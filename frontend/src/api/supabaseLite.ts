@@ -136,7 +136,17 @@ async function request<T>(
       return [] as T;
     }
 
-    return (await res.json()) as T;
+    // Some PostgREST responses (e.g. POST with no Prefer: return=representation) return 200/201
+    // with an empty body. Guard against JSON parse failure on empty responses.
+    const text = await res.text();
+    if (!text || !text.trim()) {
+      return [] as T;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return [] as T;
+    }
   }
 
   const detail = lastError ? ` Last error: ${lastError.message}` : '';
@@ -3059,7 +3069,8 @@ export async function listApiTokenUsagePage(
       throw new Error(`PostgREST ${res.status}: ${text}`);
     }
 
-    const rows = (await res.json()) as ApiTokenUsage[];
+    const apiText = await res.text();
+    const rows = apiText.trim() ? (JSON.parse(apiText) as ApiTokenUsage[]) : [];
     const total = parseTotalFromContentRange(res.headers.get('content-range'));
     return { rows, total };
   }

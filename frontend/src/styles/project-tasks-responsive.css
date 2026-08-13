@@ -30,3 +30,142 @@
     text-align: left;
   }
 }
+
+/* Task card list: hidden on desktop, shown on small screens (same pattern as project cards). */
+.task-card-list {
+  display: none;
+}
+
+.task-card {
+  border: 1px solid #d6e4dc;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.task-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-card-name {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  color: #243d32;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  padding: 0;
+}
+
+.task-card-name:hover {
+  color: #1f4f3f;
+}
+
+.task-card-state {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.task-card-state.tone-positive {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.task-card-state.tone-negative {
+  background: #fce4ec;
+  color: #c62828;
+}
+
+.task-card-state.tone-running {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.task-card-state.tone-muted {
+  background: #f5f5f5;
+  color: var(--muted);
+}
+
+.task-card-summary {
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+}
+
+.task-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+
+.task-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.task-card-actions .danger {
+  color: #b14545;
+}
+
+
+/* Small screens: switch task table to card list (same breakpoint as project cards). */
+@media (max-width: 900px) {
+  .task-table-wrap {
+    display: none;
+  }
+  .task-card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 640px;
+    margin: 0 auto;
+    width: 100%;
+  }
+}
+
+/* Mobile: aggressively hide secondary columns so the task table fits without horizontal scroll.
+   Keep Name, State, Backend, and Actions visible — the essentials for managing tasks on a phone. */
+@media (max-width: 767px) {
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
+    min-width: 0;
+  }
+
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-backend,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-backend,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-plddt,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-plddt,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-iptm,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-iptm,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-ipsae,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-ipsae,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-pae,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-pae {
+    display: none;
+  }
+
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-name,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-name {
+    min-width: 120px;
+  }
+}

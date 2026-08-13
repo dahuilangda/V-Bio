@@ -43,30 +43,6 @@ function isOneOf<T extends readonly string[]>(value: string, options: T): value 
   return (options as readonly string[]).includes(value);
 }
 
-function normalizeCopilotTaskParameterPatch(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object') return {};
-  const row = value as Record<string, unknown>;
-  const patch: Record<string, unknown> = {};
-  const backend = readCopilotText(row.backend).toLowerCase();
-  if (backend === 'boltz' || backend === 'alphafold3' || backend === 'protenix') {
-    patch.backend = backend;
-  }
-  const seed = readCopilotNumber(row.seed);
-  if (seed !== null) {
-    patch.seed = Math.max(0, Math.floor(seed));
-  }
-  if (Array.isArray(row.componentsAdd)) {
-    patch.componentsAdd = row.componentsAdd;
-  }
-  if (Array.isArray(row.componentsPatch)) {
-    patch.componentsPatch = row.componentsPatch;
-  }
-  if (row.componentsReplacement && typeof row.componentsReplacement === 'object') {
-    patch.componentsReplacement = row.componentsReplacement;
-  }
-  return patch;
-}
-
 function summarizeTaskStates(rows: ProjectTask[]): Record<string, number> {
   return rows.reduce<Record<string, number>>((acc, row) => {
     const state = String(row.task_state || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
@@ -455,30 +431,28 @@ export function ProjectTasksPage() {
       navigate(url.pathname + url.search);
       return;
     }
-    if (action.id === 'tasks:copy_with_patch') {
+    if (action.id === 'tasks:copy') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       if (!project) throw new Error('Project is not loaded.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
       if (!task) throw new Error('Could not find the task referenced by Copilot.');
-      const parameterPatch = normalizeCopilotTaskParameterPatch(action.payload?.parameterPatch);
-      if (Object.keys(parameterPatch).length === 0) throw new Error('Copilot did not provide any task changes to apply.');
       const params = new URLSearchParams();
       params.set('tab', 'components');
       params.set('new_task', '1');
       params.set('source_task_row_id', task.id);
-      params.set('copilot_parameter_patch', JSON.stringify(parameterPatch));
       if (currentPage > 1) {
         params.set('task_list_page', String(currentPage));
       }
       const targetPath = `/projects/${project.id}`;
       const targetSearch = `?${params.toString()}`;
       const targetUrl = `${targetPath}${targetSearch}`;
+      // SPA navigation only — no window.location.assign fallback. A full page load on a Copilot
+      // copy action is the exact reload the user sees; react-router carries the
+      // new_task/source_task_row_id params and the workspace loader applies them on mount.
+      // Parameter changes are separate atomic operations on the task-detail page
+      // (task_detail:apply_parameter_patch) — every skill stays a single unit of work.
       navigate(targetUrl);
-      window.setTimeout(() => {
-        if (window.location.pathname === targetPath && window.location.search === targetSearch) return;
-        window.location.assign(targetUrl);
-      }, 150);
       return;
     }
     if (action.id === 'tasks:delete') {

@@ -69,11 +69,19 @@
 .copilot-drag-handle {
   cursor: move;
   user-select: none;
-  touch-action: none;
   margin: -14px -14px 0;
   padding: 12px 14px;
   border-bottom: 1px solid #d9e5de;
   background: #fbfdfb;
+}
+
+/* touch-action: none is applied only on desktop (where dragging is active) via a media query.
+ * On mobile (< 768px) the panel is full-screen and dragging is disabled, so we must NOT set
+ * touch-action: none — it would prevent touch clicks on the header buttons (New chat, History, Close). */
+@media (min-width: 768px) {
+  .copilot-drag-handle {
+    touch-action: none;
+  }
 }
 
 .copilot-chat-window.history-open .copilot-drag-handle,
@@ -116,8 +124,8 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-right: 10px;
+  gap: 6px;
+  padding-right: 8px;
   border-right: 1px solid #edf2ef;
 }
 
@@ -125,109 +133,137 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  padding: 0 4px;
 }
 
-.copilot-history-head strong {
-  font-size: var(--text-sm);
-}
-
-.copilot-history-head button {
-  border: 1px solid #d6e2db;
-  background: #fff;
-  color: #243d32;
-  border-radius: 8px;
-  padding: 6px 8px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font: inherit;
+.copilot-history-label {
   font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.copilot-history-new {
+  border: 0;
+  background: transparent;
+  color: #4a6358;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: inline-grid;
+  place-items: center;
   cursor: pointer;
+}
+
+.copilot-history-new:hover {
+  background: #f0f4f1;
+  color: #1f4f3f;
 }
 
 .copilot-history-list {
   min-height: 0;
   overflow: auto;
   scrollbar-gutter: stable;
-  display: grid;
-  gap: 6px;
-  margin-right: -10px;
-  padding-right: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 2px;
 }
 
 .copilot-history-item {
-  border: 1px solid #dfe8e2;
-  background: #fff;
-  border-radius: 8px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  min-height: 58px;
-  overflow: hidden;
+  position: relative;
+  border-radius: 6px;
+}
+
+.copilot-history-item:hover {
+  background: #f2f5f3;
 }
 
 .copilot-history-item.active {
-  border-color: #b5d2c2;
-  background: #f4faf6;
+  background: #e6efe9;
 }
 
-.copilot-history-item > button:first-child {
+.copilot-history-btn {
   border: 0;
   background: transparent;
-  padding: 10px 9px;
-  display: grid;
-  align-content: center;
-  gap: 5px;
+  width: 100%;
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   text-align: left;
-  color: #243d32;
+  color: #3c4a42;
   font: inherit;
   cursor: pointer;
   min-width: 0;
-  min-height: 56px;
-  line-height: 1.25;
 }
 
-.copilot-history-item > button:first-child > span {
+.copilot-history-item.active .copilot-history-btn {
+  color: #1f4f3f;
+}
+
+.copilot-history-title {
   display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+
+.copilot-history-time {
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.copilot-history-item.active .copilot-history-time {
+  color: #5a7a6a;
 }
 
 .copilot-history-delete {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   border: 0;
-  border-left: 1px solid #edf2ef;
   background: transparent;
-  color: #7a8f84;
-  padding: 0 8px;
+  color: #8a958f;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   display: inline-grid;
   place-items: center;
   cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.copilot-history-item:hover .copilot-history-delete {
+  opacity: 1;
 }
 
 .copilot-history-delete:hover {
-  color: #8a2f2f;
-  background: #fff6f6;
+  color: #c44;
+  background: rgba(196, 68, 68, 0.1);
 }
 
-.copilot-history-item button small {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  color: var(--muted);
-  font-size: var(--text-2xs);
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.copilot-history-item.active .copilot-history-delete {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.copilot-history-item.active .copilot-history-delete:hover {
+  color: #ff8888;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .copilot-history-empty {
   color: var(--muted);
   font-size: var(--text-xs);
+  padding: 12px 8px;
 }
 
 .copilot-chat-window .copilot-head {
@@ -452,8 +488,8 @@
 }
 
 @keyframes copilotSparkPulse {
-  0%, 100% { opacity: 0.6; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.12); }
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.9; }
 }
 
 .copilot-chat-window .copilot-message-body p {
@@ -509,25 +545,81 @@
   padding-right: 2px;
 }
 
+/* A confirmation step: a horizontal row with the step content on the left and a per-step Apply
+ * button on the right. Keeps the minimal pale-sage palette; the visible Apply label makes each step
+ * independently confirmable (the old card was a single opaque button with no affordance). */
 .copilot-chat-window .copilot-plan-action {
   width: 100%;
   min-height: 52px;
   border: 1px solid #cddbd3;
   background: #fff;
   border-radius: 8px;
-  padding: 8px 9px;
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  align-items: center;
-  gap: 9px;
+  padding: 9px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   color: #243d32;
   font: inherit;
   text-align: left;
-  cursor: pointer;
 }
 
-.copilot-chat-window .copilot-plan-action:hover:not(:disabled) {
-  background: #eef6f1;
+.copilot-chat-window .copilot-plan-action-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.copilot-chat-window .copilot-plan-action-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.copilot-chat-window .copilot-plan-action strong {
+  overflow-wrap: anywhere;
+}
+
+.copilot-chat-window .copilot-plan-action small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.copilot-chat-window .copilot-plan-action-desc {
+  line-height: 1.35;
+}
+
+/* Semantic key/value summary of what the step will apply (SMILES, structure, project, ...).
+ * Replaces the old raw-JSON dump with readable labeled rows in the same muted style. */
+.copilot-chat-window .copilot-plan-action-summary {
+  margin: 4px 0 0;
+  display: grid;
+  gap: 2px;
+}
+
+.copilot-chat-window .copilot-plan-action-summary-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.copilot-chat-window .copilot-plan-action-summary-row dt {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.copilot-chat-window .copilot-plan-action-summary-row dd {
+  margin: 0;
+  min-width: 0;
+  color: #33413a;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .copilot-chat-window .copilot-plan-action.is-destructive {
@@ -535,88 +627,57 @@
   background: #fffafa;
 }
 
-.copilot-chat-window .copilot-plan-action.is-destructive:hover:not(:disabled) {
-  background: #fff1f1;
+.copilot-chat-window .copilot-plan-action.is-applying {
+  border-color: #9fc0ad;
+  background: #f4faf7;
 }
 
-.copilot-chat-window .copilot-plan-action:disabled {
-  cursor: not-allowed;
-  opacity: 0.62;
-}
-
-.copilot-chat-window .copilot-plan-action > span {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.copilot-chat-window .copilot-plan-action strong,
-.copilot-chat-window .copilot-plan-action small {
-  overflow-wrap: anywhere;
-}
-
-.copilot-chat-window .copilot-plan-action small {
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.copilot-chat-window .copilot-plan-action .copilot-plan-action-arguments {
-  margin-top: 4px;
-  padding: 5px 6px;
-  border: 1px solid #e3e8e5;
-  border-radius: 4px;
-  background: #f7f9f8;
-  color: #33413a;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  line-height: 1.35;
-  white-space: pre-wrap;
-}
-
-.copilot-chat-window .copilot-action-footer {
+/* Per-step button pair: Cancel + Apply sit side by side inside each card so they are visually
+ * symmetrical — neither floats alone in a separate footer row. */
+.copilot-chat-window .copilot-plan-action-buttons {
+  flex: 0 0 auto;
+  align-self: center;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
-  padding-top: 8px;
-  border-top: 1px solid #e1ebe5;
+  gap: 6px;
 }
 
-.copilot-chat-window .copilot-action-footer button {
-  min-width: 92px;
-  height: 32px;
-  border-radius: 8px;
-  padding: 0 11px;
+.copilot-chat-window .copilot-plan-action-buttons button {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
   font: inherit;
   font-size: var(--text-xs);
+  font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.copilot-chat-window .copilot-action-footer button:disabled {
+.copilot-chat-window .copilot-plan-action-buttons button:disabled {
   cursor: not-allowed;
-  opacity: 0.58;
+  opacity: 0.5;
 }
 
-.copilot-chat-window .copilot-action-cancel {
+.copilot-chat-window .copilot-plan-action-cancel {
   border: 1px solid #cddbd3;
   background: #fff;
   color: #435b50;
 }
 
-.copilot-chat-window .copilot-action-cancel:hover:not(:disabled) {
+.copilot-chat-window .copilot-plan-action-cancel:hover:not(:disabled) {
   background: #f1f6f3;
 }
 
-.copilot-chat-window .copilot-action-apply-all {
+.copilot-chat-window .copilot-plan-action-apply {
   border: 1px solid #1f4f3f;
   background: #1f4f3f;
   color: #fff;
 }
 
-.copilot-chat-window .copilot-action-apply-all:hover:not(:disabled) {
+.copilot-chat-window .copilot-plan-action-apply:hover:not(:disabled) {
   background: #245d49;
 }
 
@@ -803,6 +864,89 @@
   opacity: 0.55;
 }
 
+/* Plus menu wrapper — holds the + button and the popup drawer. */
+.copilot-plus-wrap {
+  position: relative;
+  align-self: end;
+}
+
+/* Popup drawer (ChatGPT-style): appears above the + button. */
+.copilot-plus-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 160px;
+  background: #fff;
+  border: 1px solid #dde3df;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copilot-plus-menu-item {
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #3c4a42;
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.copilot-plus-menu-item:hover {
+  background: #f0f4f1;
+}
+
+.copilot-plus-menu-item.is-active {
+  color: #c44;
+}
+
+/* Voice input button — kept for the listening animation if used inline elsewhere. */
+.copilot-voice-btn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: #f2f6f3;
+  color: #294b3d;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+  align-self: end;
+  flex-shrink: 0;
+}
+
+.copilot-voice-btn:hover:not(:disabled) {
+  background: #e7f0eb;
+}
+
+.copilot-voice-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.copilot-voice-btn.is-listening {
+  background: #ef4444;
+  color: #fff;
+  animation: copilot-voice-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes copilot-voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
 .copilot-chat-window .copilot-composer textarea {
   width: 100%;
   min-height: 30px;
@@ -888,30 +1032,80 @@
   color: #7a8f84;
 }
 
+/* While a turn is running the send button shows a spinning loader ("working"). On hover the CSS
+   swaps the loader for a stop icon and reddens the button — the affordance to cancel is obvious
+   without changing the icon while the user is just watching it work. The two icons are stacked;
+   the spinner shows by default, the stop icon shows on hover/focus. */
+.copilot-send-btn.is-sending {
+  background: #1f4f3f;
+}
+/* Both icons occupy the same grid cell so they overlap exactly; display toggles which is visible. */
+.copilot-send-btn.is-sending .copilot-send-spin,
+.copilot-send-btn.is-sending .copilot-send-stop {
+  grid-area: 1 / 1;
+}
+.copilot-send-btn.is-sending .copilot-send-stop {
+  display: none;
+}
+.copilot-send-btn.is-sending:hover,
+.copilot-send-btn.is-sending:focus-visible {
+  background: #b42318;
+}
+.copilot-send-btn.is-sending:hover .copilot-send-spin,
+.copilot-send-btn.is-sending:focus-visible .copilot-send-spin {
+  display: none;
+}
+.copilot-send-btn.is-sending:hover .copilot-send-stop,
+.copilot-send-btn.is-sending:focus-visible .copilot-send-stop {
+  display: inline-grid;
+}
+
 .copilot-chat-window .copilot-message.is-system .copilot-message-meta {
   display: none;
 }
 
-@media (max-width: 700px) {
+/* Failed action receipt: red-tinted background so the user immediately sees something went wrong. */
+.copilot-chat-window .copilot-message.is-action-failed {
+  background: #fef2f2;
+  border-left: 3px solid #ef4444;
+}
+
+.copilot-chat-window .copilot-message.is-action-failed .copilot-message-body {
+  color: #991b1b;
+}
+
+@media (max-width: 767px) {
   /* Small screens: the floating panel becomes a true full-screen sheet (overrides the persisted
      position/size, which would otherwise push the composer off-screen). Drag/resize are visually
      disabled via !important. */
   .copilot-floating-panel {
     left: 0 !important;
-    top: 0 !important;
     right: 0 !important;
     bottom: 0 !important;
     width: 100vw !important;
-    height: 100vh !important;
-    height: 100dvh !important;
+    /* height/max-height/top are intentionally NOT !important here: the component applies inline
+       styles bound to window.visualViewport so the panel tracks the visible region above the soft
+       keyboard (dvh alone is unreliable across browsers). The CSS values below are the keyboard-
+       closed defaults; the inline visualViewport styles override them when the keyboard opens.
+       left/right/bottom stay !important because those edges never change on keyboard open. */
+    top: 0;
+    /* dvh is the dynamic viewport height — it shrinks when the soft keyboard opens on browsers
+       that support it, keeping the input visible as a baseline. The inline visualViewport styles
+       are the authoritative source and override this when available. */
+    height: 100dvh;
     max-width: 100vw !important;
-    max-height: 100vh !important;
-    max-height: 100dvh !important;
+    max-height: 100dvh;
     min-width: 0 !important;
     min-height: 0 !important;
     border: 0;
     border-radius: 0;
     resize: none;
+  }
+
+  /* On mobile, the suppressed dock-chip adds no value (a dialog already covers the full screen).
+     Hide it entirely instead of showing a floating pill behind the dialog. */
+  .copilot-floating-panel.copilot-suppressed {
+    display: none !important;
   }
 
   .copilot-modal.copilot-chat-window {
@@ -951,3 +1145,480 @@
     width: 30px;
   }
 }
+
+/*
+ * Guided question cards: the planner asks the user to resolve an ambiguity (task type, backend)
+ * before planning. Rendered inline under the assistant message as clickable chips so the user
+ * answers with one click; a freeform question just prompts them to type below.
+ */
+/*
+ * Retrieved data card: a collapsible section under the assistant message showing the authoritative
+ * records from read skills (sequence, SMILES, accession, ...). The user always sees the real data
+ * even when the model's message only summarizes it.
+ */
+.copilot-chat-window .copilot-observation-card {
+  margin-top: 6px;
+}
+
+.copilot-chat-window .copilot-observation-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.copilot-chat-window .copilot-observation-toggle:hover {
+  color: #435b50;
+}
+
+.copilot-chat-window .copilot-observation-records {
+  margin-top: 4px;
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.copilot-chat-window .copilot-observation-record {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #e3e8e5;
+  border-radius: 6px;
+  background: #f7f9f8;
+  display: grid;
+  gap: 3px;
+}
+
+.copilot-chat-window .copilot-observation-field {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.copilot-chat-window .copilot-observation-field dt {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  min-width: 70px;
+}
+
+.copilot-chat-window .copilot-observation-field dd {
+  margin: 0;
+  min-width: 0;
+  color: #33413a;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.copilot-chat-window .copilot-observation-field dd.is-long {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.4;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/*
+ * Guided question cards: the planner asks the user to resolve an ambiguity (task type, backend)
+ * before planning. Rendered inline under the assistant message as clickable chips so the user
+ * answers with one click; a freeform question just prompts them to type below.
+ */
+.copilot-chat-window .copilot-question-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #cddbd3;
+  border-radius: 8px;
+  background: #f9fcfa;
+}
+
+.copilot-chat-window .copilot-question {
+  display: grid;
+  gap: 6px;
+}
+
+.copilot-chat-window .copilot-question-text {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #243d32;
+}
+
+.copilot-chat-window .copilot-question-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.copilot-chat-window .copilot-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.copilot-chat-window .copilot-question-chip {
+  border: 1px solid #cddbd3;
+  background: #fff;
+  border-radius: 999px;
+  padding: 5px 12px;
+  color: #243d32;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.copilot-chat-window .copilot-question-chip:hover:not(:disabled) {
+  background: #eef6f1;
+  border-color: #9fc0ad;
+}
+
+.copilot-chat-window .copilot-question-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+/* Selected chip: the user clicked this option. Filled sage to show the choice is locked in. */
+.copilot-chat-window .copilot-question-chip.is-selected {
+  border-color: #1f4f3f;
+  background: #1f4f3f;
+  color: #fff;
+}
+
+.copilot-chat-window .copilot-question-chip.is-selected:hover:not(:disabled) {
+  background: #245d49;
+}
+
+/* Answered question: dimmed so the user's attention moves to the next unanswered question. */
+.copilot-chat-window .copilot-question.is-answered {
+  opacity: 0.7;
+}
+
+.copilot-chat-window .copilot-question-answered {
+  color: #1f4f3f;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+/* Submit button for multi-question cards: appears only when there is more than one question. */
+.copilot-chat-window .copilot-question-submit {
+  margin-top: 4px;
+  width: 100%;
+  height: 34px;
+  border: 1px solid #1f4f3f;
+  border-radius: 8px;
+  background: #1f4f3f;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.copilot-chat-window .copilot-question-submit:hover:not(:disabled) {
+  background: #245d49;
+}
+
+.copilot-chat-window .copilot-question-submit:disabled {
+  border-color: #cddbd3;
+  background: #f7f9f8;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/*
+ * Suppressed state: a modal-mask dialog (new-project, sharing, ...) is open elsewhere on the page.
+ * The overlay coordinator flags it and the panel collapses to a compact dock chip placed under the
+ * dialog's z-index, so the two never visually overlap. The chip hints the assistant is still active
+ * and will restore once the dialog closes; it is non-interactive while suppressed.
+ */
+.copilot-floating-panel.copilot-suppressed {
+  z-index: 80;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  resize: none;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.copilot-floating-panel.copilot-suppressed .copilot-modal {
+  display: none;
+}
+
+.copilot-floating-panel.copilot-suppressed::after {
+  content: 'Copilot';
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  height: auto;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid #c6d7ce;
+  background: #fff;
+  color: #243d32;
+  box-shadow: 0 8px 22px rgba(26, 56, 43, 0.16);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Settings panel (proxy / LLM server / API key)                      */
+/* ------------------------------------------------------------------ */
+
+.copilot-chat-window {
+  position: relative;
+}
+
+.copilot-settings-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background: rgba(16, 38, 29, 0.32);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 20px 14px;
+  overflow-y: auto;
+}
+
+.copilot-settings-panel {
+  width: 100%;
+  max-width: 440px;
+  background: #fff;
+  border: 1px solid #cddbd3;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(16, 38, 29, 0.20);
+  display: flex;
+  flex-direction: column;
+  align-self: center;
+}
+
+.copilot-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e5ede8;
+}
+
+.copilot-settings-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-base, 14px);
+  font-weight: 600;
+  color: #243d32;
+}
+
+.copilot-settings-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6b8278);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+
+.copilot-settings-close:hover {
+  color: #243d32;
+  background: #f0f5f2;
+}
+
+.copilot-settings-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.copilot-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.copilot-settings-label {
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+  color: #243d32;
+}
+
+.copilot-settings-current {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--muted, #6b8278);
+}
+
+.copilot-settings-input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid #cddbd3;
+  border-radius: 5px;
+  font: inherit;
+  font-size: var(--text-sm, 13px);
+  color: #243d32;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+
+.copilot-settings-input:focus {
+  border-color: #1f4f3f;
+  box-shadow: 0 0 0 2px rgba(31, 79, 63, 0.14);
+}
+
+.copilot-settings-input::placeholder {
+  color: var(--muted, #9aac9f);
+}
+
+.copilot-settings-error {
+  font-size: var(--text-xs, 12px);
+  color: #b42318;
+  background: #fef3f2;
+  border: 1px solid #fbd0cc;
+  border-radius: 5px;
+  padding: 7px 9px;
+}
+
+.copilot-settings-success {
+  font-size: var(--text-xs, 12px);
+  color: #157f3d;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 5px;
+  padding: 7px 9px;
+}
+
+.copilot-settings-test-results {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.copilot-settings-test-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--text-xs, 12px);
+  padding: 6px 9px;
+  border-radius: 5px;
+}
+
+.copilot-settings-test-item.ok {
+  background: #f0fdf4;
+  color: #157f3d;
+}
+
+.copilot-settings-test-item.fail {
+  background: #fef3f2;
+  color: #b42318;
+}
+
+.copilot-settings-test-item.skipped {
+  background: #f4f6f5;
+  color: #5b6b64;
+}
+
+.copilot-settings-test-item::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.copilot-settings-test-item.ok::before {
+  background: #22c55e;
+}
+
+.copilot-settings-test-item.fail::before {
+  background: #ef4444;
+}
+
+.copilot-settings-test-item.skipped::before {
+  background: #9aa8a2;
+}
+
+.copilot-settings-test-name {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.copilot-settings-test-detail {
+  word-break: break-word;
+}
+
+.copilot-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid #e5ede8;
+}
+
+.copilot-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: var(--text-sm, 13px);
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.copilot-settings-btn.primary {
+  background: #1f4f3f;
+  color: #fff;
+  border-color: #1f4f3f;
+}
+
+.copilot-settings-btn.primary:hover:not(:disabled) {
+  background: #245d49;
+  border-color: #245d49;
+}
+
+.copilot-settings-btn.secondary {
+  background: #fff;
+  color: #243d32;
+  border-color: #cddbd3;
+}
+
+.copilot-settings-btn.secondary:hover:not(:disabled) {
+  background: #f6faf8;
+}
+
+.copilot-settings-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.copilot-settings-btn .spin {
+  animation: copilot-spin 0.8s linear infinite;
+}
+

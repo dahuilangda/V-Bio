@@ -1,6 +1,9 @@
-import { Clock3 } from 'lucide-react';
+import { Clock3, ExternalLink, Square, Trash2 } from 'lucide-react';
 import type { ProjectTask } from '../../types/models';
+import { formatDateTime } from '../../utils/date';
+import { canEditTask } from '../../utils/accessControl';
 import { ProjectTaskRow } from './ProjectTaskRow';
+import { taskStateLabel, taskStateTone } from './taskPresentation';
 import type { SortKey, TaskListRow, TaskMetricColumnKey, TaskTableMode } from './taskListTypes';
 
 const METRIC_COLUMN_LABELS: Record<TaskMetricColumnKey, string> = {
@@ -185,6 +188,68 @@ export function ProjectTasksTable({
           </table>
         </div>
       )}
+
+      {/* Mobile task card list — same data, card layout for small screens (CSS toggles visibility). */}
+      {filteredCount > 0 ? (
+        <div className="task-card-list" aria-label="Tasks">
+          {pagedRows.map((row) => {
+            const { task } = row;
+            const canEdit = canEditTask(task);
+            const taskName = String(task.name || '').trim() || `Task ${String(task.task_id || task.id || '').slice(0, 8)}`;
+            const stateLabel = taskStateLabel(task.task_state);
+            const stateTone = taskStateTone(task.task_state);
+            const submittedTs = task.submitted_at || task.created_at;
+            const normalizedTaskState = String(task.task_state || '').trim().toUpperCase();
+            const isTerminalState = normalizedTaskState === 'SUCCESS' || normalizedTaskState === 'FAILURE' || normalizedTaskState === 'REVOKED';
+            const hasRuntimeTaskId = Boolean(String(task.task_id || '').trim());
+            const canTerminateTask = hasRuntimeTaskId && !isTerminalState;
+            return (
+              <div className="task-card" key={task.id}>
+                <div className="task-card-head">
+                  <button
+                    type="button"
+                    className="task-card-name"
+                    onClick={() => void onOpenTask(task)}
+                    title="Open task"
+                  >
+                    {taskName}
+                  </button>
+                  <span className={`task-card-state tone-${stateTone}`}>{stateLabel}</span>
+                </div>
+                {task.summary ? <p className="task-card-summary muted">{task.summary}</p> : null}
+                <div className="task-card-meta">
+                  {submittedTs ? <span className="muted"><Clock3 size={11} /> {formatDateTime(submittedTs)}</span> : null}
+                </div>
+                <div className="task-card-actions">
+                  <button type="button" className="btn btn-ghost btn-compact" onClick={() => void onOpenTask(task)}>
+                    <ExternalLink size={14} /> Open
+                  </button>
+                  {canTerminateTask ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-compact"
+                      onClick={() => void onTerminateTask(task)}
+                      disabled={Boolean(terminatingTaskId)}
+                    >
+                      <Square size={13} /> Cancel
+                    </button>
+                  ) : null}
+                  {canEdit ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-compact danger"
+                      onClick={() => void onRemoveTask(task)}
+                      disabled={Boolean(deletingTaskId)}
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {filteredCount > 0 && (
         <div className="project-pagination">

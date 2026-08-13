@@ -101,6 +101,7 @@ export function summarizePeptideDesignCandidates(confidence: Record<string, unkn
 export function summarizeCopilotTask(task: ProjectTask | null | undefined) {
   if (!task) return null;
   const confidence = asRecord(task.confidence);
+  const affinity = asRecord(task.affinity);
   return {
     id: readText(task.id).trim(),
     project_id: readText(task.project_id).trim(),
@@ -119,14 +120,47 @@ export function summarizeCopilotTask(task: ProjectTask | null | undefined) {
     components: summarizeCopilotComponents(task.components),
     constraints: summarizeCopilotConstraints(task.constraints),
     properties: task.properties,
-    affinitySummary: {
-      keys: Object.keys(asRecord(task.affinity)).slice(0, 24)
-    },
+    // Surface the ACTUAL metric values (not just key names) so the model can quote confidence /
+    // affinity numbers in an analysis. Scalars are kept verbatim; nested objects/arrays are kept as
+    // keys only (to bound payload size) — the scalar top-level fields (avgPlddt, iptm, pae, etc.)
+    // are the values a "analyze this task" answer needs.
+    affinitySummary: summarizeMetricValues(affinity),
     confidenceSummary: {
-      keys: Object.keys(confidence).slice(0, 24),
+      ...summarizeMetricValues(confidence),
       peptideDesign: summarizePeptideDesignCandidates(confidence)
     }
   };
+}
+
+/**
+ * Project a metrics object (confidence / affinity) into a bounded summary that keeps scalar VALUES
+ * (numbers, booleans, short strings) alongside their keys, so the model can quote real metric
+ * numbers in an analysis answer. Nested objects and arrays are reduced to their key names only to
+ * bound the payload size — the scalar top-level fields carry the load-bearing numbers (avgPlddt,
+ * iptm, ipTM, pAE, affinity scores, etc.).
+ */
+function summarizeMetricValues(metrics: Record<string, unknown>, maxEntries = 32): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let count = 0;
+  for (const [key, value] of Object.entries(metrics)) {
+    if (count >= maxEntries) break;
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = value;
+      count += 1;
+    } else if (typeof value === 'string' && value.length <= 120) {
+      out[key] = value;
+      count += 1;
+    } else if (typeof value === 'object') {
+      // Nested object/array: keep its keys so the model knows the structure, but not the full tree
+      // (could be large residue-level arrays). One entry for the key map.
+      const nested = value as Record<string, unknown>;
+      const keys = Array.isArray(nested) ? undefined : Object.keys(nested).slice(0, 12);
+      out[key] = keys ? { keys } : { count: Array.isArray(nested) ? nested.length : 0 };
+      count += 1;
+    }
+  }
+  return out;
 }
 
 export function normalizeCopilotPrefillComponents(value: unknown): InputComponent[] {

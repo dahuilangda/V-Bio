@@ -88,9 +88,53 @@ describe('validateCopilotTurnPayload', () => {
     expect(() => validateCopilotTurnPayload(validPayload({ plan_id: '' }))).toThrow();
   });
 
-  it('throws on malformed questions or actions', () => {
-    expect(() => validateCopilotTurnPayload(validPayload({ questions: [123] }))).toThrow();
+  it('accepts the honest failed terminal state', () => {
+    // A turn that exhausted the planning budget returns state=failed with a plain status message;
+    // it is a real result (rendered with its trace), not a thrown error.
+    const result = validateCopilotTurnPayload(
+      validPayload({ state: 'failed', content: 'I could not complete this request.' })
+    );
+    expect(result.state).toBe('failed');
+    expect(result.content).toContain('could not complete');
+  });
+
+  it('throws on malformed actions and drops malformed questions defensively', () => {
+    // Malformed actions still fail the turn (integrity gate).
     expect(() => validateCopilotTurnPayload(validPayload({ actions: {} }))).toThrow();
+    // Malformed questions are dropped defensively (like the trace), never failing the turn: a bad
+    // question item becomes an empty list rather than rejecting the whole response.
+    const result = validateCopilotTurnPayload(validPayload({ questions: [123] }));
+    expect(result.questions).toEqual([]);
+  });
+
+  it('parses structured choice questions into typed objects', () => {
+    const result = validateCopilotTurnPayload(
+      validPayload({
+        questions: [
+          {
+            text: 'Which task type?',
+            kind: 'choice',
+            options: [
+              { label: 'Affinity', value: 'affinity' },
+              { label: 'Prediction', value: 'prediction' },
+            ],
+          },
+        ],
+      })
+    );
+    expect(result.questions).toHaveLength(1);
+    expect(result.questions[0].kind).toBe('choice');
+    expect(result.questions[0].options).toHaveLength(2);
+    expect(result.questions[0].options?.[0].value).toBe('affinity');
+  });
+
+  it('drops a choice question with fewer than two options', () => {
+    const result = validateCopilotTurnPayload(
+      validPayload({
+        questions: [{ text: 'Only one?', kind: 'choice', options: [{ label: 'A', value: 'a' }] }],
+      })
+    );
+    expect(result.questions).toEqual([]);
   });
 
   it('throws when an action fails its integrity checks', () => {

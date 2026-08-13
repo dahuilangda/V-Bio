@@ -256,6 +256,36 @@
   min-height: 520px;
 }
 
+@media (max-width: 767px) {
+  .peptide-results-structure-panel .molstar-host,
+  .peptide-results-grid--card .peptide-results-structure-panel {
+    min-height: 320px;
+    height: clamp(320px, 50vh, 480px);
+  }
+
+  /* Stack the results grid vertically on mobile — the 3-column grid (viewer + resizer + info panel)
+     overflows on small screens and causes the viewer to render at zero width. */
+  .results-grid {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto auto auto;
+    gap: 8px;
+  }
+
+  .results-grid .results-resizer {
+    display: none !important;
+  }
+
+  .structure-panel {
+    height: auto;
+    min-height: clamp(300px, 45vh, 420px);
+  }
+
+  .structure-panel .molstar-host {
+    height: clamp(300px, 45vh, 420px) !important;
+    min-height: 300px !important;
+  }
+}
+
 .peptide-result-focus-card {
   gap: 10px;
 }

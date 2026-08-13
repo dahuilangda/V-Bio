@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.strategies import DDPStrategy
 from torch import Tensor
 
@@ -615,6 +616,24 @@ def _select_strategy(devices, num_records: int):
     return strategy, devices
 
 
+class _GPUCleanupCallback(Callback):
+    """Clear the CUDA cache before Lightning teardown.
+
+    PyTorch Lightning's ``strategy.teardown()`` calls ``model.cpu()`` which
+    needs GPU memory for bookkeeping.  After a large forward pass the caching
+    allocator can hold ~18 GB, leaving no room for teardown and causing OOM.
+    Flushing the cache in ``on_predict_end`` (runs *before* teardown) prevents
+    this.  Critical for shared-GPU web services where memory must be released
+    promptly after each prediction.
+    """
+
+    def on_predict_end(self, trainer, pl_module):
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def run_scoring(
     processed_dir: Path,
     output_dir: Path,
@@ -649,7 +668,11 @@ def run_scoring(
         "ignore", ".*that has Tensor Cores. To properly utilize them.*"
     )
     torch.set_grad_enabled(False)
-    torch.set_float32_matmul_precision("highest")
+    # Use TF32 for float32 matmuls on Ampere+ GPUs.  ~30-40% faster than pure
+    # fp32 ("highest") and numerically safe for the confidence head: the only
+    # precision-sensitive op (SVD in weighted_rigid_align) is either skipped in
+    # score mode or already force-cast to fp32/fp64 internally.
+    torch.set_float32_matmul_precision("high")
 
     if seed is not None:
         seed_everything(seed)
@@ -794,18 +817,27 @@ def run_scoring(
         write_embeddings=False,
     )
 
-    # Boltz-2 can hit occasional SVD convergence failures under bf16 AMP for
-    # ill-conditioned inputs, so prefer fp32 unless explicitly overridden.
+    # Precision selection:
+    # - "32"            → pure fp32 (safest, slowest)
+    # - "bf16-mixed"    → bf16 AMP (upstream Boltz2 default, ~25% faster)
+    # - "16-mixed"      → fp16 AMP (fast but may overflow)
+    # - None            → auto: bf16-mixed for score mode, fp32 for structure_refine
+    # The SVD in weighted_rigid_align is only invoked during structure sampling
+    # (skip_run_structure=False); in pure score mode the sampler never runs, so
+    # bf16-mixed is safe.  The model internally force-casts precision-critical
+    # blocks (structure sampling, affinity head, distograms) to fp32.
     resolved_precision: int | str
     if trainer_precision is not None:
         resolved_precision = 32 if str(trainer_precision).strip() == "32" else trainer_precision
+    elif structure_refine:
+        resolved_precision = 32  # fp32 for refinement (SVD risk)
     else:
-        resolved_precision = 32
+        resolved_precision = "bf16-mixed"  # score mode: safe + fast
 
     trainer = Trainer(
         default_root_dir=output_dir,
         strategy=strategy,
-        callbacks=[pred_writer],
+        callbacks=[pred_writer, _GPUCleanupCallback()],
         accelerator=accelerator,
         devices=devices,
         precision=resolved_precision,

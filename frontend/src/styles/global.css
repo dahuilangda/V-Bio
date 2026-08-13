@@ -177,20 +177,21 @@ h3 {
   display: none;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   flex: 0 0 auto;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
-  transition: background-color 0.16s ease, border-color 0.16s ease;
+  transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
 }
 
 .nav-hamburger:hover {
-  background: var(--surface-2);
-  border-color: #c2d3c8;
+  color: #1f4f3f;
+  background: #eef6f1;
+  border-color: #b4cec1;
 }
 
 .nav-hamburger:focus-visible {
@@ -1239,6 +1240,86 @@ select:focus {
   font-weight: 500;
 }
 
+/* Mobile project card list — hidden on desktop, shown via media query below. */
+.project-card-list {
+  display: none;
+}
+
+.project-card {
+  border: 1px solid #d6e4dc;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.project-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.project-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #243d32;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.project-card-name:hover {
+  color: #1f4f3f;
+}
+
+.project-card-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.project-card-badge {
+  flex-shrink: 0;
+}
+
+.project-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+
+.project-card-tasks {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.project-card-time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.project-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.project-card-actions .danger {
+  color: #b14545;
+}
+
 .workflow-badge {
   display: inline-flex;
   align-items: center;
@@ -1832,6 +1913,32 @@ select:focus {
 }
 
 
+/* Small screens: switch the project list from table to card grid so no horizontal scroll is needed.
+   Only hide the project-list table (not the task-list table, which also uses .project-table-wrap).
+   The .project-card-list sibling only exists on the ProjectsPage, so we scope via :has(). */
+@media (max-width: 900px) {
+  .panel:has(.project-card-list) .project-table-wrap {
+    display: none;
+  }
+  .project-card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 640px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  .project-card {
+    width: 100%;
+  }
+  /* Tighten gutters on small screens so content uses more of the viewport. */
+  .main-content {
+    padding-left: clamp(10px, 3vw, 16px);
+    padding-right: clamp(10px, 3vw, 16px);
+  }
+}
+
+
 @media (max-width: 1100px) {
   .two-columns {
     grid-template-columns: 1fr;
@@ -2182,5 +2289,109 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .main-content {
+    padding: 0 10px 16px;
+  }
 
+  .panel {
+    padding: 10px;
+  }
+
+  .page-header {
+    padding: 12px;
+  }
+
+
+}
+
+/* ── Mobile breakpoint (phones): tighten everything for small viewports ── */
+@media (max-width: 600px) {
+  .page-header h1 {
+    font-size: var(--text-xl);
+  }
+
+  .panel {
+    padding: 10px;
+    border-radius: 8px;
+  }
+
+  /* Workspace stepper: collapse to a compact horizontal row at the top */
+  .workspace-stepper {
+    position: static;
+    width: 100%;
+    margin-left: 0;
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    overflow-x: auto;
+    padding: 6px 0;
+  }
+
+  .workspace-stepper-track {
+    display: none;
+  }
+
+  /* Form fields stack vertically */
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Detail page tabs scroll horizontally */
+  .detail-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .detail-tab {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Component editor: single column */
+  .component-editor-grid,
+  .prediction-components-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Results summary: stack cards */
+  .results-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Run controls wrap */
+  .run-controls {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* Buttons shrink padding on mobile */
+  .btn {
+    padding: 7px 12px;
+    font-size: var(--text-xs);
+  }
+
+  .btn-compact {
+    padding: 5px 8px;
+  }
+
+  /* Tables: allow horizontal scroll with smaller min-width */
+  .table {
+    font-size: var(--text-xs);
+  }
+
+  .table th,
+  .table td {
+    padding: 6px 8px;
+  }
+
+  /* Pagination: compact */
+  .project-pagination {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .project-pagination-controls {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
 }

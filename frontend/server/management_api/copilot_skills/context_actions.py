@@ -73,6 +73,7 @@ def build_context_skill_definitions(
         effect = str(schema.get("effect") or "").strip().lower()
         if not effect:
             effect = "create" if defaults.get("create") is True else "delete" if schema.get("destructive") else "update"
+        target_context = str(schema.get("target_context") or "").strip() or None
         definitions.append(
             CopilotSkillDefinition(
                 name=action_id,
@@ -81,6 +82,7 @@ def build_context_skill_definitions(
                 input_schema=input_schema,
                 effect=effect,
                 context_type=normalized_context,
+                target_context=target_context,
                 payload_defaults=defaults,
                 destructive=bool(schema.get("destructive", False)),
             )

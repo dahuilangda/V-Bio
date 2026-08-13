@@ -6,41 +6,61 @@ from typing import Any, Dict
 PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "projects:create": {
         "label": "New project",
-        "description": "Open the new-project dialog.",
-        "payload_keys": ["create"],
+        "description": "Create a new project. Pass the workflow type the user requested.",
+        "target_context": "task_list",
+        "payload_keys": ["create", "workflow"],
         "payload_defaults": {"create": True},
         "input_schema": {
             "type": "object",
-            "properties": {"create": {"type": "boolean", "const": True}},
+            "properties": {
+                "create": {"type": "boolean", "const": True},
+                "workflow": {"type": "string", "enum": ["prediction", "virtual_screening", "affinity", "peptide_design", "lead_optimization"], "description": "The project's workflow type."},
+            },
             "required": ["create"],
             "additionalProperties": False,
         },
     },
     "projects:open": {
         "label": "Open project",
-        "description": "Open the matching project.",
+        "description": "Navigate into a project's task list. Requires the project ID from the visible project list.",
+        "target_context": "task_list",
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "input_schema": {
             "type": "object",
             "properties": {
-                "projectId": {"type": "string", "description": "ID copied exactly from context_payload.projects[].id."},
-                "projectName": {"type": "string", "description": "Human readable project name from context."},
+                "projectId": {"type": "string", "description": "Project ID from the visible list."},
+                "projectName": {"type": "string"},
             },
             "required": ["projectId"],
             "additionalProperties": False,
         },
     },
+    "projects:rename": {
+        "label": "Rename project",
+        "description": "Change a project's name. Requires the project ID and the new name.",
+        "payload_keys": ["projectId", "projectName"],
+        "requires_payload": ["projectId", "projectName"],
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "projectId": {"type": "string", "description": "Project ID from the visible list."},
+                "projectName": {"type": "string", "minLength": 1, "description": "The new project name."},
+            },
+            "required": ["projectId", "projectName"],
+            "additionalProperties": False,
+        },
+    },
     "projects:delete": {
         "label": "Delete project",
-        "description": "Delete the matching project.",
+        "description": "Permanently delete a project and all its tasks. Requires the project ID.",
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "destructive": True,
         "input_schema": {
             "type": "object",
             "properties": {
-                "projectId": {"type": "string", "description": "ID copied exactly from context_payload.projects[].id."},
+                "projectId": {"type": "string", "description": "Project ID from the visible list."},
                 "projectName": {"type": "string"},
             },
             "required": ["projectId"],
@@ -49,7 +69,7 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "projects:cancel_active": {
         "label": "Cancel project runs",
-        "description": "Cancel the active runtime tasks in the matching project.",
+        "description": "Stop all queued and running tasks in a project. Requires the project ID.",
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "destructive": True,
@@ -57,7 +77,7 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "projectId": {"type": "string", "description": "ID copied exactly from context_payload.projects[].id."},
+                "projectId": {"type": "string", "description": "Project ID from the visible list."},
                 "projectName": {"type": "string"},
             },
             "required": ["projectId"],
@@ -127,8 +147,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:update_view": {
-        "label": "Update project view",
-        "description": "Combine and update the project-list search, filters, sorting, paging, and advanced filters as requested by the user.",
+        "label": "Filter or sort projects",
+        "description": "Filter and sort the project list: search by text, filter by workflow type / state / activity / backend, sort by date or name, change page size. Pass only the fields the user wants to change.",
         "payload_keys": [
             "search",
             "typeFilter",
@@ -154,11 +174,11 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "search": {"type": "string", "description": "Free text for the project search box."},
+                "search": {"type": "string", "description": "Free text search."},
                 "typeFilter": {"type": "string", "enum": ["all", "prediction", "virtual_screening", "affinity", "peptide_design", "lead_optimization"]},
                 "stateFilter": {"type": "string", "enum": ["all", "DRAFT", "QUEUED", "RUNNING", "SUCCESS", "FAILURE", "REVOKED"]},
                 "sortBy": {"type": "string", "enum": ["updated_desc", "updated_asc", "created_desc", "created_asc", "name_asc", "name_desc"]},
-                "backendFilter": {"type": "string", "description": "Backend token from context projects, or all."},
+                "backendFilter": {"type": "string", "description": "Backend name or 'all'."},
                 "activityFilter": {"type": "string", "enum": ["all", "active", "completed", "failed", "no_tasks"]},
                 "updatedWithinDays": {"type": "string", "enum": ["all", "1", "7", "30", "90"]},
                 "minTaskCount": {"type": "string", "enum": ["all", "1", "3", "5", "10"]},
@@ -166,53 +186,5 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             },
             "additionalProperties": False,
         },
-    },
-    "projects:workflow_prediction": {
-        "label": "Prediction projects",
-        "description": "Filter for structure-prediction workflow projects.",
-        "payload_keys": ["workflowFilter"],
-        "payload_defaults": {"workflowFilter": "prediction"},
-    },
-    "projects:workflow_virtual_screening": {
-        "label": "Virtual Screening projects",
-        "description": "Filter for Nesso-1 Virtual Screening workflow projects.",
-        "payload_keys": ["workflowFilter"],
-        "payload_defaults": {"workflowFilter": "virtual_screening"},
-    },
-    "projects:workflow_affinity": {
-        "label": "Affinity projects",
-        "description": "Filter for Affinity Scoring workflow projects.",
-        "payload_keys": ["workflowFilter"],
-        "payload_defaults": {"workflowFilter": "affinity"},
-    },
-    "projects:workflow_peptide_design": {
-        "label": "Peptide Design projects",
-        "description": "Filter for Peptide Design workflow projects.",
-        "payload_keys": ["workflowFilter"],
-        "payload_defaults": {"workflowFilter": "peptide_design"},
-    },
-    "projects:workflow_lead_optimization": {
-        "label": "Lead Optimization projects",
-        "description": "Filter for Lead Optimization workflow projects.",
-        "payload_keys": ["workflowFilter"],
-        "payload_defaults": {"workflowFilter": "lead_optimization"},
-    },
-    "projects:updated_desc": {
-        "label": "Newest updated",
-        "description": "Sort by most-recently-updated, descending.",
-        "payload_keys": ["sortBy"],
-        "payload_defaults": {"sortBy": "updated_desc"},
-    },
-    "projects:updated_asc": {
-        "label": "Oldest updated",
-        "description": "Sort by most-recently-updated, ascending.",
-        "payload_keys": ["sortBy"],
-        "payload_defaults": {"sortBy": "updated_asc"},
-    },
-    "projects:backend_boltz": {
-        "label": "Boltz projects",
-        "description": "Filter for Boltz-backend projects.",
-        "payload_keys": ["backendFilter"],
-        "payload_defaults": {"backendFilter": "boltz"},
     },
 }

@@ -21,7 +21,10 @@ export function showRunQueuedNotice(params: {
 export function handleRunAction(params: { runDisabled: boolean; submitTask: () => Promise<void> }): void {
   const { runDisabled, submitTask } = params;
   if (runDisabled) return;
-  void submitTask();
+  // The submit function re-throws backend errors (for the Copilot chain to detect failures).
+  // The error is already surfaced via setError inside the submit's own catch block — this .catch
+  // prevents an unhandled promise rejection on the manual Run button path.
+  void submitTask().catch(() => {});
 }
 
 export function handleRunCurrentDraft(params: {
@@ -30,7 +33,7 @@ export function handleRunCurrentDraft(params: {
 }): void {
   const { setRunMenuOpen, submitTask } = params;
   setRunMenuOpen(false);
-  void submitTask();
+  void submitTask().catch(() => {});
 }
 
 export function handleRestoreSavedDraft(params: {

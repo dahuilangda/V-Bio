@@ -375,6 +375,26 @@ export interface ProjectCopilotState {
 export type CopilotOperationEffect = 'create' | 'update' | 'delete' | 'execute' | 'navigate';
 
 /**
+ * A structured question the planner asks the user to resolve an ambiguity before planning (e.g.
+ * which task type or modeling backend). The frontend renders these as clickable choice chips when
+ * kind=choice, a yes/no pair when kind=confirm, or a highlighted prompt when kind=freeform.
+ */
+export type CopilotQuestionKind = 'choice' | 'confirm' | 'freeform';
+
+export interface CopilotQuestionOption {
+  label: string;
+  value: string;
+  hint?: string;
+}
+
+export interface CopilotPlannerQuestion {
+  text: string;
+  kind: CopilotQuestionKind;
+  options?: CopilotQuestionOption[];
+  defaultValue?: string;
+}
+
+/**
  * One observable step in the planner loop (model call → harness audit → read-skill
  * observation → terminal). Returned by the Copilot turn endpoint as a `trace[]` so the
  * UI can show how the planner reasoned, general and domain-agnostic (event names + compact

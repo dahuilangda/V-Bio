@@ -76,8 +76,17 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
   }, [locationSearch]);
 
   const loadContextSearchKey = useMemo(() => {
+    // Only server-routing intent should trigger a full workspace refetch. Client-side view-state
+    // params (task_row_id, tab, task_list_page, copilot_* prefill) are applied in place by their
+    // own handlers — patching them in here would recreate `loadProject`, re-run the mount effect,
+    // and cause the whole task list to be cleared and refetched on every submit/view switch.
+    // The params that remain (new_task, source_task_row_id) are the ones that genuinely change
+    // what the server must return (a fresh draft vs. an existing task's draft).
     const query = new URLSearchParams(locationSearch);
     query.delete('tab');
+    query.delete('task_row_id');
+    query.delete('task_list_page');
+    query.delete('copilot_parameter_patch');
     const next = query.toString();
     return next ? `?${next}` : '';
   }, [locationSearch]);

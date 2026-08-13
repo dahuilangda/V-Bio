@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from management_api.copilot_skill_harness import CopilotSkillDefinition
+from management_api.copilot_skills.context_actions import build_context_skill_definitions
 from management_api.copilot_skills.workflows import infer_workflow_key, normalize_workflow_key
 
 
@@ -57,7 +58,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_submission_planning",
-        "description": "Draft a parameter-change and submission plan for the current task/project using existing UI form state, or copy a visible task-list row into a new draft with a requested backend.",
+        "description": "Draft a parameter-change and submission plan for the current task/project using existing UI form state, or copy a visible task-list row into a new draft and adjust it on the task-detail page.",
         "trigger": "Commands to rerun, change seed/backend/mode/parameters, submit variants, copy a best-scoring visible task, or batch submit candidates.",
         "inputs": "Current draft/task parameters, visible task rows when in task_list, workflow, editable status, run disabled reason, requested changes.",
         "confirmation": "Always require a plan and explicit user confirmation before execution. If required parameters are missing, ask concise follow-up questions.",
@@ -69,7 +70,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
         "trigger": "Prediction rerun, seed change, or request to submit the current prediction draft.",
         "inputs": "Current Prediction draft, seed, components, constraints, run disabled reason.",
         "confirmation": "Always require explicit user confirmation before applying seed or running.",
-        "execution_boundary": "Allowed patch keys: seed. Execution uses the existing Prediction Run path.",
+        "execution_boundary": "Allowed patch keys: backend, seed, affinityBinding, componentsReplacement. Execution uses the existing Prediction Run path.",
     },
     {
         "name": "virtual_screening.submit_plan",
@@ -110,6 +111,8 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
     "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix"]},
     "seed": {"type": "int", "min": 0, "max": 2147483647},
     "affinityMode": {"type": "enum", "values": ["score", "pose", "refine", "interface"]},
+    "affinityBinding": {"type": "affinity_binding"},
+    "lowVram": {"type": "bool"},
     "peptideDesignMode": {"type": "enum", "values": ["linear", "cyclic", "bicyclic"]},
     "peptideBinderLength": {"type": "int", "min": 1, "max": 200},
     "peptideIterations": {"type": "int", "min": 1, "max": 10000},
@@ -130,7 +133,7 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
 }
 
 WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
-    "prediction": ["backend", "seed", "componentsReplacement"],
+    "prediction": ["backend", "seed", "affinityBinding", "lowVram", "componentsReplacement"],
     "virtual_screening": ["backend", "seed"],
     "affinity": ["seed", "affinityMode"],
     "peptide_design": [
@@ -223,7 +226,7 @@ def _task_parameter_json_schema(workflow_key: str) -> Dict[str, Any]:
             "numCopies": {"type": "integer", "minimum": 1},
             "useMsa": {"type": "boolean"},
             "cyclic": {"type": "boolean"},
-            "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
+            "inputMethod": {"type": "string", "enum": ["smiles", "ccd", "jsme"]},
         },
         "required": ["type", "sequence"],
         "additionalProperties": False,
@@ -253,6 +256,24 @@ def _task_parameter_json_schema(workflow_key: str) -> Dict[str, Any]:
                 "required": ["mode", "components"],
                 "additionalProperties": False,
             }
+        elif spec["type"] == "affinity_binding":
+            properties[key] = {
+                "type": "object",
+                "description": (
+                    "Enable or disable binding/affinity computation on this task. Set enabled=true to turn on "
+                    "affinity scoring; assign chain IDs to target and ligand/binder to declare which components "
+                    "the affinity is computed between. The component chain IDs come from the task's component "
+                    "list in context_payload."
+                ),
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "target": {"type": "string", "description": "Chain ID of the receptor/target component."},
+                    "ligand": {"type": "string", "description": "Chain ID of the ligand component."},
+                    "binder": {"type": "string", "description": "Chain ID of the binder component (alias for ligand)."},
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            }
     return {
         "type": "object",
         "properties": properties,
@@ -268,9 +289,53 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
     empty_input = {"type": "object", "properties": {}, "additionalProperties": False}
     definitions = [
         CopilotSkillDefinition(
+            name="task_detail:create_new_task",
+            label="New task",
+            description=(
+                "Create a NEW task in the current project, prefilled with the target components. "
+                "Use when the user asks to start a new task or create another one from the current "
+                "task's target. The host navigates to the new-task page and applies the provided "
+                "components to the draft."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "components": {
+                        "type": "array",
+                        "description": "Every structural component for the new task. Copy the target protein component from the current task when the user says the target is the current one.",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["protein", "ligand", "dna", "rna"],
+                                    "description": "Component type. Use ligand for small molecules, CCD IDs, and SMILES strings.",
+                                },
+                                "sequence": {
+                                    "type": "string",
+                                    "description": "Protein/DNA/RNA sequence, ligand SMILES, or ligand CCD ID.",
+                                },
+                                "numCopies": {"type": "integer", "minimum": 1},
+                                "useMsa": {"type": "boolean"},
+                                "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
+                            },
+                            "required": ["type", "sequence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["components"],
+                "additionalProperties": False,
+            },
+            effect="create",
+            context_type="task_detail",
+            target_context="task_detail",
+        ),
+        CopilotSkillDefinition(
             name="task_detail:submit_current",
             label="Start run",
-            description="Submit the task through the current page's validation path.",
+            description="Submit the current task for execution.",
             input_schema=empty_input,
             effect="execute",
             context_type="task_detail",
@@ -278,7 +343,7 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
         CopilotSkillDefinition(
             name="task_detail:save_draft",
             label="Save draft",
-            description="Save the current task draft.",
+            description="Save the current task configuration as a draft.",
             input_schema=empty_input,
             effect="update",
             context_type="task_detail",
@@ -304,7 +369,7 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
         CopilotSkillDefinition(
             name="task_detail:apply_metadata_patch",
             label="Update task metadata",
-            description="Update the current task's metadata.",
+            description="Update the current task's name or description.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -352,72 +417,86 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
             effect="update",
             context_type="task_detail",
         ),
-        CopilotSkillDefinition(
-            name="task_detail:apply_structure_template",
-            label="Apply structure as template",
-            description=(
-                "Fetch a structure file from a URL and attach it as the template for the protein component of the "
-                "current prediction task. Pass the structureUrl returned by a prior rcsb.resolve / rcsb.search / "
-                "alphafold.resolve observation (its pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif "
-                "file. Prediction tasks only."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
-                    "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
-                },
-                "required": ["structureUrl"],
-                "additionalProperties": False,
-            },
-            effect="update",
-            context_type="task_detail",
-        ),
-        CopilotSkillDefinition(
-            name="task_detail:apply_affinity_target_structure",
-            label="Apply structure as affinity target",
-            description=(
-                "Fetch a structure file from a URL and set it as the target/receptor structure for the current "
-                "affinity task. Pass the structureUrl from a prior rcsb.resolve / rcsb.search / alphafold.resolve "
-                "observation (pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif file. Affinity tasks "
-                "only."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
-                    "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
-                },
-                "required": ["structureUrl"],
-                "additionalProperties": False,
-            },
-            effect="update",
-            context_type="task_detail",
-        ),
-        CopilotSkillDefinition(
-            name="task_detail:apply_affinity_ligand_smiles",
-            label="Set affinity binder (SMILES)",
-            description=(
-                "Set the binder / ligand for the current affinity task from a SMILES string. Pass the smiles from a "
-                "prior pubchem.search observation. Affinity tasks only."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {"smiles": {"type": "string", "minLength": 1, "maxLength": 2048}},
-                "required": ["smiles"],
-                "additionalProperties": False,
-            },
-            effect="update",
-            context_type="task_detail",
-        ),
     ]
+    # The structure-template skill is prediction-only (the handler enforces this). Registering it only
+    # for prediction avoids the planner proposing it on affinity/peptide/lead_opt where it would error.
+    if normalized_workflow == "prediction":
+        definitions.append(
+            CopilotSkillDefinition(
+                name="task_detail:apply_structure_template",
+                label="Apply structure as template",
+                description=(
+                    "Fetch a structure file from a URL and attach it as the template for the protein component of the "
+                    "current prediction task. Pass the structureUrl returned by a prior rcsb.resolve / rcsb.search / "
+                    "alphafold.resolve observation (its pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif "
+                    "file. Prediction tasks only."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
+                    },
+                    "required": ["structureUrl"],
+                    "additionalProperties": False,
+                },
+                effect="update",
+                context_type="task_detail",
+            )
+        )
+    # The affinity-specific upload skills (target structure / ligand SMILES) belong only to the
+    # standalone affinity workflow. Prediction tasks enable affinity via the affinityBinding parameter
+    # on apply_parameter_patch instead, so these skills are withheld for non-affinity workflows to
+    # avoid the model proposing a path the host blocks.
+    if normalized_workflow == "affinity":
+        definitions.extend(
+            [
+                CopilotSkillDefinition(
+                    name="task_detail:apply_affinity_target_structure",
+                    label="Apply structure as affinity target",
+                    description=(
+                        "Fetch a structure file from a URL and set it as the target/receptor structure for the current "
+                        "affinity task. Pass the structureUrl from a prior rcsb.resolve / rcsb.search / alphafold.resolve "
+                        "observation (pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif file. Affinity tasks "
+                        "only."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
+                            "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
+                        },
+                        "required": ["structureUrl"],
+                        "additionalProperties": False,
+                    },
+                    effect="update",
+                    context_type="task_detail",
+                ),
+                CopilotSkillDefinition(
+                    name="task_detail:apply_affinity_ligand_smiles",
+                    label="Set affinity binder (SMILES)",
+                    description=(
+                        "Set the binder / ligand for the current affinity task from a SMILES string. Pass the smiles from a "
+                        "prior pubchem.search observation. Affinity tasks only."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"smiles": {"type": "string", "minLength": 1, "maxLength": 2048}},
+                        "required": ["smiles"],
+                        "additionalProperties": False,
+                    },
+                    effect="update",
+                    context_type="task_detail",
+                ),
+            ]
+        )
     parameter_schema = _task_parameter_json_schema(normalized_workflow)
     if parameter_schema["properties"]:
         definitions.append(
             CopilotSkillDefinition(
                 name="task_detail:apply_parameter_patch",
                 label="Update task parameters",
-                description="Update the current task's structured parameters.",
+                description="Update the current task's runtime parameters (backend, seed, affinity binding, components, etc.). The available parameter keys depend on the workflow.",
                 input_schema={
                     "type": "object",
                     "properties": {"parameterPatch": parameter_schema},
@@ -429,3 +508,22 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
             )
         )
     return definitions
+
+
+def build_cross_context_skill_definitions(
+    *,
+    current_context: str,
+    context_payload: Dict[str, Any],
+    workflow_key: str,
+) -> List[CopilotSkillDefinition]:
+    """Return skills for the current host page only (progressive disclosure).
+
+    The catalog is kept small so a weaker model can reliably pick the right operation: only the
+    action skills for the page the user is on are exposed, plus all read-only lookup skills (those
+    are universal). When the user confirms an action that navigates to another page, the next page's
+    Copilot turn sees that page's action skills — so a multi-step task advances page by page, each
+    step planned with only the relevant tools visible.
+    """
+    if current_context == "task_detail":
+        return build_task_detail_skill_definitions(workflow_key)
+    return build_context_skill_definitions(current_context, context_payload, workflow_key=workflow_key)

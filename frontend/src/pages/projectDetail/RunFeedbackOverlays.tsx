@@ -21,7 +21,6 @@ interface RunFeedbackOverlaysProps {
 
 export function RunFeedbackOverlays({
   runSuccessNotice,
-  taskHistoryPath,
   onOpenTaskHistory,
   isRunRedirecting,
   showQuickRunFab,
@@ -44,9 +43,9 @@ export function RunFeedbackOverlays({
           </span>
           <div className="run-inline-toast-line">
             <div className="run-inline-toast-text">{runSuccessNotice}</div>
-            <a className="run-inline-toast-link" href={taskHistoryPath} onClick={onOpenTaskHistory}>
+            <button type="button" className="run-inline-toast-link" onClick={onOpenTaskHistory}>
               Tasks
-            </a>
+            </button>
           </div>
         </div>
       )}

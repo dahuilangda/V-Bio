@@ -73,7 +73,7 @@ def forward_task_read(gateway: Any, task_id: str, upstream_prefix: str, action: 
             project_id=project_id,
             task_id=task_id,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
@@ -147,7 +147,7 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
             project_id=project_id,
             task_id=None,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def cancel_or_delete_task(gateway: Any, task_id: str) -> Tuple[Response, int]:
@@ -226,4 +226,4 @@ def cancel_or_delete_task(gateway: Any, task_id: str) -> Tuple[Response, int]:
             project_id=project_id,
             task_id=task_id,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500
