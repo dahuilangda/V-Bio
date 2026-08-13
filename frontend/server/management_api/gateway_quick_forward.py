@@ -103,7 +103,7 @@ def forward_quick_json(
             project_id=project_id or (token.project_id if token else None),
             task_id=None,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def forward_quick_multipart(
@@ -174,7 +174,7 @@ def forward_quick_multipart(
             project_id=project_id or (token.project_id if token else None),
             task_id=None,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def forward_quick_get(gateway: Any, upstream_path: str, action: str) -> Tuple[Response, int]:
@@ -239,4 +239,4 @@ def forward_quick_get(gateway: Any, upstream_path: str, action: str) -> Tuple[Re
             project_id=project_id or (token.project_id if token else None),
             task_id=None,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500

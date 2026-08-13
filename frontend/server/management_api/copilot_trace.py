@@ -26,9 +26,12 @@ TRACE_MODEL_REQUEST = "model_request"
 TRACE_MALFORMED_OUTPUT = "malformed_output"
 TRACE_AUDIT_REJECTED = "audit_rejected"
 TRACE_SKILL_OBSERVATIONS = "skill_observations"
-TRACE_FALLBACK = "fallback"
 TRACE_TERMINAL = "terminal"
 TRACE_NO_CONVERGENCE = "no_convergence"
+# Hierarchical planning events: the planner emitted a goal_steps outline, and the harness drives
+# step-by-step concretization with progress tracking.
+TRACE_OUTLINE = "outline"
+TRACE_STEP_DONE = "step_done"
 
 
 @dataclass

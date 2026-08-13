@@ -35,7 +35,6 @@ interface ProjectHeaderActionsProps {
 }
 
 export function ProjectHeaderActions({
-  taskHistoryPath,
   onOpenTaskHistory,
   onDownloadResult,
   canDownloadResult,
@@ -87,15 +86,15 @@ export function ProjectHeaderActions({
 
   return (
     <div className="row gap-8 page-header-actions">
-      <a
+      <button
+        type="button"
         className="task-row-action-btn"
-        href={taskHistoryPath}
         onClick={onOpenTaskHistory}
         title="Back to task list"
         aria-label="Back to task list"
       >
         <ArrowLeft size={14} />
-      </a>
+      </button>
       <button
         className="task-row-action-btn"
         onClick={onDownloadResult}

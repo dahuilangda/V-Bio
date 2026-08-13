@@ -64,12 +64,7 @@ export function useProjectRunUiEffects({
     runRedirectTimerRef.current = window.setTimeout(() => {
       runRedirectTimerRef.current = null;
       navigate(taskPagePath);
-      window.setTimeout(() => {
-        if (window.location.pathname !== taskPagePath) {
-          window.location.assign(taskPagePath);
-        }
-      }, 140);
-    }, 620);
+    }, 420);
     return () => {
       if (runRedirectTimerRef.current !== null) {
         window.clearTimeout(runRedirectTimerRef.current);

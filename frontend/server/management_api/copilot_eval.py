@@ -26,7 +26,6 @@ from management_api.copilot_skills.compute_skills import register_compute_skills
 from management_api.copilot_skills.online_databases import OnlineSkillDefinition
 from management_api.copilot_trace import (
     TRACE_AUDIT_REJECTED,
-    TRACE_FALLBACK,
     TRACE_MALFORMED_OUTPUT,
     TRACE_MODEL_REQUEST,
     TRACE_NO_CONVERGENCE,
@@ -134,7 +133,8 @@ class EvalCase:
 
     ``expect_rejected`` asserts the audit surfaces an issue; ``expect_state`` the derived turn state.
     ``expect_skills`` / ``expect_operation_count`` add the tool-selection and efficiency dimensions
-    (the industry-standard agent-eval metrics) when set.
+    (the industry-standard agent-eval metrics) when set. ``active_outline`` simulates a locked
+    goal_steps outline for the direction-immutability cases.
     """
 
     name: str
@@ -145,6 +145,7 @@ class EvalCase:
     expect_rejected: bool = False
     expect_skills: Tuple[str, ...] = ()
     expect_operation_count: int = -1
+    active_outline: Tuple[Dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -278,7 +279,7 @@ def score_trajectory(case: TrajectoryCase) -> EvalCaseResult:
             f"max_round_seen={max_seen}, budget={case.max_rounds}",
         )
     ]
-    terminal_events = {TRACE_TERMINAL, TRACE_FALLBACK}
+    terminal_events = {TRACE_TERMINAL}
     reached_terminal = any(event in terminal_events for event in events)
     dimensions.append(
         EvalDimension(
@@ -324,7 +325,10 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
     EvalCase(
         "missing_input_requests_input",
         "Unresolved questions with no operations request input.",
-        candidate=_turn("I need more detail.", questions=["Which target?"]),
+        candidate=_turn(
+            "I need more detail.",
+            questions=[{"text": "Which target?", "kind": "freeform"}],
+        ),
         expect_state="needs_input",
         expect_operation_count=0,
     ),
@@ -424,6 +428,80 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         expect_state="continue",
         expect_skills=("compute.aggregate",),
     ),
+    EvalCase(
+        "re_emitted_operation_is_rejected",
+        "Re-emitting an operation id that already produced an observation is a contract violation.",
+        candidate=_turn("Again.", [_read_op("existing")]),
+        observations={"existing": {"ok": True, "values": [{"value": "resolved"}]}},
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "mixed_read_write_rejected_even_with_observations",
+        "Read and confirmation operations mixed in one round are rejected even when observations already exist.",
+        candidate=_turn("Mix.", [_read_op(), _write_op()]),
+        observations={"existing": {"ok": True, "values": [{"value": "resolved"}]}},
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "goal_steps_with_operations_rejected",
+        "An outline cannot accompany operations in the same round.",
+        candidate={
+            "message": "Outlining.",
+            "questions": [],
+            "operations": [_read_op()],
+            "goal_steps": [{"description": "Do it."}],
+        },
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "goal_steps_with_questions_rejected",
+        "An outline cannot accompany questions in the same round.",
+        candidate={
+            "message": "Asking.",
+            "questions": [{"text": "Which one?", "kind": "freeform"}],
+            "operations": [],
+            "goal_steps": [{"description": "Do it."}],
+        },
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "malformed_question_is_rejected",
+        "A malformed question item is rejected, not silently dropped.",
+        candidate=_turn("Asking.", questions=[{"text": "", "kind": "freeform"}]),
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "outline_reemission_is_rejected",
+        "Re-emitting goal_steps after the outline is locked is rejected (direction is immutable).",
+        candidate={
+            "message": "Redo.",
+            "questions": [],
+            "operations": [],
+            "goal_steps": [{"description": "Different direction."}],
+        },
+        active_outline=({"description": "Locked direction."},),
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "message_text_never_rejected",
+        "The harness does NOT audit message text — a title-only or colon-ending message is accepted. "
+        "Message quality is the model's responsibility, guided by the system prompt. The harness "
+        "audits structure only.",
+        candidate=_turn("当前任务分析如下："),
+        expect_state="complete",
+    ),
+    EvalCase(
+        "grounded_context_answer_accepted",
+        "A message that cites a real payload value passes cleanly.",
+        candidate=_turn("已完成,boltz 后端 pLDDT 85.2。"),
+        expect_state="complete",
+    ),
+    EvalCase(
+        "greeting_on_rich_context_accepted",
+        "A greeting on a context-rich page is accepted — the harness does not audit message content.",
+        candidate=_turn("你好！我是 V-Bio Copilot，有什么可以帮你的吗？"),
+        expect_state="complete",
+    ),
 )
 
 
@@ -450,20 +528,22 @@ TRAJECTORY_CASES: Tuple[TrajectoryCase, ...] = (
         ),
     ),
     TrajectoryCase(
-        "non_converging_repeats_then_fallback",
-        "Repeated audit rejections exhaust the budget; the turn ends via conversational fallback (terminal-ish).",
+        "non_converging_repeats_end_in_honest_failure",
+        "Repeated audit rejections exhaust the budget; the turn ends with an explicit failure "
+        "(no_convergence + terminal state=failed), never a conversational fallback.",
         steps=(
             _step(0, TRACE_MODEL_REQUEST),
             _step(0, TRACE_AUDIT_REJECTED, issues=["x"]),
             _step(1, TRACE_MODEL_REQUEST),
             _step(1, TRACE_AUDIT_REJECTED, issues=["x"]),
-            _step(2, TRACE_FALLBACK),
+            _step(2, TRACE_NO_CONVERGENCE, reason="x"),
+            _step(2, TRACE_TERMINAL, state="failed"),
         ),
         max_rounds=8,
     ),
     TrajectoryCase(
         "stuck_no_terminal",
-        "A pathological trace that never reaches any terminal/fallback event within budget.",
+        "A pathological trace that never reaches any terminal event within budget.",
         steps=(
             _step(0, TRACE_MODEL_REQUEST),
             _step(0, TRACE_NO_CONVERGENCE),
@@ -478,7 +558,12 @@ def run_eval() -> EvalReport:
     harness, definitions = build_eval_harness()
     results: list[EvalCaseResult] = []
     for case in ARCHETYPAL_CASES:
-        audit = harness.audit_plan(case.candidate, definitions, observations=case.observations)
+        audit = harness.audit_plan(
+            case.candidate,
+            definitions,
+            observations=case.observations,
+            active_outline=case.active_outline or None,
+        )
         results.append(score_audit(audit, case))
     return EvalReport(tuple(results))
 

@@ -14,10 +14,12 @@ CONFIRMATION_EFFECTS = frozenset({"create", "update", "delete", "execute", "navi
 KNOWN_EFFECTS = READ_EFFECTS | CONFIRMATION_EFFECTS
 
 # Canonical fields of a retrieved record, in identity/display priority order. This is the single
-# source of truth for "which fields identify a record" — used both to summarize observations for the
-# model (copilot._summarize_observations) and to derive anti-hallucination grounding anchors
-# (_grounding_issue). General by construction: a new skill's normalized record fields surface
-# automatically once named here, instead of being hardcoded per consumer.
+# Record-field contracts shared across consumers. The observation summarizer
+# (copilot._summarize_observations) now surfaces EVERY scalar field of a record automatically, so a
+# new skill's data reaches the model with no per-field registration. These lists remain for the two
+# consumers that need curated anchors: grounding (_grounding_issue) and memory carry-forward
+# (_compact_memory_records) use RECORD_IDENTITY_FIELDS; RECORD_LONG_FIELDS also marks the fields the
+# summarizer renders in full length (SMILES / sequence) instead of capping at 80 chars.
 RECORD_IDENTITY_FIELDS: Tuple[str, ...] = (
     "accession",
     "cid",
@@ -29,9 +31,66 @@ RECORD_IDENTITY_FIELDS: Tuple[str, ...] = (
     "proteinName",
     "title",
     "organism",
+    "name",
+    "chemblId",
+    "target",
+    "activityType",
+    "units",
 )
 RECORD_LONG_FIELDS: Tuple[str, ...] = ("smiles", "sequence")
-RECORD_NUMERIC_FIELDS: Tuple[str, ...] = ("avgPlddt", "resolution", "value", "length")
+
+
+def _planner_goal_step_schema() -> Dict[str, Any]:
+    """JSON schema for one abstract goal step in a planner outline.
+
+    An outline step describes a high-level goal the planner will later concretize into operations
+    when the harness asks it to (one step at a time). Each step is a single description; fan-out over
+    a retrieved collection is the planner's responsibility (it emits one operation per element), not a
+    declared harness behavior — declaring an unimplemented ``iterate`` here would let the planner
+    expect fan-out the harness never performs, so it is intentionally absent.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "minLength": 1, "maxLength": 300},
+        },
+        "required": ["description"],
+        "additionalProperties": False,
+    }
+
+
+def _planner_question_schema() -> Dict[str, Any]:
+    """JSON schema for one structured planner question.
+
+    A question asks the user to resolve an ambiguity before the planner can proceed (e.g. which task
+    type or which modeling backend). ``choice`` questions enumerate concrete options the frontend
+    renders as clickable chips; ``confirm`` is a yes/no; ``freeform`` is open text. The planner emits
+    questions WITHOUT operations and waits for the user's answer in the next turn.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "minLength": 1, "maxLength": 400},
+            "kind": {"type": "string", "enum": ["choice", "confirm", "freeform"]},
+            "options": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+                        "value": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "hint": {"type": "string", "maxLength": 160},
+                    },
+                    "required": ["label", "value"],
+                    "additionalProperties": False,
+                },
+                "maxItems": 8,
+            },
+            "defaultValue": {"type": "string", "maxLength": 120},
+        },
+        "required": ["text", "kind"],
+        "additionalProperties": False,
+    }
 
 
 @dataclass(frozen=True)
@@ -43,7 +102,13 @@ class CopilotSkillDefinition:
     input_schema: Dict[str, Any]
     effect: str
     label: str = ""
+    # The host page whose catalog exposes this skill (where it may be proposed).
     context_type: str | None = None
+    # The host page a confirmation of this skill navigates the user to. Read-only skills have no
+    # target (they stay on the current page). Navigation/create skills declare the page that should
+    # be active after the user confirms, so a multi-step plan chains across page boundaries. When
+    # unset, the target defaults to the skill's own context_type (the page does not change).
+    target_context: str | None = None
     payload_defaults: Dict[str, Any] = field(default_factory=dict)
     destructive: bool = False
 
@@ -54,6 +119,18 @@ class CopilotSkillDefinition:
     @property
     def requires_confirmation(self) -> bool:
         return not self.read_only
+
+    @property
+    def effective_target_context(self) -> str | None:
+        """The page a user lands on after confirming this skill.
+
+        Read-only skills never change the page. For confirmation skills, an explicit
+        ``target_context`` wins; otherwise the skill's own ``context_type`` is the target
+        (the page does not change after confirming).
+        """
+        if self.read_only:
+            return None
+        return self.target_context or self.context_type or None
 
 
 @dataclass(frozen=True)
@@ -83,6 +160,7 @@ class PlanAudit:
     issues: Tuple[str, ...]
     candidate: Dict[str, Any]
     state: str
+    goal_steps: Tuple[Dict[str, Any], ...] = ()
 
 
 class CopilotSkillHarness:
@@ -146,6 +224,39 @@ class CopilotSkillHarness:
             if not str(definition.description or "").strip():
                 raise ValueError(f"Confirmation skill {name} must declare a description.")
 
+    @staticmethod
+    def _validate_question(item: Any, path: str) -> str | None:
+        """Validate one structured planner question; return an issue string or None if valid."""
+        if not isinstance(item, dict):
+            return f"{path} must be an object"
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return f"{path}.text is required"
+        kind = str(item.get("kind") or "").strip()
+        if kind not in ("choice", "confirm", "freeform"):
+            return f"{path}.kind must be one of choice, confirm, freeform"
+        options = item.get("options")
+        if kind == "choice":
+            if not isinstance(options, list) or len(options) < 2:
+                return f"{path}.options must list at least two choices for a choice question"
+            seen_values: set[str] = set()
+            for opt_index, option in enumerate(options):
+                opt_path = f"{path}.options[{opt_index}]"
+                if not isinstance(option, dict):
+                    return f"{opt_path} must be an object"
+                opt_label = str(option.get("label") or "").strip()
+                opt_value = str(option.get("value") or "").strip()
+                if not opt_label or not opt_value:
+                    return f"{opt_path} must declare label and value"
+                if opt_value in seen_values:
+                    return f"{opt_path}.value duplicates an earlier option"
+                seen_values.add(opt_value)
+            if len(options) > 8:
+                return f"{path}.options must contain at most 8 choices"
+        elif options is not None and not isinstance(options, list):
+            return f"{path}.options must be an array when present"
+        return None
+
     def planner_output_schema(
         self,
         definitions: Mapping[str, CopilotSkillDefinition],
@@ -178,15 +289,22 @@ class CopilotSkillHarness:
             "type": "object",
             "properties": {
                 "message": {"type": "string", "minLength": 1},
+
                 "questions": {
                     "type": "array",
-                    "items": {"type": "string", "minLength": 1},
+                    "items": _planner_question_schema(),
                     "maxItems": 3,
                 },
                 "operations": {
                     "type": "array",
                     "items": {"oneOf": operation_variants},
                     "maxItems": self.max_calls_per_round,
+                },
+                "goal_steps": {
+                    "type": "array",
+                    "items": _planner_goal_step_schema(),
+                    "maxItems": 20,
+                    "description": "An abstract outline of the plan. Emit this for complex multi-step tasks: the harness will ask you to concretize each step one at a time. Omit for simple single-step tasks.",
                 },
             },
             "required": ["message", "questions", "operations"],
@@ -208,9 +326,10 @@ class CopilotSkillHarness:
             "type": "object",
             "properties": {
                 "message": {"type": "string", "minLength": 1},
+
                 "questions": {
                     "type": "array",
-                    "items": {"type": "string", "minLength": 1},
+                    "items": _planner_question_schema(),
                     "maxItems": 3,
                 },
                 "operations": {
@@ -232,6 +351,12 @@ class CopilotSkillHarness:
                     },
                     "maxItems": self.max_calls_per_round,
                 },
+                "goal_steps": {
+                    "type": "array",
+                    "items": _planner_goal_step_schema(),
+                    "maxItems": 20,
+                    "description": "An abstract outline of the plan. Emit this for complex multi-step tasks: the harness will ask you to concretize each step one at a time. Omit for simple single-step tasks.",
+                },
             },
             "required": ["message", "questions", "operations"],
             "additionalProperties": False,
@@ -244,38 +369,55 @@ class CopilotSkillHarness:
         import json
 
         available = definitions if definitions is not None else self._definitions
-        catalog = [
-            {
+        # Tool catalog in the conventional {name, description, input_schema} shape that tool-calling
+        # models are trained on (OpenAI/Anthropic/SmolAgents all use this). Split into read tools
+        # (the harness executes them and returns observations) and action tools (the harness surfaces
+        # them as user confirmations) because that read/write split is what makes this harness
+        # non-standard and must be explained to the model.
+        read_tools = []
+        action_tools = []
+        for definition in available.values():
+            tool = {
                 "name": definition.name,
                 "description": definition.description,
-                "effect": definition.effect,
-                "read_only": definition.read_only,
-                "requires_confirmation": definition.requires_confirmation,
                 "input_schema": definition.input_schema,
             }
-            for definition in available.values()
-        ]
+            if definition.read_only:
+                read_tools.append(tool)
+            else:
+                tool["page"] = definition.context_type or ""
+                tool["advances_to"] = definition.effective_target_context or ""
+                action_tools.append(tool)
         return (
-            "Plan one turn with registered atomic skills. Return a user-visible message, unresolved questions, "
-            "and ordered operations. Use questions only when required input is missing, and do not combine questions "
-            "with operations. Use only skill names and argument fields declared by the registry. Operation ids must be "
-            "unique across the planning loop, and dependencies may reference only earlier operations or observations. "
-            "The harness derives the turn state, executes only read-only skills, and converts every non-read-only skill "
-            "into a pending confirmation. The planner must never claim that a non-read-only operation already ran. "
-            "The harness executes your read-only operations and returns their observations as a system message for the "
-            "next round. Read what you need straight from those observations: most lookups finish in a single search "
-            "operation whose observation already holds the answer (a SMILES or a protein sequence), so then return the "
-            "final message with no further operations. Each round, emit only NEW operations with NEW ids; never repeat "
-            "an operation id whose observation you have already received, and never invent template placeholders such "
-            "as {{...}}. When a later operation needs a value a prior observation retrieved, you MUST reference it "
-            "with {\"$fromObservation\": \"<id>\", \"field\": \"<field>\", \"index\": <n>} (record 0 is the top hit; "
-            "common fields are sequence, smiles, accession, cid, geneNames) and set depends_on to that id — never "
-            "paste a retrieved sequence, SMILES, or other long value into an argument. Run read-only lookups first; "
-            "once their observations return, emit the non-read-only operation that consumes them in a later round — "
-            "a single round may contain read-only operations OR non-read-only operations, never both. "
-            "The output structure is enforced separately by the model server and must contain data only, never schema "
-            "keywords or protocol metadata. Registered skill contracts:\n"
-            f"{json.dumps(catalog, ensure_ascii=False, sort_keys=True)}"
+            "OUTPUT FORMAT: emit a JSON object with these fields:\n"
+            "  message: string — what to tell the user\n"
+            "  questions: array — ask when a decision is missing (see below)\n"
+            "  operations: array — each is {id, skill, arguments, depends_on}\n"
+            "  goal_steps: array — for complex tasks, an outline (see below)\n\n"
+            "TOOLS:\n"
+            "Read tools — the harness executes them and returns results:\n"
+            f"{json.dumps(read_tools, ensure_ascii=False, sort_keys=True)}\n\n"
+            "Action tools — become user confirmations (not executed immediately):\n"
+            f"{json.dumps(action_tools, ensure_ascii=False, sort_keys=True)}\n\n"
+            "QUESTIONS — ask when the user must decide something that changes the plan:\n"
+            "  {text, kind, options?} where kind=choice/confirm/freeform\n"
+            "  choice: options=[{label, value}]; confirm: yes/no; freeform: open text\n\n"
+            "GOAL_STEPS — for complex tasks, emit an outline first:\n"
+            "  [{description}] — the harness drives step-by-step concretization\n"
+            "  Each step is a single description. To fan out over a retrieved collection (one action "
+            "per element), emit one operation per element when the harness asks for that step.\n\n"
+            "REFERENCE — use a retrieved value in an argument instead of pasting it:\n"
+            '  {"$fromObservation": "<id>", "field": "<field>", "index": 0}\n\n'
+            "GUIDELINES:\n"
+            "- Emit goal_steps at most once per turn: the outline is fixed once the harness accepts it, "
+            "and re-emitting it is rejected\n"
+            "- Never mix read tools and action tools in the same round — they are separate phases\n"
+            "- Retry a failed or empty lookup with a NEW operation id; never reuse an operation id that "
+            "already produced an observation — consume it via $fromObservation and depends_on instead\n"
+            "- Failed or empty lookups must be retried, asked about, or reported plainly to the user — "
+            "never proceed as if the data had been retrieved\n"
+            "- Reference retrieved values, never paste long values into arguments\n"
+            "- Never fabricate data, identifiers, or observations"
         )
 
     def audit_plan(
@@ -285,25 +427,36 @@ class CopilotSkillHarness:
         *,
         observations: Mapping[str, Dict[str, Any]] | None = None,
         context_type: str = "",
+        active_outline: Sequence[Dict[str, Any]] | None = None,
     ) -> PlanAudit:
         issues: List[str] = []
         if not isinstance(candidate, dict):
             return PlanAudit((), ("planner output must be an object",), {}, "")
 
-        allowed_fields = {"message", "questions", "operations"}
+        allowed_fields = {"message", "questions", "operations", "goal_steps"}
         issues.extend(f"planner output field is not declared: {key}" for key in candidate if key not in allowed_fields)
         if not isinstance(candidate.get("message"), str) or not str(candidate.get("message") or "").strip():
             issues.append("message must be a non-empty string")
         if "questions" not in candidate:
             issues.append("questions is required")
-        questions = candidate.get("questions")
-        if not isinstance(questions, list) or any(not isinstance(item, str) for item in questions):
-            issues.append("questions must be an array of strings")
-            questions = []
-        elif any(not item.strip() for item in questions):
-            issues.append("questions must not contain empty strings")
-        elif len(questions) > 3:
-            issues.append("questions must contain at most 3 items")
+        questions_raw = candidate.get("questions")
+        # Questions are structured objects ({text, kind, options?}). Validate each one and collect the
+        # normalized list the audit uses for state decisions. A malformed question is a contract
+        # violation: the planner must re-emit a well-formed question, never have a bad item silently
+        # dropped.
+        questions: List[Dict[str, Any]] = []
+        if not isinstance(questions_raw, list):
+            issues.append("questions must be an array")
+        else:
+            if len(questions_raw) > 3:
+                issues.append("questions must contain at most 3 items")
+            for index, item in enumerate(questions_raw):
+                path = f"questions[{index}]"
+                issue = self._validate_question(item, path)
+                if issue:
+                    issues.append(issue)
+                elif isinstance(item, dict):
+                    questions.append(item)
         raw_operations = candidate.get("operations")
         if not isinstance(raw_operations, list):
             issues.append("operations must be an array")
@@ -338,18 +491,26 @@ class CopilotSkillHarness:
                 continue
             seen_ids.add(operation_id)
             if operation_id in observation_map:
-                # The planner re-emitted an operation that already produced an observation.
-                # Weaker planners routinely repeat a completed read instead of moving on;
-                # treat it as already satisfied and carry the existing observation forward
-                # rather than rejecting the whole turn (which would deadlock the loop).
+                # Re-emitting an operation id that already produced an observation is a contract
+                # violation: the observation already exists, so a repeat is either redundant work
+                # or an attempt to re-run failed work under the same identity. Reject it and state
+                # the two legal paths — consume the observation via $fromObservation + depends_on,
+                # or emit a NEW operation id for a retry. No silent skip: the planner must learn
+                # the contract, not be patched around it.
+                issues.append(
+                    f"{path}.id already produced an observation; consume it with $fromObservation "
+                    "and depends_on, or use a new operation id to retry"
+                )
                 continue
             definition = definitions.get(skill_name)
             if definition is None:
                 issues.append(f"{path}.skill is not registered: {skill_name}")
                 continue
-            if definition.context_type and context_type and definition.context_type != context_type:
-                issues.append(f"{path}.skill is not available in context {context_type}: {skill_name}")
-                continue
+            # Cross-context planning: a skill may target a different host page than the one the turn
+            # started on (e.g. a project_list turn proposing a task_detail skill that consumes a prior
+            # observation). The skill's target page is carried on the action payload as targetContextType
+            # so the frontend navigates there after the user confirms; it is not an audit failure. The
+            # planner's skill catalog decides availability, and depends_on/$fromObservation enforce order.
             raw_arguments = raw.get("arguments")
             if not isinstance(raw_arguments, dict):
                 issues.append(f"{path}.arguments must be an object")
@@ -400,11 +561,74 @@ class CopilotSkillHarness:
         read_operations = [item for item in prepared if item.definition.read_only]
         write_operations = [item for item in prepared if not item.definition.read_only]
         if read_operations and write_operations:
+            # Read and confirmation operations are separate phases of the loop: reads run in the
+            # harness and return observations, confirmations await the user. Mixing them in one
+            # round makes the phase boundary unverifiable (the planner could consume observations
+            # it never received), so the mix is always rejected — with or without prior
+            # observations — and the planner must separate the phases into successive rounds.
             issues.append("a turn must contain either read-only operations or confirmation operations, not both")
         if questions and raw_operations:
             issues.append("questions cannot accompany operations")
+        # Validate goal_steps (the abstract outline). When present with no operations and no questions,
+        # the state is "outline" — the harness will drive step-by-step concretization.
+        goal_steps_raw = candidate.get("goal_steps")
+        goal_steps: List[Dict[str, Any]] = []
+        if active_outline is not None and goal_steps_raw:
+            # The outline is the plan's declared direction. Once the harness locks it, re-emitting
+            # goal_steps would let the planner drift from the approved direction mid-execution, so
+            # re-emission is rejected outright — the outline is immutable for the rest of the turn.
+            issues.append(
+                "the plan outline is fixed; do not re-emit goal_steps — the harness drives each "
+                "step and will ask for its operations one at a time"
+            )
+        elif goal_steps_raw is not None:
+            if not isinstance(goal_steps_raw, list):
+                issues.append("goal_steps must be an array")
+            else:
+                if len(goal_steps_raw) > 20:
+                    # The declared schema caps the outline at 20 steps (maxItems); the audit must
+                    # enforce the same bound — an uncapped outline would make the loop drive 21+
+                    # rounds, burning the whole round budget on one plan.
+                    issues.append("goal_steps must contain at most 20 items")
+                for gs_index, gs_item in enumerate(goal_steps_raw):
+                    if not isinstance(gs_item, dict):
+                        issues.append(f"goal_steps[{gs_index}] must be an object")
+                        continue
+                    gs_desc = str(gs_item.get("description") or "").strip()
+                    if not gs_desc:
+                        issues.append(f"goal_steps[{gs_index}].description is required")
+                        continue
+                    if "iterate" in gs_item:
+                        # The ``iterate`` declaration was removed: the harness never performed the
+                        # fan-out it implied, so accepting it let the planner expect behavior that
+                        # silently never happened. Reject it so the planner emits one operation per
+                        # element explicitly when concretizing the step.
+                        issues.append(
+                            f"goal_steps[{gs_index}].iterate is not supported; fan out by emitting "
+                            "one operation per element when the harness asks for this step"
+                        )
+                        continue
+                    goal_steps.append(gs_item)
+        if goal_steps and raw_operations:
+            # The outline and its operations belong to separate rounds of the loop: an outline round
+            # declares direction, an operations round concretizes it. Emitting both at once makes the
+            # direction unverifiable (the harness could not tell whether the operations follow the
+            # outline), so the round is rejected — the planner must pick one mode.
+            issues.append(
+                "goal_steps cannot accompany operations; emit the outline alone, then the "
+                "harness will ask for each step's operations separately"
+            )
+        if goal_steps and questions:
+            # Same separation: a question resolves an ambiguity that the outline must incorporate
+            # first. Emitting both at once is rejected rather than silently preferring one.
+            issues.append(
+                "goal_steps cannot accompany questions; resolve the ambiguity with a question "
+                "first, then emit the outline in the next round"
+            )
         if questions:
             state = "needs_input"
+        elif goal_steps and not prepared:
+            state = "outline"
         elif read_operations:
             state = "continue"
         elif write_operations:
@@ -419,7 +643,62 @@ class CopilotSkillHarness:
             grounding_issue = self._grounding_issue(candidate.get("message"), observations)
             if grounding_issue:
                 issues.append(grounding_issue)
-        return PlanAudit(tuple(prepared), tuple(issues), dict(candidate), state)
+        # Context-anchored answer guard: when a turn completes with NO tools run and NO question
+        # asked (a pure context-answer turn), the message must reference at least one concrete value
+        # from the live context_payload — a task state, a metric number, a component type, a backend
+        # name, etc. This refuses the specific failure where the model had the data but emitted a
+        # title-only or empty-body message ("当前任务分析如下：" with no content). The check is purely
+        # structural: it matches REAL tokens extracted from the payload, never language patterns, so
+        # it cannot false-reject a legitimate answer (any answer that cites a real value passes). It
+        # only fires on context-rich pages where anchors exist; an empty workspace has none.
+        #
+        # NOTE: The harness does NOT audit the message text. The message field is the model's
+        # free-text output — its quality (length, formatting, whether it cites context values) is
+        # the MODEL's responsibility, guided by the system prompt. The harness audits STRUCTURE:
+        # operations schema, dependencies, read/write separation, observation correctness, and
+        # grounding (anti-hallucination when a record was retrieved). Auditing message content
+        # (dangling-promise colon check, context-anchor citation check) caused repeated rejections
+        # that the model could not self-correct, producing "I could not complete" failures for
+        # simple questions like "你会做什么". Those checks are removed — the system prompt guides
+        # the model on how to answer, and the harness trusts the model's output.
+        return PlanAudit(tuple(prepared), tuple(issues), dict(candidate), state, tuple(goal_steps))
+
+    @classmethod
+    def classify_observation(cls, observation: Mapping[str, Any]) -> str:
+        """Classify one skill-execution observation into SUCCESS / NO_MATCH / FAILED.
+
+        The audit of "did this unit operation really succeed" has exactly three honest outcomes:
+        SUCCESS — at least one discrete record was retrieved; NO_MATCH — the source answered
+        authoritatively but found nothing (an honest empty result, distinct from a failure);
+        FAILED — a transport/source error, meaning the lookup could not be completed at all.
+        The planner must react to NO_MATCH and FAILED (retry, ask, or report) — it may never
+        silently proceed as if the data had been retrieved.
+        """
+        if not observation.get("ok"):
+            return "FAILED"
+        # A value that carries an explicit `results` key is a search-shaped payload: its records
+        # live in that list (possibly empty). A value without `results` IS the discrete record
+        # (resolve-shaped). Either shape yields SUCCESS only when a record with at least one
+        # populated field actually exists — an empty {} value is not a record, so it must NOT be
+        # reported as SUCCESS (that would tell the planner data was retrieved when it wasn't).
+        for value in observation.get("values") or []:
+            if not isinstance(value, dict):
+                continue
+            nested = value.get("results")
+            if isinstance(nested, list):
+                if nested:
+                    return "SUCCESS"
+                # Search-shaped payload with an empty results list — an authoritative empty
+                # answer, never a success.
+                continue
+            if "results" in value:
+                # Search-shaped payload whose results key is missing or not a list
+                # (e.g. {"results": null}) — the source returned no list of records, so this is
+                # not a retrieved record either. Do not classify it as SUCCESS.
+                continue
+            if value:
+                return "SUCCESS"
+        return "NO_MATCH"
 
     @staticmethod
     def _grounding_issue(message: Any, observations: Mapping[str, Dict[str, Any]]) -> str | None:
@@ -557,7 +836,12 @@ class CopilotSkillHarness:
                     "operationId": operation.operation_id,
                     "skill": operation.skill,
                     "effect": operation.definition.effect,
-                    "contextType": context_type,
+                    # contextType is the host page this operation belongs to (where the user confirms
+                    # it); targetContextType is the page confirming it navigates to. For a cross-page
+                    # plan emitted from one page, these carry each operation's own page so the frontend
+                    # renders it on the right host page and advances correctly after confirmation.
+                    "contextType": operation.definition.context_type or context_type,
+                    "targetContextType": operation.definition.effective_target_context or context_type,
                     "workflowKey": workflow_key,
                     "destructive": operation.definition.destructive,
                     "dependsOn": list(operation.depends_on),
@@ -579,6 +863,81 @@ class CopilotSkillHarness:
                 }
             )
         return actions
+
+    @staticmethod
+    def group_actions_by_target_context(
+        actions: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Order confirmation actions so dependencies resolve before dependents, grouped by target page.
+
+        A single plan may span multiple host pages (project_list → task_list → task_detail). The
+        frontend drives the plan page by page: it renders only the actions whose targetContextType
+        matches the current page, and navigates to the next page once those are confirmed. Ordering
+        must respect the planner's declared dependency graph (an operation that depends_on another
+        always comes after it) so the user never sees a dependent step before its prerequisite; the
+        target page is the secondary key so a plan reads in navigation order within that constraint.
+        """
+        # Canonical progression of host pages a plan may move through. Actions whose target is not
+        # recognized sort last but are still grouped together.
+        page_order = {"project_list": 0, "task_list": 1, "task_detail": 2}
+        unknown_order = len(page_order)
+
+        def page_rank(action: Dict[str, Any]) -> int:
+            target = str(action.get("payload", {}).get("targetContextType") or "").strip()
+            return page_order.get(target, unknown_order)
+
+        def declared_sequence(action: Dict[str, Any]) -> int:
+            try:
+                return int(action.get("sequence") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        # Stable topological sort honoring dependsOn, with (page_rank, sequence) as the tie-breaker so
+        # independent actions still read in navigation + declared order. Dependencies that reference an
+        # operation id not present in this action set are treated as already satisfied (external).
+        action_by_id: Dict[str, Dict[str, Any]] = {}
+        for action in actions:
+            op_id = str(action.get("operation_id") or "").strip()
+            if op_id:
+                action_by_id[op_id] = action
+
+        remaining = list(actions)
+        ordered: List[Dict[str, Any]] = []
+        placed: set[str] = set()
+        # Bound the loop by the action count; a cycle leaves the unplaceable tail in declared order.
+        for _ in range(len(actions) + 1):
+            if not remaining:
+                break
+            ready: List[Dict[str, Any]] = []
+            deferred: List[Dict[str, Any]] = []
+            for action in remaining:
+                dependencies = action.get("payload", {}).get("dependsOn") or []
+                op_id = str(action.get("operation_id") or "").strip()
+                if (
+                    isinstance(dependencies, list)
+                    and all(
+                        (dep not in action_by_id) or (str(dep) in placed)
+                        for dep in dependencies
+                        if isinstance(dep, str)
+                    )
+                ) or not isinstance(dependencies, list):
+                    ready.append(action)
+                else:
+                    deferred.append(action)
+            if not ready:
+                # The audit guarantees dependencies reference earlier operations or existing
+                # observations, so a cycle is unreachable for audited plans. If one ever appears
+                # it is a harness bug — fail loudly instead of emitting an unordered tail.
+                raise ValueError("confirmation action dependencies cannot be resolved (cycle)")
+            ready.sort(key=lambda a: (page_rank(a), declared_sequence(a)))
+            for action in ready:
+                ordered.append(action)
+                op_id = str(action.get("operation_id") or "").strip()
+                if op_id:
+                    placed.add(op_id)
+            remaining = deferred
+
+        return ordered
 
     def execute(self, calls: List[PreparedSkillCall]) -> Dict[str, Dict[str, Any]]:
         grouped: Dict[str, Dict[str, Any]] = {}
@@ -684,7 +1043,11 @@ class CopilotSkillHarness:
         try:
             index = int(value.get("index", 0))
         except (TypeError, ValueError):
-            index = 0
+            # A non-numeric index is a planner contract error, not something to paper over by
+            # silently reading record 0 — reject it so the audit makes the planner fix the output.
+            raise ValueError(
+                f"Observation {observation_id} declares an invalid record index {value.get('index')!r}"
+            )
         if index < 0 or index >= len(records):
             raise ValueError(
                 f"Observation {observation_id} has no record at index {index} (have {len(records)})"

@@ -5,10 +5,21 @@ import json
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
-from urllib.parse import quote
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote, urlparse
 
 import requests
+
+
+# Per-host minimum spacing between requests, to respect documented upstream rate limits. ChEMBL
+# enforces "no more than 1 request/second without an API key" (official ChEMBL/Beaker docs); the
+# official chembl_webresource_client throttles automatically, but raw calls must do so explicitly
+# or the source returns 5xx / drops connections under sustained load. The reservation is keyed by
+# host so unrelated sources are not serialized.
+_HOST_RATE_SECONDS: Dict[str, float] = {
+    "www.ebi.ac.uk": 1.0,  # ChEMBL data API (+ other EBI services on this host)
+}
+_DEFAULT_RATE_SECONDS = 0.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,17 @@ def _pubdate_year(value: Any) -> str:
     return parts[0].split(";")[0] if parts else ""
 
 
+def _is_http_status(exc: Exception, status: int) -> bool:
+    """Return whether a fetch RuntimeError reports the given HTTP status.
+
+    ``_fetch_json`` raises ``RuntimeError("HTTP <status>...")`` for non-2xx responses. Status-code
+    detection is matched on the stable message prefix so callers can distinguish an authoritative
+    "no such record" (HTTP 404) from a transport/source failure (5xx, timeouts, connection drops) —
+    the two must map to NO_MATCH and FAILED respectively, never conflated.
+    """
+    return str(exc).startswith(f"HTTP {status}")
+
+
 class OnlineDatabaseSkills:
     """Registry of read-only, atomic online-database skills."""
 
@@ -65,8 +87,12 @@ class OnlineDatabaseSkills:
         self._cache_ttl_seconds = max(1.0, min(3600.0, float(cache_ttl_seconds)))
         self._cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         self._cache_lock = threading.Lock()
+        self._host_next_allowed: Dict[str, float] = {}
+        self._rate_lock = threading.Lock()
         self._definitions: Dict[str, OnlineSkillDefinition] = {}
         self._handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+        # Per-call outbound proxy (from runtime settings). None means direct connection.
+        self._proxies: Optional[Dict[str, str]] = None
         self._register_builtin_skills()
 
     @property
@@ -122,12 +148,12 @@ class OnlineDatabaseSkills:
             OnlineSkillDefinition(
                 name="uniprot.search",
                 description=(
-                    "Search UniProtKB and return ranked candidate entries, each with its accession and protein "
-                    "sequence, so a sequence question can be answered in one step. Pass a UniProt query string "
-                    "using the database's native field syntax: gene:<symbol>, protein_name:\"<name>\", "
-                    "organism_id:<NCBI taxon id> (9606 is human), reviewed:true, accession:<id>. Combine fields "
-                    "with AND. Prefer organism_id over a free-text organism name. Returns no results when there "
-                    "is no authoritative match."
+                    "Search UniProtKB and return ranked candidate entries with accession, gene name, protein name, "
+                    "organism, and sequence. Use UniProt field syntax for precision: a gene-name field for a gene "
+                    "symbol, a protein-name field for a protein name, and an accession field for a known accession; "
+                    "combine fields with AND. Add an explicit organism filter when the entity exists in multiple "
+                    "species, and request reviewed entries when curated data is required. Never send a bare gene "
+                    "name or protein name without field syntax — it returns irrelevant matches across all organisms."
                 ),
                 input_schema={
                     "type": "object",
@@ -245,11 +271,11 @@ class OnlineDatabaseSkills:
                     "biological TARGET and return them ranked by measured potency (IC50 / Ki / Kd / EC50), each "
                     "with name and canonical SMILES. Answers 'what inhibits / binds / hits target X?' or 'find me "
                     "inhibitors of X'. Resolve the target one of three ways, most precise first: (1) a UniProt "
-                    "accession in 'accession' (e.g. Q92918) — resolve a gene symbol such as HPK1 or its alias "
-                    "MAP4K1 to an accession with uniprot.search first, then pass that accession here; (2) a ChEMBL "
-                    "target id in 'target_chembl_id'; (3) a free-text protein name in 'query' alone, matched on "
-                    "ChEMBL's preferred name (gene symbols rarely match — prefer the accession path). Defaults to "
-                    "Homo sapiens. Returns no results when the target or its activity is unknown."
+                    "accession in 'accession' — resolve a gene symbol to its accession with uniprot.search first, "
+                    "then pass that accession here; (2) a ChEMBL target id in 'target_chembl_id'; (3) a free-text "
+                    "protein name in 'query' alone, matched on ChEMBL's preferred name (gene symbols rarely match "
+                    "— prefer the accession path). Defaults to Homo sapiens. Returns no results when the target or "
+                    "its activity is unknown."
                 ),
                 input_schema={
                     "type": "object",
@@ -264,13 +290,13 @@ class OnlineDatabaseSkills:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 64,
-                            "description": "UniProt accession (e.g. Q92918). Most precise target key.",
+                            "description": "UniProt accession. Most precise target key.",
                         },
                         "target_chembl_id": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 64,
-                            "description": "A ChEMBL target id (e.g. CHEMBL4618), used directly when already known.",
+                            "description": "A ChEMBL target id, used directly when already known.",
                         },
                         "organism": {
                             "type": "string",
@@ -346,6 +372,27 @@ class OnlineDatabaseSkills:
     _RETRY_BACKOFF_SECONDS = 0.4
     _RETRY_BACKOFF_FACTOR = 2.5
 
+    def _wait_for_host_rate(self, url: str) -> None:
+        """Space requests to a host per its documented rate limit (reservation pattern).
+
+        ChEMBL allows <=1 req/s without an API key. Under the lock we reserve the next allowed
+        slot for this host (slot = max(now, previous_slot) + interval), release the lock, then
+        sleep until the slot. Concurrent requests to the SAME host therefore queue at the rate
+        limit, while requests to a different host are not blocked by this one.
+        """
+        host = (urlparse(url).hostname or "").lower()
+        interval = _HOST_RATE_SECONDS.get(host, _DEFAULT_RATE_SECONDS)
+        if interval <= 0:
+            return
+        with self._rate_lock:
+            now = time.monotonic()
+            previous = self._host_next_allowed.get(host, 0.0)
+            slot = max(now, previous)
+            self._host_next_allowed[host] = slot + interval
+            sleep_for = slot - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
     def _request_with_retry(self, method: str, url: str, *, data: str | None = None) -> Any:
         """Issue one HTTP request, retrying transient failures with bounded exponential backoff.
 
@@ -360,11 +407,12 @@ class OnlineDatabaseSkills:
         backoff = self._RETRY_BACKOFF_SECONDS
         response: Any = None
         for attempt in range(self._RETRY_MAX_ATTEMPTS):
+            self._wait_for_host_rate(url)
             try:
                 if method == "GET":
-                    response = self._session.get(url, headers=headers, timeout=self._timeout_seconds)
+                    response = self._session.get(url, headers=headers, timeout=self._timeout_seconds, proxies=self._proxies)
                 else:
-                    response = self._session.post(url, headers=headers, data=data, timeout=self._timeout_seconds)
+                    response = self._session.post(url, headers=headers, data=data, timeout=self._timeout_seconds, proxies=self._proxies)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
                 if attempt + 1 == self._RETRY_MAX_ATTEMPTS:
                     raise RuntimeError(f"online source unreachable: {exc}") from exc
@@ -390,7 +438,16 @@ class OnlineDatabaseSkills:
         if not response.ok:
             detail = " ".join(str(getattr(response, "text", "") or "").split())[:240]
             raise RuntimeError(f"HTTP {response.status_code}{': ' + detail if detail else ''}")
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            # HTTP 200 but a non-JSON body (an empty response or an HTML error page) — some
+            # upstreams misbehave this way under load. Report it as a source failure so the harness
+            # surfaces SOURCE UNAVAILABLE, instead of letting a raw JSONDecodeError propagate.
+            preview = " ".join(str(getattr(response, "text", "") or "").split())[:120]
+            raise RuntimeError(
+                f"source returned a non-JSON response{f': {preview}' if preview else ' (empty body)'}"
+            ) from exc
         if not isinstance(payload, dict):
             raise RuntimeError("Online database returned a non-object JSON response.")
         return payload
@@ -466,7 +523,16 @@ class OnlineDatabaseSkills:
     def _resolve_uniprot(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         identifier = str(arguments.get("identifier") or "").strip()
         url = f"https://rest.uniprot.org/uniprotkb/{quote(identifier, safe='-')}.json"
-        payload = self._get_json(url)
+        try:
+            payload = self._get_json(url)
+        except RuntimeError as exc:
+            if _is_http_status(exc, 404):
+                # UniProt answers 404 for a nonexistent accession — an authoritative "no such
+                # record", NOT a source failure. Return the empty shape so the harness classifies
+                # it NO_MATCH and the planner tells the user the record does not exist (never
+                # "source unavailable").
+                return {"source": "uniprot", "identifier": identifier, "count": 0, "results": []}
+            raise
         sequence_data = payload.get("sequence") if isinstance(payload.get("sequence"), dict) else {}
         sequence = "".join(str(sequence_data.get("value") or "").split()).upper()
         if not sequence:
@@ -574,7 +640,14 @@ class OnlineDatabaseSkills:
 
     def _resolve_rcsb(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         identifier = str(arguments.get("identifier") or "").strip().upper()
-        summary = self._rcsb_entry_summary(identifier)
+        try:
+            summary = self._rcsb_entry_summary(identifier)
+        except RuntimeError as exc:
+            if _is_http_status(exc, 404):
+                # RCSB answers 404 for an unknown PDB id — authoritative "no such entry" (NO_MATCH),
+                # not a source failure.
+                return {"source": "rcsb", "identifier": identifier, "count": 0, "results": []}
+            raise
         summary.update({"source": "rcsb", "identifier": identifier})
         return summary
 
@@ -612,6 +685,15 @@ class OnlineDatabaseSkills:
         url = f"https://alphafold.ebi.ac.uk/api/prediction/{quote(accession, safe='')}"
         response = self._request_with_retry("GET", url)
         if not response.ok:
+            if int(getattr(response, "status_code", 0)) == 404:
+                # AlphaFold answers 404 when no predicted structure exists for the accession —
+                # authoritative "no such prediction" (NO_MATCH), not a source failure.
+                return {
+                    "source": "alphafold",
+                    "identifier": accession,
+                    "count": 0,
+                    "results": [],
+                }
             detail = " ".join(str(getattr(response, "text", "") or "").split())[:240]
             raise RuntimeError(f"HTTP {response.status_code}{': ' + detail if detail else ''}")
         try:
@@ -676,7 +758,7 @@ class OnlineDatabaseSkills:
             if existing is None or value < existing["value"]:
                 best_by_target[target] = {
                     "target": target,
-                    "type": str(item.get("standard_type") or "").strip(),
+                    "activityType": str(item.get("standard_type") or "").strip(),
                     "value": value,
                     "units": str(item.get("standard_units") or "nM").strip(),
                     "organism": str(item.get("organism") or "").strip(),
@@ -838,18 +920,17 @@ class OnlineDatabaseSkills:
         results: List[Dict[str, Any]] = []
         for row in ranked:
             info = hydrated.get(row["molecule_chembl_id"], {})
+            # Flat record so the observation summarizer surfaces every field (smiles, value,
+            # activityType, units) at the top level — the same shape pubchem/rcsb use, not a
+            # nested compound/activity object the summarizer cannot reach.
             results.append(
                 {
-                    "compound": {
-                        "chemblId": row["molecule_chembl_id"],
-                        "name": info.get("name") or row["name_hint"] or row["molecule_chembl_id"],
-                        "smiles": info.get("smiles", ""),
-                    },
-                    "activity": {
-                        "type": row["type"],
-                        "value": row["value"],
-                        "units": row["units"],
-                    },
+                    "title": info.get("name") or row["name_hint"] or row["molecule_chembl_id"],
+                    "chemblId": row["molecule_chembl_id"],
+                    "smiles": info.get("smiles", ""),
+                    "activityType": row["type"],
+                    "value": row["value"],
+                    "units": row["units"],
                 }
             )
         return {

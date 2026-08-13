@@ -330,6 +330,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   } = runtime;
 
   const copilotSequenceAppliedRef = useRef(false);
+  // Latest-value ref for saveDraft: an in-flight async closure (e.g. the Copilot
+  // apply_parameter_patch handler) may outlive the render it was created in. Reading
+  // saveDraftRef.current after the patch's setDraft has been committed gives the saveDraft from
+  // THAT render, whose closure captures the PATCHED draft — a plain closure capture can never
+  // refresh itself by waiting, which is why the earlier double-rAF approach lost the patch.
+  const saveDraftRef = useRef(saveDraft);
+  saveDraftRef.current = saveDraft;
   const [copilotPrefillSave, setCopilotPrefillSave] = useState<{ components: InputComponent[] } | null>(null);
   useEffect(() => {
     if (copilotSequenceAppliedRef.current) return;
@@ -2087,12 +2094,46 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (affinityModePatch === 'score' || affinityModePatch === 'pose' || affinityModePatch === 'refine' || affinityModePatch === 'interface') {
         onAffinityModeChange(affinityModePatch);
       }
+      const affinityBinding = asRecord(patch.affinityBinding);
+      if (affinityBinding && typeof affinityBinding.enabled === 'boolean') {
+        // Enable/disable binding computation on the prediction task (the "Binding / Compute" checkbox).
+        const wantEnabled = affinityBinding.enabled === true;
+        if (wantEnabled && !canEnableAffinityFromWorkspace) {
+          throw new Error('Cannot enable affinity: the task needs at least two components (a receptor and a ligand) before binding can be computed.');
+        }
+        setAffinityEnabledFromWorkspace(wantEnabled);
+        if (wantEnabled) {
+          // Chain-ID assignment (target/ligand/binder) goes directly into the draft properties.
+          const targetChain = readText(affinityBinding.target).trim();
+          const ligandChain = readText(affinityBinding.ligand || affinityBinding.binder).trim();
+          setDraft((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  inputConfig: {
+                    ...prev.inputConfig,
+                    properties: {
+                      ...prev.inputConfig.properties,
+                      ...(targetChain ? { target: targetChain } : {}),
+                      ...(ligandChain ? { ligand: ligandChain, binder: ligandChain } : {}),
+                    },
+                  },
+                }
+              : prev
+          );
+        }
+      }
+      if (typeof patch.lowVram === 'boolean') {
+        handleRuntimeLowVramChange(patch.lowVram);
+      }
       const peptideDesignMode = readText(patch.peptideDesignMode).trim();
       if (peptideDesignMode === 'linear' || peptideDesignMode === 'cyclic' || peptideDesignMode === 'bicyclic') {
         handleRuntimePeptideDesignModeChange(peptideDesignMode);
       }
       const peptideBinderLength = readFiniteNumber(patch.peptideBinderLength);
-      if (peptideBinderLength !== null) handleRuntimePeptideBinderLengthChange(Math.max(1, Math.floor(peptideBinderLength)));
+      if (peptideBinderLength !== null) {
+        handleRuntimePeptideBinderLengthChange(Math.max(1, Math.floor(peptideBinderLength)));
+      }
       const peptideIterations = readFiniteNumber(patch.peptideIterations);
       if (peptideIterations !== null) handleRuntimePeptideIterationsChange(Math.max(1, Math.floor(peptideIterations)));
       const peptidePopulationSize = readFiniteNumber(patch.peptidePopulationSize);
@@ -2132,8 +2173,28 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const replacementComponentsRaw = componentsReplacement.components;
       if (Array.isArray(replacementComponentsRaw)) {
         const replacementComponents = replacementComponentsRaw
-          .map((component) => (component && typeof component === 'object' ? (component as InputComponent) : null))
-          .filter((component): component is InputComponent => Boolean(component?.type && readText(component.sequence).trim()));
+          .map((component, index) => {
+            if (!component || typeof component !== 'object') return null;
+            const raw = component as Record<string, unknown>;
+            const type = readText(raw.type).trim();
+            const sequence = readText(raw.sequence).trim();
+            if (!type || !sequence) return null;
+            // Fill defaults the InputComponent type requires but the planner may omit.
+            // Ligands with a SMILES sequence default to inputMethod 'smiles' (the sequence IS the
+            // SMILES string); proteins default useMsa to false.
+            const isLigand = type === 'ligand';
+            const inputMethod = readText(raw.inputMethod).trim() || (isLigand ? 'smiles' : undefined);
+            return {
+              id: readText(raw.id).trim() || `copilot-${index + 1}`,
+              type: type as InputComponent['type'],
+              sequence,
+              numCopies: Math.max(1, Math.floor(Number(raw.numCopies)) || 1),
+              ...(typeof raw.useMsa === 'boolean' ? { useMsa: raw.useMsa } : (!isLigand ? { useMsa: false } : {})),
+              ...(typeof raw.cyclic === 'boolean' ? { cyclic: raw.cyclic } : {}),
+              ...(inputMethod ? { inputMethod: inputMethod as InputComponent['inputMethod'] } : {}),
+            } as InputComponent;
+          })
+          .filter((component): component is InputComponent => component !== null);
         if (replacementComponents.length > 0) {
           setDraft((prev) =>
             prev
@@ -2151,13 +2212,32 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         }
       }
     };
+    if (action.id === 'task_detail:create_new_task') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      const components = Array.isArray(action.payload?.components) ? action.payload.components : [];
+      if (components.length === 0) throw new Error('No components were provided for the new task.');
+      const params = new URLSearchParams();
+      params.set('tab', 'components');
+      params.set('new_task', '1');
+      params.set('copilot_components', JSON.stringify(components));
+      navigate(`/projects/${project.id}?${params.toString()}`);
+      return 'New task draft created with the provided components.';
+    }
     if (action.id === 'task_detail:apply_parameter_patch') {
       applyPatch();
-      return;
+      // Wait for React to commit the setDraft state updates, then save via saveDraftRef.current —
+      // the ref points at the saveDraft of the render that committed the PATCHED draft, so its
+      // closure reads the patched values (not the stale pre-patch draft). The double-rAF flush
+      // makes the render commit; the ref makes the save read the new render's closure.
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+      await saveDraftRef.current();
+      return 'Parameters updated and draft saved.';
     }
     if (action.id === 'task_detail:apply_metadata_patch') {
       await applyMetadataPatch();
-      return;
+      return 'Task metadata updated.';
     }
     if (action.id === 'task_detail:apply_structure_template') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -2200,7 +2280,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const contentText = await response.text();
       const file = new File([contentText], fileName, { type: format === 'pdb' ? 'chemical/x-pdb' : 'chemical/x-cif' });
       onAffinityTargetFileChange(file);
-      return;
+      return 'Structure template applied to the protein component.';
     }
     if (action.id === 'task_detail:apply_affinity_ligand_smiles') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -2208,27 +2288,18 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const smiles = String(action.payload?.smiles || '').trim();
       if (!smiles) throw new Error('No SMILES was provided.');
       setAffinityLigandSmiles(smiles);
-      return;
+      return 'Ligand SMILES set.';
     }
     if (action.id === 'task_detail:save_draft') {
       await saveDraft();
-      return;
-    }
-    if (action.id === 'task_detail:apply_patch_and_submit') {
-      applyPatch();
-      await new Promise((resolve) => window.setTimeout(resolve, 0));
-      if (runDisabledRef.current) {
-        throw new Error(runBlockedReasonRef.current || 'Current task cannot be submitted yet.');
-      }
-      await submitTaskRef.current();
-      return;
+      return 'Draft saved.';
     }
     if (action.id === 'task_detail:submit_current') {
       if (runDisabledRef.current) {
         throw new Error(runBlockedReasonRef.current || 'Current task cannot be submitted yet.');
       }
       await submitTaskRef.current();
-      return;
+      return 'Task submitted. The task is now queued.';
     }
     if (action.id === 'task_detail:cancel_current') {
       const taskRow = statusContextTaskRow || activeResultTask;
@@ -2244,7 +2315,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         throw new Error(`Backend did not confirm cancellation for task "${runtimeTaskId}".`);
       }
       await loadProject();
-      return;
+      return 'Task cancelled.';
     }
     if (action.id === 'task_detail:delete_current') {
       const taskRow = activeResultTask || statusContextTaskRow;
@@ -2264,6 +2335,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       await deleteProjectTask(taskRow.id);
       await loadProject();
       navigate(`/projects/${project.id}/tasks`, { replace: true });
+      return 'Task deleted.';
     }
   }, [
     activeResultTask,

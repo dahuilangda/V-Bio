@@ -839,31 +839,39 @@ export function useProjectDetailRuntimeContext() {
     }
   }, [location.search, projectId]);
 
+  // Sync the URL tab param with the active workspace tab. IMPORTANT: draft is NOT in the deps —
+  // including it caused a navigate(replace) on every keystroke/edit, creating a cascade with
+  // syncWorkspaceTaskRow and loadProject that made the page visibly jump after submit. The tab
+  // only needs to sync when workspaceTab changes, not when the draft changes.
   useEffect(() => {
-    if (!projectId || !project || !draft) return;
+    if (!projectId || !project) return;
     const query = new URLSearchParams(location.search);
     const currentTab = String(query.get('tab') || '').trim().toLowerCase();
     if (currentTab === workspaceTab) return;
     query.set('tab', workspaceTab);
     navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
-  }, [draft, location.search, navigate, project, projectId, workspaceTab]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceTab, projectId, project, navigate]);
 
+  // Only set source_task_row_id when requestNewTask transitions to true AND we have a fallback.
+  // projectTasks and location.search are NOT in deps — they caused a navigate cascade after submit
+  // (submit → syncWorkspaceTaskRow → location.search change → this effect fires → another navigate).
   useEffect(() => {
     if (!projectId || !project) return;
+    if (!requestNewTask) return;
     if (!(isPredictionLikeWorkflowKey(getWorkflowDefinition(project.task_type).key) || getWorkflowDefinition(project.task_type).key === 'affinity')) {
       return;
     }
+    if (!fallbackEditableTaskRowId) return;
     const query = new URLSearchParams(location.search);
     const currentSourceTaskRowId = String(query.get('source_task_row_id') || '').trim();
-
-    if (requestNewTask && !currentSourceTaskRowId && fallbackEditableTaskRowId) {
-      query.set('new_task', '1');
-      query.set('source_task_row_id', fallbackEditableTaskRowId);
-      query.set('tab', workspaceTab);
-      navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
-      return;
-    }
-  }, [fallbackEditableTaskRowId, location.search, navigate, project, projectId, projectTasks, requestNewTask, workspaceTab]);
+    if (currentSourceTaskRowId) return; // already set
+    query.set('new_task', '1');
+    query.set('source_task_row_id', fallbackEditableTaskRowId);
+    query.set('tab', workspaceTab);
+    navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestNewTask, fallbackEditableTaskRowId, projectId, project, workspaceTab, navigate]);
 
   const canEdit = useMemo(() => {
     if (!project) return false;
@@ -1471,6 +1479,95 @@ export function useProjectDetailRuntimeContext() {
     setDraft,
     setProjectTasks,
     setCustomResidueLibrary,
+    normalizeConfigForBackend
+  ]);
+
+  // In-place task draft re-hydration for the component-editor workflows (prediction / affinity /
+  // virtual_screening). These workflows edit their draft through the component editor, so when the
+  // selected task changes (task_row_id in the URL, e.g. browser back/forward) the draft must be
+  // re-aligned to the newly-selected task's snapshot — WITHOUT a full workspace refetch (which is
+  // the page-reload feel the loadContextSearchKey fix eliminated). Peptide/lead-opt have their own
+  // dedicated effects above; this covers the remaining component-editor workflows. The marker ref
+  // dedupes so it only fires on a real task change, not on every projectTasks refresh.
+  const componentTaskSwitchRef = useRef<string>('');
+  useEffect(() => {
+    if (!isPredictionWorkflow && !isAffinityWorkflow && !isVirtualScreeningWorkflow) return;
+
+    const query = new URLSearchParams(location.search);
+    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const activeTaskId = String(project?.task_id || '').trim();
+    const focusedRow =
+      (requestedTaskRowId
+        ? projectTasks.find((row) => String(row.id || '').trim() === requestedTaskRowId)
+        : undefined) ||
+      (activeTaskId ? projectTasks.find((row) => String(row.task_id || '').trim() === activeTaskId) : undefined) ||
+      null;
+    const focusedRowId = String(focusedRow?.id || '').trim();
+    if (!focusedRowId) return;
+
+    let cancelled = false;
+    const applyTaskSnapshot = (taskRow: ProjectTask) => {
+      const marker = `${focusedRowId}|${String(taskRow.updated_at || '').trim()}`;
+      if (componentTaskSwitchRef.current === marker) return;
+      componentTaskSwitchRef.current = marker;
+      setDraft((prev) => {
+        if (!prev) return prev;
+        const mergedConfig = normalizeConfigForBackend(
+          mergeTaskSnapshotIntoConfig(prev.inputConfig, taskRow),
+          prev.backend
+        );
+        return {
+          ...prev,
+          taskName: String(taskRow.name || prev.taskName || '').trim(),
+          taskSummary: String(taskRow.summary || prev.taskSummary || '').trim(),
+          inputConfig: mergedConfig
+        };
+      });
+    };
+
+    // If the focused row already carries full component data (from the list fetch), merge now.
+    if (focusedRow && Array.isArray((focusedRow as ProjectTask).components) && (focusedRow as ProjectTask).components.length >= 0 && hasStoredTaskInputOptions(focusedRow as ProjectTask)) {
+      applyTaskSnapshot(focusedRow as ProjectTask);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const detailRow = await getProjectTaskDetailCached(focusedRowId, {
+          includeComponents: true,
+          includeConstraints: true,
+          includeProperties: true,
+          includeLeadOptSummary: false,
+          includeLeadOptCandidates: false,
+          includeConfidence: true,
+          includeAffinity: isAffinityWorkflow,
+          includeProteinSequence: true
+        });
+        if (cancelled || !detailRow) return;
+        setProjectTasks((prev) =>
+          prev.map((row) =>
+            String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
+          )
+        );
+        applyTaskSnapshot(detailRow);
+      } catch (err) {
+        console.error('Task detail hydration failed; keeping current editor state.', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    getProjectTaskDetailCached,
+    isAffinityWorkflow,
+    isPredictionWorkflow,
+    isVirtualScreeningWorkflow,
+    location.search,
+    project?.task_id,
+    projectTasks,
+    setDraft,
+    setProjectTasks,
     normalizeConfigForBackend
   ]);
 
@@ -2165,9 +2262,16 @@ export function useProjectDetailRuntimeContext() {
     [location.search, navigate, projectId, workspaceTab]
   );
 
+  // Track the latest draft via a ref so submitTask always reads the current value, not a stale
+  // closure. The applyPatch function in the workspace view updates draft via setDraft (async React
+  // state update), but submitTask may execute before the re-render commits the new value. Reading
+  // from a ref that's always kept in sync avoids the race condition.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
   const { submitAffinityTask, submitPredictionTask } = createWorkflowSubmitters({
     project,
-    draft,
+    draftRef,
     isPeptideDesignWorkflow,
     isVirtualScreeningWorkflow,
     workspaceTab,
@@ -2231,7 +2335,7 @@ export function useProjectDetailRuntimeContext() {
   const submitTask = async () => {
     await submitTaskByWorkflow({
       project,
-      draft,
+      draft: draftRef.current,
       submitInFlightRef,
       workflowKey,
       getWorkflowDefinition,

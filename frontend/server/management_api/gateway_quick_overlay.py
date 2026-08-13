@@ -131,4 +131,4 @@ def handle_lead_optimization_pocket_overlay(gateway: Any) -> Tuple[Response, int
             project_id=project_id or (token.project_id if token else None),
             task_id=None,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500

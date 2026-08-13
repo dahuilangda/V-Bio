@@ -1,5 +1,5 @@
 import type { MutableRefObject } from 'react';
-import { submitPrediction } from '../../api/backendApi';
+import { submitPrediction, terminateTask } from '../../api/backendApi';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
 import { extractPrimaryProteinAndLigand, normalizeProjectInputConfig, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '../../utils/peptideTaskPreview';
@@ -258,7 +258,6 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     draft,
     isPeptideDesignWorkflow = false,
     isVirtualScreeningWorkflow = false,
-    workspaceTab,
     proteinTemplates,
     submitInFlightRef,
     runRedirectTimerRef,
@@ -581,6 +580,10 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
         setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row))));
       }
     } catch (taskPersistError) {
+      // The backend task was queued but the local DB row couldn't be persisted — terminate the
+      // orphaned backend task so it doesn't waste GPU compute. Fire-and-forget: the primary error
+      // is the persist failure, which the caller must handle; the termination is best-effort cleanup.
+      terminateTask(taskId).catch(() => { /* ignore termination errors */ });
       throw new Error(
         `Task submitted (${taskId}) but failed to persist queued task row: ${
           taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
@@ -612,16 +615,14 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       persistenceWarnings.push(`saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`);
     }
     setStatusInfo(null);
-    const shouldAutoRedirect = workspaceTab !== 'components';
-    if (shouldAutoRedirect) {
-      setRunRedirectTaskId(taskId);
-    } else {
-      setRunRedirectTaskId(null);
-      syncWorkspaceTaskRow(draftTaskRow.id);
-    }
+    // Stay on the current page after submit — no route change, no remount, no flash.
+    // The runtime polling effect will reflect the new task's QUEUED/RUNNING state in place.
+    // syncWorkspaceTaskRow updates the task row in the workspace without navigating away.
+    setRunRedirectTaskId(null);
+    syncWorkspaceTaskRow(draftTaskRow.id);
     if (persistenceWarnings.length > 0) {
       showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);
-    } else if (!shouldAutoRedirect) {
+    } else {
       showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued.`);
     }
   } catch (err) {
@@ -632,6 +633,10 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     }
     setRunRedirectTaskId(null);
     setError(message);
+    // Re-throw so the Copilot execution chain can detect the failure and record it.
+    // Without this, the submit Promise resolves as success even when the backend rejected it,
+    // and the Copilot writes an "applied" receipt for a task that was never submitted.
+    throw err;
   } finally {
     submitInFlightRef.current = false;
     setSubmitting(false);

@@ -211,6 +211,16 @@ def run_single_job(
         trainer_precision=args.trainer_precision,
     )
 
+    # Release the scoring model from GPU before affinity runs so the affinity
+    # head (~2.2 GB checkpoint + forward activations) does not hit OOM on the
+    # shared GPU.  This is essential for per-request web-service inference.
+    if run_affinity:
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     write_chain_map(
         processed_dir=work_dir / "processed",
         output_dir=plan.output_dir,

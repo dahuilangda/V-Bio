@@ -358,6 +358,9 @@ def run_affinity_prediction(
     if seed is not None:
         seed_everything(seed)
 
+    # TF32 matmuls for speed (see inference.py for rationale).
+    torch.set_float32_matmul_precision("high")
+
     cache_dir = cache_dir.expanduser().resolve()
     affinity_ckpt = (checkpoint or (cache_dir / "boltz2_aff.ckpt")).expanduser().resolve()
     if not affinity_ckpt.exists():
@@ -447,7 +450,7 @@ def run_affinity_prediction(
     if trainer_precision is not None:
         resolved_precision = 32 if str(trainer_precision).strip() == "32" else trainer_precision
     else:
-        resolved_precision = 32
+        resolved_precision = "bf16-mixed"  # affinity head force-casts to fp32 internally
 
     trainer = Trainer(
         default_root_dir=output_dir / "affinity",
@@ -466,6 +469,16 @@ def run_affinity_prediction(
     )
     _install_stable_align_patch()
     trainer.predict(model_module, datamodule=data_module, return_predictions=False)
+
+    # Release the affinity model + flush the GPU cache so the next request
+    # (or other GPU users in this shared-GPU service) has full memory available.
+    import gc
+
+    del model_module
+    del trainer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     affinity_result_path = _load_affinity_result_json(output_dir, record_id)
     result = json.loads(affinity_result_path.read_text())

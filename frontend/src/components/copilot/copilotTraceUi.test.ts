@@ -41,30 +41,39 @@ describe('readPlannerTrace', () => {
 });
 
 describe('formatTraceStep', () => {
-  it('renders each lifecycle event as a short user-facing phrase', () => {
-    expect(formatTraceStep({ round: 0, event: 'model_request' })).toBe('Analyzing request');
+  it('renders each lifecycle event as a descriptive user-facing phrase', () => {
+    expect(formatTraceStep({ round: 0, event: 'model_request' })).toBe('Understanding your request');
+    // later rounds show refinement
+    expect(formatTraceStep({ round: 1, event: 'model_request' })).toBe('Refining the plan');
     // token counts are developer-only detail and must NOT surface to the user
-    expect(formatTraceStep({ round: 0, event: 'model_request', detail: { usage: { input_tokens: 9272, output_tokens: 114 } } })).toBe('Analyzing request');
-    expect(formatTraceStep({ round: 0, event: 'malformed_output' })).toBe('Regenerating');
-    expect(formatTraceStep({ round: 0, event: 'fallback' })).toBe('Composing answer');
-    expect(formatTraceStep({ round: 0, event: 'no_convergence' })).toBe('Could not settle on a plan');
+    expect(formatTraceStep({ round: 0, event: 'model_request', detail: { usage: { input_tokens: 9272, output_tokens: 114 } } })).toBe('Understanding your request');
+    expect(formatTraceStep({ round: 0, event: 'malformed_output' })).toBe('Reformatting response');
+    expect(formatTraceStep({ round: 0, event: 'no_convergence' })).toContain('Could not settle');
   });
 
-  it('hides the technical audit issue and the terminal state code from the user', () => {
-    expect(formatTraceStep({ round: 0, event: 'audit_rejected', detail: { issues: ['bad skill', 'second'] } })).toBe('Adjusting plan');
-    expect(formatTraceStep({ round: 0, event: 'audit_rejected', detail: {} })).toBe('Adjusting plan');
-    expect(formatTraceStep({ round: 0, event: 'terminal', detail: { state: 'await_confirmation' } })).toBe('Done');
+  it('hides technical audit issues but shows a user-friendly terminal label', () => {
+    expect(formatTraceStep({ round: 0, event: 'audit_rejected', detail: { issues: ['bad skill', 'second'] } })).toBe('Adjusting approach');
+    expect(formatTraceStep({ round: 0, event: 'audit_rejected', detail: {} })).toBe('Adjusting approach');
+    expect(formatTraceStep({ round: 0, event: 'terminal', detail: { state: 'await_confirmation' } })).toBe('Ready for your confirmation');
+    expect(formatTraceStep({ round: 0, event: 'terminal', detail: { state: 'needs_input' } })).toBe('Waiting for your input');
+    expect(formatTraceStep({ round: 0, event: 'terminal', detail: { state: 'outline' } })).toBe('Plan outlined');
+    expect(formatTraceStep({ round: 0, event: 'terminal', detail: { state: 'failed' } })).toBe('Could not complete the plan');
+    expect(formatTraceStep({ round: 0, event: 'terminal', detail: { state: 'complete' } })).toBe('Complete');
   });
 
-  it('aggregates skill observations into one total result count, hiding skill names', () => {
+  it('shows the data source and result count for skill observations', () => {
     const text = formatTraceStep({
       round: 0,
       event: 'skill_observations',
       detail: { observations: [{ skill: 'pubchem.search', ok: true, count: 2, successCount: 2 }, { skill: 'rcsb.resolve', ok: false, count: 1, successCount: 0 }] }
     });
-    expect(text).toBe('Found 2 results');
-    expect(text).not.toContain('search');
-    expect(text).not.toContain('resolve');
+    // The source name (PubChem) is surfaced, not the full skill namespace (pubchem.search)
+    expect(text).toContain('Pubchem');
+    expect(text).toContain('2 result');
+    expect(text).toContain('Rcsb unavailable');
+    // Full skill namespace with dot should NOT appear
+    expect(text).not.toContain('.search');
+    expect(text).not.toContain('.resolve');
   });
 });
 

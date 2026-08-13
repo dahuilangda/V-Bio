@@ -599,6 +599,14 @@
   }
 }
 
+@media (max-width: 767px) {
+  .virtual-screening-target-viewer .molstar-host,
+  .virtual-screening-target-viewer {
+    height: clamp(280px, 45vh, 400px);
+    min-height: 280px;
+  }
+}
+
 @media (max-width: 760px) {
   .virtual-screening-search {
     width: 260px;

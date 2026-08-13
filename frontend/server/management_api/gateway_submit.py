@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -15,6 +15,12 @@ from management_api.task_snapshot import (
     read_task_name,
     read_task_summary,
 )
+
+# A single bounded thread pool for snapshot persistence — replaces the per-submit daemon thread
+# that could spawn unboundedly under load and was silently dropped on process exit. The pool is
+# shared across all submit calls; if it's saturated, the snapshot is persisted synchronously as a
+# fallback (same as usage_tracker's pattern). Pool size 4 is enough for typical burst patterns.
+_snapshot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vbio-snapshot")
 
 
 def _build_submit_snapshot(gateway: Any, upstream_path: str) -> Dict[str, Any]:
@@ -86,21 +92,21 @@ def forward_submit(gateway: Any, upstream_path: str, action: str) -> Tuple[Respo
                     default_protenix_predict_seed=gateway.default_protenix_predict_seed,
                 )
                 gateway.task_store.remember_task_alias(project_id, task_id)
-                threading.Thread(
-                    target=_persist_submit_snapshot_async,
-                    kwargs={
-                        "gateway": gateway,
-                        "project_id": project_id,
-                        "task_id": task_id,
-                        "task_name": task_name,
-                        "task_summary": task_summary,
-                        "backend": backend,
-                        "seed": seed,
-                        "extra_snapshot_payload": extra_snapshot_payload,
-                    },
-                    daemon=True,
-                    name="vbio-task-snapshot",
-                ).start()
+                snapshot_kwargs = {
+                    "gateway": gateway,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "task_summary": task_summary,
+                    "backend": backend,
+                    "seed": seed,
+                    "extra_snapshot_payload": extra_snapshot_payload,
+                }
+                try:
+                    _snapshot_executor.submit(_persist_submit_snapshot_async, **snapshot_kwargs)
+                except RuntimeError:
+                    # Executor shut down (process exit) — persist synchronously as a fallback.
+                    _persist_submit_snapshot_async(**snapshot_kwargs)
 
         gateway._record_usage(
             token,
@@ -147,4 +153,4 @@ def forward_submit(gateway: Any, upstream_path: str, action: str) -> Tuple[Respo
             project_id=project_id,
             task_id=None,
         )
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Internal server error"}), 500

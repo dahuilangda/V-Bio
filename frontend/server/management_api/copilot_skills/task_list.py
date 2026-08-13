@@ -6,13 +6,14 @@ from typing import Any, Dict
 TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "tasks:open": {
         "label": "Open task",
-        "description": "Open the matching task.",
+        "description": "Navigate into a task's detail page. Requires the task ID from the visible task list.",
+        "target_context": "task_detail",
         "payload_keys": ["taskRowId", "taskName"],
         "requires_payload": ["taskRowId"],
         "input_schema": {
             "type": "object",
             "properties": {
-                "taskRowId": {"type": "string", "description": "ID copied exactly from context_payload.rows[].id."},
+                "taskRowId": {"type": "string", "description": "Task ID from the visible list."},
                 "taskName": {"type": "string"},
             },
             "required": ["taskRowId"],
@@ -22,12 +23,14 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "tasks:create": {
         "label": "New task",
         "description": "Create a new task in the current project.",
+        "target_context": "task_detail",
         "payload_keys": ["create"],
         "payload_defaults": {"create": True},
     },
     "tasks:create_with_sequence": {
         "label": "New task (with components)",
         "description": "Create a new task prefilled with a structured component list (protein / small molecule / DNA / RNA). Applies to structure-prediction and peptide-design tasks.",
+        "target_context": "task_detail",
         "payload_keys": ["create", "components"],
         "requires_workflow": ["prediction", "peptide_design"],
         "requires_payload": ["components"],
@@ -68,6 +71,7 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "tasks:create_virtual_screening": {
         "label": "New virtual-screening task",
         "description": "Create a virtual-screening task: one or more protein target components plus a library of small-molecule compounds (by SMILES) to screen against the target.",
+        "target_context": "task_detail",
         "payload_keys": ["create", "components", "screeningCompounds"],
         "requires_workflow": ["virtual_screening"],
         "requires_payload": ["components", "screeningCompounds"],
@@ -117,12 +121,13 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
-    "tasks:copy_with_patch": {
-        "label": "Copy task and edit parameters",
-        "description": "Select an existing task from the task list, copy it into a new draft, apply a structured parameter/component patch, and continue confirming the run on the task-detail page.",
-        "payload_keys": ["taskRowId", "taskName", "parameterPatch"],
+    "tasks:copy": {
+        "label": "Copy task to new draft",
+        "description": "Select an existing task from the task list and copy it into a new draft, opened on the task-detail page for further edits. Parameter changes are separate operations on that page.",
+        "target_context": "task_detail",
+        "payload_keys": ["taskRowId", "taskName"],
         "requires_workflow": ["prediction"],
-        "requires_payload": ["taskRowId", "parameterPatch"],
+        "requires_payload": ["taskRowId"],
         "input_schema": {
             "type": "object",
             "properties": {
@@ -130,85 +135,36 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "ID copied exactly from the selected task row in the provided context.",
                 },
-                "taskName": {"type": "string"},
-                "parameterPatch": {
-                    "type": "object",
-                    "description": "Patch to apply after copying the source task. Include only requested changes.",
-                    "properties": {
-                        "backend": {
-                            "type": "string",
-                            "enum": ["boltz", "alphafold3", "protenix"],
-                            "description": "Requested structure-prediction backend. Map AlphaFold/AF3 to alphafold3.",
-                        },
-                        "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647},
-                        "componentsAdd": {
-                            "type": "array",
-                            "description": "Legacy shortcut for componentsPatch append operations. Prefer componentsPatch for new plans.",
-                            "items": {"type": "object"},
-                        },
-                        "componentsReplacement": {
-                            "type": "object",
-                            "description": "Legacy shortcut for componentsPatch replace_all operations. Prefer componentsPatch for new plans.",
-                            "properties": {"mode": {"type": "string"}, "components": {"type": "array", "items": {"type": "object"}}, "clearConstraints": {"type": "boolean"}},
-                        },
-                        "componentsPatch": {
-                            "type": "array",
-                            "description": "Ordered component operations to apply to the copied source task.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "op": {"type": "string", "enum": ["append", "update", "remove", "replace_all"]},
-                                    "selector": {
-                                        "type": "object",
-                                        "description": "Existing component selector for update/remove: id, 1-based index, type, or sequenceContains.",
-                                    },
-                                    "component": {
-                                        "type": "object",
-                                        "description": "Full component for append or partial fields for update: type, sequence, numCopies, useMsa, inputMethod.",
-                                    },
-                                    "components": {
-                                        "type": "array",
-                                        "description": "Full final component list for replace_all.",
-                                        "items": {"type": "object"},
-                                    },
-                                },
-                                "required": ["op"],
-                                "additionalProperties": False,
-                            },
-                        },
-                    },
-                    "additionalProperties": False,
+                "taskName": {
+                    "type": "string",
+                    "description": "Optional new name for the copied draft.",
                 },
             },
-            "required": ["taskRowId", "parameterPatch"],
+            "required": ["taskRowId"],
             "additionalProperties": False,
         },
     },
     "tasks:delete": {
         "label": "Delete task",
-        "description": "Delete the matching task record.",
+        "description": "Permanently delete a task. Requires the task ID.",
         "payload_keys": ["taskRowId", "taskName"],
         "requires_payload": ["taskRowId"],
         "destructive": True,
     },
     "tasks:rename": {
         "label": "Rename task",
-        "description": "Update the name or description of the matching task.",
+        "description": "Change a task's name or description. Requires the task ID.",
         "payload_keys": ["taskRowId", "taskName", "taskSummary"],
         "requires_payload": ["taskRowId"],
     },
     "tasks:cancel": {
         "label": "Cancel task",
-        "description": "Cancel or terminate the matching running or queued task.",
+        "description": "Stop a running or queued task. Requires the task ID.",
         "payload_keys": ["taskRowId", "taskName"],
         "requires_payload": ["taskRowId"],
         "destructive": True,
         "requires_active_task": True,
     },
-    "tasks:failure": {"label": "Failed tasks", "description": "Filter for FAILURE tasks.", "payload_keys": ["stateFilter"], "payload_defaults": {"stateFilter": "FAILURE"}},
-    "tasks:running": {"label": "Running tasks", "description": "Filter for RUNNING tasks.", "payload_keys": ["stateFilter"], "payload_defaults": {"stateFilter": "RUNNING"}},
-    "tasks:queued": {"label": "Queued tasks", "description": "Filter for QUEUED tasks.", "payload_keys": ["stateFilter"], "payload_defaults": {"stateFilter": "QUEUED"}},
-    "tasks:success": {"label": "Succeeded tasks", "description": "Filter for SUCCESS tasks.", "payload_keys": ["stateFilter"], "payload_defaults": {"stateFilter": "SUCCESS"}},
     "tasks:clear_filters": {
         "label": "Show all tasks",
         "description": "Clear task-list filters and restore the default sorting.",
@@ -235,8 +191,8 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "tasks:update_view": {
-        "label": "Update task view",
-        "description": "Combine and update the task-list search, filters, sorting, paging, and advanced filters as requested by the user.",
+        "label": "Filter or sort tasks",
+        "description": "Filter and sort the task list: search by text, filter by state / workflow / backend, sort by submitted time or metrics (pLDDT/ipTM/IPSAE/PAE), change page size. Pass only the fields the user wants to change.",
         "payload_keys": [
             "search",
             "stateFilter",
@@ -295,10 +251,5 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
-    "tasks:submitted": {"label": "Submitted time", "description": "Sort by submitted time.", "payload_keys": ["sortKey"], "payload_defaults": {"sortKey": "submitted"}},
-    "tasks:sort_plddt": {"label": "Sort by pLDDT", "description": "Sort by pLDDT, high to low.", "payload_keys": ["sortKey"], "payload_defaults": {"sortKey": "plddt"}},
-    "tasks:sort_iptm": {"label": "Sort by ipTM", "description": "Sort by ipTM, high to low.", "payload_keys": ["sortKey"], "payload_defaults": {"sortKey": "iptm"}},
-    "tasks:sort_ipsae": {"label": "Sort by IPSAE", "description": "Sort by IPSAE, high to low.", "payload_keys": ["sortKey"], "payload_defaults": {"sortKey": "ipsae"}},
-    "tasks:sort_pae": {"label": "Sort by PAE", "description": "Sort by PAE, low to high.", "payload_keys": ["sortKey"], "payload_defaults": {"sortKey": "pae"}},
-    "tasks:backend_boltz": {"label": "Boltz tasks", "description": "Filter for Boltz-backend tasks.", "payload_keys": ["backendFilter"], "payload_defaults": {"backendFilter": "boltz"}},
 }
+

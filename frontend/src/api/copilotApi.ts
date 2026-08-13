@@ -1,5 +1,5 @@
-import { API_HEADERS, fetchWithTimeout, managementApiUrl, requestManagement } from './backendClient';
-import type { CopilotPlanAction, CopilotTraceStep } from '../types/models';
+import { API_HEADERS, managementApiUrl, requestManagement } from './backendClient';
+import type { CopilotPlanAction, CopilotPlannerQuestion, CopilotQuestionOption, CopilotTraceStep } from '../types/models';
 
 const MAX_CONTEXT_STRING_CHARS = 1600;
 const MAX_CONTEXT_LIST_ITEMS = 40;
@@ -94,8 +94,94 @@ export async function getCopilotConfig(): Promise<{ enabled: boolean; completion
   return { enabled: payload.enabled === true, completionEnabled: payload.completionEnabled === true };
 }
 
+// ---------------------------------------------------------------------------
+//  Copilot runtime settings (proxy / LLM server / API key / model)
+// ---------------------------------------------------------------------------
 
-const COPILOT_TURN_STATES = new Set(['continue', 'await_confirmation', 'needs_input', 'complete']);
+export interface CopilotSettingsView {
+  proxy: string;
+  api_url: string;
+  model: string;
+  api_key_masked: string;
+  has_api_key: boolean;
+}
+
+export interface CopilotTestSubResult {
+  ok: boolean;
+  detail: string;
+  ms: number;
+  /** True when the sub-test was skipped because the field isn't configured (neutral, not a failure). */
+  skipped?: boolean;
+}
+
+export interface CopilotTestResult {
+  proxy: CopilotTestSubResult;
+  llm: CopilotTestSubResult;
+}
+
+const EMPTY_SETTINGS: CopilotSettingsView = {
+  proxy: '',
+  api_url: '',
+  model: '',
+  api_key_masked: '',
+  has_api_key: false,
+};
+
+export async function getCopilotSettings(managementToken: string): Promise<CopilotSettingsView> {
+  const res = await requestManagement(
+    '/vbio-api/copilot/settings',
+    { method: 'GET', headers: { ...API_HEADERS, 'X-VBio-Session': managementToken } },
+    10000
+  );
+  const payload = (await res.json().catch(() => ({}))) as Partial<CopilotSettingsView> & { error?: string };
+  if (!res.ok) throw new Error(payload.error || `Failed to load settings (HTTP ${res.status}).`);
+  return {
+    proxy: payload.proxy || '',
+    api_url: payload.api_url || '',
+    model: payload.model || '',
+    api_key_masked: payload.api_key_masked || '',
+    has_api_key: payload.has_api_key === true,
+  };
+}
+
+export async function saveCopilotSettings(
+  managementToken: string,
+  input: { proxy?: string; api_url?: string; api_key?: string; model?: string }
+): Promise<CopilotSettingsView> {
+  const res = await requestManagement(
+    '/vbio-api/copilot/settings',
+    {
+      method: 'POST',
+      headers: { ...API_HEADERS, 'Content-Type': 'application/json', 'X-VBio-Session': managementToken },
+      body: JSON.stringify(input),
+    },
+    15000
+  );
+  const payload = (await res.json().catch(() => ({}))) as { settings?: CopilotSettingsView; error?: string };
+  if (!res.ok) throw new Error(payload.error || `Failed to save settings (HTTP ${res.status}).`);
+  return payload.settings || { ...EMPTY_SETTINGS };
+}
+
+export async function testCopilotSettings(
+  managementToken: string,
+  input: { proxy?: string; api_url?: string; api_key?: string; model?: string }
+): Promise<CopilotTestResult> {
+  const res = await requestManagement(
+    '/vbio-api/copilot/settings/test',
+    {
+      method: 'POST',
+      headers: { ...API_HEADERS, 'Content-Type': 'application/json', 'X-VBio-Session': managementToken },
+      body: JSON.stringify(input),
+    },
+    45000
+  );
+  const payload = (await res.json().catch(() => ({}))) as CopilotTestResult & { error?: string };
+  if (!res.ok) throw new Error(payload.error || `Settings test failed (HTTP ${res.status}).`);
+  return payload;
+}
+
+
+const COPILOT_TURN_STATES = new Set(['continue', 'await_confirmation', 'needs_input', 'complete', 'failed']);
 const COPILOT_CONFIRMATION_EFFECTS = new Set(['create', 'update', 'delete', 'execute', 'navigate']);
 
 /**
@@ -117,11 +203,52 @@ export function parseCopilotTrace(value: unknown): CopilotTraceStep[] {
   return trace;
 }
 
+/**
+ * Validate structured planner questions defensively: a malformed question must never fail a turn.
+ * Drop anything that is not a valid {text, kind, options?} object and return the clean list. A
+ * choice question without at least two options is dropped; freeform/confirm need no options.
+ */
+export function parseCopilotQuestions(value: unknown): CopilotPlannerQuestion[] {
+  if (!Array.isArray(value)) return [];
+  const VALID_KINDS = new Set(['choice', 'confirm', 'freeform']);
+  const questions: CopilotPlannerQuestion[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as Record<string, unknown>;
+    const text = String(raw.text || '').trim();
+    const kind = String(raw.kind || '').trim();
+    if (!text || !VALID_KINDS.has(kind)) continue;
+    const question: CopilotPlannerQuestion = { text, kind: kind as CopilotPlannerQuestion['kind'] };
+    if (kind === 'choice') {
+      const rawOptions = raw.options;
+      if (!Array.isArray(rawOptions)) continue;
+      const options = rawOptions
+        .map((opt): CopilotQuestionOption | null => {
+          if (!opt || typeof opt !== 'object') return null;
+          const optRaw = opt as Record<string, unknown>;
+          const label = String(optRaw.label || '').trim();
+          const optValue = String(optRaw.value || '').trim();
+          if (!label || !optValue) return null;
+          const hint = String(optRaw.hint || '').trim();
+          return { label, value: optValue, ...(hint ? { hint } : {}) };
+        })
+        .filter((opt): opt is CopilotQuestionOption => opt !== null);
+      if (options.length < 2) continue;
+      question.options = options;
+    }
+    if (typeof raw.defaultValue === 'string' && raw.defaultValue.trim()) {
+      question.defaultValue = String(raw.defaultValue).trim();
+    }
+    questions.push(question);
+  }
+  return questions;
+}
+
 export interface CopilotTurnResult {
   content: string;
   actions: CopilotPlanAction[];
-  state: 'continue' | 'await_confirmation' | 'needs_input' | 'complete';
-  questions: string[];
+  state: 'continue' | 'await_confirmation' | 'needs_input' | 'complete' | 'failed';
+  questions: CopilotPlannerQuestion[];
   planId: string;
   /** Planner reasoning/audit trajectory. Observability only; never affects execution. */
   trace: CopilotTraceStep[];
@@ -139,9 +266,7 @@ export function validateCopilotTurnPayload(payload: Record<string, unknown>): Co
   if (!COPILOT_TURN_STATES.has(state)) throw new Error('Copilot turn returned an invalid state.');
   if (!planId) throw new Error('Copilot turn returned no plan identity.');
   const rawQuestions = payload.questions;
-  if (!Array.isArray(rawQuestions) || rawQuestions.some((question) => typeof question !== 'string')) {
-    throw new Error('Copilot turn returned invalid questions.');
-  }
+  const questions = parseCopilotQuestions(rawQuestions);
   const rawActions = payload.actions;
   if (!Array.isArray(rawActions)) {
     throw new Error('Copilot turn returned invalid confirmation operations.');
@@ -190,7 +315,7 @@ export function validateCopilotTurnPayload(payload: Record<string, unknown>): Co
     content,
     actions,
     state: state as CopilotTurnResult['state'],
-    questions: rawQuestions as string[],
+    questions,
     planId,
     trace: parseCopilotTrace(payload.trace),
     observations
@@ -270,26 +395,46 @@ export async function streamCopilotTurn(
     username: string;
     content: string;
   },
-  onTrace: (step: CopilotTraceStep) => void
+  onTrace: (step: CopilotTraceStep) => void,
+  signal?: AbortSignal
 ): Promise<CopilotTurnResult> {
-  const res = await fetchWithTimeout(
-    managementApiUrl('/vbio-api/copilot/stream'),
-    {
-      method: 'POST',
-      headers: {
-        ...API_HEADERS,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        context_type: input.contextType,
-        context_payload: sanitizeCopilotContextPayload(input.contextPayload),
-        user_id: input.userId,
-        username: input.username,
-        content: input.content
-      })
-    },
-    180000
-  );
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), 180000);
+
+  // Combine the external cancel signal with the internal timeout signal.
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
+
+  let res: Response;
+  try {
+    res = await fetch(
+      managementApiUrl('/vbio-api/copilot/stream'),
+      {
+        method: 'POST',
+        headers: {
+          ...API_HEADERS,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          context_type: input.contextType,
+          context_payload: sanitizeCopilotContextPayload(input.contextPayload),
+          user_id: input.userId,
+          username: input.username,
+          content: input.content
+        }),
+        signal: combinedSignal
+      }
+    );
+  } catch (error) {
+    clearTimeout(timer);
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      if (signal?.aborted) throw new DOMException('Aborted by user', 'AbortError');
+      throw new Error('Copilot stream timeout.');
+    }
+    throw error;
+  }
+  clearTimeout(timer);
   if (!res.ok) {
     const payload = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(payload.error || `Copilot stream failed with HTTP ${res.status}.`);
@@ -299,6 +444,7 @@ export async function streamCopilotTurn(
   const decoder = new TextDecoder();
   let buffer = '';
   let result: CopilotTurnResult | null = null;
+  try {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -320,6 +466,14 @@ export async function streamCopilotTurn(
         throw new Error(errorPayload.error || 'Copilot stream reported an error.');
       }
     }
+  }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError' && signal?.aborted) {
+      throw new DOMException('Aborted by user', 'AbortError');
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
   if (!result) throw new Error('Copilot stream ended without a result.');
   return result;

@@ -737,16 +737,16 @@ export function handleOpenTaskHistoryAction(params: {
   setRunRedirectTaskId: Dispatch<SetStateAction<string | null>>;
   navigate: (to: string) => void;
 }): void {
+  // SPA navigation only — no window.location.assign fallback. A full page load on every
+  // task-list switch is the exact reload the user sees; react-router owns the route, and if the
+  // target path is already current we do nothing. There is deliberately no "soft-check then
+  // hard-reload" timer: a failed client navigation is a routing bug to fix, not a reason to
+  // silently downgrade the whole app to a full load.
   const { event, taskHistoryPath, setRunRedirectTaskId, navigate } = params;
   event.preventDefault();
   setRunRedirectTaskId(null);
   if (window.location.pathname === taskHistoryPath) return;
   navigate(taskHistoryPath);
-  window.setTimeout(() => {
-    if (window.location.pathname !== taskHistoryPath) {
-      window.location.assign(taskHistoryPath);
-    }
-  }, 120);
 }
 
 export function handlePredictionComponentsChangeAction<TDraft extends DraftLike>(params: {

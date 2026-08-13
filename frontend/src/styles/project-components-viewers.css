@@ -25,6 +25,35 @@
   background: #fff;
 }
 
+/* On small screens, shrink the viewer and neutralize Mol*'s side-panel geometry. */
+@media (max-width: 767px) {
+  .molstar-host {
+    height: clamp(320px, 50vh, 480px);
+    min-height: 320px;
+    border-radius: 8px;
+  }
+
+  /* Mol*'s "standard" layout reserves fixed-width regions for left/right panels even when
+   * collapsed, pushing the viewport (.msp-layout-main) off-screen on narrow displays.
+   * Hide these regions entirely on mobile so the viewport fills the full host width. */
+  .molstar-host .msp-layout-left,
+  .molstar-host .msp-layout-right,
+  .molstar-host .msp-left-panel,
+  .molstar-host .msp-right-panel {
+    display: none !important;
+  }
+
+  /* Reset the viewport's absolute offsets to fill the entire host. */
+  .molstar-host .msp-layout-main {
+    left: 0 !important;
+    right: 0 !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+  }
+}
+
 .molstar-host > .msp-plugin {
   position: absolute;
   inset: 0;
@@ -38,9 +67,24 @@
 .molstar-host .msp-plugin-content,
 .molstar-host .msp-layout-standard,
 .molstar-host .msp-layout-expanded,
-.molstar-host .msp-layout-static,
+.molstar-host .msp-layout-static {
+  background: #fff !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
 .molstar-host .msp-viewport {
   background: #fff !important;
+  width: 100% !important;
+  height: 100% !important;
+  position: relative !important;
+}
+
+/* Mol* layout root: must fill the host so offsetWidth/offsetHeight (used by handleResize) match the
+ * container, not some stale desktop value. */
+.molstar-host .msp-layout-root {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .molstar-host .msp-sequence-wrapper,

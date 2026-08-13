@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useOverlayHost } from '../components/ui/OverlayContext';
 import {
   Activity,
   Atom,
@@ -74,6 +75,17 @@ function summarizeProjectTaskStates(rows: Project[]): Record<string, number> {
     acc.SUCCESS = (acc.SUCCESS || 0) + counts.success;
     acc.FAILURE = (acc.FAILURE || 0) + counts.failure;
     acc.OTHER = (acc.OTHER || 0) + counts.other;
+    return acc;
+  }, {});
+}
+
+// Count projects by a string field (task_type / backend). Precomputed so Copilot answers portfolio
+// questions ("how many per type/backend") from the FULL set, not the visible window (capped at 40).
+function countProjectsByField(rows: Project[], field: 'task_type' | 'backend'): Record<string, number> {
+  return rows.reduce<Record<string, number>>((acc, project) => {
+    const value = (project[field] || '').trim();
+    if (!value) return acc;
+    acc[value] = (acc[value] || 0) + 1;
     return acc;
   }, {});
 }
@@ -323,14 +335,48 @@ export function ProjectsPage() {
 
   const applyProjectCopilotAction = async (action: CopilotPlanAction) => {
     if (action.id === 'projects:create') {
-      openCreateModal();
-      return;
+      // Create the project directly from the plan and navigate to its task list. The workflow comes
+      // from the action arguments (what the planner resolved the user wants) and falls back to the
+      // payload workflowKey, then to prediction as a last resort.
+      const argWorkflow = String(action.arguments?.workflow || '').trim();
+      const payloadWorkflow = String(action.payload?.workflowKey || '').trim();
+      const rawWorkflowKey = argWorkflow || payloadWorkflow;
+      const workflowKey: WorkflowKey = WORKFLOWS.some((item) => item.key === rawWorkflowKey)
+        ? (rawWorkflowKey as WorkflowKey)
+        : 'prediction';
+      const rawName = String(action.payload?.name || '').trim();
+      const info = getWorkflowDefinition(workflowKey);
+      const now = new Date();
+      const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const name = rawName || `${info.shortTitle} ${stamp}`;
+      const created = await createProject({
+        name,
+        summary: '',
+        taskType: workflowKey,
+        backend: workflowKey === 'virtual_screening' ? 'nesso' : 'boltz',
+        useMsa: false,
+        proteinSequence: '',
+        ligandSmiles: ''
+      });
+      if (!created?.id) {
+        throw new Error('Project was created but no project ID was returned.');
+      }
+      navigate(`/projects/${created.id}`);
+      return `Project "${name}" created. You are now in the project task list.`;
     }
     if (action.id === 'projects:open') {
       const projectId = String(action.payload?.projectId || '').trim();
       const target = projects.find((p) => p.id === projectId);
       if (!target) throw new Error('Could not find the project referenced by Copilot.');
       navigate(`/projects/${target.id}`);
+      return;
+    }
+    if (action.id === 'projects:rename') {
+      const projectId = String(action.payload?.projectId || '').trim();
+      const newName = String(action.payload?.projectName || '').trim();
+      if (!projectId) throw new Error('No project ID was provided.');
+      if (!newName) throw new Error('No new project name was provided.');
+      await patchProject(projectId, { name: newName });
       return;
     }
     if (action.id === 'projects:cancel_active') {
@@ -413,6 +459,8 @@ export function ProjectsPage() {
       setStateFilter('all');
     } else if (action.id === 'projects:workflow_prediction') {
       setTypeFilter('prediction');
+    } else if (action.id === 'projects:workflow_virtual_screening') {
+      setTypeFilter('virtual_screening');
     } else if (action.id === 'projects:workflow_affinity') {
       setTypeFilter('affinity');
     } else if (action.id === 'projects:workflow_peptide_design') {
@@ -468,8 +516,22 @@ export function ProjectsPage() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const openCreateModal = () => {
-    setWorkflow('prediction');
+  // Announce the new-project dialog to the overlay coordinator while it is open, so the persistent
+  // Copilot panel collapses out of the way instead of overlapping it. This covers the manual "New
+  // Project" button path; the Copilot projects:create action creates inline (no dialog) and does
+  // not open showCreate. No-op when no provider is mounted.
+  const registerOverlay = useOverlayHost();
+  useEffect(() => {
+    if (!showCreate) return;
+    return registerOverlay('projects:create-dialog', 'dialog');
+  }, [showCreate, registerOverlay]);
+
+  const openCreateModal = (workflowKey?: WorkflowKey) => {
+    // Default to the prediction workflow only when no workflow is implied by the caller. A Copilot
+    // plan that proposes projects:create carries the workflow the user asked for (affinity, virtual
+    // screening, ...) on the action payload, so the new-project dialog opens pre-selected to it
+    // instead of always resetting to prediction.
+    setWorkflow(workflowKey ?? 'prediction');
     setCreateError(null);
     setShowCreate(true);
   };
@@ -577,7 +639,7 @@ export function ProjectsPage() {
           </p>
         </div>
         <div className="row gap-8">
-          <button className="btn btn-primary" onClick={openCreateModal}>
+          <button className="btn btn-primary" onClick={() => openCreateModal()}>
             <Plus size={16} />
             New Project
           </button>
@@ -964,6 +1026,76 @@ export function ProjectsPage() {
           </div>
         )}
 
+        {/* Mobile card list — shown only on small screens (CSS toggles visibility). Uses the same
+         * pagedProjects data as the table above, rendered as scannable cards instead of a wide table. */}
+        {!loading && pagedProjects.length > 0 ? (
+          <div className="project-card-list" aria-label="Projects">
+            {pagedProjects.map((project) => {
+              const workflowDef = getWorkflowDefinition(project.task_type);
+              const counts = project.task_counts!;
+              const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
+              const canRemoveProject = canDeleteProject(project, session?.userId || null);
+              const hasProjectRuntime = counts.running > 0 || counts.queued > 0;
+              return (
+                <div className="project-card" key={project.id}>
+                  <div className="project-card-head">
+                    <Link className="project-card-name" to={`/projects/${project.id}`}>
+                      <FolderOpen size={15} className="project-card-icon" />
+                      <span>{projectName}</span>
+                    </Link>
+                    <span className="badge workflow-badge project-card-badge">
+                      {workflowIconMap[workflowDef.key]}
+                      {workflowDef.shortTitle}
+                    </span>
+                  </div>
+                  <div className="project-card-meta">
+                    {counts.total === 0 ? (
+                      <span className="project-state-empty">No tasks</span>
+                    ) : (
+                      <span className="project-card-tasks">
+                        {counts.success > 0 ? <span className="project-state-pill success"><span className="project-state-pill-key">S</span>{counts.success}</span> : null}
+                        {counts.running > 0 ? <span className="project-state-pill running"><span className="project-state-pill-key">R</span>{counts.running}</span> : null}
+                        {counts.queued > 0 ? <span className="project-state-pill queued"><span className="project-state-pill-key">Q</span>{counts.queued}</span> : null}
+                        {counts.failure > 0 ? <span className="project-state-pill failure"><span className="project-state-pill-key">F</span>{counts.failure}</span> : null}
+                        <span className="muted">· {counts.total} total</span>
+                      </span>
+                    )}
+                    <span className="muted project-card-time">{formatDateTime(project.updated_at)}</span>
+                  </div>
+                  <div className="project-card-actions">
+                    <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}`}>
+                      <ExternalLink size={14} /> Open
+                    </Link>
+                    {hasProjectRuntime ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-compact"
+                        onClick={() => void cancelProjectRuns(project)}
+                        disabled={Boolean(cancellingProjectId)}
+                      >
+                        <Square size={13} /> Cancel runs
+                      </button>
+                    ) : null}
+                    {canRemoveProject ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-compact danger"
+                        onClick={() => {
+                          if (window.confirm(`Delete project "${project.name}"?`)) {
+                            void softDeleteProject(project.id);
+                          }
+                        }}
+                      >
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
         {!loading && filteredProjects.length > 0 && (
           <div className="project-pagination">
             <div className="project-pagination-info muted small">
@@ -1090,6 +1222,10 @@ export function ProjectsPage() {
             summary: {
               allTaskStateCounts: summarizeProjectTaskStates(projects),
               matchedTaskStateCounts: summarizeProjectTaskStates(filteredProjects),
+              allTypeCounts: countProjectsByField(projects, 'task_type'),
+              matchedTypeCounts: countProjectsByField(filteredProjects, 'task_type'),
+              allBackendCounts: countProjectsByField(projects, 'backend'),
+              matchedBackendCounts: countProjectsByField(filteredProjects, 'backend'),
               activeProjects: projects.filter((project) => {
                 const counts = project.task_counts || { queued: 0, running: 0 };
                 return counts.queued > 0 || counts.running > 0 || project.task_state === 'QUEUED' || project.task_state === 'RUNNING';

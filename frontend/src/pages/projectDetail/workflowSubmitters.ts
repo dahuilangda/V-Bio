@@ -1,16 +1,22 @@
+import type { MutableRefObject } from 'react';
 import { submitAffinityTaskFromDraft } from './affinitySubmission';
 import { submitPredictionTaskFromDraft } from './predictionSubmission';
 
 export interface WorkflowSubmitterContext {
   [key: string]: any;
+  /** A ref to the latest draft so the submit closures always read the current value, not a stale
+   * closure capture. This fixes the race where applyPatch (setDraft, async) is immediately followed
+   * by submit — without the ref, the submit closures captured the pre-patch draft. */
+  draftRef: MutableRefObject<unknown>;
 }
 
 export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
   const submitAffinityTask = async () => {
-    if (!c.project || !c.draft) return;
+    const draft = c.draftRef.current as Record<string, unknown> | null;
+    if (!c.project || !draft) return;
     await submitAffinityTaskFromDraft({
       project: c.project,
-      draft: c.draft,
+      draft: draft as any,
       workspaceTab: c.workspaceTab,
       affinityTargetFile: c.affinityTargetFile,
       affinityLigandFile: c.affinityLigandFile,
@@ -63,10 +69,11 @@ export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
   };
 
   const submitPredictionTask = async () => {
-    if (!c.project || !c.draft) return;
+    const draft = c.draftRef.current as Record<string, unknown> | null;
+    if (!c.project || !draft) return;
     await submitPredictionTaskFromDraft({
       project: c.project,
-      draft: c.draft,
+      draft: draft as any,
       isPeptideDesignWorkflow: Boolean(c.isPeptideDesignWorkflow),
       isVirtualScreeningWorkflow: Boolean(c.isVirtualScreeningWorkflow),
       workspaceTab: c.workspaceTab,

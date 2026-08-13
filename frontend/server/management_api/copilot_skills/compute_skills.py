@@ -68,10 +68,10 @@ def register_compute_skills(skills: Any) -> None:
             name="compute.aggregate",
             description=(
                 "Compute summary statistics (count, sum, min, max, mean, median) over a list of numeric "
-                "values. Use this to ground arithmetic over retrieved data instead of approximating it — "
-                "e.g. the mean potency across activities returned by chembl.bioactivity. Pass the values "
-                "explicitly, or consume a numeric column from a prior observation with "
-                "{\"$fromObservation\": \"<id>\", \"field\": \"<field>\", \"all\": true} and depends_on that id."
+                "values. Use this to ground arithmetic over retrieved data instead of approximating it "
+                "from memory. Pass the values explicitly, or consume a numeric column from a prior "
+                "observation with {\"$fromObservation\": \"<id>\", \"field\": \"<field>\", \"all\": true} "
+                "and depends_on that id."
             ),
             input_schema={
                 "type": "object",

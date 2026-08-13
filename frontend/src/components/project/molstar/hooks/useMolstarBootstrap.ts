@@ -33,6 +33,7 @@ export function useMolstarBootstrap({
 }: UseMolstarBootstrapArgs) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<any>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
   const pickUnsubscribeRef = useRef<(() => void) | null>(null);
   const onResiduePickRef = useRef<typeof onResiduePick>(onResiduePick);
   const suppressPickEventsRef = useRef(false);
@@ -142,6 +143,51 @@ export function useMolstarBootstrap({
           false
         );
         setReady(true);
+
+        // Watch for container size changes (e.g. CSS media queries on mobile) and tell Mol* to
+        // re-layout. Without this, the Mol* canvas keeps its initial desktop size when the
+        // container shrinks, making the structure invisible on mobile.
+        const resizeTarget = hostRef.current;
+        let resizeTimer: number | null = null;
+        const doResize = () => {
+          if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+          resizeTimer = window.setTimeout(() => {
+            resizeTimer = null;
+            try {
+              const plugin = viewerRef.current?.plugin;
+              if (!plugin) return;
+              // Force Mol* to recalculate canvas dimensions from the host element's current size.
+              // handleResize reads layout.root.offsetWidth/Height and resizes the WebGL canvas.
+              if (plugin.canvas3d && typeof plugin.canvas3d.handleResize === 'function') {
+                plugin.canvas3d.handleResize();
+              }
+              if (plugin.canvas3d && typeof plugin.canvas3d.requestResize === 'function') {
+                plugin.canvas3d.requestResize();
+              }
+              // Re-trigger layout in case panels need to adjust.
+              if (plugin.layout?.events?.update) {
+                plugin.layout.events.update.next(plugin.layout.current);
+              }
+            } catch {
+              // no-op — resize is best-effort
+            }
+          }, 100);
+        };
+        const resizeObserver = new ResizeObserver(doResize);
+        if (resizeTarget) {
+          resizeObserver.observe(resizeTarget);
+        }
+        // Fire an initial resize after a short delay — Mol* may have initialized before CSS
+        // media queries applied the correct container size (especially on mobile).
+        window.setTimeout(doResize, 200);
+        window.setTimeout(doResize, 800);
+        // Store cleanup on the cancel flag's closure
+        const originalCleanup = cleanupRef.current;
+        cleanupRef.current = () => {
+          originalCleanup?.();
+          resizeObserver.disconnect();
+          if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+        };
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : 'Unable to load Mol* viewer.');
@@ -152,6 +198,10 @@ export function useMolstarBootstrap({
 
     return () => {
       cancelled = true;
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
       const viewer = viewerRef.current;
       if (pickUnsubscribeRef.current) {
         pickUnsubscribeRef.current();
