@@ -1,9 +1,4 @@
 import { LigandFragmentSketcher, type LigandFragmentItem } from '../LigandFragmentSketcher';
-import type {
-  LeadOptDirection,
-  LeadOptGroupedByEnvironment,
-  LeadOptQueryProperty,
-} from './hooks/useLeadOptMmpQueryForm';
 
 interface LeadOptFragmentPanelProps {
   sectionId?: string;
@@ -14,22 +9,13 @@ interface LeadOptFragmentPanelProps {
   onAtomClick: (atomIndex: number, options?: { additive?: boolean; preferredFragmentId?: string }) => void;
   onToggleFragmentSelection: (fragmentId: string, options?: { additive?: boolean }) => void;
   onClearFragmentSelection: () => void;
-  direction: LeadOptDirection;
-  queryProperty: LeadOptQueryProperty;
-  groupedByEnvironment: LeadOptGroupedByEnvironment;
-  selectedDatabaseId: string;
-  databaseOptions: Array<{ id: string; label: string }>;
-  propertyOptions: Array<{ value: string; label: string }>;
-  envRadius: number;
-  minPairs: number;
-  onDirectionChange: (value: LeadOptDirection) => void;
-  onQueryPropertyChange: (value: LeadOptQueryProperty) => void;
-  onGroupedByEnvironmentChange: (value: LeadOptGroupedByEnvironment) => void;
-  onDatabaseIdChange: (value: string) => void;
-  onEnvRadiusChange: (value: number) => void;
-  onMinPairsChange: (value: number) => void;
 }
 
+/**
+ * Fragment selection on the reference ligand (click atoms / legend chips).
+ * The picked fragments feed the halo run: fragment smiles → keep fragment,
+ * atom indices → directed edit positions.
+ */
 export function LeadOptFragmentPanel({
   sectionId,
   effectiveLigandSmiles,
@@ -38,24 +24,11 @@ export function LeadOptFragmentPanel({
   activeFragmentId,
   onAtomClick,
   onToggleFragmentSelection,
-  onClearFragmentSelection,
-  direction,
-  queryProperty,
-  groupedByEnvironment,
-  selectedDatabaseId,
-  databaseOptions,
-  propertyOptions,
-  envRadius,
-  minPairs,
-  onDirectionChange,
-  onQueryPropertyChange,
-  onGroupedByEnvironmentChange,
-  onDatabaseIdChange,
-  onEnvRadiusChange,
-  onMinPairsChange
+  onClearFragmentSelection
 }: LeadOptFragmentPanelProps) {
   return (
     <section id={sectionId} className="panel subtle lead-opt-panel">
+      <div className="lead-opt-panel-title">Fragments</div>
       <LigandFragmentSketcher
         smiles={effectiveLigandSmiles}
         fragments={fragments}
@@ -66,77 +39,6 @@ export function LeadOptFragmentPanel({
         onBackgroundClick={onClearFragmentSelection}
         height={220}
       />
-
-      <div className="lead-opt-build-controls">
-        <label className="field lead-opt-build-field lead-opt-build-field--property">
-          <span>Property</span>
-          <select value={queryProperty} onChange={(e) => onQueryPropertyChange(e.target.value as LeadOptQueryProperty)}>
-            <option value="">-</option>
-            {propertyOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field lead-opt-build-field lead-opt-build-field--db">
-          <span>DB</span>
-          <select
-            value={selectedDatabaseId}
-            onChange={(e) => onDatabaseIdChange(e.target.value)}
-            disabled={databaseOptions.length <= 1}
-          >
-            {databaseOptions.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field lead-opt-build-field lead-opt-build-field--direction">
-          <span>Direction</span>
-          <select
-            value={direction}
-            onChange={(e) => onDirectionChange(e.target.value as LeadOptDirection)}
-            disabled={!queryProperty}
-          >
-            <option value="">-</option>
-            <option value="increase">Up</option>
-            <option value="decrease">Down</option>
-          </select>
-        </label>
-        <label className="field lead-opt-build-field lead-opt-build-field--pairs">
-          <span>Min pairs</span>
-          <input
-            type="number"
-            min={1}
-            max={50}
-            value={minPairs}
-            onChange={(e) => onMinPairsChange(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
-          />
-        </label>
-        <label className="field lead-opt-build-field lead-opt-build-field--radius">
-          <span>Env radius</span>
-          <input
-            type="number"
-            min={0}
-            max={6}
-            value={envRadius}
-            onChange={(e) => onEnvRadiusChange(Math.max(0, Math.min(6, Number(e.target.value) || 0)))}
-          />
-        </label>
-        <label className="field lead-opt-build-field lead-opt-build-field--group">
-          <span>Env grouping</span>
-          <select
-            value={groupedByEnvironment}
-            onChange={(e) => onGroupedByEnvironmentChange(e.target.value as LeadOptGroupedByEnvironment)}
-          >
-            <option value="auto">Auto</option>
-            <option value="on">On</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
-      </div>
     </section>
   );
 }

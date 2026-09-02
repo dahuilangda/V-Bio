@@ -14,7 +14,9 @@ MGMT_LOG="${RUNTIME_DIR}/management_api.log"
 
 VBIO_FRONTEND_HOST="${VBIO_FRONTEND_HOST:-0.0.0.0}"
 VBIO_FRONTEND_PORT="${VBIO_FRONTEND_PORT:-5173}"
-VBIO_MGMT_HOST="${VBIO_MGMT_HOST:-0.0.0.0}"
+# Loopback by default: the SPA reaches the API through the vite proxy on this host; binding
+# 0.0.0.0 would expose the (unauthenticated) copilot inference endpoints to the network.
+VBIO_MGMT_HOST="${VBIO_MGMT_HOST:-127.0.0.1}"
 VBIO_MGMT_PORT="${VBIO_MGMT_PORT:-5055}"
 VBIO_MGMT_WORKERS="${VBIO_MGMT_WORKERS:-2}"
 VBIO_MGMT_THREADS="${VBIO_MGMT_THREADS:-8}"

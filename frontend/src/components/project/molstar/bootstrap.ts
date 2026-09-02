@@ -90,6 +90,87 @@ export async function waitForMolstarReady(timeoutMs = 12000, intervalMs = 120) {
   throw new Error('Mol* failed to initialize.');
 }
 
+let overlayRefs: string[] = [];
+let refsBeforeOverlayLoad: Set<string> | null = null;
+
+/** Call BEFORE loading the overlay — records existing refs (primary's). */
+export function beginOverlayLoad(viewer: any): void {
+  const state = viewer?.plugin?.state?.data;
+  refsBeforeOverlayLoad = state?.cells ? new Set(state.cells.keys()) : new Set();
+}
+
+/** Call AFTER loading the overlay — diffs to find ONLY the new overlay refs. */
+export function endOverlayLoad(viewer: any): void {
+  const state = viewer?.plugin?.state?.data;
+  if (!state?.cells || !refsBeforeOverlayLoad) {
+    overlayRefs = [];
+    return;
+  }
+  const before = refsBeforeOverlayLoad;
+  overlayRefs = [...state.cells.keys()].filter(ref => !before.has(ref));
+  refsBeforeOverlayLoad = null;
+}
+
+/** Remove ONLY the overlay component's state nodes, preserving the primary. */
+export async function removeOverlayOnly(viewer: any): Promise<void> {
+  const state = viewer?.plugin?.state?.data;
+  if (!state?.cells || typeof state.build !== 'function') {
+    throw new Error('removeOverlayOnly: state API unavailable');
+  }
+  if (overlayRefs.length === 0) return;
+
+  const builder = state.build();
+  let deleted = 0;
+  for (const ref of overlayRefs) {
+    if (state.cells.has(ref)) {
+      builder.delete(ref);
+      deleted++;
+    }
+  }
+  if (deleted > 0) {
+    await builder.commit();
+  }
+  overlayRefs = [];
+}
+
+// Backwards-compatible aliases
+export function snapshotPrimaryLoaded(_viewer?: any): void {
+  overlayRefs = [];
+}
+
+export function trackOverlayLoaded(viewer: any): void {
+  endOverlayLoad(viewer);
+}
+
+/**
+ * Remove ALL loaded structures from the MolStar plugin state.
+ */
+export async function clearViewerStructures(viewer: any): Promise<void> {
+  const state = viewer?.plugin?.state?.data;
+  if (!state?.cells || typeof state.build !== 'function') {
+    throw new Error(
+      'clearViewerStructures: plugin.state.data.cells or .build unavailable. ' +
+      `Got cells=${typeof state?.cells}, build=${typeof state?.build}. ` +
+      'The MolStar Viewer API has changed.'
+    );
+  }
+
+  overlayRefs = [];
+  const rootRef = '-=root=-';
+  const builder = state.build();
+  let deleted = 0;
+  for (const cell of state.cells.values()) {
+    const ref = cell?.transform?.ref;
+    if (ref && ref !== rootRef) {
+      builder.delete(ref);
+      deleted++;
+    }
+  }
+  if (deleted > 0) {
+    await builder.commit();
+  }
+}
+
 export async function loadStructure(
   viewer: any,
   text: string,
@@ -97,8 +178,8 @@ export async function loadStructure(
   options?: { clearBefore?: boolean }
 ) {
   const clearBefore = options?.clearBefore !== false;
-  if (clearBefore && typeof viewer?.clear === 'function') {
-    await viewer.clear();
+  if (clearBefore) {
+    await clearViewerStructures(viewer);
   }
   const formats = format === 'cif' ? ['mmcif', 'pdb'] : ['pdb', 'mmcif'];
   const errors: string[] = [];

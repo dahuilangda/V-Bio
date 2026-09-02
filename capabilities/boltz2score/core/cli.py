@@ -9,10 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import torch
-
-from boltz.main import get_cache_path
-from core.modes import SCORE_MODE, mode_help_text, normalize_mode_name
+from core.modes import SCORE_MODE, DOCK_MODE, mode_help_text, normalize_mode_name
 
 
 @dataclass(frozen=True)
@@ -131,7 +128,7 @@ def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--sampling_steps", type=int, default=None, help="Override sampling steps. Defaults depend on refinement mode.")
     group.add_argument("--diffusion_samples", type=int, default=None, help="Override diffusion sample count. Defaults depend on refinement mode.")
     group.add_argument("--max_parallel_samples", type=int, default=1)
-    group.add_argument("--step_scale", type=float, default=1.5)
+    group.add_argument("--step_scale", type=float, default=None, help="Override the diffusion step scale. Defaults depend on the mode / execution plan.")
     group.add_argument("--no_kernels", action="store_true")
     group.add_argument("--seed", type=int, default=None)
     group.add_argument("--trainer_precision", type=str, default="32", help="Lightning trainer precision for scoring (default: 32).")
@@ -155,7 +152,7 @@ def _add_refinement_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--gamma_0", type=float, default=None, help="Override Boltz2 diffusion gamma_0 during structure refinement.")
     group.add_argument("--gamma_min", type=float, default=None, help="Override Boltz2 diffusion gamma_min during structure refinement.")
     group.add_argument("--anchor_contact_cutoff", type=float, default=5.0, help="Select pocket residues within this heavy-atom distance of the input ligand pose.")
-    group.add_argument("--anchor_max_distance", type=float, default=8.0, help="Contact upper bound used by anchored refinement guidance.")
+    group.add_argument("--anchor_max_distance", type=float, default=None, help="Contact upper bound used by anchored refinement guidance. Defaults depend on the mode / pocket.")
     group.add_argument("--anchor_max_residues", type=int, default=16, help="Maximum number of closest pocket residues to constrain during anchored refinement.")
     group.add_argument("--pose_anchor_atoms", type=int, default=4, help="Number of ligand heavy-atom anchors used to preserve the input pose orientation during anchored refinement.")
     group.add_argument("--pose_anchor_slack", type=float, default=0.75, help="Extra slack in angstroms added to each pose-preserving atom-level contact constraint.")
@@ -169,6 +166,7 @@ def _add_output_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--compute_ipsae", action="store_true", help="Compute ligand-aware IPSAE metrics and append them to confidence JSON outputs.")
     group.add_argument("--ipsae_pae_cutoff", type=float, default=12.0, help="PAE cutoff used by ligand-aware IPSAE.")
     group.add_argument("--ipsae_dist_cutoff", type=float, default=5.0, help="Distance cutoff in angstroms used by ligand-aware IPSAE.")
+    group.add_argument("--compute_interactions", action="store_true", help="Analyze protein-ligand interactions (PLIP) on the best-scoring structure and write interactions_<record>.json.")
 
 
 def _add_affinity_arguments(parser: argparse.ArgumentParser) -> None:
@@ -176,6 +174,7 @@ def _add_affinity_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--target_chain", type=str, default=None, help="Target protein chain ID(s), comma-separated. Required with --enable_affinity.")
     group.add_argument("--ligand_chain", type=str, default=None, help="Ligand chain ID(s), comma-separated. Required with --enable_affinity.")
     group.add_argument("--affinity_refine", action="store_true", help="When --enable_affinity is set, run diffusion refinement before affinity (higher quality, slower).")
+    group.add_argument("--affinity_recycling_steps", type=int, default=1, help="Pairformer recycling steps for the affinity head. Default: 1 (ablation-optimized: matches upstream R=5 quality at ~10%% lower cost). Set to 5 for bit-for-bit upstream parity.")
     group.add_argument("--enable_affinity", action="store_true", help="Enable affinity prediction. Requires both --target_chain and --ligand_chain. Only supported for protein-small-molecule complexes.")
 
 
@@ -187,9 +186,45 @@ def _add_msa_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--max_msa_seqs", type=int, default=8192, help="Maximum number of MSA sequences to keep per protein chain.")
 
 
+def _add_docking_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Docking (dock mode)")
+    group.add_argument("--ligand_smiles", type=str, default=None,
+                       help="SMILES string for dock mode (generates a 3-D conformer automatically).")
+    group.add_argument("--ligand_smiles_file", type=str, default=None,
+                       help="File containing SMILES for dock mode. .smi (tab-sep SMILES+name) or .csv (with SMILES column).")
+    # Pocket center
+    group.add_argument("--center_x", type=float, default=None,
+                       help="X coordinate of the pocket center.")
+    group.add_argument("--center_y", type=float, default=None,
+                       help="Y coordinate of the pocket center.")
+    group.add_argument("--center_z", type=float, default=None,
+                       help="Z coordinate of the pocket center.")
+    group.add_argument("--pocket_center", type=str, default=None,
+                       help="Shorthand for --center_x/y/z as 'x,y,z' (e.g. '10.5,20.3,-5.0').")
+    group.add_argument("--pocket_ligand", type=str, default=None,
+                       help="Reference ligand file (.sdf/.mol2/.pdb) defining the pocket center.")
+    group.add_argument("--pocket_residues", type=str, default=None,
+                       help="Pocket residues 'CHAIN:RESNUM,...' (e.g. 'A:100,A:101,A:102'). Uses their Cα centroid as pocket center.")
+    # Pocket size
+    group.add_argument("--size_x", type=float, default=None,
+                       help="Pocket box size in X (Å).")
+    group.add_argument("--size_y", type=float, default=None,
+                       help="Pocket box size in Y (Å).")
+    group.add_argument("--size_z", type=float, default=None,
+                       help="Pocket box size in Z (Å).")
+    group.add_argument("--pocket_radius", type=float, default=7.0,
+                       help="Pocket search radius in angstroms (default: 7.0). Ignored when --size_x/y/z are set.")
+    group.add_argument("--dock_seed", type=int, default=42,
+                       help="Random seed for ETKDG conformer generation (default: 42).")
+    group.add_argument("--dock_poses", type=int, default=1,
+                       help="Number of diverse initial pose candidates per SMILES (dock mode). "
+                            ">1 runs a pose ensemble: each candidate is refined and the best-scored "
+                            "pose per ligand is kept (default: 1; use 8-16 for hard targets).")
+
+
 def build_main_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run Boltz2Score scoring or refinement on a single complex."
+        description="Run Boltz2Score scoring, refinement, or flexible docking on a protein-ligand complex."
     )
     _add_input_arguments(parser)
     _add_runtime_arguments(parser)
@@ -197,6 +232,7 @@ def build_main_parser() -> argparse.ArgumentParser:
     _add_output_arguments(parser)
     _add_affinity_arguments(parser)
     _add_msa_arguments(parser)
+    _add_docking_arguments(parser)
     return parser
 
 
@@ -209,6 +245,10 @@ def normalize_main_args(
     except ValueError as exc:
         parser.error(str(exc))
     if args.accelerator is None:
+        # Deferred import: high-level modes (dock/pose/refine/interface) only
+        # spawn a score-mode subprocess and never touch torch themselves.
+        import torch
+
         args.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     return args
 
@@ -220,7 +260,7 @@ def _validate_main_args(args: argparse.Namespace, parser: argparse.ArgumentParse
         raise ValueError("--anchored_refine requires --structure_refine.")
     if args.anchor_contact_cutoff <= 0:
         raise ValueError("--anchor_contact_cutoff must be positive.")
-    if args.anchor_max_distance <= 0:
+    if args.anchor_max_distance is not None and args.anchor_max_distance <= 0:
         raise ValueError("--anchor_max_distance must be positive.")
     if args.anchor_max_residues <= 0:
         raise ValueError("--anchor_max_residues must be positive.")
@@ -247,6 +287,11 @@ def _validate_main_args(args: argparse.Namespace, parser: argparse.ArgumentParse
 
     has_input = args.input is not None
     has_separate = args.protein_file is not None and args.ligand_file is not None
+
+    # Dock mode has its own input contract: protein + SMILES + pocket definition.
+    if args.mode == DOCK_MODE:
+        return _validate_dock_args(args, parser)
+
     if not has_input and not has_separate:
         parser.error("Either --input or both --protein_file and --ligand_file must be provided")
     if has_input and has_separate:
@@ -259,6 +304,67 @@ def _validate_main_args(args: argparse.Namespace, parser: argparse.ArgumentParse
         parser.error("--ligand_indices requires separate-input mode with --protein_file and --ligand_file")
     _parse_ligand_index_selection(args.ligand_indices)
     return has_input, has_separate
+
+
+def _validate_dock_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[bool, bool]:
+    """Validate the input contract for dock mode.
+
+    Required: ``--protein_file`` + (``--ligand_smiles`` or ``--ligand_smiles_file``)
+              + exactly one pocket definition (``--pocket_ligand``, ``--pocket_center``, or ``--pocket_residues``).
+    """
+    if args.input is not None:
+        parser.error("dock mode does not support --input. Use --protein_file + --ligand_smiles.")
+    if args.protein_file is None:
+        parser.error("dock mode requires --protein_file.")
+    if args.ligand_file is not None:
+        parser.error("dock mode does not accept --ligand_file (use --ligand_smiles or --ligand_smiles_file instead).")
+    if args.ligand_indices:
+        parser.error("--ligand_indices is not supported in dock mode.")
+
+    has_smiles = args.ligand_smiles is not None
+    has_smiles_file = args.ligand_smiles_file is not None
+    if not has_smiles and not has_smiles_file:
+        parser.error("dock mode requires --ligand_smiles or --ligand_smiles_file.")
+    if has_smiles and has_smiles_file:
+        parser.error("Provide either --ligand_smiles or --ligand_smiles_file, not both.")
+
+    # Pocket center: exactly one method.
+    has_center_axes = args.center_x is not None or args.center_y is not None or args.center_z is not None
+    center_axes_complete = args.center_x is not None and args.center_y is not None and args.center_z is not None
+    if has_center_axes and not center_axes_complete:
+        parser.error("--center_x/y/z must all be provided together.")
+    pocket_defs = [
+        center_axes_complete,
+        args.pocket_center is not None,
+        args.pocket_ligand is not None,
+        args.pocket_residues is not None,
+    ]
+    count = sum(pocket_defs)
+    if count == 0:
+        parser.error(
+            "dock mode requires a pocket definition. "
+            "Provide one of: --center_x/--center_y/--center_z, --pocket_center, "
+            "--pocket_ligand, or --pocket_residues."
+        )
+    if count > 1:
+        parser.error(
+            "Provide exactly one pocket definition method "
+            "(--center_x/y/z, --pocket_center, --pocket_ligand, or --pocket_residues)."
+        )
+
+    # Pocket size: either all three size axes or none.
+    has_size = args.size_x is not None or args.size_y is not None or args.size_z is not None
+    if has_size and not (args.size_x is not None and args.size_y is not None and args.size_z is not None):
+        parser.error("--size_x/y/z must all be provided together.")
+    if has_size:
+        if args.size_x <= 0 or args.size_y <= 0 or args.size_z <= 0:
+            parser.error("--size_x/y/z must be positive.")
+    elif args.pocket_radius <= 0:
+        parser.error("--pocket_radius must be positive.")
+
+    if int(getattr(args, "dock_poses", 1) or 1) < 1:
+        parser.error("--dock_poses must be at least 1.")
+    return False, True
 
 
 def _resolve_sampling_defaults(args: argparse.Namespace) -> tuple[bool, int, int, int]:
@@ -394,6 +500,10 @@ def build_execution_plan(
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deferred import: pulls in torch + the boltz stack (~7s); only the
+    # score-mode path needs it.
+    from boltz.main import get_cache_path
 
     cache_dir = Path(args.cache or get_cache_path()).expanduser().resolve()
 

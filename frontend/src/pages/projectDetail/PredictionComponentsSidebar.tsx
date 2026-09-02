@@ -2,6 +2,13 @@ import { ChevronDown, ChevronRight, Dna, FlaskConical, Plus, Target } from 'luci
 import { componentTypeLabel } from '../../utils/projectInputs';
 import type { InputComponent, PredictionConstraint, PredictionConstraintType, PredictionProperties } from '../../types/models';
 
+export interface PeptidePocketSidebarInfo {
+  /** One-line pocket state: "3 residues", "center + radius" or "whole surface". */
+  summaryLabel: string;
+  /** Component hosting the pocket picker; clicking the row jumps to it. */
+  targetComponentId: string | null;
+}
+
 export interface ComponentBucketEntry {
   id: string;
   filled: boolean;
@@ -61,6 +68,8 @@ export interface PredictionComponentsSidebarProps {
   onSetAffinityComponentFromWorkspace: (role: 'target' | 'ligand', componentId: string | null) => void;
   affinityEnableDisabledReason: string;
   showAffinityComputeToggle?: boolean;
+  /** Peptide design: pocket summary + jump-to-target-component row. */
+  peptidePocket?: PeptidePocketSidebarInfo | null;
 }
 
 export function PredictionComponentsSidebar({
@@ -98,7 +107,8 @@ export function PredictionComponentsSidebar({
   workspaceLigandSelectableOptions,
   onSetAffinityComponentFromWorkspace,
   affinityEnableDisabledReason,
-  showAffinityComputeToggle = true
+  showAffinityComputeToggle = true,
+  peptidePocket = null
 }: PredictionComponentsSidebarProps) {
   if (!visible) return null;
 
@@ -251,6 +261,22 @@ export function PredictionComponentsSidebar({
               ))}
             </select>
           </label>
+          {peptidePocket ? (
+            <button
+              type="button"
+              className="peptide-pocket-sidebar-row"
+              disabled={!peptidePocket.targetComponentId}
+              title="Binding pocket is defined inside the target component — click to jump to it"
+              onClick={() => {
+                if (peptidePocket.targetComponentId) onJumpToComponent(peptidePocket.targetComponentId);
+              }}
+            >
+              <span className="affinity-key">Pocket</span>
+              <span className="peptide-pocket-sidebar-value">
+                {peptidePocket.summaryLabel} <span aria-hidden="true">›</span>
+              </span>
+            </button>
+          ) : null}
           <label className="field affinity-field">
             <span className="affinity-key">Ligand</span>
             <select

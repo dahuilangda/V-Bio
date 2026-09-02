@@ -1,4 +1,4 @@
-import { compactResultConfidenceForStorage } from '../api/backendResultParserApi';
+import { compactResultConfidenceForStorage, mergePeptideCandidateRowsPreferRicher } from '../api/backendResultParserApi';
 
 const PEPTIDE_RUNTIME_SETUP_KEYS = [
   'design_mode',
@@ -90,6 +90,36 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function asRecordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
+}
+
+const PEPTIDE_CANDIDATE_ROW_COLLECTION_KEYS = ['best_sequences', 'current_best_sequences', 'candidates'] as const;
+
+/**
+ * Preferred-structure pulls know fewer candidate structure names than the
+ * persisted rows from a full parse. Field-level merge keeps those names alive;
+ * wholesale replacement (the old copyMissingFields behavior) erased them and
+ * broke candidate switching after the first preferred-structure click.
+ */
+function mergeCandidateRowCollections(
+  merged: Record<string, unknown>,
+  base: Record<string, unknown>
+): boolean {
+  let changed = false;
+  for (const key of PEPTIDE_CANDIDATE_ROW_COLLECTION_KEYS) {
+    const incomingRows = asRecordArray(merged[key]);
+    const baseRows = asRecordArray(base[key]);
+    if (incomingRows.length === 0 || baseRows.length === 0) continue;
+    const nextRows = mergePeptideCandidateRowsPreferRicher(incomingRows, baseRows);
+    if (JSON.stringify(nextRows) !== JSON.stringify(incomingRows)) {
+      merged[key] = nextRows;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function hasMeaningfulValue(value: unknown): boolean {
   if (value === undefined || value === null) return false;
   if (typeof value === 'string') return value.trim().length > 0;
@@ -147,6 +177,7 @@ export function mergePeptideSummaryIntoParsedConfidence(
   const basePeptide = asRecord(baseConfidence.peptide_design);
   const peptideChangedBySetup = copyMissingFields(mergedPeptide, basePeptide, PEPTIDE_RUNTIME_SETUP_KEYS);
   const peptideChangedByProgress = copyMissingFields(mergedPeptide, basePeptide, PEPTIDE_RUNTIME_PROGRESS_KEYS);
+  const peptideChangedByRows = mergeCandidateRowCollections(mergedPeptide, basePeptide);
 
   const mergedPeptideProgress = { ...asRecord(mergedPeptide.progress) };
   const basePeptideProgress = asRecord(basePeptide.progress);
@@ -161,6 +192,7 @@ export function mergePeptideSummaryIntoParsedConfidence(
   if (
     peptideChangedBySetup ||
     peptideChangedByProgress ||
+    peptideChangedByRows ||
     peptideProgressChanged ||
     (Object.keys(mergedPeptide).length === 0 && Object.keys(basePeptide).length > 0)
   ) {
@@ -177,6 +209,8 @@ export function mergePeptideSummaryIntoParsedConfidence(
 
   if (!hasMeaningfulValue(merged.best_sequences) && hasMeaningfulValue(baseConfidence.best_sequences)) {
     merged.best_sequences = baseConfidence.best_sequences;
+  } else {
+    mergeCandidateRowCollections(merged, baseConfidence);
   }
   if (!hasMeaningfulValue(merged.current_best_sequences) && hasMeaningfulValue(baseConfidence.current_best_sequences)) {
     merged.current_best_sequences = baseConfidence.current_best_sequences;

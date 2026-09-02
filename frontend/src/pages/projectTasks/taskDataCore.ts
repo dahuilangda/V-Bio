@@ -855,7 +855,6 @@ export {
 } from './taskDataPeptide';
 
 export {
-  SILENT_CACHE_SYNC_WINDOW_MS,
   mapTaskState,
   inferTaskStateFromStatusPayload,
   readStatusText,
@@ -868,8 +867,6 @@ export {
   normalizeIptmThreshold,
   normalizeSmilesForSearch,
   hasSubstructureMatchPayload,
-  sanitizeFileName,
-  toBase64FromBytes,
   waitForRuntimeTaskToStop
 } from './taskRuntimeUiUtils';
 

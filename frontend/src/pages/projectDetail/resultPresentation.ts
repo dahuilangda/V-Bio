@@ -24,6 +24,8 @@ export function buildSnapshotCards(params: {
   snapshotIc50Um: number | null;
   snapshotIc50Error: { plus: number; minus: number } | null;
   snapshotIc50Tone: MetricTone;
+  snapshotPic50?: number | null;
+  snapshotPic50Mw?: number | null;
   snapshotBindingProbability: number | null;
   snapshotBindingStd: number | null;
   snapshotBindingTone: MetricTone;
@@ -40,6 +42,8 @@ export function buildSnapshotCards(params: {
     snapshotIc50Um,
     snapshotIc50Error,
     snapshotIc50Tone,
+    snapshotPic50 = null,
+    snapshotPic50Mw = null,
     snapshotBindingProbability,
     snapshotBindingStd,
     snapshotBindingTone,
@@ -74,6 +78,13 @@ export function buildSnapshotCards(params: {
           ? selectedResultPairLabel
             : 'Interface conf',
       tone: preferredInterfaceMetric.tone
+    },
+    {
+      key: 'pic50',
+      label: 'pIC50',
+      value: snapshotPic50 === null ? '-' : snapshotPic50.toFixed(2),
+      detail: snapshotPic50Mw !== null ? `MW-corrected ${snapshotPic50Mw.toFixed(2)}` : '-log10 IC50 (M)',
+      tone: snapshotIc50Tone
     },
     {
       key: 'ic50',

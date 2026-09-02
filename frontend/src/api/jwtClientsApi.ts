@@ -83,14 +83,6 @@ export async function issueJwtClientToken(
   return readPayload<JwtIssuedTokenResponse>(res);
 }
 
-export async function rotateJwtClient(managementToken: string, clientId: string): Promise<JwtClientSecretResponse> {
-  const res = await requestManagement(`/vbio-api/admin/jwt-clients/${encodeURIComponent(clientId)}/rotate`, {
-    method: 'POST',
-    headers: adminHeaders(managementToken)
-  });
-  return readPayload<JwtClientSecretResponse>(res);
-}
-
 export async function deleteJwtClient(managementToken: string, clientId: string): Promise<void> {
   const res = await requestManagement(`/vbio-api/admin/jwt-clients/${encodeURIComponent(clientId)}`, {
     method: 'DELETE',

@@ -340,19 +340,6 @@ def _af3_json_modifications(modifications: List[Dict[str, object]]) -> List[Dict
     return json_mods
 
 
-def _af3_effective_query_sequence(sequence: str, modifications: List[Dict[str, object]]) -> str:
-    chars = list(str(sequence or "").strip().upper())
-    for mod in modifications or []:
-        position = _coerce_int(mod.get("ptmPosition", mod.get("position")), "AF3 modification position")
-        if position < 1 or position > len(chars):
-            continue
-        chars[position - 1] = _af3_ccd_to_one_letter(
-            mod.get("ptmType", mod.get("ccd")),
-            mod.get("baseResidue", mod.get("base_residue")),
-        )
-    return "".join(chars)
-
-
 def _protein_group_key(
     sequence: str,
     modifications: List[Dict[str, object]],

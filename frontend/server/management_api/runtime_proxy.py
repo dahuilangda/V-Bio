@@ -298,4 +298,9 @@ class RuntimeProxy:
     def build_flask_response(upstream: requests.Response) -> Tuple[Response, int]:
         content_type = upstream.headers.get("Content-Type", "application/json")
         response = Response(upstream.content, status=upstream.status_code, content_type=content_type)
+        # File downloads (e.g. the excel export) carry the filename here — dropping it made
+        # the client fall back to a generic name.
+        disposition = upstream.headers.get("Content-Disposition")
+        if disposition:
+            response.headers["Content-Disposition"] = disposition
         return response, upstream.status_code

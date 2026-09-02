@@ -7,7 +7,6 @@ import shutil
 import traceback
 import yaml
 import hashlib
-import glob
 import csv
 import zipfile
 import shlex
@@ -45,7 +44,6 @@ BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
 sys.path.append(str(PROJECT_ROOT))
 from backend.core.config import (
     MSA_SERVER_URL,
-    MSA_SERVER_MODE,
     MSA_SERVER_TIMEOUT_SECONDS,
     COLABFOLD_JOBS_DIR,
     BOLTZ2_DOCKER_IMAGE,
@@ -69,11 +67,6 @@ from backend.core.config import (
     PROTENIX_CONTAINER_MODEL_DIR,
     PROTENIX_CONTAINER_CHECKPOINT_PATH,
     PROTENIX_COMMON_CACHE_DIR,
-    POCKETXMOL_ROOT_DIR,
-    POCKETXMOL_DOCKER_IMAGE,
-    POCKETXMOL_CONFIG_MODEL,
-    POCKETXMOL_DEVICE,
-    POCKETXMOL_BATCH_SIZE,
     PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
     PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
     RESULTS_BASE_DIR,
@@ -104,33 +97,27 @@ from backend.runtime.protenix_adapter import (
     serialize_protenix_json,
 )
 from Bio import Align
-from Bio.PDB import PDBParser, Select
+from Bio.PDB import PDBParser
 import gemmi
 from rdkit import Chem
-from rdkit.Chem import AllChem, Descriptors, rdFMCS, rdMolAlign, rdMolDescriptors
+from rdkit.Chem import AllChem, rdFMCS, rdMolAlign
 from backend.runtime.custom_ccd_builder import (
-    CUSTOM_RESIDUE_BACKBONE_SMARTS,
     _append_custom_residues_ccd,
     _append_custom_residues_ccd_from_molecules,
     _boltz_custom_ccd_aliases,
     _build_custom_ccd_bundle,
     _build_custom_ccd_mol,
-    _custom_ccd_has_amino_acid_backbone,
-    _custom_ccd_mol_atom_names,
-    _custom_ccd_mol_to_cif_block,
-    _find_residue_backbone_topology,
-    _is_amide_like_nitrogen,
-    _is_carbonyl_carbon,
-    _normalize_backbone_override,
     _normalize_custom_ccd_molecules,
-    _residue_topology_from_backbone_override,
-    _set_atom_name,
-    _set_custom_ccd_atom_properties,
 )
+from backend.runtime.ccd_contract import validate_ccd_additions
 
-# MSA 缓存配置
+# MSA 缓存配置（目录可通过 BOLTZ_MSA_CACHE_DIR 覆盖；默认指向 /data 挂载，
+# 避免缓存放大容器可写层导致宿主机根分区膨胀）
 MSA_CACHE_CONFIG = {
-    'cache_dir': '/tmp/boltz_msa_cache',
+    'cache_dir': os.environ.get(
+        'BOLTZ_MSA_CACHE_DIR',
+        '/data/boltz_msa_cache'
+    ),
     'enable_cache': True
 }
 
@@ -601,17 +588,6 @@ def _sanitize_template_chain_residues(chain: gemmi.Chain) -> Tuple[int, int]:
     return removed, renamed
 
 
-class _ChainSelect(Select):
-    def __init__(self, chain_id: str):
-        self.chain_id = chain_id
-
-    def accept_model(self, model):
-        return model.id == 0
-
-    def accept_chain(self, chain):
-        return chain.id == self.chain_id
-
-
 def _build_single_chain_structure(
     source_path: Path,
     chain_id: str,
@@ -643,7 +619,7 @@ def _build_single_chain_structure(
     removed_count, renamed_count = _sanitize_template_chain_residues(chain)
     if removed_count or renamed_count:
         print(
-            f"⚠️ 模板链 {selected_chain} 已清理残基：移除 {removed_count} 个，标准化 {renamed_count} 个。",
+            f"[WARN] 模板链 {selected_chain} 已清理残基：移除 {removed_count} 个，标准化 {renamed_count} 个。",
             file=sys.stderr,
         )
     if len(chain) == 0:
@@ -713,9 +689,6 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
         has_model_num = "_atom_site.pdbx_PDB_model_num" in tags
 
         if not has_model_num:
-            # We need to reconstruct the atom_site loop with the required field
-            # This is complex, so let's use a different approach:
-            # Parse the text and add the missing field
             lines = cif_text.splitlines()
             result_lines = []
             in_atom_site_loop = False
@@ -726,7 +699,6 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
                 stripped = line.strip()
 
                 if stripped.startswith("loop_"):
-                    # Check if next lines contain _atom_site tags
                     j = i + 1
                     atom_site_tags = []
                     while j < len(lines) and lines[j].strip().startswith("_"):
@@ -737,20 +709,16 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
                         in_atom_site_loop = True
                         atom_site_tags_found = True
 
-                        # Find where to insert pdbx_PDB_model_num
-                        # It should be after group_PDB and before id
+                        # pdbx_PDB_model_num belongs after group_PDB and before id.
                         insert_idx = -1
                         for idx, tag in enumerate(atom_site_tags):
                             if tag == "_atom_site.group_PDB":
-                                # Insert after group_PDB
                                 insert_idx = idx + 1
                                 break
                             elif tag == "_atom_site.id" and insert_idx == -1:
-                                # Insert before id if group_PDB not found
                                 insert_idx = idx
                                 break
 
-                        # Write loop_ and modified tags
                         result_lines.append(line)
                         for k, tag in enumerate(atom_site_tags):
                             if k == insert_idx:
@@ -766,19 +734,15 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
                         continue
 
                 if in_atom_site_loop and atom_site_tags_found:
-                    # Check if we've reached the data rows
                     if not stripped.startswith("_") and stripped and not stripped.startswith("loop_") and not stripped.startswith("data_"):
-                        # This is a data row - add model_num value
                         parts = stripped.split()
                         if model_num_idx >= 0 and model_num_idx < len(parts) + 1:
-                            # Insert "1" at the model_num position
                             parts.insert(model_num_idx, "1")
                             result_lines.append(" ".join(parts))
                         else:
                             result_lines.append(line)
                         continue
                     elif stripped.startswith("_") or stripped.startswith("loop_") or stripped.startswith("data_"):
-                        # End of atom_site data
                         in_atom_site_loop = False
                         atom_site_tags_found = False
                         model_num_idx = -1
@@ -911,12 +875,12 @@ def prepare_template_payloads(
     for idx, template in enumerate(template_inputs):
         content_b64 = template.get("content_base64")
         if not content_b64:
-            print("⚠️ 模板内容为空，跳过。", file=sys.stderr)
+            print("[WARN] 模板内容为空，跳过。", file=sys.stderr)
             continue
         try:
             raw_bytes = base64.b64decode(content_b64)
         except Exception:
-            print("⚠️ 模板内容解码失败，跳过。", file=sys.stderr)
+            print("[WARN] 模板内容解码失败，跳过。", file=sys.stderr)
             continue
         text = raw_bytes.decode("utf-8", errors="replace")
         fmt = (template.get("format") or "pdb").lower()
@@ -929,7 +893,7 @@ def prepare_template_payloads(
             chain_sequences = extract_chain_sequences_from_structure(text, fmt)
             first_chain = next(iter(chain_sequences.keys()), None)
         if not chain_sequences:
-            print("⚠️ 模板未解析出蛋白质链，跳过。", file=sys.stderr)
+            print("[WARN] 模板未解析出蛋白质链，跳过。", file=sys.stderr)
             continue
         if template_chain_id not in chain_sequences:
             template_chain_id = first_chain or next(iter(chain_sequences.keys()))
@@ -940,7 +904,7 @@ def prepare_template_payloads(
         try:
             raw_path.write_bytes(raw_bytes)
         except Exception as exc:
-            print(f"⚠️ 保存模板文件失败 {raw_path}: {exc}", file=sys.stderr)
+            print(f"[WARN] 保存模板文件失败 {raw_path}: {exc}", file=sys.stderr)
             continue
 
         if fmt == "pdb":
@@ -949,7 +913,7 @@ def prepare_template_payloads(
                 _write_filtered_pdb_by_chain(text, str(template_chain_id or ""), filtered_path)
                 raw_path = filtered_path
             except Exception as exc:
-                print(f"⚠️ 过滤 PDB 模板失败 {raw_path}: {exc}", file=sys.stderr)
+                print(f"[WARN] 过滤 PDB 模板失败 {raw_path}: {exc}", file=sys.stderr)
 
         cif_stem = Path(file_name).stem or f"template_{idx}"
         cif_path = templates_dir / f"{cif_stem}.cif"
@@ -958,7 +922,7 @@ def prepare_template_payloads(
                 raw_path, str(template_chain_id or ""), cif_path
             )
         except Exception as exc:
-            print(f"⚠️ 模板转换失败，已跳过 {file_name}: {exc}", file=sys.stderr)
+            print(f"[WARN] 模板转换失败，已跳过 {file_name}: {exc}", file=sys.stderr)
             continue
         if cif_template_seq:
             template_seq = cif_template_seq
@@ -989,6 +953,10 @@ def prepare_template_payloads(
 
         # Boltz template entry
         boltz_entry: Dict[str, Any] = {"cif": str(cif_path)}
+        if fmt == "pdb":
+            # the converted mmcif renumbers residues 1..N; pocket-residue
+            # translation needs the author numbering of the original upload
+            boltz_entry["author_pdb"] = str(raw_path)
         if target_chain_ids:
             boltz_entry["chain_id"] = target_chain_ids if len(target_chain_ids) > 1 else target_chain_ids[0]
         boltz_templates.append(boltz_entry)
@@ -1056,14 +1024,14 @@ def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dic
             if candidate.exists():
                 cif_path = candidate
         if not cif_path.exists():
-            print(f"⚠️ 模板 CIF 文件不存在，跳过: {cif_path}", file=sys.stderr)
+            print(f"[WARN] 模板 CIF 文件不存在，跳过: {cif_path}", file=sys.stderr)
             continue
         suffix = cif_path.suffix.lower()
         fmt = "cif" if suffix in (".cif", ".mmcif") else "pdb"
         try:
             text = cif_path.read_text()
         except Exception as exc:
-            print(f"⚠️ 读取模板文件失败 {cif_path}: {exc}", file=sys.stderr)
+            print(f"[WARN] 读取模板文件失败 {cif_path}: {exc}", file=sys.stderr)
             continue
 
         template_chain_id = entry.get("template_id") or entry.get("template_chain_id")
@@ -1103,10 +1071,10 @@ def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dic
                 template_chain_id = resolved_chain_id
         except Exception as exc:
             if fmt in ("cif", "mmcif") and text:
-                print(f"⚠️ 转换模板失败，改用原始 mmCIF: {cif_path} ({exc})", file=sys.stderr)
+                print(f"[WARN] 转换模板失败，改用原始 mmCIF: {cif_path} ({exc})", file=sys.stderr)
                 cif_text = text
             else:
-                print(f"⚠️ 转换模板为单链 mmCIF 失败 {cif_path}: {exc}", file=sys.stderr)
+                print(f"[WARN] 转换模板为单链 mmCIF 失败 {cif_path}: {exc}", file=sys.stderr)
                 continue
 
         query_seq = chain_seq_map.get(target_chain_ids[0], "") if target_chain_ids else ""
@@ -1322,13 +1290,13 @@ def sanitize_docker_extra_args(raw_args: list) -> list:
 
         if token in ("--env", "-e"):
             if i + 1 >= len(raw_args):
-                print(f"⚠️ 忽略无效的 Docker 参数: {token} (缺少值)", file=sys.stderr)
+                print(f"[WARN] 忽略无效的 Docker 参数: {token} (缺少值)", file=sys.stderr)
                 i += 1
                 continue
 
             value = raw_args[i + 1]
             if "=" not in value:
-                print(f"⚠️ 忽略无效的 Docker 参数: {token} {value} (缺少 KEY=VALUE 形式)", file=sys.stderr)
+                print(f"[WARN] 忽略无效的 Docker 参数: {token} {value} (缺少 KEY=VALUE 形式)", file=sys.stderr)
                 i += 2
                 continue
 
@@ -1370,7 +1338,7 @@ def sanitize_a3m_content(content: str, context: str = "") -> str:
     sanitized = content.replace("\x00", "")
     if sanitized != content:
         msg_context = f" ({context})" if context else ""
-        print(f"⚠️ 检测到并移除非法字符\\x00{msg_context}", file=sys.stderr)
+        print(f"[WARN] 检测到并移除非法字符\\x00{msg_context}", file=sys.stderr)
     return sanitized
 
 
@@ -1385,7 +1353,7 @@ def sanitize_a3m_file(path: str, context: str = "") -> None:
         with open(path, "r") as f:
             content = f.read()
     except (OSError, UnicodeDecodeError) as e:
-        print(f"⚠️ 无法读取 A3M 文件进行清理: {path}, {e}", file=sys.stderr)
+        print(f"[WARN] 无法读取 A3M 文件进行清理: {path}, {e}", file=sys.stderr)
         return
 
     sanitized = sanitize_a3m_content(content, context=context or path)
@@ -1394,15 +1362,7 @@ def sanitize_a3m_file(path: str, context: str = "") -> None:
             with open(path, "w") as f:
                 f.write(sanitized)
         except OSError as e:
-            print(f"⚠️ 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
-
-
-def _build_query_only_a3m(sequence: str, header: str = "query") -> str:
-    normalized_sequence = "".join(str(sequence or "").split()).strip()
-    if not normalized_sequence:
-        return ""
-    normalized_header = str(header or "query").strip() or "query"
-    return f">{normalized_header}\n{normalized_sequence}\n"
+            print(f"[WARN] 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
 
 
 def _a3m_has_sequence_content(content: str) -> bool:
@@ -1426,7 +1386,7 @@ def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", heade
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 existing_content = f.read()
         except OSError as exc:
-            print(f"⚠️ 无法读取 A3M 文件 {path}: {exc}", file=sys.stderr)
+            print(f"[WARN] 无法读取 A3M 文件 {path}: {exc}", file=sys.stderr)
             return False
 
     sanitized = sanitize_a3m_content(existing_content, context=context or path)
@@ -1436,12 +1396,12 @@ def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", heade
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(sanitized)
             except OSError as exc:
-                print(f"⚠️ 无法写回清理后的 A3M 文件 {path}: {exc}", file=sys.stderr)
+                print(f"[WARN] 无法写回清理后的 A3M 文件 {path}: {exc}", file=sys.stderr)
                 return False
         return True
 
     msg_context = f" ({context})" if context else ""
-    print(f"❌ A3M 文件无有效序列内容: {path}{msg_context}", file=sys.stderr)
+    print(f"[ERROR] A3M 文件无有效序列内容: {path}{msg_context}", file=sys.stderr)
     return False
 
 
@@ -1509,7 +1469,7 @@ def _legacy_parse_ligand_from_text(cif_path: Path, binder_chain: str) -> Optiona
                 if chain_id == binder_chain:
                     return comp_id
     except OSError as err:
-        print(f"⚠️ 无法读取 CIF 文件 {cif_path}: {err}", file=sys.stderr)
+        print(f"[WARN] 无法读取 CIF 文件 {cif_path}: {err}", file=sys.stderr)
     return None
 
 
@@ -1526,7 +1486,7 @@ def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[st
     try:
         structure = gemmi.read_structure(str(cif_path))
     except Exception as err:
-        print(f"⚠️ 无法使用 gemmi 解析 {cif_path}: {err}", file=sys.stderr)
+        print(f"[WARN] 无法使用 gemmi 解析 {cif_path}: {err}", file=sys.stderr)
         return _legacy_parse_ligand_from_text(cif_path, binder_chain)
 
     for model in structure:
@@ -1565,7 +1525,7 @@ def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
         import gemmi  # type: ignore
     except ImportError:
         print(
-            "⚠️ 未安装 gemmi，无法清理结构原子名，直接使用原始结构。",
+            "[WARN] 未安装 gemmi，无法清理结构原子名，直接使用原始结构。",
             file=sys.stderr,
         )
         return source_path
@@ -1573,7 +1533,7 @@ def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
     try:
         structure = gemmi.read_structure(str(source_path))
     except Exception as err:
-        print(f"⚠️ 无法读取结构 {source_path} 进行清理: {err}", file=sys.stderr)
+        print(f"[WARN] 无法读取结构 {source_path} 进行清理: {err}", file=sys.stderr)
         return source_path
 
     changed = False
@@ -1599,11 +1559,11 @@ def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
         else:
             structure.write_minimal_pdb(str(sanitized_path))
     except Exception as err:
-        print(f"⚠️ 写入清理后的结构失败，回退到原始结构: {err}", file=sys.stderr)
+        print(f"[WARN] 写入清理后的结构失败，回退到原始结构: {err}", file=sys.stderr)
         return source_path
 
     print(
-        f"🧼 已生成用于亲和力预测的清理结构: {sanitized_path}",
+        f"已生成用于亲和力预测的清理结构: {sanitized_path}",
         file=sys.stderr,
     )
     return sanitized_path
@@ -1626,7 +1586,7 @@ def _stage_structure_for_affinity_container(source_path: Path, work_dir: Path) -
     staged_path = work_dir / source_path.name
     shutil.copy2(source_path, staged_path)
     print(
-        f"📦 已将亲和力评分输入暂存到 Boltz2Score 容器挂载目录: {staged_path}",
+        f"已将亲和力评分输入暂存到 Boltz2Score 容器挂载目录: {staged_path}",
         file=sys.stderr,
     )
     return staged_path
@@ -1649,7 +1609,7 @@ def _infer_affinity_chain_plan(
     try:
         structure = gemmi.read_structure(str(structure_path))
     except Exception as err:
-        print(f"⚠️ 无法解析结构以推断 affinity 链信息: {err}", file=sys.stderr)
+        print(f"[WARN] 无法解析结构以推断 affinity 链信息: {err}", file=sys.stderr)
         return None
 
     resolved_ligand_chain: Optional[str] = None
@@ -2061,7 +2021,7 @@ def _log_ipsae_ligand_annotation_skip(
     requested_text = ",".join(requested) if requested else "未声明"
     structure_text = ",".join(structure_chain_ids) if structure_chain_ids else "未解析到"
     print(
-        f"⚠️ {source} IPSAE 后处理跳过：YAML 未声明可在结构中解析的 ligand/binder 链。"
+        f"[WARN] {source} IPSAE 后处理跳过：YAML 未声明可在结构中解析的 ligand/binder 链。"
         f" requested={requested_text}; structure_chains={structure_text}。"
         "请在 yaml_file properties 中明确写入 target、ligand、binder。",
         file=sys.stderr,
@@ -2216,7 +2176,7 @@ def _run_standalone_ipsae_postprocess(
     model_entries: List[Dict[str, Any]],
 ) -> List[Tuple[Path, str]]:
     if not model_entries:
-        print(f"ℹ️ {source} 未收集到可用于 IPSAE 的模型结果，跳过后处理。", file=sys.stderr)
+        print(f"{source} 未收集到可用于 IPSAE 的模型结果，跳过后处理。", file=sys.stderr)
         return []
 
     postprocess_base.mkdir(parents=True, exist_ok=True)
@@ -2261,10 +2221,10 @@ def _run_standalone_ipsae_postprocess(
     if ipsae_log_path.exists():
         entries.append((ipsae_log_path, ipsae_log_path.name))
     if not entries:
-        print(f"⚠️ {source} IPSAE 后处理未生成可归档文件。", file=sys.stderr)
+        print(f"[WARN] {source} IPSAE 后处理未生成可归档文件。", file=sys.stderr)
         return []
 
-    print(f"✅ {source} IPSAE 后处理完成，生成 {len(entries)} 个归档文件。", file=sys.stderr)
+    print(f"{source} IPSAE 后处理完成，生成 {len(entries)} 个归档文件。", file=sys.stderr)
     return entries
 
 
@@ -2583,7 +2543,7 @@ def _run_boltz2score_affinity_postprocess(
     chain_plan = _infer_affinity_chain_plan(model_for_affinity, requested_ligand_chain)
     if not chain_plan:
         print(
-            f"⚠️ 无法从结构中解析 affinity 所需的 target/ligand 链，跳过亲和力预测: {model_for_affinity}",
+            f"[WARN] 无法从结构中解析 affinity 所需的 target/ligand 链，跳过亲和力预测: {model_for_affinity}",
             file=sys.stderr,
         )
         return []
@@ -2595,11 +2555,11 @@ def _run_boltz2score_affinity_postprocess(
         if str(chain_id).strip()
     ]
     if not target_chain_ids:
-        print("⚠️ 未识别到蛋白 target 链，跳过亲和力预测。", file=sys.stderr)
+        print("[WARN] 未识别到蛋白 target 链，跳过亲和力预测。", file=sys.stderr)
         return []
 
     print(
-        "⚙️ 开始运行 Boltz2Score 亲和力后处理，"
+        "开始运行 Boltz2Score 亲和力后处理，"
         f"target链: {','.join(target_chain_ids)}, 配体链: {resolved_ligand_chain}",
         file=sys.stderr,
     )
@@ -2632,7 +2592,7 @@ def _run_boltz2score_affinity_postprocess(
     try:
         gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
     except RuntimeError as err:
-        print(f"⚠️ 无法准备 Boltz2Score GPU 环境，跳过亲和力预测: {err}", file=sys.stderr)
+        print(f"[WARN] 无法准备 Boltz2Score GPU 环境，跳过亲和力预测: {err}", file=sys.stderr)
         return []
 
     image = str(BOLTZ2_DOCKER_IMAGE or "").strip()
@@ -2643,7 +2603,7 @@ def _run_boltz2score_affinity_postprocess(
     extra_args = sanitize_docker_extra_args(raw_extra_args)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):
         print(
-            f"⚠️ 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
+            f"[WARN] 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
             file=sys.stderr,
         )
     shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
@@ -2727,7 +2687,7 @@ def _run_boltz2score_affinity_postprocess(
 
     score_log = affinity_base / "boltz2score.log"
     print(
-        f"🧮 运行 affinity 后处理 Boltz2Score: {' '.join(shlex.quote(part) for part in docker_command)}",
+        f"运行 affinity 后处理 Boltz2Score: {' '.join(shlex.quote(part) for part in docker_command)}",
         file=sys.stderr,
     )
     with score_log.open("w", encoding="utf-8") as logf:
@@ -2741,24 +2701,42 @@ def _run_boltz2score_affinity_postprocess(
         score_return = score_proc.wait()
     if score_return != 0:
         print(
-            "⚠️ Boltz2Score affinity 后处理失败，跳过 affinity_data.json。"
+            "[WARN] Boltz2Score affinity 后处理失败，跳过 affinity_data.json。"
             f" Tail:\n{_tail_lines(score_log, 120)}",
             file=sys.stderr,
         )
+        # The requester explicitly opted into affinity — record the failure inside the output
+        # archive instead of degrading silently, so the frontend/user can see WHY affinity data
+        # is missing instead of parsing stderr.
+        try:
+            (output_dir / "affinity_error.txt").write_text(
+                f"Boltz2Score affinity postprocess failed with exit code {score_return}.\n"
+                f"Log tail:\n{_tail_lines(score_log, 120)}\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
         return []
 
     affinity_result_path = _find_first_existing(sorted(output_dir.rglob("affinity_*.json")))
     if affinity_result_path is None or not affinity_result_path.exists():
-        print("⚠️ Boltz2Score affinity 未产生 affinity JSON，跳过 affinity_data.json。", file=sys.stderr)
+        print("[WARN] Boltz2Score affinity 未产生 affinity JSON，跳过 affinity_data.json。", file=sys.stderr)
+        try:
+            (output_dir / "affinity_error.txt").write_text(
+                "Boltz2Score affinity finished but produced no affinity JSON.\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
         return []
 
     try:
         affinity_result = _load_json_object(affinity_result_path)
     except (json.JSONDecodeError, ValueError, OSError) as exc:
-        print(f"⚠️ 读取 Boltz2Score affinity JSON 失败 ({exc})，跳过 affinity_data.json。", file=sys.stderr)
+        print(f"[WARN] 读取 Boltz2Score affinity JSON 失败 ({exc})，跳过 affinity_data.json。", file=sys.stderr)
         return []
     if not affinity_result:
-        print("⚠️ Boltz2Score affinity JSON 为空，跳过 affinity_data.json。", file=sys.stderr)
+        print("[WARN] Boltz2Score affinity JSON 为空，跳过 affinity_data.json。", file=sys.stderr)
         return []
 
     affinity_result["source"] = source
@@ -2786,7 +2764,7 @@ def _run_boltz2score_affinity_postprocess(
     if score_log.exists():
         affinity_entries.append((score_log, f"{archive_prefix}/boltz2score.log"))
 
-    print("✅ 亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
+    print("亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
     return affinity_entries
 
 
@@ -2938,7 +2916,7 @@ def extract_af3_structure_from_archives(
         return None
 
     print(
-        f"🔍 从归档文件提取 AlphaFold3 结构: {selected_archive} -> {dest_path}",
+        f"从归档文件提取 AlphaFold3 结构: {selected_archive} -> {dest_path}",
         file=sys.stderr,
     )
     return dest_path
@@ -2961,12 +2939,12 @@ def run_af3_affinity_pipeline(
 
     binder_chain = affinity_config.get("binder")
     if not binder_chain:
-        print("ℹ️ 亲和力配置未提供有效的 binder，跳过亲和力预测。", file=sys.stderr)
+        print("亲和力配置未提供有效的 binder，跳过亲和力预测。", file=sys.stderr)
         return []
 
     binder_chain = str(binder_chain).strip()
     if not binder_chain:
-        print("ℹ️ 亲和力配置 binder 为空，跳过亲和力预测。", file=sys.stderr)
+        print("亲和力配置 binder 为空，跳过亲和力预测。", file=sys.stderr)
         return []
 
     ligand_entries = [
@@ -2974,7 +2952,7 @@ def run_af3_affinity_pipeline(
         if isinstance(entry, dict) and "ligand" in entry
     ]
     if not ligand_entries:
-        print("ℹ️ 未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
+        print("未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
         return []
 
     binder_chain = prep.chain_id_label_map.get(binder_chain, safe_filename(binder_chain))
@@ -2993,20 +2971,20 @@ def run_af3_affinity_pipeline(
 
     if not model_path or not model_path.exists():
         print(
-            "⚠️ 未找到 AlphaFold3 预测的结构文件，无法进行亲和力预测。",
+            "[WARN] 未找到 AlphaFold3 预测的结构文件，无法进行亲和力预测。",
             file=sys.stderr,
         )
         return []
 
     print(
-        f"🔍 使用 AlphaFold3 结构进行亲和力评估: {model_path}",
+        f"使用 AlphaFold3 结构进行亲和力评估: {model_path}",
         file=sys.stderr,
     )
 
     ligand_resname = find_ligand_resname_in_cif(model_path, binder_chain)
     if not ligand_resname:
         print(
-            f"⚠️ 未能在结构中找到链 {binder_chain} 的配体残基，跳过亲和力预测。",
+            f"[WARN] 未能在结构中找到链 {binder_chain} 的配体残基，跳过亲和力预测。",
             file=sys.stderr,
         )
         return []
@@ -3022,7 +3000,7 @@ def run_af3_affinity_pipeline(
             archive_prefix="af3",
         )
     except Exception as err:
-        print(f"⚠️ 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
+        print(f"[WARN] 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
         return []
 
 
@@ -3153,12 +3131,12 @@ def run_protenix_affinity_pipeline(
 
     binder_chain_raw = affinity_config.get("binder")
     if not binder_chain_raw:
-        print("ℹ️ 亲和力配置未提供有效的 binder，跳过亲和力预测。", file=sys.stderr)
+        print("亲和力配置未提供有效的 binder，跳过亲和力预测。", file=sys.stderr)
         return []
 
     binder_chain_raw = str(binder_chain_raw).strip()
     if not binder_chain_raw:
-        print("ℹ️ 亲和力配置 binder 为空，跳过亲和力预测。", file=sys.stderr)
+        print("亲和力配置 binder 为空，跳过亲和力预测。", file=sys.stderr)
         return []
 
     ligand_entries = [
@@ -3166,7 +3144,7 @@ def run_protenix_affinity_pipeline(
         if isinstance(entry, dict) and "ligand" in entry
     ]
     if not ligand_entries:
-        print("ℹ️ 未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
+        print("未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
         return []
 
     binder_chain = (
@@ -3178,10 +3156,10 @@ def run_protenix_affinity_pipeline(
 
     model_path = locate_protenix_structure_file(Path(protenix_output_dir), prep.input_name)
     if not model_path or not model_path.exists():
-        print("⚠️ 未找到 Protenix 预测的结构文件，无法进行亲和力预测。", file=sys.stderr)
+        print("[WARN] 未找到 Protenix 预测的结构文件，无法进行亲和力预测。", file=sys.stderr)
         return []
 
-    print(f"🔍 使用 Protenix 结构进行亲和力评估: {model_path}", file=sys.stderr)
+    print(f"使用 Protenix 结构进行亲和力评估: {model_path}", file=sys.stderr)
 
     ligand_resname = find_ligand_resname_in_cif(model_path, binder_chain)
     if not ligand_resname:
@@ -3189,7 +3167,7 @@ def run_protenix_affinity_pipeline(
         if inferred:
             inferred_chain, inferred_resname = inferred
             print(
-                f"ℹ️ 未在链 {binder_chain} 找到配体，自动回退到链 {inferred_chain} ({inferred_resname})。",
+                f"未在链 {binder_chain} 找到配体，自动回退到链 {inferred_chain} ({inferred_resname})。",
                 file=sys.stderr,
             )
             binder_chain = inferred_chain
@@ -3197,7 +3175,7 @@ def run_protenix_affinity_pipeline(
 
     if not ligand_resname:
         print(
-            f"⚠️ 未能在结构中找到链 {binder_chain} 的配体残基，跳过亲和力预测。",
+            f"[WARN] 未能在结构中找到链 {binder_chain} 的配体残基，跳过亲和力预测。",
             file=sys.stderr,
         )
         return []
@@ -3213,13 +3191,39 @@ def run_protenix_affinity_pipeline(
             archive_prefix="protenix",
         )
     except Exception as err:
-        print(f"⚠️ 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
+        print(f"[WARN] 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
         return []
 
 
 def get_sequence_hash(sequence: str) -> str:
     """计算序列的MD5哈希值作为缓存键"""
     return hashlib.md5(sequence.encode('utf-8')).hexdigest()
+
+def _merge_a3m_texts(first: str, second: str) -> str:
+    """Concatenate two a3m texts, dropping duplicate aligned sequences.
+
+    The query (first entry of `first`) is kept exactly once; the second
+    file's query row and any sequence already present are skipped."""
+    def _entries(text):
+        header, block = None, []
+        for line in text.splitlines():
+            if line.startswith(">"):
+                if header is not None:
+                    yield header, "".join(block)
+                header, block = line, []
+            elif header is not None:
+                block.append(line)
+        if header is not None:
+            yield header, "".join(block)
+
+    out, seen = [], set()
+    for header, seq in list(_entries(first)) + list(_entries(second)):
+        if seq in seen:
+            continue
+        seen.add(seq)
+        out.append((header, seq))
+    return "".join(f"{h}\n{s}\n" for h, s in out)
+
 
 def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Optional[dict]:
     """
@@ -3234,36 +3238,40 @@ def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Opt
     """
     try:
         effective_timeout = timeout if timeout and timeout > 0 else MSA_SERVER_TIMEOUT_SECONDS
-        print(f"🔍 正在从 MSA 服务器请求多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
+        print(f"正在从 MSA 服务器请求多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
         
         # 准备请求数据
         # 确保序列是 FASTA 格式
         if not sequence.startswith('>'):
             sequence = f">query\n{sequence}"
         
-        # ColabFold MSA 服务器使用 form data 格式
+        # ColabFold MSA 服务器使用 form data 格式。
+        # mode=env 启用宏基因组库搜索并在结果包里附带
+        # bfd.mgnify30.metaeuk30.smag30.a3m；只取第一个 a3m（uniref）会
+        # 丢掉整个宏基因组深度，下面下载时合并两份。
+        msa_mode = "env"
         payload = {
             "q": sequence,
-            "mode": MSA_SERVER_MODE
+            "mode": msa_mode
         }
-        print(f"📦 MSA 请求参数: mode={MSA_SERVER_MODE}", file=sys.stderr)
+        print(f"MSA 请求参数: mode={msa_mode}", file=sys.stderr)
         
         # 提交搜索任务
         submit_url = f"{MSA_SERVER_URL}/ticket/msa"
-        print(f"📤 提交 MSA 搜索任务到: {submit_url}", file=sys.stderr)
+        print(f"提交 MSA 搜索任务到: {submit_url}", file=sys.stderr)
         
         response = requests.post(submit_url, data=payload, timeout=30)
         if response.status_code != 200:
-            print(f"❌ MSA 任务提交失败: {response.status_code} - {response.text}", file=sys.stderr)
+            print(f"[ERROR] MSA 任务提交失败: {response.status_code} - {response.text}", file=sys.stderr)
             return None
         
         result = response.json()
         ticket_id = result.get("id")
         if not ticket_id:
-            print(f"❌ 未获取到有效的任务 ID: {result}", file=sys.stderr)
+            print(f"[ERROR] 未获取到有效的任务 ID: {result}", file=sys.stderr)
             return None
         
-        print(f"✅ MSA 任务已提交，任务 ID: {ticket_id}", file=sys.stderr)
+        print(f"MSA 任务已提交，任务 ID: {ticket_id}", file=sys.stderr)
         
         # 轮询结果
         result_url = f"{MSA_SERVER_URL}/ticket/{ticket_id}"
@@ -3271,23 +3279,23 @@ def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Opt
         
         while time.time() - start_time < effective_timeout:
             try:
-                print(f"⏳ 检查 MSA 任务状态...", file=sys.stderr)
+                print(f"检查 MSA 任务状态...", file=sys.stderr)
                 response = requests.get(result_url, timeout=30)
                 
                 if response.status_code == 200:
                     result_data = response.json()
                     if result_data.get("status") == "COMPLETE":
-                        print(f"✅ MSA 搜索完成，获取到结果", file=sys.stderr)
+                        print(f"MSA 搜索完成，获取到结果", file=sys.stderr)
                         download_url = result_data.get("result_url") or f"{MSA_SERVER_URL}/result/download/{ticket_id}"
-                        print(f"📥 下载 MSA 结果: {download_url}", file=sys.stderr)
+                        print(f"下载 MSA 结果: {download_url}", file=sys.stderr)
                         try:
                             download_response = requests.get(download_url, timeout=60)
                         except requests.exceptions.RequestException as download_error:
-                            print(f"❌ 下载 MSA 结果请求失败: {download_error}", file=sys.stderr)
+                            print(f"[ERROR] 下载 MSA 结果请求失败: {download_error}", file=sys.stderr)
                             return None
                         if download_response.status_code != 200:
                             print(
-                                f"❌ 下载 MSA 结果失败: {download_response.status_code} - {download_response.text}",
+                                f"[ERROR] 下载 MSA 结果失败: {download_response.status_code} - {download_response.text}",
                                 file=sys.stderr,
                             )
                             return None
@@ -3296,21 +3304,43 @@ def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Opt
                             tar_bytes = io.BytesIO(download_response.content)
                             with tarfile.open(fileobj=tar_bytes, mode="r:gz") as tar:
                                 a3m_content = None
+                                env_content = None
                                 extracted_filename = None
                                 for member in tar.getmembers():
-                                    if member.name.lower().endswith(".a3m"):
-                                        file_obj = tar.extractfile(member)
-                                        if file_obj:
-                                            a3m_content = file_obj.read().decode("utf-8")
-                                            extracted_filename = member.name
-                                            break
+                                    name_lower = member.name.lower()
+                                    if not name_lower.endswith(".a3m"):
+                                        continue
+                                    file_obj = tar.extractfile(member)
+                                    if not file_obj:
+                                        continue
+                                    if "mgnify" in name_lower:
+                                        env_content = file_obj.read().decode("utf-8")
+                                        continue
+                                    if a3m_content is None:
+                                        a3m_content = file_obj.read().decode("utf-8")
+                                        extracted_filename = member.name
+                                if a3m_content and env_content:
+                                    a3m_content = _merge_a3m_texts(
+                                        a3m_content, env_content)
+                                    extracted_filename = (
+                                        f"{extracted_filename}+mgnify(merged)")
 
                             if not a3m_content:
-                                print("❌ 未在下载的结果中找到 A3M 文件", file=sys.stderr)
+                                print("[ERROR] 未在下载的结果中找到 A3M 文件", file=sys.stderr)
                                 return None
 
-                            print(f"✅ 成功提取 A3M 文件: {extracted_filename}", file=sys.stderr)
+                            print(f"成功提取 A3M 文件: {extracted_filename}", file=sys.stderr)
                             a3m_content = sanitize_a3m_content(a3m_content, context=extracted_filename)
+                            # merged rows with mismatched match-column counts
+                            # crash downstream featurizers — validate now
+                            query_line = ""
+                            for ln in a3m_content.splitlines():
+                                if ln and not ln.startswith(">"):
+                                    query_line = ln
+                                    break
+                            query_len = sum(1 for c in query_line if not c.islower())
+                            if query_len:
+                                a3m_content = _drop_malformed_rows_len(a3m_content, query_len)
                             entries = parse_a3m_content(a3m_content)
                             return {
                                 "entries": entries,
@@ -3319,33 +3349,33 @@ def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Opt
                                 "ticket_id": ticket_id,
                             }
                         except tarfile.TarError as tar_error:
-                            print(f"❌ 解析 MSA 压缩包失败: {tar_error}", file=sys.stderr)
+                            print(f"[ERROR] 解析 MSA 压缩包失败: {tar_error}", file=sys.stderr)
                             return None
                     elif result_data.get("status") == "ERROR":
-                        print(f"❌ MSA 搜索失败: {result_data.get('error', '未知错误')}", file=sys.stderr)
+                        print(f"[ERROR] MSA 搜索失败: {result_data.get('error', '未知错误')}", file=sys.stderr)
                         print(
                             f"   ↳ 服务器返回: {json.dumps(result_data, ensure_ascii=False)}",
                             file=sys.stderr,
                         )
                         return None
                     else:
-                        print(f"⏳ MSA 任务状态: {result_data.get('status', 'PENDING')}", file=sys.stderr)
+                        print(f"MSA 任务状态: {result_data.get('status', 'PENDING')}", file=sys.stderr)
                 elif response.status_code == 404:
-                    print(f"⏳ 任务尚未完成或不存在", file=sys.stderr)
+                    print(f"任务尚未完成或不存在", file=sys.stderr)
                 else:
-                    print(f"⚠️ 检查状态时出现错误: {response.status_code}", file=sys.stderr)
+                    print(f"[WARN] 检查状态时出现错误: {response.status_code}", file=sys.stderr)
                 
             except requests.exceptions.RequestException as e:
-                print(f"⚠️ 检查状态时网络错误: {e}", file=sys.stderr)
+                print(f"[WARN] 检查状态时网络错误: {e}", file=sys.stderr)
             
             # 等待一段时间再次检查
             time.sleep(10)
         
-        print(f"⏰ MSA 搜索超时 ({effective_timeout}秒)", file=sys.stderr)
+        print(f"MSA 搜索超时 ({effective_timeout}秒)", file=sys.stderr)
         return None
         
     except Exception as e:
-        print(f"❌ MSA 服务器请求失败: {e}", file=sys.stderr)
+        print(f"[ERROR] MSA 服务器请求失败: {e}", file=sys.stderr)
         return None
 
 def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
@@ -3379,11 +3409,11 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
                 f.write(sanitized_content)
             return True
         else:
-            print(f"❌ MSA 结果格式不支持: {msa_result.keys()}", file=sys.stderr)
+            print(f"[ERROR] MSA 结果格式不支持: {msa_result.keys()}", file=sys.stderr)
             return False
             
     except Exception as e:
-        print(f"❌ 保存 MSA 结果失败: {e}", file=sys.stderr)
+        print(f"[ERROR] 保存 MSA 结果失败: {e}", file=sys.stderr)
         return False
 
 
@@ -3427,7 +3457,7 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
         是否成功生成 MSA
     """
     try:
-        print(f"🧬 开始为蛋白质序列生成 MSA", file=sys.stderr)
+        print(f"开始为蛋白质序列生成 MSA", file=sys.stderr)
 
         protein_sequences: Dict[str, str] = {}
         output_names: Dict[str, str] = {}
@@ -3452,17 +3482,17 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                 protein_sequences[chain_id] = policy.sequence
 
         if not protein_sequences:
-            print("ℹ️ 没有需要外部 MSA 的蛋白质序列，跳过 MSA 生成", file=sys.stderr)
+            print("没有需要外部 MSA 的蛋白质序列，跳过 MSA 生成", file=sys.stderr)
             return True
 
         msa_timeout = MSA_SERVER_TIMEOUT_SECONDS if MSA_SERVER_TIMEOUT_SECONDS > 0 else 600
-        print(f"🔍 找到 {len(protein_sequences)} 个蛋白质序列需要生成 MSA", file=sys.stderr)
-        print(f"⏱️ 当前 MSA 超时配置: {msa_timeout} 秒", file=sys.stderr)
+        print(f"找到 {len(protein_sequences)} 个蛋白质序列需要生成 MSA", file=sys.stderr)
+        print(f"当前 MSA 超时配置: {msa_timeout} 秒", file=sys.stderr)
 
         # 为每个蛋白质序列生成 MSA
         success_count = 0
         for protein_id, sequence in protein_sequences.items():
-            print(f"🧬 正在为蛋白质 {protein_id} 生成 MSA...", file=sys.stderr)
+            print(f"正在为蛋白质 {protein_id} 生成 MSA...", file=sys.stderr)
 
             output_path = os.path.join(temp_dir, f"{safe_filename(protein_id)}_msa.a3m")
             if os.path.exists(output_path):
@@ -3472,18 +3502,18 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                     context=f"{protein_id} 临时文件",
                     header=protein_id,
                 ):
-                    print(f"✅ 临时目录中已存在可用 MSA 文件: {output_path}", file=sys.stderr)
+                    print(f"临时目录中已存在可用 MSA 文件: {output_path}", file=sys.stderr)
                     success_count += 1
                     continue
-                print(f"⚠️ 临时目录中的 MSA 文件不可用，准备重新生成: {output_path}", file=sys.stderr)
+                print(f"[WARN] 临时目录中的 MSA 文件不可用，准备重新生成: {output_path}", file=sys.stderr)
 
-            # 检查缓存（统一使用 msa_ 前缀）
+            # 缓存键与 af3 / boltz2score / protenix2dock 共用
             sequence_hash = get_sequence_hash(sequence)
             cache_dir = MSA_CACHE_CONFIG['cache_dir']
             cached_msa_path = os.path.join(cache_dir, f"msa_{sequence_hash}.a3m")
 
             if MSA_CACHE_CONFIG['enable_cache'] and os.path.exists(cached_msa_path):
-                print(f"✅ 找到缓存的 MSA 文件: {cached_msa_path}", file=sys.stderr)
+                print(f"找到缓存的 MSA 文件: {cached_msa_path}", file=sys.stderr)
                 sanitize_a3m_file(cached_msa_path, context=f"{protein_id} 缓存原文件")
                 shutil.copy2(cached_msa_path, output_path)
                 if _ensure_nonempty_a3m_file(
@@ -3494,7 +3524,7 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                 ):
                     success_count += 1
                     continue
-                print(f"⚠️ 缓存中的 MSA 文件为空，准备重新生成: {cached_msa_path}", file=sys.stderr)
+                print(f"[WARN] 缓存中的 MSA 文件为空，准备重新生成: {cached_msa_path}", file=sys.stderr)
 
             # 从服务器请求 MSA
             msa_result = request_msa_from_server(sequence, timeout=msa_timeout)
@@ -3517,23 +3547,23 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                                 context=f"{protein_id} 缓存写入",
                                 header=protein_id,
                             )
-                            print(f"💾 MSA 结果已缓存: {cached_msa_path}", file=sys.stderr)
+                            print(f"MSA 结果已缓存: {cached_msa_path}", file=sys.stderr)
                     else:
-                        print(f"❌ 保存后的 MSA 文件仍不可用: {protein_id}", file=sys.stderr)
+                        print(f"[ERROR] 保存后的 MSA 文件仍不可用: {protein_id}", file=sys.stderr)
                 else:
-                    print(f"❌ 保存 MSA 文件失败: {protein_id}", file=sys.stderr)
+                    print(f"[ERROR] 保存 MSA 文件失败: {protein_id}", file=sys.stderr)
             else:
-                print(f"❌ 获取 MSA 失败: {protein_id}", file=sys.stderr)
+                print(f"[ERROR] 获取 MSA 失败: {protein_id}", file=sys.stderr)
 
         total_sequences = len(protein_sequences)
-        print(f"✅ MSA 生成完成: {success_count}/{total_sequences} 个成功", file=sys.stderr)
+        print(f"MSA 生成完成: {success_count}/{total_sequences} 个成功", file=sys.stderr)
         if success_count != total_sequences:
-            print("❌ MSA 生成不完整：必须为所有蛋白序列生成 MSA。", file=sys.stderr)
+            print("[ERROR] MSA 生成不完整：必须为所有蛋白序列生成 MSA。", file=sys.stderr)
             return False
         return True
 
     except Exception as e:
-        print(f"❌ 生成 MSA 时出现错误: {e}", file=sys.stderr)
+        print(f"[ERROR] 生成 MSA 时出现错误: {e}", file=sys.stderr)
         return False
 
 
@@ -3629,22 +3659,64 @@ def cache_msa_files_from_temp_dir(temp_dir: str, yaml_content: str):
         for protein_id, sequence in protein_sequences.items():
             msa_path = Path(temp_dir) / f"{safe_filename(protein_id)}_msa.a3m"
             if not msa_path.is_file():
-                print(f"❌ 蛋白质组分 {protein_id} 缺少声明的 A3M 文件", file=sys.stderr)
+                print(f"[ERROR] 蛋白质组分 {protein_id} 缺少声明的 A3M 文件", file=sys.stderr)
                 continue
             if cache_single_protein_msa(protein_id, sequence, str(msa_path), cache_dir):
                 cached_count += 1
 
-        print(f"✅ MSA缓存完成，成功缓存 {cached_count}/{len(protein_sequences)} 个蛋白质组分", file=sys.stderr)
+        print(f"MSA缓存完成，成功缓存 {cached_count}/{len(protein_sequences)} 个蛋白质组分", file=sys.stderr)
 
     except Exception as e:
-        print(f"❌ 缓存MSA文件失败: {e}", file=sys.stderr)
+        print(f"[ERROR] 缓存MSA文件失败: {e}", file=sys.stderr)
+
+def _drop_malformed_rows_len(a3m_text: str, query_len: int) -> str:
+    out, dropped, header = [], 0, None
+    for line in a3m_text.splitlines():
+        if line.startswith(">"):
+            header = line
+        elif header is not None:
+            if sum(1 for c in line if not c.islower()) == query_len:
+                out.append(header)
+                out.append(line)
+            else:
+                dropped += 1
+            header = None
+    if dropped:
+        print(f"    [MSA] 丢弃 {dropped} 行匹配列数异常的序列", file=sys.stderr)
+    return "".join(f"{l}\n" for l in out)
+
+
+def _drop_malformed_rows(a3m_text: str, protein_sequence: str) -> str:
+    """Drop a3m rows whose match-state count differs from the query length.
+
+    Cross-source merges (uniref + metagenome) can carry rows aligned to a
+    different match column count; downstream featurizers (Protenix, AF3)
+    hard-fail on them. The query row defines the expected count."""
+    query_len = len((protein_sequence or "").strip())
+    if query_len == 0:
+        return a3m_text
+    out, dropped, header = [], 0, None
+    for line in a3m_text.splitlines():
+        if line.startswith(">"):
+            header = line
+        elif header is not None:
+            if sum(1 for c in line if not c.islower()) == query_len:
+                out.append(header)
+                out.append(line)
+            else:
+                dropped += 1
+            header = None
+    if dropped:
+        print(f"    [MSA] 丢弃 {dropped} 行匹配列数异常的序列", file=sys.stderr)
+    return "".join(f"{l}\n" for l in out)
+
 
 def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: str, cache_dir: str) -> bool:
     """Validate and cache one explicitly selected A3M file."""
     try:
         source_path = Path(msa_file)
         filename = source_path.name
-        print(f"  📂 处理MSA文件: {filename}", file=sys.stderr)
+        print(f"  处理MSA文件: {filename}", file=sys.stderr)
         if source_path.suffix.lower() != '.a3m' or not source_path.is_file():
             return False
 
@@ -3656,17 +3728,20 @@ def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: s
 
         query_sequence = str(entries[0].get('sequence') or '')
         if not is_sequence_match(protein_sequence, query_sequence):
-            print(f"    ❌ A3M文件中的查询序列与蛋白质组分 {protein_id} 不匹配", file=sys.stderr)
+            print(f"    [ERROR] A3M文件中的查询序列与蛋白质组分 {protein_id} 不匹配", file=sys.stderr)
             return False
 
         seq_hash = get_sequence_hash(protein_sequence)
+        validated = _drop_malformed_rows(msa_content, protein_sequence)
         cache_path = Path(cache_dir) / f"msa_{seq_hash}.a3m"
-        cache_path.write_text(msa_content)
-        print(f"    ✅ 成功缓存蛋白质组分 {protein_id} 的MSA: {cache_path}", file=sys.stderr)
+        tmp_cache_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+        tmp_cache_path.write_text(validated)
+        os.replace(tmp_cache_path, cache_path)
+        print(f"    成功缓存蛋白质组分 {protein_id} 的MSA: {cache_path}", file=sys.stderr)
         print(f"       序列哈希: {seq_hash}", file=sys.stderr)
         return True
     except Exception as e:
-        print(f"    ❌ 处理蛋白质组分 {protein_id} 的MSA文件失败 {msa_file}: {e}", file=sys.stderr)
+        print(f"    [ERROR] 处理蛋白质组分 {protein_id} 的MSA文件失败 {msa_file}: {e}", file=sys.stderr)
         return False
 
 
@@ -3874,22 +3949,22 @@ def create_archive_with_a3m(
                     zipf.write(cache_file_path, arcname)
                     print(f"添加a3m缓存文件: {arcname}", file=sys.stderr)
                 
-                print(f"✅ 成功添加 {len(cached_a3m_files)} 个a3m缓存文件到zip归档", file=sys.stderr)
+                print(f"成功添加 {len(cached_a3m_files)} 个a3m缓存文件到zip归档", file=sys.stderr)
             else:
-                print("⚠️ 未找到相关的a3m缓存文件", file=sys.stderr)
+                print("[WARN] 未找到相关的a3m缓存文件", file=sys.stderr)
 
             if extra_files:
                 for file_path, arcname in extra_files:
                     if not file_path or not Path(file_path).exists():
-                        print(f"⚠️ 额外文件不存在，跳过添加: {file_path}", file=sys.stderr)
+                        print(f"[WARN] 额外文件不存在，跳过添加: {file_path}", file=sys.stderr)
                         continue
                     zipf.write(str(file_path), arcname)
                     print(f"添加额外文件: {arcname}", file=sys.stderr)
         
-        print(f"✅ 归档创建完成: {output_archive_path}", file=sys.stderr)
+        print(f"归档创建完成: {output_archive_path}", file=sys.stderr)
         
     except Exception as e:
-        print(f"❌ 创建包含a3m文件的归档失败: {e}", file=sys.stderr)
+        print(f"[ERROR] 创建包含a3m文件的归档失败: {e}", file=sys.stderr)
         # 如果失败，回退到原来的方式
         archive_base_name = output_archive_path.rsplit('.', 1)[0]
         created_archive_path = shutil.make_archive(
@@ -4073,7 +4148,7 @@ def _normalize_ligand_chain_collisions(yaml_content: str) -> str:
                     atom1[0] = ligand_id_mapping[chain_id]
 
     print(
-        f"ℹ️ Normalized ligand chain collisions: {ligand_id_mapping}",
+        f"Normalized ligand chain collisions: {ligand_id_mapping}",
         file=sys.stderr,
     )
     return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
@@ -4187,30 +4262,28 @@ def _load_template_residue_number_mapping(
     return "".join(sequence_chars), residue_numbers
 
 
-def _remap_constraints_by_template_alignment(yaml_content: str) -> str:
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return yaml_content
-    if not isinstance(yaml_data, dict):
-        return yaml_content
+def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[int, int]]:
+    """Author-to-sequence residue numbering per YAML chain.
 
-    constraints = yaml_data.get("constraints")
+    Returns {query_chain_id: {author_resnum: 1-based_sequence_position}} built
+    by aligning each YAML chain sequence against the uploaded template chains.
+    Chains without a resolvable template are absent from the result.
+    """
     templates = yaml_data.get("templates")
-    if not isinstance(constraints, list) or not constraints:
-        return yaml_content
     if not isinstance(templates, list) or not templates:
-        return yaml_content
+        return {}
 
     chain_seq_map = build_chain_sequence_map(yaml_data)
     if not chain_seq_map:
-        return yaml_content
+        return {}
 
     mapping_by_chain: Dict[str, Dict[int, int]] = {}
     for entry in templates:
         if not isinstance(entry, dict):
             continue
-        template_path_raw = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
+        template_path_raw = (entry.get("author_pdb")
+                             or entry.get("cif") or entry.get("mmcif")
+                             or entry.get("pdb"))
         template_path_text = str(template_path_raw or "").strip()
         if not template_path_text:
             continue
@@ -4244,6 +4317,23 @@ def _remap_constraints_by_template_alignment(yaml_content: str) -> str:
             if residue_map:
                 mapping_by_chain[query_chain] = residue_map
 
+    return mapping_by_chain
+
+
+def _remap_constraints_by_template_alignment(yaml_content: str) -> str:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return yaml_content
+    if not isinstance(yaml_data, dict):
+        return yaml_content
+
+    constraints = yaml_data.get("constraints")
+    if not isinstance(constraints, list) or not constraints:
+        return yaml_content
+
+    mapping_by_chain = _build_template_residue_maps(yaml_data)
+
     if not mapping_by_chain:
         return yaml_content
 
@@ -4275,7 +4365,7 @@ def _remap_constraints_by_template_alignment(yaml_content: str) -> str:
 
     if replaced_contacts > 0:
         print(
-            f"ℹ️ Remapped pocket contacts by template/query alignment: replaced={replaced_contacts}",
+            f"Remapped pocket contacts by template/query alignment: replaced={replaced_contacts}",
             file=sys.stderr,
         )
         yaml_data["constraints"] = constraints
@@ -4322,7 +4412,7 @@ def _print_constraint_residue_summary(yaml_content: str) -> None:
     if total_contacts <= 0:
         return
     print(
-        f"ℹ️ Constraint summary: total_contacts={total_contacts}, max_residue_by_chain={chain_max_residue}, chain_lengths={chain_lengths}",
+        f"Constraint summary: total_contacts={total_contacts}, max_residue_by_chain={chain_max_residue}, chain_lengths={chain_lengths}",
         file=sys.stderr,
     )
 
@@ -4362,7 +4452,7 @@ def create_af3_archive(
                     zipf.write(path, arcname)
                     print(f"添加AF3 MSA文件: {arcname}", file=sys.stderr)
             else:
-                print("⚠️ 未找到AF3所需的MSA文件，JSON中将留空", file=sys.stderr)
+                print("[WARN] 未找到AF3所需的MSA文件，JSON中将留空", file=sys.stderr)
 
             output_files_added = False
             if af3_output_dir and os.path.isdir(af3_output_dir):
@@ -4375,7 +4465,7 @@ def create_af3_archive(
                         print(f"添加AF3输出文件: {arcname}", file=sys.stderr)
                         output_files_added = True
             if not output_files_added:
-                print("ℹ️ AF3输出目录为空或缺失，仅保留输入文件", file=sys.stderr)
+                print("AF3输出目录为空或缺失，仅保留输入文件", file=sys.stderr)
 
             instructions = (
                 "AlphaFold3 input assets generated by V-Bio.\n"
@@ -4392,12 +4482,12 @@ def create_af3_archive(
             if extra_files:
                 for file_path, arcname in extra_files:
                     if not file_path or not Path(file_path).exists():
-                        print(f"⚠️ 额外文件不存在，跳过添加: {file_path}", file=sys.stderr)
+                        print(f"[WARN] 额外文件不存在，跳过添加: {file_path}", file=sys.stderr)
                         continue
                     zipf.write(str(file_path), arcname)
                     print(f"添加额外文件: {arcname}", file=sys.stderr)
 
-        print(f"✅ AF3 归档创建完成: {output_archive_path}", file=sys.stderr)
+        print(f"AF3 归档创建完成: {output_archive_path}", file=sys.stderr)
     except Exception as e:
         raise RuntimeError(f"Failed to create AF3 archive: {e}") from e
 
@@ -4440,7 +4530,7 @@ def create_protenix_archive(
                         print(f"添加 Protenix 输出文件: {arcname}", file=sys.stderr)
 
             if not output_files_added:
-                print("ℹ️ Protenix 输出目录为空或缺失，仅保留输入文件", file=sys.stderr)
+                print("Protenix 输出目录为空或缺失，仅保留输入文件", file=sys.stderr)
 
             readme = (
                 "Protenix input assets generated by V-Bio.\n"
@@ -4458,7 +4548,7 @@ def create_protenix_archive(
                         continue
                     zipf.write(str(file_path), arcname)
 
-        print(f"✅ Protenix 归档创建完成: {output_archive_path}", file=sys.stderr)
+        print(f"Protenix 归档创建完成: {output_archive_path}", file=sys.stderr)
     except Exception as exc:
         raise RuntimeError(f"Failed to create Protenix archive: {exc}") from exc
 
@@ -4473,7 +4563,12 @@ def run_protenix_backend(
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
     low_vram: bool = False,
 ) -> None:
-    print("🚀 Using Protenix backend", file=sys.stderr)
+    print("Using Protenix backend", file=sys.stderr)
+    # Same normalization as the boltz path: pocket contacts arrive in author
+    # numbering of the uploaded structure, while both engines number polymer
+    # residues 1..N over the input sequence.
+    yaml_content = _remap_constraints_by_template_alignment(yaml_content)
+    yaml_content = _sanitize_constraints_for_chain_lengths(yaml_content)
     prep = parse_yaml_for_protenix(yaml_content)
     protenix_json = prep.payload
     protein_entity_indices = {
@@ -4520,13 +4615,13 @@ def run_protenix_backend(
 
     if use_msa_server:
         msa_server_url = _assert_msa_server_configured("protenix")
-        print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
+        print(f"开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
         _require_complete_external_msa(yaml_content, str(protenix_work_root), "Protenix")
-        print("✅ MSA 生成成功，将用于 Protenix 输入", file=sys.stderr)
+        print("MSA 生成成功，将用于 Protenix 输入", file=sys.stderr)
         if MSA_CACHE_CONFIG["enable_cache"]:
             cache_msa_files_from_temp_dir(str(protenix_work_root), yaml_content)
     else:
-        print("ℹ️ Protenix 输入不需要外部 MSA 生成。", file=sys.stderr)
+        print("Protenix 输入不需要外部 MSA 生成。", file=sys.stderr)
 
     protenix_input_dir = str(protenix_work_root / "input")
     protenix_output_dir = str(protenix_results_root / "output")
@@ -4536,7 +4631,14 @@ def run_protenix_backend(
     os.makedirs(protenix_msa_dir, exist_ok=True)
 
     try:
-        af3_prep = parse_yaml_for_af3(yaml_content, default_jobname=prep.input_name)
+        # MSA resolution only needs sequences; strip constraints (pocket/bond)
+        # so the AF3 parser doesn't reject constraint types it doesn't model —
+        # the protenix candidate input.json keeps its own native constraint.
+        msa_yaml_data = yaml.safe_load(yaml_content) or {}
+        if isinstance(msa_yaml_data, dict):
+            msa_yaml_data.pop("constraints", None)
+        msa_yaml_content = yaml.safe_dump(msa_yaml_data, sort_keys=False)
+        af3_prep = parse_yaml_for_af3(msa_yaml_content, default_jobname=prep.input_name)
         cache_dir = MSA_CACHE_CONFIG["cache_dir"] if MSA_CACHE_CONFIG["enable_cache"] else None
         chain_msa_paths = collect_chain_msa_paths(af3_prep, str(protenix_work_root), cache_dir)
         for chain_id, path in chain_msa_paths.items():
@@ -4569,7 +4671,7 @@ def run_protenix_backend(
             f"Protenix external MSA assignment incomplete: assigned={assigned_count}, required={required_protein_entities}"
         )
     if assigned_count:
-        print(f"✅ 已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
+        print(f"已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
 
     input_json_path = os.path.join(protenix_input_dir, "input.json")
     with open(input_json_path, "w", encoding="utf-8") as f:
@@ -4678,13 +4780,13 @@ def run_protenix_backend(
         gpu_device_groups = collect_gpu_device_group_ids()
         for gid in gpu_device_groups:
             docker_command.extend(["--group-add", str(gid)])
-        print(f"🔐 Protenix 容器使用宿主机用户: {host_uid}:{host_gid}", file=sys.stderr)
+        print(f"Protenix 容器使用宿主机用户: {host_uid}:{host_gid}", file=sys.stderr)
     else:
-        print("🔐 Protenix 容器使用默认 root 用户（官方镜像推荐）", file=sys.stderr)
-    print("📦 Protenix 资源模式: host-mounted（源码 + 权重 + common）", file=sys.stderr)
-    print(f"🗂️ Protenix 缓存挂载: {protenix_common_cache_mount} -> /cache/common", file=sys.stderr)
+        print("Protenix 容器使用默认 root 用户（官方镜像推荐）", file=sys.stderr)
+    print("Protenix 资源模式: host-mounted（源码 + 权重 + common）", file=sys.stderr)
+    print(f"Protenix 缓存挂载: {protenix_common_cache_mount} -> /cache/common", file=sys.stderr)
     if protenix_common_cache_mount != protenix_common_cache_dir:
-        print(f"🧬 Protenix 原始 common cache: {protenix_common_cache_dir}", file=sys.stderr)
+        print(f"Protenix 原始 common cache: {protenix_common_cache_dir}", file=sys.stderr)
 
     docker_command.extend(extra_args)
 
@@ -4729,7 +4831,7 @@ def run_protenix_backend(
         except Exception:
             pass
 
-    print(f"🐳 运行 Protenix Docker: {display_command}", file=sys.stderr)
+    print(f"运行 Protenix Docker: {display_command}", file=sys.stderr)
     protenix_log_path = str(protenix_results_root / "protenix_docker.log")
     with open(protenix_log_path, "w", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
@@ -4805,7 +4907,7 @@ def run_protenix_backend(
         if isinstance(parsed_yaml, dict):
             yaml_data = parsed_yaml
     except Exception as yaml_err:
-        print(f"⚠️ Protenix 亲和力流程解析 YAML 失败，将跳过亲和力预测: {yaml_err}", file=sys.stderr)
+        print(f"[WARN] Protenix 亲和力流程解析 YAML 失败，将跳过亲和力预测: {yaml_err}", file=sys.stderr)
 
     extra_files: List[Tuple[Path, str]] = [(Path(protenix_log_path), "protenix/protenix_docker.log")]
     try:
@@ -4818,7 +4920,7 @@ def run_protenix_backend(
             )
         )
     except Exception as err:
-        print(f"⚠️ 运行 Protenix IPSAE 后处理失败: {err}", file=sys.stderr)
+        print(f"[WARN] 运行 Protenix IPSAE 后处理失败: {err}", file=sys.stderr)
     extra_files.extend(
         run_protenix_affinity_pipeline(
             temp_dir=temp_dir,
@@ -4880,17 +4982,7 @@ def _normalize_protenix_output_permissions(
     try:
         subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as perm_err:
-        print(f"⚠️ 无法自动修复 Protenix 输出目录权限: {perm_err}", file=sys.stderr)
-
-
-def _decode_base64_text(value: Any, field_name: str) -> str:
-    token = str(value or "").strip()
-    if not token:
-        raise ValueError(f"Missing required field: {field_name}")
-    try:
-        return base64.b64decode(token).decode("utf-8")
-    except Exception as exc:
-        raise ValueError(f"Failed to decode {field_name} as base64 UTF-8 text: {exc}") from exc
+        print(f"[WARN] 无法自动修复 Protenix 输出目录权限: {perm_err}", file=sys.stderr)
 
 
 def _safe_runtime_token(raw: Any) -> str:
@@ -4898,19 +4990,6 @@ def _safe_runtime_token(raw: Any) -> str:
     if token:
         return token[:72]
     return f"pxm_{int(time.time())}_{random.randint(1000, 9999)}"
-
-
-def _normalize_path_within_root(raw: Any, root: Path, fallback: str) -> Path:
-    raw_token = str(raw or "").strip()
-    if not raw_token:
-        return Path(fallback)
-    candidate = Path(raw_token)
-    if candidate.is_absolute():
-        try:
-            return candidate.resolve().relative_to(root.resolve())
-        except Exception:
-            return Path(fallback)
-    return candidate
 
 
 def _tail_lines(path: Path, count: int = 80) -> str:
@@ -4921,995 +5000,11 @@ def _tail_lines(path: Path, count: int = 80) -> str:
     return "\n".join(lines[-count:])
 
 
-def _find_latest_pocketxmol_experiment(outdir: Path, config_stem: str, model_stem: str) -> Optional[Path]:
-    if not outdir.exists():
-        return None
-    prefix = f"{config_stem}_{model_stem}_20"
-    candidates = [path for path in outdir.iterdir() if path.is_dir() and path.name.startswith(prefix)]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda path: path.name)
-    return candidates[-1]
-
-
-def _pick_rank1_pose_from_experiment(exp_dir: Path) -> Tuple[Path, Optional[Path], Optional[dict]]:
-    ranking_path = exp_dir / "confidence_ranking.csv"
-    ranking_row: Optional[dict] = None
-    pose_filename = ""
-    if ranking_path.exists():
-        try:
-            with ranking_path.open("r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                first_row = next(reader, None)
-                if isinstance(first_row, dict):
-                    ranking_row = first_row
-                    pose_filename = str(first_row.get("filename") or "").strip()
-        except Exception:
-            pose_filename = ""
-
-    pose_roots = [
-        exp_dir / f"{exp_dir.name}_SDF",
-        exp_dir / "SDF",
-    ]
-    for root in pose_roots:
-        if not root.exists():
-            continue
-        if pose_filename:
-            candidate = root / pose_filename
-            if candidate.exists():
-                return candidate, (ranking_path if ranking_path.exists() else None), ranking_row
-        sdf_candidates = sorted([path for path in root.glob("*.sdf") if path.is_file()])
-        if sdf_candidates:
-            return sdf_candidates[0], (ranking_path if ranking_path.exists() else None), ranking_row
-
-    raise FileNotFoundError(f"No generated SDF pose found in PocketXMol experiment: {exp_dir}")
-
-
-def _convert_target_structure_for_pocketxmol(source_path: Path, source_format: str, output_pdb: Path) -> Path:
-    fmt = str(source_format or "").strip().lower()
-    if fmt == "pdb" or source_path.suffix.lower() in {".pdb", ".ent"}:
-        if source_path.resolve() != output_pdb.resolve():
-            shutil.copyfile(source_path, output_pdb)
-        return output_pdb
-    if fmt != "cif" and source_path.suffix.lower() not in {".cif", ".mmcif"}:
-        raise ValueError(f"Unsupported reference target format for PocketXMol: {source_path.suffix}")
-    structure = gemmi.read_structure(str(source_path))
-    structure.write_pdb(str(output_pdb))
-    return output_pdb
-
-
-def _convert_reference_ligand_for_pocketxmol(source_path: Path, output_dir: Path) -> Path:
-    suffix = source_path.suffix.lower()
-    if suffix in {".sdf", ".sd", ".pdb", ".ent"}:
-        output_path = output_dir / f"reference_ligand{suffix if suffix != '.sd' else '.sdf'}"
-        if source_path.resolve() != output_path.resolve():
-            shutil.copyfile(source_path, output_path)
-        return output_path
-
-    if suffix == ".mol2":
-        mol = Chem.MolFromMol2File(str(source_path), sanitize=False, removeHs=False)
-        if mol is None:
-            raise ValueError(f"Failed to parse MOL2 ligand: {source_path}")
-        output_path = output_dir / "reference_ligand.sdf"
-        Chem.MolToMolFile(mol, str(output_path))
-        return output_path
-
-    if suffix == ".mol":
-        mol = Chem.MolFromMolFile(str(source_path), sanitize=False, removeHs=False)
-        if mol is None:
-            raise ValueError(f"Failed to parse MOL ligand: {source_path}")
-        output_path = output_dir / "reference_ligand.sdf"
-        Chem.MolToMolFile(mol, str(output_path))
-        return output_path
-
-    raise ValueError(
-        "PocketXMol requires reference ligand in SDF/PDB/MOL/MOL2 format for lead-opt docking."
-    )
-
-
 def _find_first_existing(paths: List[Path]) -> Optional[Path]:
     for path in paths:
         if path.exists():
             return path
     return None
-
-
-def _load_reference_ligand_with_coords(path: Path) -> Chem.Mol:
-    suffix = path.suffix.lower()
-    mol: Optional[Chem.Mol] = None
-    if suffix in {".sdf", ".sd", ".mol"}:
-        supplier = Chem.SDMolSupplier(str(path), removeHs=False)
-        for item in supplier:
-            if item is not None:
-                mol = item
-                break
-    elif suffix == ".mol2":
-        mol = Chem.MolFromMol2File(str(path), sanitize=True, removeHs=False)
-    elif suffix in {".pdb", ".ent"}:
-        mol = Chem.MolFromPDBFile(str(path), sanitize=True, removeHs=False)
-    if mol is None:
-        raise ValueError(f"Failed to load reference ligand with 3D coordinates: {path}")
-    mol = Chem.RemoveHs(mol)
-    if mol.GetNumConformers() <= 0:
-        raise ValueError(f"Reference ligand has no 3D conformer: {path}")
-    return mol
-
-
-def _build_3d_mol_from_smiles(smiles: str, seed: int) -> Chem.Mol:
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError(f"Invalid candidate SMILES: {smiles}")
-    mol = Chem.AddHs(mol)
-    params = AllChem.ETKDGv3()
-    params.randomSeed = int(seed)
-    status = AllChem.EmbedMolecule(mol, params)
-    if status != 0:
-        status = AllChem.EmbedMolecule(mol, useRandomCoords=True, randomSeed=int(seed))
-    if status != 0:
-        raise ValueError("Failed to embed 3D conformer for candidate SMILES.")
-    try:
-        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
-    except Exception:
-        pass
-    mol = Chem.RemoveHs(mol)
-    return mol
-
-
-def _prepare_aligned_candidate_input_ligand(
-    reference_ligand_path: Path,
-    candidate_smiles: str,
-    fixed_atom_indices: List[int],
-    output_sdf_path: Path,
-    seed: int,
-) -> Tuple[Path, List[int], Dict[int, int]]:
-    reference_mol = _load_reference_ligand_with_coords(reference_ligand_path)
-    candidate_mol = _build_3d_mol_from_smiles(candidate_smiles, seed=seed)
-    ref_conf = reference_mol.GetConformer()
-    candidate_atom_count = candidate_mol.GetNumAtoms()
-    kept_old_indices = sorted(
-        set(
-            int(i)
-            for i in fixed_atom_indices
-            if isinstance(i, int) and 0 <= int(i) < candidate_atom_count
-        )
-    )
-    if not kept_old_indices:
-        raise ValueError("No valid fixed atom indices for candidate molecule.")
-
-    remove_indices = sorted(set(range(candidate_atom_count)) - set(kept_old_indices), reverse=True)
-    rw = Chem.RWMol(candidate_mol)
-    for idx in remove_indices:
-        rw.RemoveAtom(int(idx))
-    fixed_submol = rw.GetMol()
-    try:
-        Chem.SanitizeMol(fixed_submol)
-    except Exception:
-        # Subgraph may still be usable as query even if sanitize fails.
-        pass
-    old_to_new: Dict[int, int] = {}
-    next_idx = 0
-    remove_set = set(remove_indices)
-    for old_idx in range(candidate_atom_count):
-        if old_idx in remove_set:
-            continue
-        old_to_new[old_idx] = next_idx
-        next_idx += 1
-
-    mapping_candidates: List[Dict[int, int]] = []
-
-    strict_matches = reference_mol.GetSubstructMatches(
-        fixed_submol,
-        uniquify=True,
-        useChirality=False,
-        maxMatches=256,
-    )
-    for match in strict_matches:
-        fixed_to_ref: Dict[int, int] = {}
-        valid = True
-        for old_idx in kept_old_indices:
-            new_idx = old_to_new.get(old_idx)
-            if new_idx is None or new_idx >= len(match):
-                valid = False
-                break
-            ref_idx = int(match[new_idx])
-            fixed_to_ref[int(old_idx)] = ref_idx
-        if valid and fixed_to_ref:
-            mapping_candidates.append(fixed_to_ref)
-
-    if not mapping_candidates:
-        # Relax bond-type constraints for aromatic/kekule inconsistencies in uploaded ligands.
-        try:
-            query_params = Chem.AdjustQueryParameters.NoAdjustments()
-            query_params.makeBondsGeneric = True
-            relaxed_query = Chem.AdjustQueryProperties(fixed_submol, query_params)
-            relaxed_matches = reference_mol.GetSubstructMatches(
-                relaxed_query,
-                uniquify=True,
-                useChirality=False,
-                maxMatches=256,
-            )
-            for match in relaxed_matches:
-                fixed_to_ref = {}
-                valid = True
-                for old_idx in kept_old_indices:
-                    new_idx = old_to_new.get(old_idx)
-                    if new_idx is None or new_idx >= len(match):
-                        valid = False
-                        break
-                    fixed_to_ref[int(old_idx)] = int(match[new_idx])
-                if valid and fixed_to_ref:
-                    mapping_candidates.append(fixed_to_ref)
-        except Exception:
-            pass
-
-    if not mapping_candidates:
-        # Derive a full-molecule MCS map, then project onto requested fixed atoms.
-        try:
-            mcs = rdFMCS.FindMCS(
-                [candidate_mol, reference_mol],
-                atomCompare=rdFMCS.AtomCompare.CompareElements,
-                bondCompare=rdFMCS.BondCompare.CompareAny,
-                ringMatchesRingOnly=False,
-                completeRingsOnly=False,
-                matchValences=False,
-                timeout=8,
-            )
-            if mcs and mcs.numAtoms > 0 and mcs.smartsString:
-                mcs_query = Chem.MolFromSmarts(mcs.smartsString)
-                if mcs_query is not None:
-                    cand_matches = candidate_mol.GetSubstructMatches(
-                        mcs_query,
-                        uniquify=True,
-                        useChirality=False,
-                        maxMatches=128,
-                    )
-                    ref_matches = reference_mol.GetSubstructMatches(
-                        mcs_query,
-                        uniquify=True,
-                        useChirality=False,
-                        maxMatches=128,
-                    )
-                    for cand_match in cand_matches:
-                        for ref_match in ref_matches:
-                            paired = zip(cand_match, ref_match)
-                            fixed_to_ref = {
-                                int(cand_idx): int(ref_idx)
-                                for cand_idx, ref_idx in paired
-                                if int(cand_idx) in kept_old_indices
-                            }
-                            if fixed_to_ref:
-                                mapping_candidates.append(fixed_to_ref)
-        except Exception:
-            pass
-
-    best_atom_map: List[Tuple[int, int]] = []
-    best_fixed_to_ref: Dict[int, int] = {}
-    best_key: Optional[Tuple[int, float]] = None
-    for fixed_to_ref in mapping_candidates:
-        atom_map_candidate_to_ref: List[Tuple[int, int]] = []
-        valid = True
-        for cand_idx, ref_idx in fixed_to_ref.items():
-            if cand_idx < 0 or ref_idx < 0:
-                valid = False
-                break
-            if cand_idx >= candidate_mol.GetNumAtoms() or ref_idx >= reference_mol.GetNumAtoms():
-                valid = False
-                break
-            cand_atom = candidate_mol.GetAtomWithIdx(int(cand_idx))
-            ref_atom = reference_mol.GetAtomWithIdx(int(ref_idx))
-            if int(cand_atom.GetAtomicNum()) != int(ref_atom.GetAtomicNum()):
-                valid = False
-                break
-            atom_map_candidate_to_ref.append((int(cand_idx), int(ref_idx)))
-        if not valid or not atom_map_candidate_to_ref:
-            continue
-
-        probe = Chem.Mol(candidate_mol)
-        rmsd = 9999.0
-        if len(atom_map_candidate_to_ref) >= 3:
-            try:
-                rmsd = float(rdMolAlign.AlignMol(probe, reference_mol, atomMap=atom_map_candidate_to_ref))
-            except Exception:
-                rmsd = 9999.0
-        else:
-            rmsd = 0.0
-
-        ranking_key = (len(atom_map_candidate_to_ref), -rmsd)
-        if best_key is None or ranking_key > best_key:
-            best_key = ranking_key
-            best_atom_map = atom_map_candidate_to_ref
-            best_fixed_to_ref = {int(k): int(v) for k, v in fixed_to_ref.items()}
-
-    if not best_atom_map or not best_fixed_to_ref:
-        raise ValueError(
-            "Unable to map fixed scaffold atoms onto uploaded reference ligand. "
-            "Please verify reference ligand corresponds to current Lead-Opt reference."
-        )
-    aligned = Chem.Mol(candidate_mol)
-    if len(best_atom_map) >= 3:
-        try:
-            rdMolAlign.AlignMol(aligned, reference_mol, atomMap=best_atom_map)
-        except Exception:
-            aligned = Chem.Mol(candidate_mol)
-
-    aligned_conf = aligned.GetConformer()
-    for cand_idx, ref_idx in best_fixed_to_ref.items():
-        aligned_conf.SetAtomPosition(int(cand_idx), ref_conf.GetAtomPosition(int(ref_idx)))
-
-    selected_fixed_indices = sorted(best_fixed_to_ref.keys())
-    output_sdf_path.parent.mkdir(parents=True, exist_ok=True)
-    Chem.MolToMolFile(aligned, str(output_sdf_path))
-    return output_sdf_path, selected_fixed_indices, best_fixed_to_ref
-
-
-def _load_ligand_coordinates_for_pocket_radius(ligand_path: Path) -> List[Tuple[float, float, float]]:
-    suffix = ligand_path.suffix.lower()
-    mol = None
-    if suffix in {".sdf", ".sd", ".mol"}:
-        mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
-    elif suffix == ".mol2":
-        mol = Chem.MolFromMol2File(str(ligand_path), sanitize=False, removeHs=False)
-    elif suffix in {".pdb", ".ent"}:
-        mol = Chem.MolFromPDBFile(str(ligand_path), sanitize=False, removeHs=False)
-    else:
-        raise ValueError(f"Unsupported ligand format for pocket radius estimation: {ligand_path.suffix}")
-    if mol is None:
-        raise ValueError(f"Failed to parse ligand coordinates from {ligand_path}")
-    if mol.GetNumConformers() <= 0:
-        raise ValueError(f"Ligand file has no 3D conformer: {ligand_path}")
-    conf = mol.GetConformer()
-    coords: List[Tuple[float, float, float]] = []
-    for atom_idx in range(mol.GetNumAtoms()):
-        pos = conf.GetAtomPosition(atom_idx)
-        coords.append((float(pos.x), float(pos.y), float(pos.z)))
-    if not coords:
-        raise ValueError(f"No ligand atoms found in {ligand_path}")
-    return coords
-
-
-def _estimate_pocket_radius_from_ligand_coords(coords: List[Tuple[float, float, float]]) -> int:
-    if not coords:
-        raise ValueError("Cannot estimate pocket radius from empty ligand coordinates.")
-    center_x = sum(point[0] for point in coords) / len(coords)
-    center_y = sum(point[1] for point in coords) / len(coords)
-    center_z = sum(point[2] for point in coords) / len(coords)
-    max_dist = 0.0
-    for x, y, z in coords:
-        dx = x - center_x
-        dy = y - center_y
-        dz = z - center_z
-        max_dist = max(max_dist, math.sqrt(dx * dx + dy * dy + dz * dz))
-    # Radius is ligand extent plus a fixed shell for pocket context.
-    estimated = int(math.ceil(max_dist + 6.0))
-    return max(10, min(32, estimated))
-
-
-def _split_atom_indices_into_connected_components(
-    mol: Chem.Mol,
-    atom_indices: List[int],
-) -> List[List[int]]:
-    atom_set = set(
-        int(idx)
-        for idx in atom_indices
-        if isinstance(idx, int) and 0 <= int(idx) < int(mol.GetNumAtoms())
-    )
-    if not atom_set:
-        return []
-    visited: set[int] = set()
-    components: List[List[int]] = []
-    for start_idx in sorted(atom_set):
-        if start_idx in visited:
-            continue
-        queue = [start_idx]
-        visited.add(start_idx)
-        component: List[int] = []
-        while queue:
-            current = queue.pop()
-            component.append(current)
-            atom = mol.GetAtomWithIdx(int(current))
-            for neighbor in atom.GetNeighbors():
-                nid = int(neighbor.GetIdx())
-                if nid not in atom_set or nid in visited:
-                    continue
-                visited.add(nid)
-                queue.append(nid)
-        components.append(sorted(component))
-    return components
-
-
-def _load_protein_heavy_atom_coords_from_pdb(pdb_path: Path) -> List[Tuple[float, float, float]]:
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("target", str(pdb_path))
-    coords: List[Tuple[float, float, float]] = []
-    for atom in structure.get_atoms():
-        element = str(getattr(atom, "element", "") or "").strip().upper()
-        if element == "H":
-            continue
-        xyz = atom.get_coord()
-        coords.append((float(xyz[0]), float(xyz[1]), float(xyz[2])))
-    if not coords:
-        raise ValueError(f"No heavy atoms parsed from target structure: {pdb_path}")
-    return coords
-
-
-def _reference_ligand_contact_flags_against_target(
-    reference_ligand_path: Path,
-    target_pdb_path: Path,
-    distance_cutoff: float = 4.5,
-) -> Dict[int, bool]:
-    reference_mol = _load_reference_ligand_with_coords(reference_ligand_path)
-    ref_conf = reference_mol.GetConformer()
-    protein_coords = _load_protein_heavy_atom_coords_from_pdb(target_pdb_path)
-    cutoff_sq = float(distance_cutoff) * float(distance_cutoff)
-    flags: Dict[int, bool] = {}
-    for ref_idx in range(reference_mol.GetNumAtoms()):
-        pos = ref_conf.GetAtomPosition(int(ref_idx))
-        px = float(pos.x)
-        py = float(pos.y)
-        pz = float(pos.z)
-        contact = False
-        for tx, ty, tz in protein_coords:
-            dx = px - tx
-            dy = py - ty
-            dz = pz - tz
-            if (dx * dx + dy * dy + dz * dz) <= cutoff_sq:
-                contact = True
-                break
-        flags[int(ref_idx)] = contact
-    return flags
-
-
-def _select_single_anchor_fixed_component(
-    candidate_mol: Chem.Mol,
-    fixed_atom_indices: List[int],
-    fixed_atom_mapping_to_reference: Dict[int, int],
-    reference_ligand_path: Path,
-    target_pdb_path: Path,
-) -> Tuple[List[int], Dict[str, Any]]:
-    components = _split_atom_indices_into_connected_components(candidate_mol, fixed_atom_indices)
-    if len(components) <= 1:
-        return sorted(set(int(i) for i in fixed_atom_indices)), {
-            "strategy": "single_component",
-            "component_count": len(components),
-        }
-
-    contact_flags: Dict[int, bool] = {}
-    contact_error = ""
-    try:
-        contact_flags = _reference_ligand_contact_flags_against_target(
-            reference_ligand_path=reference_ligand_path,
-            target_pdb_path=target_pdb_path,
-            distance_cutoff=4.5,
-        )
-    except Exception as exc:
-        contact_error = str(exc)
-        contact_flags = {}
-
-    scored_rows: List[Dict[str, Any]] = []
-    for component in components:
-        mapped_refs = [
-            int(fixed_atom_mapping_to_reference[idx])
-            for idx in component
-            if int(idx) in fixed_atom_mapping_to_reference
-        ]
-        contact_count = int(sum(1 for ref_idx in mapped_refs if contact_flags.get(int(ref_idx), False)))
-        scored_rows.append(
-            {
-                "candidate_atom_indices": component,
-                "reference_atom_indices": mapped_refs,
-                "contact_count": contact_count,
-                "size": len(component),
-            }
-        )
-
-    # Priority:
-    # 1) maximum contact_count with target pocket
-    # 2) fallback to maximum fragment size
-    # 3) deterministic tie-breaker by smallest atom index
-    ranked = sorted(
-        scored_rows,
-        key=lambda row: (
-            int(row.get("contact_count", 0)),
-            int(row.get("size", 0)),
-            -min(row.get("candidate_atom_indices") or [10**9]),
-        ),
-        reverse=True,
-    )
-    selected_row = ranked[0] if ranked else {"candidate_atom_indices": []}
-    selected = sorted(set(int(i) for i in selected_row.get("candidate_atom_indices") or []))
-    if not selected:
-        selected = sorted(set(int(i) for i in fixed_atom_indices))
-
-    debug_payload: Dict[str, Any] = {
-        "strategy": "single_anchor_by_pocket_contact_then_size",
-        "component_count": len(components),
-        "components": scored_rows,
-        "selected_component_candidate_atom_indices": selected,
-    }
-    if contact_error:
-        debug_payload["contact_fallback_reason"] = contact_error
-    return selected, debug_payload
-
-
-def run_pocketxmol_backend(
-    temp_dir: str,
-    output_archive_path: str,
-    pocketxmol_inputs: Dict[str, Any],
-    seed: Optional[int] = None,
-    task_id: Optional[str] = None,
-) -> None:
-    print("🚀 Using PocketXMol backend", file=sys.stderr)
-    if not isinstance(pocketxmol_inputs, dict) or not pocketxmol_inputs:
-        raise ValueError("Missing pocketxmol_inputs for PocketXMol backend.")
-
-    candidate_smiles = str(pocketxmol_inputs.get("candidate_smiles") or "").strip()
-    if not candidate_smiles:
-        raise ValueError("PocketXMol backend requires candidate_smiles.")
-
-    mol = Chem.MolFromSmiles(candidate_smiles)
-    if mol is None:
-        raise ValueError("PocketXMol backend received invalid candidate SMILES.")
-    num_atoms = int(mol.GetNumAtoms())
-    if num_atoms <= 0:
-        raise ValueError("Candidate SMILES has no atoms.")
-
-    raw_variable_indices = pocketxmol_inputs.get("variable_atom_indices")
-    if not isinstance(raw_variable_indices, list):
-        raise ValueError("PocketXMol backend requires variable_atom_indices list.")
-    variable_set: set[int] = set()
-    for item in raw_variable_indices:
-        if not isinstance(item, (int, float, str)):
-            continue
-        token = str(item).strip()
-        if not token:
-            continue
-        try:
-            parsed = int(token)
-        except Exception:
-            continue
-        variable_set.add(parsed)
-    variable_atom_indices = sorted(variable_set)
-    if not variable_atom_indices:
-        raise ValueError("PocketXMol backend requires non-empty variable_atom_indices.")
-    if variable_atom_indices[0] < 0 or variable_atom_indices[-1] >= num_atoms:
-        raise ValueError(
-            f"variable_atom_indices out of range for candidate molecule with {num_atoms} atoms."
-        )
-
-    fixed_atom_indices = [idx for idx in range(num_atoms) if idx not in set(variable_atom_indices)]
-    if not fixed_atom_indices:
-        raise ValueError("PocketXMol backend needs at least one fixed scaffold atom.")
-
-    target_filename = str(pocketxmol_inputs.get("reference_target_filename") or "reference_target.pdb").strip()
-    target_content = _decode_base64_text(
-        pocketxmol_inputs.get("reference_target_content_base64"),
-        "reference_target_content_base64",
-    )
-    target_format = str(pocketxmol_inputs.get("reference_target_format") or "cif").strip().lower()
-    if target_format not in {"cif", "pdb"}:
-        target_format = "cif"
-
-    ligand_filename = str(pocketxmol_inputs.get("reference_ligand_filename") or "reference_ligand.sdf").strip()
-    ligand_content = _decode_base64_text(
-        pocketxmol_inputs.get("reference_ligand_content_base64"),
-        "reference_ligand_content_base64",
-    )
-
-    target_chain = str(pocketxmol_inputs.get("target_chain") or "A").strip() or "A"
-    ligand_chain = str(pocketxmol_inputs.get("ligand_chain") or "L").strip() or "L"
-    runtime_seed = int(seed) if isinstance(seed, int) else 2024
-    assigned_gpu_id = str(
-        os.environ.get("BOLTZ_ASSIGNED_GPU_ID")
-        or os.environ.get("BOLTZ_POCKETXMOL_GPU_ID")
-        or ""
-    ).strip()
-    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("NVIDIA_VISIBLE_DEVICES")
-    if assigned_gpu_id:
-        if not assigned_gpu_id.isdigit():
-            raise RuntimeError(f"Invalid BOLTZ_ASSIGNED_GPU_ID value: {assigned_gpu_id}")
-        pocketxmol_gpu_arg = f"device={assigned_gpu_id}"
-        pocketxmol_visible_devices = assigned_gpu_id
-    else:
-        try:
-            pocketxmol_gpu_arg = determine_docker_gpu_arg(visible_devices)
-        except RuntimeError as gpu_err:
-            print(f"❌ 无法准备 PocketXMol GPU 环境: {gpu_err}", file=sys.stderr)
-            raise
-        pocketxmol_visible_devices = ""
-        if pocketxmol_gpu_arg.startswith("device="):
-            pocketxmol_visible_devices = pocketxmol_gpu_arg.split("=", 1)[1].strip()
-
-    configured_pocketxmol_device = str(POCKETXMOL_DEVICE or "cuda:0").strip() or "cuda:0"
-    if configured_pocketxmol_device.lower().startswith("cuda"):
-        # When nested docker is constrained to explicit GPU IDs, always use cuda:0
-        # inside the container (first visible GPU in that constrained namespace).
-        pocketxmol_device = "cuda:0"
-    else:
-        pocketxmol_device = configured_pocketxmol_device
-
-    repo_root = Path(__file__).resolve().parent
-    pocket_root = Path(POCKETXMOL_ROOT_DIR).expanduser().resolve()
-    if not pocket_root.exists():
-        raise FileNotFoundError(f"PocketXMol root not found: {pocket_root}")
-    run_script = pocket_root / "scripts" / "run_pocketxmol_docker.sh"
-    if not run_script.exists():
-        raise FileNotFoundError(f"PocketXMol docker runner not found: {run_script}")
-
-    runtime_token = _safe_runtime_token(task_id or os.environ.get("BOLTZ_TASK_ID") or "")
-    results_base_dir = Path(str(RESULTS_BASE_DIR or "/data/boltz_central_results")).expanduser()
-    pocketxmol_results_root = results_base_dir / "pocketxmol_runtime" / runtime_token
-    runtime_root = _resolve_backend_work_root(pocketxmol_results_root)
-    input_dir = runtime_root / "input"
-    config_path = runtime_root / "task.yml"
-    outdir_host = pocketxmol_results_root / "output"
-    model_rel = _normalize_path_within_root(POCKETXMOL_CONFIG_MODEL, pocket_root, "configs/sample/pxm.yml")
-    input_dir.mkdir(parents=True, exist_ok=True)
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    pocketxmol_results_root.mkdir(parents=True, exist_ok=True)
-    outdir_host.mkdir(parents=True, exist_ok=True)
-
-    target_source_suffix = Path(target_filename).suffix.lower() or (".pdb" if target_format == "pdb" else ".cif")
-    if target_source_suffix == ".mmcif":
-        target_source_suffix = ".cif"
-    target_source = input_dir / f"reference_target{target_source_suffix}"
-    target_source.write_text(target_content, encoding="utf-8")
-    target_for_pocket = input_dir / "reference_target_for_pocket.pdb"
-    _convert_target_structure_for_pocketxmol(target_source, target_format, target_for_pocket)
-
-    ligand_source_suffix = Path(ligand_filename).suffix.lower() or ".sdf"
-    if ligand_source_suffix == ".mmcif":
-        ligand_source_suffix = ".cif"
-    ligand_source = input_dir / f"reference_ligand{ligand_source_suffix}"
-    ligand_source.write_text(ligand_content, encoding="utf-8")
-    ligand_for_pocket = _convert_reference_ligand_for_pocketxmol(ligand_source, input_dir)
-    aligned_input_ligand, aligned_fixed_atom_indices, fixed_atom_mapping_to_reference = _prepare_aligned_candidate_input_ligand(
-        reference_ligand_path=ligand_for_pocket,
-        candidate_smiles=candidate_smiles,
-        fixed_atom_indices=fixed_atom_indices,
-        output_sdf_path=runtime_root / "prepared_inputs" / "candidate_aligned_input.sdf",
-        seed=runtime_seed,
-    )
-    if not aligned_fixed_atom_indices:
-        raise ValueError("PocketXMol backend could not derive fixed atoms for aligned candidate ligand input.")
-    selected_fixed_atom_indices, fix_anchor_debug = _select_single_anchor_fixed_component(
-        candidate_mol=mol,
-        fixed_atom_indices=aligned_fixed_atom_indices,
-        fixed_atom_mapping_to_reference=fixed_atom_mapping_to_reference,
-        reference_ligand_path=ligand_for_pocket,
-        target_pdb_path=target_for_pocket,
-    )
-    if not selected_fixed_atom_indices:
-        raise ValueError("PocketXMol backend failed to select fixed anchor atoms.")
-    ligand_coords = _load_ligand_coordinates_for_pocket_radius(ligand_for_pocket)
-    pocket_radius = _estimate_pocket_radius_from_ligand_coords(ligand_coords)
-
-    config_payload: Dict[str, Any] = {
-        "sample": {
-            "seed": runtime_seed,
-            "batch_size": max(1, int(POCKETXMOL_BATCH_SIZE)),
-            "num_mols": 100,
-            "save_traj_prob": 0.05,
-        },
-        "data": {
-            "protein_path": str(target_for_pocket),
-            "input_ligand": str(aligned_input_ligand),
-            "is_pep": False,
-            "pocket_args": {
-                "ref_ligand_path": str(ligand_for_pocket),
-                "radius": pocket_radius,
-            },
-        },
-        "task": {
-            "name": "dock",
-            "transform": {
-                "name": "dock",
-                "settings": {"free": 1, "flexible": 0},
-                "fix_some": {"atom": selected_fixed_atom_indices},
-            },
-        },
-        "noise": {
-            "name": "dock",
-            "num_steps": 100,
-            "prior": "from_train",
-            "pre_process": "fix_some",
-            "level": {
-                "name": "advance",
-                "min": 0.0,
-                "max": 1.0,
-                "step2level": {
-                    "scale_start": 0.99999,
-                    "scale_end": 0.00001,
-                    "width": 3,
-                },
-            },
-        },
-    }
-    pocketxmol_log = pocketxmol_results_root / "pocketxmol_docker.log"
-    cmd = [
-        "bash",
-        str(run_script),
-        "--config-task",
-        str(config_path),
-        "--config-model",
-        model_rel.as_posix(),
-        "--outdir",
-        str(outdir_host),
-        "--gpus",
-        pocketxmol_gpu_arg,
-        "--device",
-        pocketxmol_device,
-        "--batch-size",
-        str(max(1, int(POCKETXMOL_BATCH_SIZE))),
-        "--rescore",
-        "--rank-mode",
-        "tuned",
-        "--rank-output",
-        "confidence_ranking.csv",
-    ]
-    if pocketxmol_visible_devices:
-        cmd.extend(["--visible-devices", pocketxmol_visible_devices])
-    config_path.write_text(
-        yaml.safe_dump(config_payload, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
-    )
-    if pocketxmol_visible_devices:
-        print(
-            f"🎯 PocketXMol GPU 绑定: assigned={assigned_gpu_id or '(none)'} "
-            f"CUDA_VISIBLE_DEVICES={visible_devices} "
-            f"-> NVIDIA_VISIBLE_DEVICES={pocketxmol_visible_devices} device={pocketxmol_device}",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"🎯 PocketXMol GPU 绑定: assigned={assigned_gpu_id or '(none)'} "
-            f"CUDA_VISIBLE_DEVICES={visible_devices or '(unset)'} "
-            f"-> docker gpu constraint {pocketxmol_gpu_arg} device={pocketxmol_device}",
-            file=sys.stderr,
-        )
-    print(
-        f"🐳 运行 PocketXMol Docker (radius={pocket_radius}): "
-        f"{' '.join(shlex.quote(part) for part in cmd)}",
-        file=sys.stderr,
-    )
-    pocketxmol_docker_image = str(POCKETXMOL_DOCKER_IMAGE or "").strip()
-    pocketxmol_env = os.environ.copy()
-    pocketxmol_env["RESULTS_BASE_DIR"] = str(results_base_dir)
-    if pocketxmol_visible_devices:
-        pocketxmol_env["CUDA_VISIBLE_DEVICES"] = pocketxmol_visible_devices
-        pocketxmol_env["NVIDIA_VISIBLE_DEVICES"] = pocketxmol_visible_devices
-    if pocketxmol_docker_image:
-        pocketxmol_env["POCKETXMOL_DOCKER_IMAGE"] = pocketxmol_docker_image
-        print(f"🧱 PocketXMol Docker 镜像: {pocketxmol_docker_image}", file=sys.stderr)
-
-    with pocketxmol_log.open("w", encoding="utf-8") as logf:
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(pocket_root),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=pocketxmol_env,
-        )
-        return_code = process.wait()
-    if return_code != 0:
-        last_tail = _tail_lines(pocketxmol_log, 120)
-        if "Empty pocket within the radius" in last_tail:
-            raise RuntimeError(
-                "PocketXMol pocket extraction returned empty pocket. "
-                f"Estimated radius={pocket_radius}. "
-                "Please ensure uploaded target and reference ligand use the same 3D coordinate frame. "
-                f"Tail:\n{last_tail}"
-            )
-        raise RuntimeError(
-            "PocketXMol docker run failed with "
-            f"exit code {return_code}. Tail:\n{last_tail}"
-        )
-
-    exp_dir = _find_latest_pocketxmol_experiment(
-        outdir_host,
-        config_path.stem,
-        Path(model_rel).stem,
-    )
-    if exp_dir is None:
-        raise FileNotFoundError(
-            f"PocketXMol experiment directory not found under {outdir_host} for config {config_path.stem}."
-        )
-    rank1_pose_path, ranking_csv_path, ranking_row = _pick_rank1_pose_from_experiment(exp_dir)
-
-    score_out_dir = pocketxmol_results_root / "boltz2score_output"
-    score_work_dir = pocketxmol_results_root / "boltz2score_work"
-    score_out_dir.mkdir(parents=True, exist_ok=True)
-    score_work_dir.mkdir(parents=True, exist_ok=True)
-    score_log = pocketxmol_results_root / "pocketxmol_boltz2score.log"
-
-    score_cmd = [
-        "python",
-        "/workspace/vbio/capabilities/boltz2score/boltz2score.py",
-        "--output_dir",
-        str(score_out_dir),
-        "--work_dir",
-        str(score_work_dir),
-        "--accelerator",
-        "gpu",
-        "--devices",
-        "1",
-        "--num_workers",
-        "0",
-        "--mode",
-        "score",
-        "--compute_ipsae",
-        "--recycling_steps",
-        "20",
-        "--sampling_steps",
-        "1",
-        "--diffusion_samples",
-        "1",
-        "--max_parallel_samples",
-        "1",
-        "--protein_file",
-        str(target_source),
-        "--ligand_file",
-        str(rank1_pose_path),
-        "--target_chain",
-        target_chain,
-        "--ligand_chain",
-        ligand_chain,
-        "--seed",
-        str(runtime_seed),
-    ]
-    score_env = os.environ.copy()
-    score_env["NUMBA_CACHE_DIR"] = str(pocketxmol_results_root / "numba_cache")
-    score_image = (BOLTZ2_DOCKER_IMAGE or "").strip()
-    if not score_image:
-        raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法运行 PocketXMol 后处理 Boltz2Score。")
-    raw_score_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
-    score_extra_args = sanitize_docker_extra_args(raw_score_extra_args)
-    if raw_score_extra_args and len(score_extra_args) != len(raw_score_extra_args):
-        print(
-            f"⚠️ 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_score_extra_args}",
-            file=sys.stderr,
-        )
-    score_shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
-    score_runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or runtime_token).strip()
-    score_container_name = make_task_scoped_container_name(f"{score_runtime_task_id}-pxm-boltz2score")
-    score_runtime_overridden = any(token == "--runtime" for token in score_extra_args)
-    score_docker_cmd = ["docker", "run", "--rm"]
-    if score_container_name:
-        score_docker_cmd.extend(["--name", score_container_name])
-        score_docker_cmd.extend(["--label", f"boltz.task_id={score_runtime_task_id}"])
-        score_docker_cmd.extend(["--label", "boltz.runtime=boltz2score"])
-    if not score_runtime_overridden:
-        score_docker_cmd.extend(["--runtime", "nvidia"])
-    if (
-        score_shm_size
-        and not docker_args_has_flag(score_extra_args, "--shm-size")
-        and not docker_args_has_flag(score_extra_args, "--ipc")
-    ):
-        score_docker_cmd.extend(["--shm-size", score_shm_size])
-    score_docker_cmd.extend(
-        [
-            "--gpus",
-            pocketxmol_gpu_arg,
-            "--volume",
-            f"{pocketxmol_results_root}:{pocketxmol_results_root}",
-            "--volume",
-            f"{PROJECT_ROOT}:/workspace/vbio:ro",
-            "--workdir",
-            "/workspace/vbio",
-            "--env",
-            "PYTHONPATH=/workspace/vbio",
-            "--env",
-            f"BOLTZ_TASK_ID={score_runtime_task_id}",
-            "--env",
-            f"NUMBA_CACHE_DIR={score_env['NUMBA_CACHE_DIR']}",
-        ]
-    )
-    score_host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
-    score_container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
-    if score_host_cache_dir:
-        os.makedirs(score_host_cache_dir, exist_ok=True)
-        score_docker_cmd.extend(["--volume", f"{score_host_cache_dir}:{score_container_cache_dir}"])
-        score_docker_cmd.extend(["--env", f"BOLTZ_CACHE={score_container_cache_dir}"])
-    score_docker_cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
-    for gid in collect_gpu_device_group_ids():
-        score_docker_cmd.extend(["--group-add", str(gid)])
-    score_docker_cmd.extend(score_extra_args)
-    score_docker_cmd.append(score_image)
-    score_docker_cmd.extend(score_cmd)
-    print(f"🧮 运行 Boltz2Score: {' '.join(shlex.quote(part) for part in score_docker_cmd)}", file=sys.stderr)
-    with score_log.open("w", encoding="utf-8") as logf:
-        score_proc = subprocess.Popen(
-            score_docker_cmd,
-            cwd=str(repo_root),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=score_env,
-        )
-        score_return = score_proc.wait()
-    if score_return != 0:
-        raise RuntimeError(
-            "Boltz2Score failed for PocketXMol result with "
-            f"exit code {score_return}. Tail:\n{_tail_lines(score_log, 120)}"
-        )
-
-    score_structure = _find_first_existing(
-        sorted(score_out_dir.rglob("*_model_0.cif")) +
-        sorted(score_out_dir.rglob("*_model_0.mmcif")) +
-        sorted(score_out_dir.rglob("*_model_0.pdb"))
-    )
-    if score_structure is None:
-        raise FileNotFoundError(f"Boltz2Score output structure not found under {score_out_dir}")
-    score_confidence = _find_first_existing(sorted(score_out_dir.rglob("confidence_*_model_0.json")))
-    score_affinity = _find_first_existing(sorted(score_out_dir.rglob("affinity_*.json")))
-
-    exported_structure = pocketxmol_results_root / f"pocketxmol_model_0{score_structure.suffix.lower()}"
-    shutil.copyfile(score_structure, exported_structure)
-
-    if not (score_confidence and score_confidence.exists()):
-        raise FileNotFoundError(
-            f"Boltz2Score confidence JSON is required but not found under {score_out_dir}"
-        )
-    exported_confidence = pocketxmol_results_root / "confidence_pocketxmol_model_0.json"
-    confidence_payload: Dict[str, Any] = {}
-    try:
-        confidence_payload = json.loads(score_confidence.read_text(encoding="utf-8"))
-        if not isinstance(confidence_payload, dict):
-            confidence_payload = {}
-    except Exception:
-        confidence_payload = {}
-    confidence_payload["backend"] = "pocketxmol"
-    confidence_payload["candidate_smiles"] = candidate_smiles
-    confidence_payload["variable_atom_indices"] = variable_atom_indices
-    confidence_payload["fixed_atom_indices"] = selected_fixed_atom_indices
-    confidence_payload["fixed_atom_indices_all"] = aligned_fixed_atom_indices
-    confidence_payload["fixed_atom_mapping_to_reference"] = {
-        str(k): int(v) for k, v in fixed_atom_mapping_to_reference.items()
-    }
-    confidence_payload["fixed_anchor_selection"] = fix_anchor_debug
-    confidence_payload["top_pose_filename"] = rank1_pose_path.name
-    if isinstance(ranking_row, dict):
-        for key in ("ranking_score", "tuned_cfd", "cfd_traj", "cfd_pos", "cfd_node", "cfd_edge"):
-            value = ranking_row.get(key)
-            if value is None or str(value).strip() == "":
-                continue
-            try:
-                confidence_payload[f"pocketxmol_{key}"] = float(value)
-            except Exception:
-                confidence_payload[f"pocketxmol_{key}"] = value
-    exported_confidence.write_text(json.dumps(confidence_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    exported_affinity: Optional[Path] = None
-    if score_affinity and score_affinity.exists():
-        exported_affinity = pocketxmol_results_root / "affinity_pocketxmol_model_0.json"
-        shutil.copyfile(score_affinity, exported_affinity)
-
-    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        zipf.write(exported_structure, exported_structure.name)
-        zipf.write(exported_confidence, exported_confidence.name)
-        if exported_affinity:
-            zipf.write(exported_affinity, exported_affinity.name)
-
-        if pocketxmol_log.exists():
-            zipf.write(pocketxmol_log, "pocketxmol/pocketxmol_docker.log")
-        if score_log.exists():
-            zipf.write(score_log, "pocketxmol/boltz2score.log")
-        if config_path.exists():
-            zipf.write(config_path, "pocketxmol/config/task.yml")
-        if ranking_csv_path and ranking_csv_path.exists():
-            zipf.write(ranking_csv_path, "pocketxmol/output/confidence_ranking.csv")
-        gen_info_path = exp_dir / "gen_info.csv"
-        if gen_info_path.exists():
-            zipf.write(gen_info_path, "pocketxmol/output/gen_info.csv")
-        exp_log_path = exp_dir / "log.txt"
-        if exp_log_path.exists():
-            zipf.write(exp_log_path, "pocketxmol/output/log.txt")
-
-        zipf.write(target_source, f"pocketxmol/input/{target_source.name}")
-        zipf.write(ligand_source, f"pocketxmol/input/{ligand_source.name}")
-        if aligned_input_ligand.exists():
-            zipf.write(aligned_input_ligand, f"pocketxmol/input/{aligned_input_ligand.name}")
-        zipf.write(rank1_pose_path, f"pocketxmol/rank1/{rank1_pose_path.name}")
 
 
 def _read_int_option(
@@ -5923,22 +5018,6 @@ def _read_int_option(
     raw = options.get(key, default)
     try:
         parsed = int(raw)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(min_value, min(max_value, parsed))
-
-
-def _read_float_option(
-    options: Dict[str, Any],
-    key: str,
-    default: float,
-    *,
-    min_value: float,
-    max_value: float,
-) -> float:
-    raw = options.get(key, default)
-    try:
-        parsed = float(raw)
     except (TypeError, ValueError):
         parsed = default
     return max(min_value, min(max_value, parsed))
@@ -5973,7 +5052,24 @@ def _normalize_peptide_backend(raw: Any) -> str:
     token = str(raw or "").strip().lower()
     if token in {"alphafold3", "protenix"}:
         return token
+    # docking engines map onto their corresponding full predictors at the
+    # engine level (queue selection, prediction calls); the docking semantics
+    # themselves are carried by _is_docking_peptide_backend / peptideChirality
+    if token in {"protenix2dock", "protenix-2-dock"}:
+        return "protenix"
     return "boltz"
+
+
+def _is_docking_peptide_backend(raw: Any) -> bool:
+    """Structure-based peptide docking engines (boltz2dock / protenix2dock).
+
+    They map onto the corresponding full predictors at the engine level but
+    carry docking semantics: a target structure is required (uploaded, or
+    predicted first with the full engine when absent) and D-peptide design
+    (mirror workflow) is available.
+    """
+    return str(raw or "").strip().lower() in {"boltz2dock", "boltz-2-dock",
+                                              "protenix2dock", "protenix-2-dock"}
 
 
 # Bicyclic linkers and the 3 linker atoms each Cys-SG bonds to (matches the atom names in
@@ -6142,13 +5238,6 @@ PEPTIDE_PRESET_PLACEMENT_RULES = {
     "PCA": "n_term",
 }
 
-PEPTIDE_CONSERVATIVE_SUBSTITUTIONS = {
-    "A": "GSV", "R": "KHQ", "N": "DQST", "D": "EN", "C": "ST", "Q": "ENKR",
-    "E": "DQK", "G": "AS", "H": "NQKR", "I": "LVMA", "L": "IVMF", "K": "RQE",
-    "M": "ILV", "F": "YWL", "P": "AGS", "S": "ATGN", "T": "SAV", "W": "FY",
-    "Y": "FW", "V": "ILMA",
-}
-
 def _merge_peptide_preset_molecules_by_code(
     custom_molecules: List[Dict[str, str]],
     ccd_codes: Iterable[str],
@@ -6282,6 +5371,10 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
                 if aa and aa in "ARNDCQEGHILKMFPSTWYV" and aa not in natural:
                     natural.append(aa)
                 continue
+            if kind == "preset" and code not in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES:
+                raise ValueError(
+                    f"未知的非天然氨基酸预设 {code}：可选 "
+                    + ", ".join(sorted(PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES)) + "。")
             if kind in {"preset", "custom"}:
                 base = ""
                 if kind == "custom":
@@ -6297,8 +5390,8 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
                         placement = PEPTIDE_PRESET_PLACEMENT_RULES.get(code, "any")
                     else:
                         # A C-terminal amidated custom residue has no leaving atom on its backbone C,
-                        # so it can only sit at the C-terminus; _sample_peptide_modifications enforces
-                        # placement == "c_term" -> last position only.
+                        # so it can only sit at the C-terminus: placement == "c_term"
+                        # (the PeptideLM decoder enforces last-position only).
                         custom_def = custom_by_code.get(code, {})
                         placement = "c_term" if bool(custom_def.get("cTerminalAmidated") or False) else "any"
                     unnatural.append({
@@ -6371,132 +5464,6 @@ def _peptide_allowed_residues(natural_pool: List[str], design_mode: str) -> List
             f"{design_mode} mode. Select at least one compatible natural residue."
         )
     return residues
-
-
-def _random_peptide_sequence_from_pool(
-    binder_length: int,
-    natural_pool: List[str],
-    *,
-    design_mode: str,
-    sequence_mask: str,
-    design_params: Dict[str, Any],
-) -> str:
-    allowed = _peptide_allowed_residues(natural_pool, design_mode)
-    seq = [random.choice(allowed) for _ in range(max(1, binder_length))]
-    candidate = _apply_sequence_mask("".join(seq), sequence_mask)
-    if design_mode == "bicyclic":
-        candidate = _enforce_bicyclic_cys_layout(
-            candidate,
-            binder_length=binder_length,
-            cys_positions=design_params.get("cys_positions"),
-        )
-    return candidate
-
-
-def _peptide_protected_indices(sequence: str, sequence_mask: str, design_mode: str) -> set[int]:
-    protected: set[int] = set()
-    if sequence_mask:
-        for idx, mask_char in enumerate(sequence_mask[: len(sequence)]):
-            if mask_char != "X":
-                protected.add(idx)
-    if design_mode == "bicyclic":
-        protected.update(idx for idx, aa in enumerate(sequence) if aa == "C")
-    return protected
-
-
-def _weighted_choice(items: List[Any], weights: List[float]) -> Any:
-    if not items:
-        raise ValueError("Cannot choose from an empty list.")
-    total = sum(max(0.0, float(weight)) for weight in weights)
-    if total <= 0:
-        return random.choice(items)
-    threshold = random.random() * total
-    running = 0.0
-    for item, weight in zip(items, weights):
-        running += max(0.0, float(weight))
-        if threshold <= running:
-            return item
-    return items[-1]
-
-
-def _mutate_peptide_sequence_from_pool(
-    sequence: str,
-    *,
-    natural_pool: List[str],
-    mutation_rate: float,
-    plddt_scores: Optional[List[float]],
-    design_mode: str,
-    sequence_mask: str,
-    design_params: Dict[str, Any],
-    strategy: str,
-    elite_sequences: Optional[List[str]] = None,
-) -> str:
-    seq = list(str(sequence or "").upper())
-    if not seq:
-        return _random_peptide_sequence_from_pool(1, natural_pool, design_mode=design_mode, sequence_mask=sequence_mask, design_params=design_params)
-    allowed = _peptide_allowed_residues(natural_pool, design_mode)
-    protected = _peptide_protected_indices("".join(seq), sequence_mask, design_mode)
-    available = [idx for idx in range(len(seq)) if idx not in protected]
-    if not available:
-        return "".join(seq)
-
-    base_mutations = max(1, int(round(len(available) * max(0.01, min(1.0, float(mutation_rate))))))
-    if strategy == "explore":
-        num_mutations = max(base_mutations, min(len(available), max(2, len(available) // 3)))
-    elif strategy == "diversify":
-        num_mutations = max(base_mutations, min(len(available), max(2, len(available) // 4)))
-    elif strategy == "crossover":
-        num_mutations = max(1, min(len(available), base_mutations // 2 or 1))
-    else:
-        num_mutations = min(len(available), base_mutations)
-
-    if strategy == "crossover" and elite_sequences:
-        mate = random.choice([item for item in elite_sequences if len(item) == len(seq)] or elite_sequences)
-        if len(mate) == len(seq):
-            cut = random.randint(1, len(seq) - 1) if len(seq) > 1 else 1
-            seq = seq[:cut] + list(mate[cut:])
-
-    if strategy == "diversify" and elite_sequences:
-        similarity_counts: List[Tuple[int, int]] = []
-        for idx in available:
-            count = sum(1 for elite_seq in elite_sequences if len(elite_seq) > idx and elite_seq[idx] == seq[idx])
-            similarity_counts.append((idx, count))
-        similarity_counts.sort(key=lambda item: item[1], reverse=True)
-        positions = [idx for idx, _ in similarity_counts[:num_mutations]]
-    elif plddt_scores and len(plddt_scores) == len(seq) and strategy != "explore":
-        weights = [max(1.0, 100.0 - float(plddt_scores[idx])) for idx in available]
-        positions = []
-        remaining = list(available)
-        remaining_weights = list(weights)
-        for _ in range(min(num_mutations, len(remaining))):
-            chosen = _weighted_choice(remaining, remaining_weights)
-            chosen_idx = remaining.index(chosen)
-            positions.append(chosen)
-            remaining.pop(chosen_idx)
-            remaining_weights.pop(chosen_idx)
-    else:
-        positions = random.sample(available, k=min(num_mutations, len(available)))
-
-    for pos in positions:
-        current = seq[pos]
-        candidates = [aa for aa in allowed if aa != current]
-        if not candidates:
-            continue
-        if strategy == "explore":
-            seq[pos] = random.choice(candidates)
-            continue
-        conservative = set(PEPTIDE_CONSERVATIVE_SUBSTITUTIONS.get(current, ""))
-        weights = [2.5 if aa in conservative else 1.0 for aa in candidates]
-        seq[pos] = _weighted_choice(candidates, weights)
-
-    candidate = _apply_sequence_mask("".join(seq), sequence_mask)
-    if design_mode == "bicyclic":
-        candidate = _enforce_bicyclic_cys_layout(
-            candidate,
-            binder_length=len(seq),
-            cys_positions=design_params.get("cys_positions"),
-        )
-    return candidate
 
 
 def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -6665,113 +5632,9 @@ def _select_nsga2_peptide_elites(results: List[Dict[str, Any]], elite_size: int)
                 break
     return selected[:elite_size]
 
-def _sample_peptide_modifications(
-    sequence: str,
-    unnatural_pool: List[Dict[str, str]],
-    min_count: int,
-    max_count: int,
-    *,
-    protected_positions: Optional[Iterable[int]] = None,
-) -> Tuple[str, List[Dict[str, Any]]]:
-    if not unnatural_pool or max_count <= 0 or not sequence:
-        return sequence, []
-    length = len(sequence)
-    protected = {
-        int(pos)
-        for pos in (protected_positions or [])
-        if isinstance(pos, int) and 0 <= int(pos) < length
-    }
-
-    def _mods_allowed_at_position(idx: int) -> List[Dict[str, str]]:
-        allowed: List[Dict[str, str]] = []
-        for mod in unnatural_pool:
-            ccd = str(mod.get("ccd") or "").strip().upper()
-            if not ccd:
-                continue
-            placement = str(mod.get("placement") or PEPTIDE_PRESET_PLACEMENT_RULES.get(ccd, "any")).strip().lower()
-            if placement == "n_term" and idx != 0:
-                continue
-            if placement == "c_term" and idx != length - 1:
-                continue
-            if placement == "terminal" and idx not in {0, length - 1}:
-                continue
-            allowed.append(mod)
-        return allowed
-
-    eligible_positions = [
-        idx
-        for idx in range(length)
-        if idx not in protected and _mods_allowed_at_position(idx)
-    ]
-    requested_min = max(0, min(length, int(min_count)))
-    requested_max = max(requested_min, min(length, int(max_count)))
-    if requested_min > len(eligible_positions):
-        placement_limited = sorted(
-            f"{str(item.get('ccd') or '').strip().upper()}:{str(item.get('placement') or PEPTIDE_PRESET_PLACEMENT_RULES.get(str(item.get('ccd') or '').strip().upper(), 'any')).strip().lower()}"
-            for item in unnatural_pool
-            if str(item.get("placement") or PEPTIDE_PRESET_PLACEMENT_RULES.get(str(item.get("ccd") or "").strip().upper(), "any")).strip().lower() != "any"
-        )
-        special_note = f" Placement-limited residues selected: {', '.join(placement_limited)}." if placement_limited else ""
-        raise ValueError(
-            "Peptide non-natural residue constraints cannot be satisfied with the selected candidate pool "
-            f"and protected positions: requested at least {requested_min}, but only {len(eligible_positions)} positions are eligible."
-            f"{special_note}"
-        )
-    effective_max = min(requested_max, len(eligible_positions))
-    count = random.randint(requested_min, effective_max) if effective_max > requested_min else requested_min
-    if count <= 0:
-        return sequence, []
-    positions = random.sample(eligible_positions, k=count)
-    seq = list(sequence)
-    modifications: List[Dict[str, Any]] = []
-    for idx in positions:
-        mod = random.choice(_mods_allowed_at_position(idx))
-        base = str(mod.get("base") or seq[idx] or "A").upper()[:1]
-        if base not in "ARNDCQEGHILKMFPSTWYV":
-            base = "A"
-        seq[idx] = base
-        modifications.append({"position": idx + 1, "ccd": mod["ccd"], "baseResidue": base})
-    modifications.sort(key=lambda item: int(item.get("position") or 0))
-    return "".join(seq), modifications
 
 def _peptide_candidate_key(sequence: str, modifications: List[Dict[str, Any]]) -> str:
     return f"{sequence}|{json.dumps(modifications, sort_keys=True, separators=(',', ':'))}"
-
-
-def _enforce_bicyclic_cys_layout(
-    sequence: str,
-    *,
-    binder_length: int,
-    cys_positions: Optional[List[int]],
-) -> str:
-    amino_no_c = "ARNDQEGHILKMFPSTWYV"
-    seq = list(sequence[:binder_length].upper())
-    if len(seq) < binder_length:
-        seq.extend(random.choice(amino_no_c) for _ in range(binder_length - len(seq)))
-
-    for idx in range(binder_length):
-        if seq[idx] == "C":
-            seq[idx] = random.choice(amino_no_c)
-
-    terminal_idx = binder_length - 1
-    seq[terminal_idx] = "C"
-
-    chosen_positions: List[int] = []
-    if cys_positions:
-        for pos in cys_positions:
-            if isinstance(pos, int) and 0 <= pos < terminal_idx and pos not in chosen_positions:
-                chosen_positions.append(pos)
-            if len(chosen_positions) == 2:
-                break
-    if len(chosen_positions) < 2:
-        pool = [idx for idx in range(terminal_idx) if idx not in chosen_positions]
-        if len(pool) >= (2 - len(chosen_positions)):
-            chosen_positions.extend(random.sample(pool, k=2 - len(chosen_positions)))
-
-    for pos in chosen_positions[:2]:
-        seq[pos] = "C"
-
-    return "".join(seq)
 
 
 def _normalize_initial_sequence(
@@ -6779,13 +5642,14 @@ def _normalize_initial_sequence(
     *,
     binder_length: int,
     sequence_mask: str,
-    default_sequence: str,
 ) -> str:
+    """User seed sequence for generation 1: A-Z only, padded/truncated to the
+    binder length, then overlaid with the fixed-position mask."""
     cleaned = "".join(ch for ch in str(raw_sequence or "").upper() if "A" <= ch <= "Z")
     if not cleaned:
-        cleaned = default_sequence
+        raise ValueError("peptideUseInitialSequence 已启用，但 peptideInitialSequence 为空。")
     if len(cleaned) < binder_length:
-        cleaned = cleaned + default_sequence[len(cleaned):binder_length]
+        cleaned = (cleaned + "G" * binder_length)[:binder_length]
     else:
         cleaned = cleaned[:binder_length]
     return _apply_sequence_mask(cleaned, sequence_mask)
@@ -6802,8 +5666,21 @@ def _build_peptide_candidate_yaml(
     linker_atom_map: Dict[str, List[str]],
     modifications: Optional[List[Dict[str, Any]]] = None,
     backend: str = "boltz",
+    cys_positions: Optional[List[int]] = None,
+    pocket_constraint: Optional[Dict[str, Any]] = None,
+    binder_only: bool = False,
 ) -> str:
     yaml_data = copy.deepcopy(base_yaml_data)
+    if binder_only:
+        # D-route conformer prediction: the isolated candidate only (ring,
+        # linker and NCAA topology included) — the receptor never enters a
+        # de novo complex prediction. Constraints reference the target chain
+        # by name and would crash the isolated prediction.
+        yaml_data["sequences"] = []
+        yaml_data.pop("templates", None)
+        yaml_data.pop("properties", None)
+        yaml_data.pop("constraints", None)
+        pocket_constraint = None
     if not isinstance(yaml_data.get("sequences"), list):
         yaml_data["sequences"] = []
 
@@ -6851,9 +5728,25 @@ def _build_peptide_candidate_yaml(
 
     yaml_data["sequences"].append(binder_entry)
 
+    if pocket_constraint:
+        constraints = yaml_data.get("constraints")
+        if not isinstance(constraints, list):
+            constraints = []
+        constraints.append({"pocket": pocket_constraint})
+        yaml_data["constraints"] = constraints
+
     if design_mode == "bicyclic":
         yaml_data["sequences"].append({"ligand": {"id": linker_chain_id, "ccd": linker_ccd}})
-        cys_indices = [idx for idx, aa in enumerate(binder_sequence) if aa == "C"]
+        if cys_positions:
+            cys_indices = sorted({int(p) for p in cys_positions})
+            for cys_idx in cys_indices:
+                if not 0 <= cys_idx < len(binder_sequence) or binder_sequence[cys_idx] != "C":
+                    raise ValueError(
+                        f"Bicyclic anchor position {cys_idx + 1} does not hold a cysteine "
+                        f"in binder sequence {binder_sequence}."
+                    )
+        else:
+            cys_indices = [idx for idx, aa in enumerate(binder_sequence) if aa == "C"]
         if len(cys_indices) != 3:
             raise ValueError(f"Bicyclic peptide requires exactly 3 cysteine residues, got {len(cys_indices)}.")
         linker_atoms = linker_atom_map.get(linker_ccd) or []
@@ -6992,7 +5885,7 @@ def _write_peptide_progress(progress_path: Optional[str], payload: Dict[str, Any
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         path_obj.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        print(f"⚠️ Failed to write peptide progress file: {exc}", file=sys.stderr)
+        print(f"[WARN] Failed to write peptide progress file: {exc}", file=sys.stderr)
 
 
 def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
@@ -7120,12 +6013,10 @@ def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, p
 def _execute_peptide_generation_jobs(
     jobs: List[Dict[str, Any]],
     parallel_workers: int,
-    worker_entry_path: str,
     queue_name: str,
     parent_task_id: str,
     progress_callback: Optional[Callable[[Dict[str, int]], None]] = None,
 ) -> List[Dict[str, Any]]:
-    del worker_entry_path  # Worker logic now runs in dedicated Celery subtask.
     if not jobs:
         return []
     worker_count = max(1, int(parallel_workers or 1))
@@ -7224,6 +6115,1656 @@ def _execute_peptide_generation_jobs(
     return completed_jobs
 
 
+def _dpeptide_target_sequence(base_yaml_data: Dict[str, Any], target_chain_id: str) -> str:
+    """First (or requested) protein chain sequence from the design YAML."""
+    target = (target_chain_id or "").strip()
+    fallback = ""
+    for block in base_yaml_data.get("sequences", []) or []:
+        if not isinstance(block, dict):
+            continue
+        protein = block.get("protein")
+        if isinstance(protein, dict) and protein.get("sequence"):
+            if target and block.get("id") != target:
+                fallback = fallback or str(protein["sequence"])
+                continue
+            return str(protein["sequence"])
+    if fallback:
+        return fallback
+    raise ValueError("D-peptide design requires a protein target chain in the input YAML.")
+
+
+def _dpeptide_uploaded_target_structure(predict_args: Dict[str, Any], out_dir: Path) -> Optional[Path]:
+    """First uploaded template structure file, decoded to disk.
+
+    Deterministic pick: entries arrive in upload order; extras are ignored
+    (logged once at the call site via returned metadata when needed)."""
+    for entry in predict_args.get("template_inputs") or []:
+        content = entry.get("content_base64") if isinstance(entry, dict) else None
+        if not content:
+            continue
+        import base64 as _b64
+
+        raw = _b64.b64decode(content)
+        fmt = str(entry.get("format") or "pdb").lower()
+        suffix = ".cif" if fmt in ("cif", "mmcif") else ".pdb"
+        path = Path(out_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        path = path / f"uploaded_target{suffix}"
+        path.write_bytes(raw)
+        return path
+    return None
+
+
+def _dpeptide_predict_target_structure(
+    sequence: str,
+    backend: str,
+    work_dir: Path,
+    seed: int,
+) -> Path:
+    """Full-structure prediction of the L-target when nothing was uploaded.
+
+    boltz2dock -> boltz2 predict (local venv); protenix2dock -> Protenix
+    docker.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fasta = work_dir / "target.fasta"
+    fasta.write_text(f">target\n{sequence}\n")
+
+    # Single-engine policy (no cross-engine fallback): boltz2dock uses the
+    # Boltz-2 predictor; protenix2dock uses Protenix. A failure surfaces so it
+    # can be fixed at the root.
+    # Orchestrator containers carry neither the Boltz2Score venv nor a docker
+    # CLI — the target-structure prediction is dispatched as a standard
+    # predict_task to the selected engine's GPU queue, and its result archive
+    # lands on the shared results volume where this loop reads it back.
+    from backend.core.celery_app import celery_app as _celery
+
+    yaml_min = (
+        "sequences:\n"
+        f"  - protein:\n"
+        f"      id: A\n"
+        f"      sequence: {sequence}\n"
+    )
+    import uuid as _uuid
+
+    sub_task_id = f"dpeptide-target-{_uuid.uuid4().hex[:12]}"
+    worker_temp = Path(os.environ.get(
+        "WORKER_SHARED_TMP_ROOT",
+        str(Path(os.environ.get("RESULTS_BASE_DIR", "/data/boltz_central_results")) / "_runtime_tmp"),
+    ))
+    task_temp_dir = worker_temp / f"predict_{sub_task_id}"
+    out_pred = task_temp_dir / "predict_out"
+    task_temp_dir.mkdir(parents=True, exist_ok=True)
+
+    from backend.worker.tasks import predict_task  # same entry used by routes
+
+    async_result = predict_task.apply_async(
+        kwargs={"predict_args": {
+            "yaml_content": yaml_min,
+            "backend": ("boltz" if str(backend).startswith("boltz") else "protenix"),
+            "model_name": None,
+            "seed": int(seed),
+            # MSA is mandatory: it locks the target fold (MSA-watershed result)
+            "use_msa_server": True,
+            "workflow": "prediction",
+        }},
+        queue=("cap.boltz2.default" if str(backend).startswith("boltz") else "cap.protenix.default"),
+    )
+
+    engine_cap = "protenix" if str(backend).startswith("protenix") else "boltz2"
+    results_base = Path(os.environ.get(
+        "RESULTS_BASE_DIR",
+        str(getattr(__import__("backend.core.config", fromlist=["RESULTS_BASE_DIR"]),
+                    "RESULTS_BASE_DIR", "/data/boltz_central_results")),
+    ))
+    result_roots = [
+        results_base / engine_cap / sub_task_id,
+        task_temp_dir,
+    ]
+
+    deadline = time.time() + 3600
+    cif_pat = re.compile(r".*model.*\.cif$|.*_sample_.*\.cif$", re.IGNORECASE)
+
+    def _extract_first_cif(zip_path: Path) -> Optional[Path]:
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                names = [n for n in zf.namelist()
+                         if n.endswith(".cif") and not n.startswith("__MACOSX")
+                         and cif_pat.search(n)]
+                if not names:
+                    return None
+                best_name = max(names, key=lambda n: zf.getinfo(n).date_time)
+                dest = work_dir / "target_from_zip.cif"
+                with zf.open(best_name) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                return dest
+        except (zipfile.BadZipFile, OSError):
+            return None
+
+    while True:
+        cifs: list[Path] = []
+        for root in result_roots:
+            if root.exists():
+                cifs.extend(c for c in root.rglob("*.cif") if cif_pat.search(str(c)))
+        if cifs:
+            return max(cifs, key=lambda p: p.stat().st_mtime)
+        # Results may exist only as the uploaded zip (<celery_id>_results.zip);
+        # read straight from it instead of waiting on an unpack step.
+        engine_cap = "protenix" if str(backend).startswith("protenix") else "boltz2"
+        zip_candidate = results_base / engine_cap / f"{async_result.id}_results.zip"
+        if zip_candidate.is_file():
+            extracted = _extract_first_cif(zip_candidate)
+            if extracted is not None:
+                return extracted
+        if async_result.state in ("FAILURE", "REVOKED"):
+            raise RuntimeError(f"D-peptide target structure prediction failed: {async_result.state}")
+        if time.time() > deadline:
+            raise RuntimeError(
+                f"D-peptide target structure prediction timed out; roots={result_roots}"
+            )
+        time.sleep(6)
+
+
+def _read_pocket_radius_option(options: Dict[str, Any]) -> float:
+    """User pocket radius in A: peptidePocketBox clamped to 4-40, default 6.
+
+    The interactive box picker derives it from the box size (max edge / 2),
+    mirroring boltz2score's box->radius conversion."""
+    raw = options.get("peptidePocketBox")
+    if raw is None:
+        raw = options.get("peptide_pocket_box")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 6.0
+    if not math.isfinite(value):
+        value = 6.0
+    return max(4.0, min(40.0, value))
+
+
+def _plain_positions_as_author_contacts(
+    base_yaml_data: Dict[str, Any],
+    positions: List[int],
+    target_chain_id: Optional[str],
+) -> List[Tuple[str, int]]:
+    """Sequence positions on the target chain as pocket contacts.
+
+    Sequence-only targets cannot be picked in 3D, so the user names residues
+    directly on the target sequence ("25,26,27"). With an uploaded template the
+    YAML pocket constraint keeps author numbering, so translate sequence ->
+    author through the template map (the engines remap author -> sequence back
+    at backend entry). Without a template the YAML numbers polymer residues
+    1..N and the positions pass through unchanged.
+    """
+    chain_lengths = _extract_protein_chain_lengths_from_yaml(base_yaml_data)
+    if not chain_lengths:
+        raise ValueError(
+            "Pocket positions need a protein target chain in the YAML."
+        )
+    resolved_chain = str(target_chain_id or "").strip()
+    if resolved_chain not in chain_lengths:
+        resolved_chain = next(iter(chain_lengths.keys()), "")
+    if not resolved_chain:
+        raise ValueError("Pocket positions could not resolve a target chain.")
+    chain_length = int(chain_lengths.get(resolved_chain) or 0)
+    out_of_range = sorted({p for p in positions if not 1 <= p <= chain_length})
+    if out_of_range:
+        raise ValueError(
+            "Pocket positions outside the target sequence (1-"
+            f"{chain_length}): {', '.join(str(p) for p in out_of_range)}"
+        )
+    mapping_by_chain = _build_template_residue_maps(base_yaml_data)
+    residue_map = None
+    for key in (resolved_chain, str(resolved_chain).upper(), str(resolved_chain).lower()):
+        residue_map = mapping_by_chain.get(key)
+        if residue_map:
+            break
+    if not residue_map:
+        return [(resolved_chain, int(p)) for p in positions]
+    sequence_to_author = {int(seq): int(auth) for auth, seq in residue_map.items()}
+    contacts: List[Tuple[str, int]] = []
+    unresolved: List[str] = []
+    for position in positions:
+        author_num = sequence_to_author.get(int(position))
+        if author_num is None:
+            unresolved.append(str(position))
+        else:
+            contacts.append((resolved_chain, author_num))
+    if unresolved:
+        raise ValueError(
+            "Pocket positions not present in the uploaded target structure: "
+            f"{', '.join(unresolved)}"
+        )
+    return contacts
+
+
+def _pocket_contacts_for_staged_space(
+    base_yaml_data: Dict[str, Any],
+    options: Dict[str, Any],
+    target_chain_id: Optional[str] = None,
+) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
+    """Pocket specification in both numbering systems.
+
+    Returns (author_contacts, sequence_contacts). Native predictions (and the
+    staged PDBs derived from them) number polymer residues 1..N over the input
+    sequence, while the user picks residues by author numbering of the
+    uploaded structure ("A:152"). Sequence-only targets instead name positions
+    directly on the target chain sequence ("25,26,27") — without a template
+    those positions already are the author numbering. The YAML pocket
+    constraint keeps author numbering (backends translate it via template
+    alignment); the staged-space placement consumes the sequence-numbered
+    list. An explicit pocket center selects the surrounding template residues
+    within the peptidePocketBox radius. Every requested residue must resolve
+    — a silently wrong pocket site is worse than a loud failure.
+    """
+    raw_residues = str(options.get("peptidePocketResidues") or options.get("peptide_pocket_residues") or "").strip()
+    author_contacts: List[Tuple[str, int]] = []
+    plain_positions: List[int] = []
+    if raw_residues:
+        for token in raw_residues.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if ":" in token:
+                chain_part, num_part = token.split(":", 1)
+                try:
+                    author_contacts.append((chain_part.strip(), int(num_part)))
+                except ValueError:
+                    continue
+            else:
+                try:
+                    position = int(token)
+                except ValueError:
+                    continue
+                if position > 0:
+                    plain_positions.append(position)
+
+    raw_center = str(options.get("peptidePocketCenter") or options.get("peptide_pocket_center") or "").strip()
+    if not author_contacts and not plain_positions and raw_center:
+        parts = [float(x) for x in raw_center.split(",")]
+        if len(parts) != 3:
+            raise ValueError("peptidePocketCenter must be 'x,y,z'")
+        center = np.asarray(parts)
+        radius = _read_pocket_radius_option(options)
+        author_contacts = _template_residues_near_center(base_yaml_data, center, radius=radius)
+        if not author_contacts:
+            raise ValueError(
+                f"peptidePocketCenter {raw_center!r} selects no template "
+                f"residues within {radius:g} A; check the coordinates "
+                "against the uploaded structure."
+            )
+
+    chain_prefixed_given = bool(author_contacts)
+    if plain_positions:
+        author_contacts = author_contacts + _plain_positions_as_author_contacts(
+            base_yaml_data, plain_positions, target_chain_id
+        )
+
+    if not author_contacts:
+        return [], []
+
+    mapping_by_chain = _build_template_residue_maps(base_yaml_data)
+    if not mapping_by_chain:
+        if not chain_prefixed_given:
+            # Sequence-only target: the YAML numbers polymer residues 1..N
+            # over the input sequence, so the plain positions already are the
+            # author numbering (a center input is impossible here — it raised
+            # above when it selected no template residues).
+            return list(author_contacts), list(author_contacts)
+        raise ValueError(
+            "Pocket residues need the uploaded target structure: the YAML "
+            "carries no readable templates to translate author numbering to "
+            "sequence positions."
+        )
+
+    translated: List[Tuple[str, int]] = []
+    unresolved: List[str] = []
+    for chain_raw, resnum in author_contacts:
+        residue_map = None
+        for key in (chain_raw, str(chain_raw).upper(), str(chain_raw).lower()):
+            residue_map = mapping_by_chain.get(key)
+            if residue_map:
+                break
+        seq_pos = residue_map.get(int(resnum)) if residue_map else None
+        if seq_pos is None:
+            unresolved.append(f"{chain_raw}:{resnum}")
+        else:
+            translated.append((chain_raw, int(seq_pos)))
+    if unresolved:
+        raise ValueError(
+            "Pocket residues not found in the uploaded target structure: "
+            f"{', '.join(unresolved)}"
+        )
+    return author_contacts, translated
+
+
+def _template_residues_near_center(
+    base_yaml_data: Dict[str, Any],
+    center: np.ndarray,
+    radius: float,
+) -> List[Tuple[str, int]]:
+    """Author-numbered residues whose CA falls within radius of center, read
+    from the uploaded templates (the same source the numbering map uses)."""
+    templates = base_yaml_data.get("templates")
+    if not isinstance(templates, list):
+        return []
+    hits: List[Tuple[str, int]] = []
+    for entry in templates:
+        if not isinstance(entry, dict):
+            continue
+        path_text = str(entry.get("cif") or entry.get("mmcif") or entry.get("pdb") or "").strip()
+        path = Path(path_text) if path_text else None
+        if path is None or not path.exists():
+            continue
+        chain_ids = _normalize_chain_id_list(entry.get("chain_id") or entry.get("target_chain_ids"))
+        if not chain_ids:
+            continue
+        try:
+            structure = gemmi.read_structure(str(path))
+            structure.setup_entities()
+        except Exception:
+            continue
+        model = structure[0] if len(structure) else None
+        if model is None:
+            continue
+        for chain in model:
+            for residue in chain:
+                if residue.het_flag != "A":
+                    continue
+                atom = residue.find_atom("CA", "*")
+                if atom is None:
+                    continue
+                if np.linalg.norm(np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - center) > radius:
+                    continue
+                for query_chain in chain_ids:
+                    hits.append((query_chain, int(residue.seqid.num)))
+    return hits
+
+
+def _dpeptide_pick_clash_free_placement(
+    free_coords: np.ndarray,
+    receptor_coords: np.ndarray,
+    pocket_center: np.ndarray,
+    seed: int,
+    pocket_coords: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rigid placement search for a staged binder around the user pocket.
+
+    Deterministic rotations x radial offsets along the outward normal, scored
+    by (clashes <2.2 A against the receptor, floating penalty, centroid gap).
+    The floating penalty drives the nearest free atom to a ~3.2-4.2 A contact
+    with the pocket residues' own atoms — the pocket residue list may be a
+    consecutive stretch whose CA centroid sits inside the protein, so the
+    binder must hug the residue patch from the surface, not park its centroid
+    on the CA mean (which buries it, measured 0.3 A min distance) nor float
+    12 A off (which leaves the refine's 8 A pocket conditioning nothing to
+    anchor to)."""
+    rng = np.random.default_rng(seed)
+    free_c = free_coords.mean(axis=0)
+    rec_c = receptor_coords.mean(axis=0)
+    outward = pocket_center - rec_c
+    norm = np.linalg.norm(outward)
+    outward = outward / norm if norm > 1e-6 else np.array([0.0, 0.0, 1.0])
+    anchor_coords = pocket_coords if pocket_coords is not None else receptor_coords
+    best = None
+    for trial in range(24):
+        axis = rng.normal(size=3)
+        axis /= np.linalg.norm(axis)
+        theta = 2 * np.pi * trial / 24
+        K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+        R = np.eye(3) + math.sin(theta) * K + (1 - math.cos(theta)) * (K @ K)
+        for offset in (0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0):
+            shift_v = pocket_center + outward * offset - R @ free_c
+            moved = (R @ free_coords.T).T + shift_v
+            d2 = ((moved[:, None, :] - receptor_coords[None, :, :]) ** 2).sum(-1)
+            clashes = int((d2 < 4.84).sum())  # <2.2 A
+            # NOTE on the placement scoring policy: a penetration-first term
+            # (surface poses, min distance >= 2.8 A) eliminates residual
+            # clashes but forces a large folding excursion in the refine;
+            # candidate-dependent projections then deform the peptide (CA-CB
+            # up to 32 A, integrity-gate-rejected) or it drifts off-pocket.
+            # Clash-count-first with the ~3.7 A contact target is the
+            # validated combination (full e2e SUCCESS with all gates green).
+            anchor_d = np.sqrt(((moved[:, None, :] - anchor_coords[None, :, :]) ** 2).sum(-1)).min()
+            floating = abs(float(anchor_d) - 3.7)
+            centroid_gap = float(np.linalg.norm(moved.mean(axis=0) - pocket_center))
+            key = (clashes, round(floating, 1), centroid_gap)
+            if best is None or key < best[0]:
+                best = (key, R, shift_v)
+    # callers apply v = R @ (x - c) + c + shift, so return the shift in that
+    # convention (the scored pose used R @ x + shift_v; see emit sites)
+    R_best, s_scored = best[1], best[2]
+    shift_emit = s_scored - free_c + R_best @ free_c
+    return R_best, shift_emit
+
+
+def _dpeptide_kabsch_rotation(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Rotation R (about the centroids) minimizing |R @ (mobile-m) - (target-t)|."""
+    m = mobile.mean(axis=0)
+    t = target.mean(axis=0)
+    H = (mobile - m).T @ (target - t)
+    U, _, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    return Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+
+
+def _dpeptide_align_product_to_input(product_pdb: Path,
+                                     input_structure_path: Path) -> float:
+    """Restore the flipped product into the USER's coordinate frame.
+
+    The modeling complex lived in the engine's output frame: even with a
+    fixed receptor the writer applies its own global placement. Mapping back
+    is the second half of the exact display transform
+    upload -> x->-x -> [engine] -> -x->x -> rigid-align-to-upload; because
+    the receptor was held fixed during sampling, shape identity holds and
+    any residual offset is reported as telemetry. Returns RMSD."""
+    def _ca_in_chain_order(path: Path, min_protein_chains: int):
+        """CA coordinates of the largest protein chain, in chain order.
+
+        Engine writers renumber residues and rename chains, so neither resnum
+        nor chain name is a stable key — the mirrored target and the user
+        upload are the SAME sequence in the SAME order by construction."""
+        st = gemmi.read_structure(str(path))
+        st.setup_entities()
+        chains = sorted(
+            (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+            key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+        if len(chains) < min_protein_chains:
+            raise RuntimeError(
+                f"D-peptide align: expected >={min_protein_chains} protein "
+                f"chains in {path}")
+        pts = []
+        for residue in chains[0]:
+            ca = residue.find_atom("CA", "*")
+            if ca is not None:
+                pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
+        return st, np.stack(pts)
+
+    # the PRODUCT carries target + peptide (>=2 protein chains); the user's
+    # REFERENCE is the bare target upload and is valid with a single chain.
+    product_st, P = _ca_in_chain_order(product_pdb, min_protein_chains=2)
+    _, Q = _ca_in_chain_order(input_structure_path, min_protein_chains=1)
+    if len(P) != len(Q):
+        # telemetry, not a crash: count mismatch means the predicted receptor
+        # and the upload differ in resolved residues; align on the common
+        # prefix (both are the same sequence in the same order by
+        # construction, so a prefix alignment is exact for the shared part)
+        n = min(len(P), len(Q))
+        print(
+            f"[d-peptide] product frame: CA count product={len(P)} vs "
+            f"input={len(Q)}; aligning on the first {n}.",
+            file=sys.stderr,
+        )
+        P, Q = P[:n], Q[:n]
+    pc, qc = P.mean(axis=0), Q.mean(axis=0)
+
+    # Frame restoration needs the full rigid transform: the receptor was
+    # pinned to the staged pose, but the staged pose itself is the mirror of
+    # a de novo prediction that lives in an arbitrary SE(3) frame. The
+    # rotation below is computed from matched CA pairs of the SAME receptor,
+    # so it is an exact transform (not a least-squares fit between different
+    # atoms) and carries the peptide rigidly. Residual RMSD measures the
+    # de novo backbone accuracy vs the upload.
+    rot = _dpeptide_kabsch_rotation(P, Q)
+
+    shift = qc - rot @ pc
+    for model in product_st:
+        for chain in model:
+            for residue in chain:
+                for atom in residue:
+                    v = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
+                    nv = rot @ v + shift
+                    atom.pos = gemmi.Position(*nv)
+    product_st.setup_entities()
+    product_st.write_pdb(str(product_pdb))
+
+    moved = (rot @ P.T).T + shift
+    return float(np.sqrt(((moved - Q) ** 2).sum(axis=1).mean()))
+
+
+def _relax_staged_bicyclic_strain(
+    staged_path: Path,
+    *,
+    bond_specs: List[Tuple[int, str]],
+    linker_code: str,
+    bond_lo: float = 1.75,
+    bond_hi: float = 2.05,
+    cb_lo: float = 1.35,
+    cb_hi: float = 1.75,
+    sweeps: int = 120,
+) -> Dict[str, Any]:
+    """In-place strain relief of a staged bicyclic complex (host, numpy).
+
+    Damped-Jacobi projection of every Cys-SG <-> linker-anchor pair into
+    [bond_lo, bond_hi] (moving only the two bonded atoms, per-atom step
+    capped), the same projection for the linker's anchor-neighbor bonds to
+    their CCD lengths, and a CA-CB bond renormalization of the peptide. The
+    refine must start from a chemically sound ring, not a strained one.
+    """
+    st = gemmi.read_structure(str(staged_path))
+    st.setup_entities()
+    polymer = sorted(
+        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
+    )
+    pep = polymer[1] if len(polymer) > 1 else None
+    linker_res = None
+    for chain in st[0]:
+        if linker_res is None and any(r.name == linker_code for r in chain):
+            for r in chain:
+                if r.name == linker_code:
+                    linker_res = r
+                    break
+    if pep is None or linker_res is None:
+        return {"relaxed": False, "reason": "peptide or linker not found"}
+
+    pairs = []
+    for cys_num, anchor_name in bond_specs:
+        sg = pep[cys_num - 1].find_atom("SG", "*") if cys_num - 1 < len(pep) else None
+        an = linker_res.find_atom(anchor_name, "*")
+        if sg is None or an is None:
+            return {"relaxed": False, "reason": f"missing atom for {cys_num}:{anchor_name}"}
+        pairs.append((cys_num, anchor_name))
+
+    def _residue_atoms(residue):
+        return [a for a in residue if a.element != gemmi.Element("H")]
+
+    # Linker anchor-neighbor bonds: the rigid placement puts the anchor atoms
+    # on the SG triangle while their bonded neighbors keep the CCD geometry,
+    # stretching the internal bonds. Relax them to their CCD lengths,
+    # splitting the correction between the two bonded atoms.
+    neighbor_bonds = []
+    try:
+        mols = _linker_ccd_mols([linker_code])
+        mol = mols[linker_code]
+        conf = mol.GetConformer(getattr(mol, "ref_conf_id", 0) or 0)
+        anchor_names = {a for _, a in bond_specs}
+        for bond in mol.GetBonds():
+            ia, ib = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            names = [mol.GetAtomWithIdx(ia).GetProp("name"),
+                     mol.GetAtomWithIdx(ib).GetProp("name")]
+            if names[0] in anchor_names or names[1] in anchor_names:
+                if not (names[0] in anchor_names and names[1] in anchor_names):
+                    target = float(np.linalg.norm(
+                        np.array([conf.GetAtomPosition(ia).x,
+                                  conf.GetAtomPosition(ia).y,
+                                  conf.GetAtomPosition(ia).z])
+                        - np.array([conf.GetAtomPosition(ib).x,
+                                    conf.GetAtomPosition(ib).y,
+                                    conf.GetAtomPosition(ib).z])))
+                    neighbor_bonds.append((names[0], names[1], target))
+    except Exception as exc:
+        print(f"[d-peptide] linker neighbor bonds unavailable: {exc}",
+              file=sys.stderr)
+
+    # iterative bond relaxation: the SG absorbs the correction, its residue
+    # follows at 30% (flexible propagation so the residue is not torn apart),
+    # the linker anchor keeps its CCD geometry
+    for _ in range(sweeps):
+        max_v = 0.0
+        for (cys_num, anchor_name) in pairs:
+            residue = pep[cys_num - 1]
+            sg = residue.find_atom("SG", "*")
+            an = linker_res.find_atom(anchor_name, "*")
+            p_sg = np.array([sg.pos.x, sg.pos.y, sg.pos.z])
+            p_an = np.array([an.pos.x, an.pos.y, an.pos.z])
+            d = float(np.linalg.norm(p_an - p_sg))
+            target = float(np.clip(d, bond_lo, bond_hi))
+            viol = d - target
+            max_v = max(max_v, abs(viol))
+            if abs(viol) < 1e-3:
+                continue
+            u = (p_an - p_sg) / max(d, 1e-8)
+            # moving SG by t along u changes the distance to |d - t|;
+            # t = viol = d - target lands exactly on the band edge
+            step = np.clip(viol * u, -0.5, 0.5)
+            sg.pos = gemmi.Position(*(p_sg + step))
+            for atom in _residue_atoms(residue):
+                if atom.name == "SG":
+                    continue
+                v = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
+                atom.pos = gemmi.Position(*(v + 0.3 * step))
+        # linker anchor-neighbor bonds: split the correction between the two
+        # bonded atoms (the anchor may move a little; its target is
+        # re-projected by the SG relaxation on the next sweep)
+        for (na, nb, target) in neighbor_bonds:
+            aa = linker_res.find_atom(na, "*")
+            ab = linker_res.find_atom(nb, "*")
+            if aa is None or ab is None:
+                continue
+            pa = np.array([aa.pos.x, aa.pos.y, aa.pos.z])
+            pb = np.array([ab.pos.x, ab.pos.y, ab.pos.z])
+            d = float(np.linalg.norm(pb - pa))
+            viol = d - target
+            max_v = max(max_v, abs(viol))
+            if abs(viol) < 1e-3:
+                continue
+            u = (pb - pa) / max(d, 1e-8)
+            half = np.clip(0.5 * viol, -0.25, 0.25)
+            aa.pos = gemmi.Position(*(pa + half * u))
+            ab.pos = gemmi.Position(*(pb - half * u))
+        if max_v < 5e-3:
+            break
+
+    # CA-CB renormalization across the peptide
+    fixed_cb = 0
+    for residue in pep:
+        ca = residue.find_atom("CA", "*")
+        cb = residue.find_atom("CB", "*")
+        if ca is None or cb is None:
+            continue
+        v_ca = np.array([ca.pos.x, ca.pos.y, ca.pos.z])
+        v_cb = np.array([cb.pos.x, cb.pos.y, cb.pos.z])
+        d = float(np.linalg.norm(v_cb - v_ca))
+        if cb_lo <= d <= cb_hi:
+            continue
+        direction = (v_cb - v_ca) / max(d, 1e-8)
+        cb.pos = gemmi.Position(*(v_ca + 1.53 * direction))
+        fixed_cb += 1
+
+    st.setup_entities()
+    st.write_pdb(str(staged_path))
+    # gemmi's write_pdb drops connections — restore the covalent topology
+    _append_staged_bicyclic_links(
+        staged_path,
+        [n - 1 for (n, _) in bond_specs],
+        linker_code,
+    )
+    final = []
+    for (cys_num, anchor_name) in pairs:
+        sg = pep[cys_num - 1].find_atom("SG", "*")
+        an = linker_res.find_atom(anchor_name, "*")
+        final.append(float(np.linalg.norm(
+            np.array([an.pos.x, an.pos.y, an.pos.z])
+            - np.array([sg.pos.x, sg.pos.y, sg.pos.z]))))
+    return {"relaxed": True, "final_bonds": [round(x, 3) for x in final],
+            "cb_renormalized": fixed_cb}
+
+
+def _dpeptide_prepare_reference_peptide(
+    predict_args: Dict[str, Any],
+    out_dir: Path,
+    binder_length: int,
+) -> Optional[Path]:
+    """Uploaded initial peptide structure, mirrored into design space.
+
+    The upload must share the coordinate frame of the uploaded target
+    structure (a reference complex). Returns the mirrored peptide PDB with
+    residues renumbered 1..N, or None when nothing was uploaded. Used only
+    for chirality='d' mode-anchored design."""
+    entry = predict_args.get("peptide_structure_input")
+    if not isinstance(entry, dict) or not entry.get("content_base64"):
+        return None
+    import base64 as _b64
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fmt = str(entry.get("format") or "pdb").lower()
+    suffix = ".cif" if fmt in ("cif", "mmcif") else ".pdb"
+    path = out_dir / f"reference_peptide{suffix}"
+    path.write_bytes(_b64.b64decode(entry["content_base64"]))
+
+    st = gemmi.read_structure(str(path))
+    st.setup_entities()
+    st.remove_alternative_conformations()
+    chain_id = str(entry.get("chain_id") or "").strip()
+    pep_chain = None
+    if chain_id:
+        for chain in st[0]:
+            if chain.name == chain_id:
+                pep_chain = chain
+                break
+    if pep_chain is None:
+        # largest polymer chain that is plausibly peptide-sized
+        polys = sorted(
+            (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+            key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+        if polys:
+            pep_chain = polys[0]
+    if pep_chain is None:
+        raise ValueError(
+            "上传的初始肽结构中没有可识别的肽链（需要至少 3 个残基的多聚链）。")
+    residues = [r for r in pep_chain if r.het_flag != "H"]
+    if not (3 <= len(residues) <= 120):
+        raise ValueError(
+            f"初始肽结构残基数 {len(residues)} 超出设计范围（3-120）。")
+
+    out = gemmi.Structure()
+    model = gemmi.Model("1")
+    chain = gemmi.Chain("B")
+    for ordinal, residue in enumerate(residues, start=1):
+        clone = residue.clone()
+        clone.seqid = gemmi.SeqId(ordinal, " ")
+        for atom in clone:
+            atom.pos = gemmi.Position(-atom.pos.x, atom.pos.y, atom.pos.z)
+        chain.add_residue(clone)
+    model.add_chain(chain)
+    out.add_model(model)
+    out.setup_entities()
+    out_path = out_dir / "d_reference_peptide.pdb"
+    lines = []
+    serial = 1
+    for residue in out[0][0]:
+        for atom in residue:
+            if atom.element.name == "H":
+                continue
+            name_field = f" {atom.name:<3}" if len(atom.name) < 4 else atom.name
+            lines.append(
+                f"ATOM  {serial:5d} {name_field} {residue.name:>3} B{int(residue.seqid.num):4d}    "
+                f"{atom.pos.x:8.3f}{atom.pos.y:8.3f}{atom.pos.z:8.3f}"
+                f"{1.00:6.2f}{0.00:6.2f}          {atom.element.name:>2}"
+            )
+            serial += 1
+    out_path.write_text("\n".join(lines) + "\nEND\n", encoding="utf-8")
+    print(f"[d-peptide] reference peptide mirrored for mode-anchored design "
+          f"({len(residues)} residues)", file=sys.stderr)
+    return out_path
+
+
+def _dpeptide_prepare_d_target(
+    predict_args: Dict[str, Any],
+    base_yaml_data: Dict[str, Any],
+    options: Dict[str, Any],
+    target_chain_id: str,
+    backend: str,
+    work_root: Path,
+    seed: int,
+) -> Tuple[Path, Path]:
+    """D-route target preparation: uploaded structure (or single-chain
+    prediction) plus its x->-x mirror.
+
+    Returns (l_target_path, d_target_path). The mirror is written with
+    polymer residues renumbered 1..N in sequence order so pocket contacts in
+    sequence numbering resolve on it."""
+    work_root.mkdir(parents=True, exist_ok=True)
+    uploaded = _dpeptide_uploaded_target_structure(predict_args, work_root)
+    if uploaded is None:
+        # yaml-referenced template paths are a valid upload form too
+        for entry in base_yaml_data.get("templates") or []:
+            for key in ("author_pdb", "pdb", "cif", "mmcif"):
+                cand = str((entry or {}).get(key) or "").strip()
+                if cand and os.path.isfile(cand):
+                    uploaded = Path(cand)
+                    break
+            if uploaded is not None:
+                break
+    if uploaded is None:
+        target_seq = _dpeptide_target_sequence(base_yaml_data, target_chain_id)
+        uploaded = _dpeptide_predict_target_structure(
+            target_seq, backend, work_root / "target_pred", seed)
+    target_l = gemmi.read_structure(str(uploaded))
+    target_l.setup_entities()
+    target_l.remove_alternative_conformations()
+
+    target_d = gemmi.read_structure(str(uploaded))
+    target_d.setup_entities()
+    peplm_root = str(_resolve_capability_dir("peptide_lm"))
+    if peplm_root not in sys.path:
+        sys.path.insert(0, peplm_root)
+    from peplm.dpeptide import mirror as dpm
+    dpm.mirror_structure(target_d)
+
+    d_path = work_root / "d_target.pdb"
+    lines: List[str] = []
+    serial = 1
+    poly = None
+    for chain in target_d[0]:
+        if sum(1 for r in chain if r.het_flag != "H") >= 3:
+            poly = chain
+            break
+    if poly is None:
+        raise RuntimeError("D-target preparation: no polymer chain found")
+    for ordinal, residue in enumerate(poly, start=1):
+        for atom in residue:
+            if atom.element.name == "H":
+                continue
+            name_field = f" {atom.name:<3}" if len(atom.name) < 4 else atom.name
+            lines.append(
+                f"ATOM  {serial:5d} {name_field} {residue.name:>3} A{ordinal:4d}    "
+                f"{atom.pos.x:8.3f}{atom.pos.y:8.3f}{atom.pos.z:8.3f}"
+                f"{1.00:6.2f}{0.00:6.2f}          {atom.element.name:>2}"
+            )
+            serial += 1
+    d_path.write_text("\n".join(lines) + "\nEND\n", encoding="utf-8")
+    return Path(uploaded), d_path
+
+
+def _dpeptide_stage_conformer_in_pocket(
+    d_target_path: Path,
+    conformer_path: Path,
+    out_path: Path,
+    pocket_sequence_contacts: List[Tuple[str, int]],
+    seed: int,
+    linker_ccd: str = "SEZ",
+    reference_peptide_path: Optional[Path] = None,
+) -> Path:
+    """Stage the design-space complex: pinned D-target + placed L-conformer.
+
+    The conformer (isolated candidate prediction, already L, ring and NCAA
+    topology included) is rigidly placed against the mirrored D-target either
+    anchored to the uploaded reference peptide pose (mode A: CA-trace
+    alignment over the residue-index window, keeping the known binding mode)
+    or with the clash-free surface search at the user pocket; a bicyclic
+    linker chain rides along from the conformer."""
+    target = gemmi.read_structure(str(d_target_path))
+    target.setup_entities()
+    conf = gemmi.read_structure(str(conformer_path))
+    conf.setup_entities()
+    conf.remove_alternative_conformations()
+
+    rec_chain = target[0][0]
+    rec_atoms = np.array([
+        [a.pos.x, a.pos.y, a.pos.z] for r in rec_chain for a in r
+        if a.element != gemmi.Element("H")])
+    pocket_pts, pocket_atoms = [], []
+    wanted = {n for _, n in pocket_sequence_contacts}
+    for ordinal, residue in enumerate(rec_chain, start=1):
+        if ordinal not in wanted:
+            continue
+        ca = residue.find_atom("CA", "*")
+        if ca is not None:
+            pocket_pts.append([ca.pos.x, ca.pos.y, ca.pos.z])
+        for atom in residue:
+            if atom.element != gemmi.Element("H"):
+                pocket_atoms.append([atom.pos.x, atom.pos.y, atom.pos.z])
+    if pocket_sequence_contacts and not pocket_pts:
+        raise ValueError(
+            "pocket residues "
+            + ",".join(f"{c}:{n}" for c, n in pocket_sequence_contacts)
+            + " not found on the mirrored D-target")
+    center = (np.mean(np.array(pocket_pts), axis=0) if pocket_pts
+              else rec_atoms.mean(axis=0))
+
+    conf_chains = sorted(
+        (c for c in conf[0]
+         if any(a.element != gemmi.Element("H") for r in c for a in r)),
+        key=lambda c: -sum(1 for r in c))
+    if not conf_chains:
+        raise RuntimeError("candidate conformer has no chains")
+    free_atoms = np.array([
+        [a.pos.x, a.pos.y, a.pos.z]
+        for c in conf_chains for r in c for a in r
+        if a.element != gemmi.Element("H")])
+    if reference_peptide_path is not None and os.path.isfile(str(reference_peptide_path)):
+        # mode A: anchor the candidate backbone to the uploaded reference
+        # peptide pose (CA trace, residue-index correspondence over a
+        # centered window) — keeps the known binding mode
+        ref_st = gemmi.read_structure(str(reference_peptide_path))
+        ref_st.setup_entities()
+        ref_ca = np.array([
+            [a.pos.x, a.pos.y, a.pos.z] for r in ref_st[0][0] for a in r
+            if a.name.strip() == "CA"])
+        cand_ca = np.array([
+            [a.pos.x, a.pos.y, a.pos.z] for r in conf_chains[0] for a in r
+            if a.name.strip() == "CA"])
+        if len(ref_ca) >= 3 and len(cand_ca) >= 3:
+            n = min(len(ref_ca), len(cand_ca))
+            ro = (len(ref_ca) - n) // 2
+            co = (len(cand_ca) - n) // 2
+            rot = _dpeptide_kabsch_rotation(cand_ca[co:co + n], ref_ca[ro:ro + n])
+            free_center = cand_ca[co:co + n].mean(axis=0)
+            # emit loops transform as rot @ (x - free_center) + free_center + shift;
+            # at x = free_center that is free_center + shift, so the shift is
+            # just the centroid difference
+            shift = ref_ca[ro:ro + n].mean(axis=0) - free_center
+            fitted = (cand_ca[co:co + n] - free_center) @ rot.T \
+                + ref_ca[ro:ro + n].mean(axis=0)
+            align_rmsd = float(np.sqrt(
+                ((fitted - ref_ca[ro:ro + n]) ** 2).sum(axis=1).mean()))
+            print(f"[d-peptide] mode A placement: {n}-residue CA alignment "
+                  f"rmsd {align_rmsd:.2f} A", file=sys.stderr)
+        else:
+            rot = np.eye(3)
+            free_center = free_atoms.mean(axis=0)
+            shift = center - free_center
+    else:
+        rot, shift = _dpeptide_pick_clash_free_placement(
+            free_atoms, rec_atoms, center, seed=seed,
+            pocket_coords=(np.array(pocket_atoms) if pocket_atoms else None))
+        free_center = free_atoms.mean(axis=0)
+
+    lines: List[str] = []
+    serial = 1
+
+    def _emit(record, aname, resname, chain_id, resnum, pos, element):
+        nonlocal serial
+        name_field = f" {aname:<3}" if len(aname) < 4 else aname
+        lines.append(
+            f"{record:<6}{serial:5d} {name_field} {resname:>3} {chain_id}{resnum:4d}    "
+            f"{pos[0]:8.3f}{pos[1]:8.3f}{pos[2]:8.3f}{1.00:6.2f}{0.00:6.2f}"
+            f"          {element:>2}"
+        )
+        serial += 1
+
+    for ordinal, residue in enumerate(rec_chain, start=1):
+        for atom in residue:
+            if atom.element.name == "H":
+                continue
+            _emit("ATOM", atom.name, residue.name, "A", ordinal,
+                  (atom.pos.x, atom.pos.y, atom.pos.z), atom.element.name)
+
+    pep_chain = conf_chains[0]
+    sg_rows: List[Tuple[int, np.ndarray]] = []
+    for ordinal, residue in enumerate(pep_chain, start=1):
+        for atom in residue:
+            if atom.element.name == "H":
+                continue
+            v = rot @ (np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - free_center) \
+                + free_center + shift
+            _emit("ATOM", atom.name, residue.name, "B", ordinal,
+                  (v[0], v[1], v[2]), atom.element.name)
+            if residue.name == "CYS" and atom.name == "SG":
+                sg_rows.append((ordinal, v))
+
+    linker_name = None
+    if len(conf_chains) > 1:
+        # the linker chain is identified by its CCD, not het flags — PDB
+        # roundtrips do not preserve them reliably
+        for extra in conf_chains[1:]:
+            if any(r.name in BICYCLIC_LINKER_ATOM_MAP for r in extra):
+                linker_res = extra[0]
+                linker_name = linker_res.name
+                for atom in linker_res:
+                    if atom.element.name == "H":
+                        continue
+                    v = rot @ (np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - free_center) \
+                        + free_center + shift
+                    _emit("HETATM", atom.name, linker_res.name, "L", 1,
+                          (v[0], v[1], v[2]), atom.element.name)
+                conf_chains = [conf_chains[0], extra]
+                break
+
+    link_rows: List[str] = []
+    if linker_name is not None and sg_rows:
+        anchors = BICYCLIC_LINKER_ATOM_MAP.get(linker_name, [])
+        placed_linker = {}
+        lchain = conf_chains[1]
+        for atom in lchain[0]:
+            if atom.element.name == "H":
+                continue
+            v = rot @ (np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - free_center) \
+                + free_center + shift
+            placed_linker[atom.name.strip()] = v
+        # one-to-one greedy assignment: symmetric linkers list the SAME
+        # anchor atom several times (BS3 = BI,BI,BI), and a plain
+        # nearest-per-anchor would bond one SG three times
+        remaining = list(sg_rows)
+        for anchor in anchors:
+            av = placed_linker.get(anchor)
+            if av is None or not remaining:
+                continue
+            best = min(remaining,
+                       key=lambda row: float(np.linalg.norm(row[1] - av)))
+            remaining.remove(best)
+            link_rows.append(_pdb_link_line(
+                "SG", "CYS", "B", best[0], anchor, linker_name, "L", 1))
+
+    out_path.write_text("\n".join(link_rows + lines) + "\nEND\n",
+                        encoding="utf-8")
+
+    if link_rows:
+        pairs = _staged_bicyclic_bond_pairs(out_path)
+        if pairs:
+            # each pair is "B:<cys>:SG,L:<pos>:<anchor>" — the relaxer resolves
+            # the atom on the LINKER residue, so take the anchor half
+            specs = []
+            for pair in pairs.split(";"):
+                a2 = pair.split(",")[1]
+                _, resnum, atom = a2.strip().split(":")
+                specs.append((int(resnum), atom))
+            _relax_staged_bicyclic_strain(
+                out_path, bond_specs=specs, linker_code=linker_name)
+
+    check = gemmi.read_structure(str(out_path))
+    check.setup_entities()
+    names = {c.name: len(c) for c in check[0]}
+    if not {"A", "B"} <= set(names):
+        raise RuntimeError(
+            f"D-peptide staging: written PDB missing chains (got {names}).")
+    return out_path
+
+
+def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
+    """Reconstruct 'chain:resnum:atom,chain:resnum:atom;...' bond pairs from a
+    staged complex: each linker anchor bonds to its NEAREST peptide Cys-SG
+    (the staged geometry carries the constructive 1.8 A contacts). Returns
+    None when the complex has no linker chain."""
+    st = gemmi.read_structure(str(staged_path))
+    st.setup_entities()
+    linker_chain = None
+    for chain in st[0]:
+        for residue in chain:
+            if residue.name in BICYCLIC_LINKER_ATOM_MAP:
+                linker_chain = chain
+                break
+        if linker_chain is not None:
+            break
+    if linker_chain is None:
+        return None
+    polymer = sorted(
+        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
+    )
+    if not polymer:
+        return None
+    receptor, peptide = polymer[0], polymer[1]
+    anchors = BICYCLIC_LINKER_ATOM_MAP[linker_chain[0].name]
+    sg_atoms = []
+    for residue in peptide:
+        sg = residue.find_atom("SG", "*")
+        if sg is not None:
+            sg_atoms.append((int(residue.seqid.num), sg))
+    if not sg_atoms:
+        raise ValueError(
+            "staged bicyclic complex has no Cys-SG on the peptide chain")
+    pairs: List[str] = []
+    remaining = list(sg_atoms)
+    for anchor_name in anchors:
+        anchor_atom = linker_chain[0].find_atom(anchor_name, "*")
+        if anchor_atom is None:
+            raise ValueError(
+                f"staged linker {linker_chain[0].name} lacks anchor {anchor_name}")
+        if not remaining:
+            raise ValueError(
+                "staged bicyclic complex has more linker anchors than Cys-SG")
+        nearest = min(
+            remaining,
+            key=lambda item: np.linalg.norm(
+                np.array([item[1].pos.x, item[1].pos.y, item[1].pos.z])
+                - np.array([anchor_atom.pos.x, anchor_atom.pos.y, anchor_atom.pos.z])),
+        )
+        remaining.remove(nearest)
+        pairs.append(
+            f"{peptide.name}:{nearest[0]}:SG,{linker_chain.name}:1:{anchor_name}")
+    return ";".join(pairs)
+
+
+def _dpeptide_refine_and_validate(
+    staged_path: Path,
+    refined_cif: Path,
+    seed: int,
+    queue: str,
+    options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Fixed-D-target diffusion refinement + confidence.
+
+    Dispatches one protenix2dock ``peptide`` task: the receptor is pinned to
+    the staged coordinates for every diffusion step (vendor inpainting side
+    channel), the peptide enters the input json as a proteinChain, and
+    bicyclic ring bonds (peptide SG <-> linker anchors) are carried both as
+    input.json covalent_bonds and as hard TFG contacts. The confidence head
+    scores the refined coordinates; the best sample (by ipTM) is copied to
+    refined_cif and its metrics returned.
+    """
+    from backend.core.celery_app import celery_app as _celery
+
+    bond_pairs = _staged_bicyclic_bond_pairs(staged_path)
+    linker_ccd = "SEZ"
+    if bond_pairs:
+        try:
+            st_lk = gemmi.read_structure(str(staged_path))
+            st_lk.setup_entities()
+            for chain in st_lk[0]:
+                for residue in chain:
+                    if residue.name in BICYCLIC_LINKER_ATOM_MAP:
+                        linker_ccd = residue.name
+                        break
+        except Exception:  # noqa: BLE001
+            pass
+    async_result = _celery.send_task(
+        "backend.worker.tasks.protenix2dock_task",
+        kwargs={"score_args": {
+            "mode": "peptide",
+            "input_file_content": staged_path.read_text(),
+            "input_filename": f"{staged_path.stem}.pdb",
+            "peptide_chain": "B",
+            # interface metrics scoped to Dtarget<->Lpeptide (A-B); the
+            # linker's chain pair (B-C) would drag the reported iptm
+            "interface_chains": "A,B",
+            "bond_pairs": bond_pairs or "",
+            "linker_chain": "L" if bond_pairs else "",
+            "linker_ccd": linker_ccd,
+            "seed": int(seed),
+            # pocket anchor cap: the TFG/anchor upper bound must sit under
+            # the acceptance gate (POCKET_CONTACT_MAX_A) or the refined pose
+            # can legally drift out of the user pocket (measured 10-11 A with
+            # the 8.0 default) and every candidate gets rejected.
+            "pocket_upper": float(POCKET_CONTACT_MAX_A) + 1.0,
+            "dpeptide_contract": True,
+        }},
+        queue=queue,
+    )
+    task_tmp = Path("/data/boltz_central_results/_runtime_tmp") / \
+        f"dpeptide_task_{async_result.id}"
+    conf_path = task_tmp / "out" / "confidence.json"
+    # Poll no longer than the dispatched GPU task itself is allowed to run
+    # (SUBPROCESS_TIMEOUT) plus a small grace for result writes.
+    from backend.worker import tasks as _worker_tasks
+
+    refine_deadline = time.time() + int(
+        getattr(_worker_tasks, "SUBPROCESS_TIMEOUT", 3 * 60 * 60)
+    ) + 120
+    while True:
+        if conf_path.is_file():
+            break
+        state = str(getattr(async_result, "state", "") or "").upper()
+        if state in ("FAILURE", "REVOKED"):
+            raise RuntimeError(f"D-space refine task {async_result.id} failed.")
+        if time.time() > refine_deadline:
+            _celery.control.revoke(async_result.id, terminate=True)
+            raise RuntimeError("D-space refine timed out.")
+        time.sleep(4.0)
+
+    metrics = json.loads(conf_path.read_text())
+    # persist staged + refined samples for post-run audits (task tmp dirs are
+    # auto-cleaned); keep under the TASK-scoped candidate dir — a shared
+    # "cand_001" name let consecutive tasks overwrite each other's evidence
+    # exactly when a defect needed diagnosing
+    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip().replace(":", "_")
+    keep_dir = Path("/data/boltz_central_results/_runtime_tmp") / \
+        f"dpeptide_keep_{runtime_task_id or 'local'}_{Path(refined_cif).parent.name}"
+    keep_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(staged_path, keep_dir / "staged.pdb")
+    structure_dir = Path(str(metrics.get("structure_dir") or ""))
+    scored = []
+    for conf_json in sorted(structure_dir.glob("confidence_*_model_*.json")):
+        payload = json.loads(conf_json.read_text())
+        iptm = float(payload.get("iptm") or 0.0)
+        # No sample filtering: all samples rank; the model's own confidence
+        # orders them (a collapsed sample sorts last). Selection-by-confidence
+        # is engine capability, not a discard rule.
+        cif = structure_dir / conf_json.name.replace("confidence_", "").replace(".json", ".cif")
+        if cif.is_file():
+            scored.append((iptm, cif))
+    if not scored:
+        raise RuntimeError(
+            f"D-space refine produced no samples under {structure_dir}.")
+    scored.sort(reverse=True)
+    for _iptm, _cif in scored:
+        shutil.copyfile(_cif, keep_dir / _cif.name)
+    shutil.copyfile(scored[0][1], refined_cif)
+    metrics["refined_iptm"] = scored[0][0]
+    return metrics
+
+
+def _structure_integrity_report(
+    structure_path: Path,
+) -> Dict[str, Any]:
+    """Per-residue backbone bond integrity of every polymer chain.
+
+    A CB pushed tens of A away passes the chirality gate (the sign still
+    reads D) and the linker gate (SG untouched) — measured on a shipped
+    product: CA-CB 30.4 A. Any broken bond here means some projection or
+    transform deformed the structure; callers reject on it.
+    """
+    st = gemmi.read_structure(str(structure_path))
+    st.setup_entities()
+    broken: List[Dict[str, Any]] = []
+    for chain in st[0]:
+        for residue in chain:
+            if residue.het_flag == "H":
+                continue
+            ca = residue.find_atom("CA", "*")
+            cb = residue.find_atom("CB", "*")
+            if ca is None or cb is None:
+                continue
+            d = float(np.linalg.norm(
+                np.array([ca.pos.x, ca.pos.y, ca.pos.z])
+                - np.array([cb.pos.x, cb.pos.y, cb.pos.z])))
+            if not 1.2 <= d <= 2.0:
+                broken.append({
+                    "chain": chain.name, "resnum": int(residue.seqid.num),
+                    "resname": residue.name, "ca_cb": round(d, 2),
+                })
+    return {"broken_bonds": broken, "all_intact": not broken}
+
+
+def _pocket_contact_report(
+    structure_path: Path,
+    pocket_sequence_contacts: List[Tuple[str, int]],
+) -> Dict[str, Any]:
+    """Min heavy-atom distance between the pocket residues and every chain
+    other than the largest (receptor) chain. Bound peptides sit well under
+    4.5 A; the gate cut-off is POCKET_CONTACT_MAX_A. Chain names match modulo
+    boltz2's processed-structure suffix ("A" matches "A1")."""
+    def _strip_suffix(name: str) -> str:
+        return name[:-1] if len(name) > 1 and name[-1].isdigit() else name
+
+    st = gemmi.read_structure(str(structure_path))
+    st.setup_entities()
+    chains = sorted(
+        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 1),
+        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
+    )
+    if not chains:
+        return {"pocket_min_distance": None}
+    receptor = chains[0]
+    wanted = {(_strip_suffix(c), int(n)) for c, n in pocket_sequence_contacts}
+    pocket_xyz = np.array([
+        [a.pos.x, a.pos.y, a.pos.z]
+        for residue in receptor
+        if (_strip_suffix(receptor.name), residue.seqid.num) in wanted
+        for a in residue if a.element != gemmi.Element("H")
+    ])
+    free_xyz = np.array([
+        [a.pos.x, a.pos.y, a.pos.z]
+        for chain in st[0]
+        if chain.name != receptor.name
+        for residue in chain
+        for a in residue if a.element != gemmi.Element("H")
+    ])
+    if pocket_xyz.size == 0 or free_xyz.size == 0:
+        return {"pocket_min_distance": None,
+                "pocket_residues_found": bool(pocket_xyz.size)}
+    dist = np.linalg.norm(
+        pocket_xyz[:, None, :] - free_xyz[None, :, :], axis=-1)
+    return {
+        "pocket_min_distance": float(dist.min()),
+        "pocket_residues_found": True,
+        "pocket_contacts_within_4p5": int((dist < 4.5).sum()),
+    }
+
+
+POCKET_CONTACT_MAX_A = 5.0
+
+
+def _pocket_place_and_refine(
+    staged_path: Path,
+    *,
+    pocket_sequence_contacts: List[Tuple[str, int]],
+    refined_cif: Path,
+    seed: int,
+    options: Dict[str, Any],
+    require_bonds: bool,
+    chirality_label: str,
+    bicyclic_cys_positions: Optional[List[int]] = None,
+    linker_ccd: str = "SEZ",
+    keep_pose: bool = False,
+) -> Dict[str, Any]:
+    """Shared pocket mechanism for both chiralities (protenix-v2 has no
+    constraint embedder, so the pocket is honored geometrically): rigidly
+    place the free chains (peptide+linker) at the user pocket on the staged
+    receptor — skipped when keep_pose is set (the staged pose is already
+    anchored to a reference), refine under the fixed receptor with a
+    confinement box around that pose, then gate on pocket contact and
+    (bicyclic) ring bonds.
+
+    Raises ValueError when a gate fails; the caller rejects the candidate.
+    """
+    # rigid placement at the pocket center (contacts already sequence-numbered
+    # to match the staged PDB's 1..N polymer numbering)
+    st_pl = gemmi.read_structure(str(staged_path))
+    st_pl.setup_entities()
+    pl_ch = sorted((c for c in st_pl[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+                   key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+    if not pl_ch:
+        raise ValueError("staged complex has no polymer chains to place against")
+    st_rec = pl_ch[0]
+    _wanted = set(pocket_sequence_contacts)
+    pts = []
+    pocket_atom_coords = []
+    for residue in st_rec:
+        if (st_rec.name, residue.seqid.num) not in _wanted:
+            continue
+        a = residue.find_atom("CA", "*")
+        if a is not None:
+            pts.append((a.pos.x, a.pos.y, a.pos.z))
+        for atom in residue:
+            if atom.element != gemmi.Element("H"):
+                pocket_atom_coords.append((atom.pos.x, atom.pos.y, atom.pos.z))
+    if not pts:
+        raise ValueError(
+            "pocket residues "
+            + ",".join(f"{c}:{n}" for c, n in pocket_sequence_contacts)
+            + f" not found on the staged receptor (chain {st_rec.name})"
+        )
+    _target_center = np.mean(np.array(pts), axis=0)
+    # clash-minimal rigid placement: deterministic rotations x radial offsets,
+    # scored against the staged receptor (centroid-on-pocket buries the binder
+    # in the pocket wall — measured 0.3 A min distance); mode A skips it —
+    # the staged pose already carries the reference binding mode
+    if keep_pose:
+        st_pl.setup_entities()
+        st_pl.write_pdb(str(staged_path))
+    else:
+        free_atoms = []
+        for ch_mv in st_pl[0]:
+            if ch_mv.name == pl_ch[0].name:
+                continue
+            for r_mv in ch_mv:
+                for a_mv in r_mv:
+                    if a_mv.element != gemmi.Element("H"):
+                        free_atoms.append(np.array([a_mv.pos.x, a_mv.pos.y, a_mv.pos.z]))
+        free_coords = np.stack(free_atoms)
+        rec_atoms = np.array([[a.pos.x, a.pos.y, a.pos.z] for r in pl_ch[0] for a in r
+                              if a.element != gemmi.Element("H")])
+        rot_place, shift_place = _dpeptide_pick_clash_free_placement(
+            free_coords, rec_atoms, np.asarray(_target_center), seed=seed,
+            pocket_coords=np.asarray(pocket_atom_coords))
+        for ch_mv in st_pl[0]:
+            if ch_mv.name == pl_ch[0].name:
+                continue
+            for r_mv in ch_mv:
+                for a_mv in r_mv:
+                    v = rot_place @ (np.array([a_mv.pos.x, a_mv.pos.y, a_mv.pos.z]) - free_coords.mean(axis=0)) \
+                        + free_coords.mean(axis=0) + shift_place
+                    a_mv.pos = gemmi.Position(*v)
+        st_pl.setup_entities()
+        st_pl.write_pdb(str(staged_path))
+    # gemmi's write_pdb dropped the LINK records above — restore the covalent
+    # topology or the refine diffusion breaks the ring (measured 13 A bonds)
+    if require_bonds:
+        _append_staged_bicyclic_links(
+            staged_path, bicyclic_cys_positions, linker_ccd)
+
+    metrics = _dpeptide_refine_and_validate(
+        staged_path,
+        refined_cif=refined_cif,
+        seed=seed,
+        queue=build_capability_queue("protenix", "default"),
+        options=options,
+    )
+    refined_path = str(refined_cif)
+
+    # Quality TELEMETRY, not filtering: the staged strain relief upstream
+    # makes the refine start chemically sound, so these reports describe the
+    # shipped structure (and would expose any residual defect) without
+    # rejecting the candidate — rejection hides engine problems instead of
+    # solving them at the source.
+    integrity = _structure_integrity_report(Path(refined_path))
+
+    if require_bonds:
+        bond_report = _dpeptide_linker_bond_report(Path(refined_path))
+    else:
+        bond_report = None
+
+    pocket_report = _pocket_contact_report(Path(refined_path), pocket_sequence_contacts)
+    pocket_min = pocket_report.get("pocket_min_distance")
+    flags = []
+    if not integrity.get("all_intact"):
+        flags.append("integrity")
+    if require_bonds and not (bond_report and bond_report.get("all_bonded")):
+        flags.append("ring_bonds")
+    if pocket_min is None or float(pocket_min) > POCKET_CONTACT_MAX_A:
+        flags.append("pocket")
+    print(
+        f"[{chirality_label}-peptide] pocket refine ipTM={metrics.get('iptm')} "
+        f"pocket_min={pocket_min if pocket_min is None else round(float(pocket_min), 2)}A "
+        f"integrity={'ok' if integrity.get('all_intact') else 'BROKEN'} "
+        f"flags={flags or 'none'}",
+        file=sys.stderr,
+    )
+    return {
+        "staged": str(staged_path),
+        "refined": refined_path,
+        "metrics": metrics,
+        "pocket": pocket_report,
+        "bonds": bond_report,
+        "integrity": integrity,
+        "quality_flags": flags,
+    }
+
+
+def _pdb_link_line(
+    atom1: str, res1: str, chain1: str, seq1: int,
+    atom2: str, res2: str, chain2: str, seq2: int,
+) -> str:
+    """Column-exact PDB LINK record. Atom names must sit right-aligned in
+    cols 13-16/43-46 — a left-aligned name makes gemmi infer a metal
+    coordination (MetalC) instead of a covalent bond, and boltz2 only honors
+    Covale connections."""
+    cols = [" "] * 78
+
+    def put(start: int, text: str) -> None:
+        for offset, char in enumerate(text):
+            cols[start - 1 + offset] = char
+
+    put(1, "LINK")
+    put(13, f"{atom1:>4}")
+    put(18, f"{res1:>3}")
+    put(22, chain1)
+    put(23, f"{seq1:4d}")
+    put(43, f"{atom2:>4}")
+    put(48, f"{res2:>3}")
+    put(52, chain2)
+    put(53, f"{seq2:4d}")
+    put(60, "1555")
+    put(66, "1555")
+    return "".join(cols).rstrip()
+
+
+def _append_staged_bicyclic_links(
+    staged_path: Path,
+    cys_positions: Optional[List[int]],
+    linker_ccd: str,
+) -> int:
+    """(Re-)append the Cys-SG <-> linker-anchor LINK records to a staged PDB.
+
+    gemmi 0.7.5's write_pdb silently drops connections, so every rewrite of
+    the staged file (pocket placement, L-space staging) loses the covalent
+    topology the refine engine needs to hold the ring together. Idempotent:
+    returns 0 when the file already carries LINK records. Pairs each peptide
+    Cys (in cys_positions, or every Cys when None) with the linker anchors in
+    BICYCLIC_LINKER_ATOM_MAP order.
+    """
+    text = staged_path.read_text(errors="replace")
+    if any(line.startswith("LINK") for line in text.splitlines()):
+        return 0
+    st = gemmi.read_structure(str(staged_path))
+    st.setup_entities()
+    chains = sorted(
+        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 1),
+        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
+    )
+    if not chains:
+        return 0
+    receptor_name = chains[0].name
+    peptide_chain = None
+    linker_chain_name = linker_resnum = None
+    for chain in st[0]:
+        if chain.name == receptor_name:
+            continue
+        if linker_chain_name is None and any(
+                r.name == linker_ccd for r in chain):
+            for residue in chain:
+                if residue.name == linker_ccd:
+                    linker_chain_name = chain.name
+                    linker_resnum = int(residue.seqid.num)
+                    break
+        elif peptide_chain is None and any(r.name == "CYS" for r in chain):
+            peptide_chain = chain
+        if peptide_chain is not None and linker_chain_name is not None:
+            break
+    if peptide_chain is None or linker_chain_name is None:
+        return 0
+    anchors = BICYCLIC_LINKER_ATOM_MAP.get(str(linker_ccd).upper()) or []
+    if cys_positions is not None:
+        wanted = {int(p) + 1 for p in cys_positions}
+        sg_resnums = [int(r.seqid.num) for r in peptide_chain
+                      if r.name == "CYS" and int(r.seqid.num) in wanted]
+    else:
+        sg_resnums = [int(r.seqid.num) for r in peptide_chain if r.name == "CYS"]
+    sg_resnums.sort()
+    if len(sg_resnums) != len(anchors):
+        raise ValueError(
+            f"staged bicyclic complex has {len(sg_resnums)} Cys-SG but linker "
+            f"{linker_ccd} needs {len(anchors)} anchors"
+        )
+    link_lines = []
+    for sg_resnum, anchor in zip(sg_resnums, anchors):
+        link_lines.append(_pdb_link_line(
+            "SG", "CYS", peptide_chain.name, sg_resnum,
+            anchor, linker_ccd, linker_chain_name, linker_resnum,
+        ))
+    # insert before the trailing END record — PDB parsers stop at END
+    lines = [line for line in text.splitlines() if line.strip()]
+    while lines and lines[-1].strip() in ("END", "ENDMDL"):
+        lines.pop()
+    with staged_path.open("w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+        for line in link_lines:
+            handle.write(line + "\n")
+        handle.write("END\n")
+    return len(link_lines)
+
+
+def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
+    """Measure whether the bicyclic linker is actually bonded in a shipped
+    structure: for every linker anchor atom, the distance to the nearest
+    Cys-SG. Bonded C-S distances are ~1.8 A; 2.5 A is the reporting cut-off."""
+    st = gemmi.read_structure(str(structure_path))
+    st.setup_entities()
+
+    linker_res = None
+    linker_code = ""
+    for chain in st[0]:
+        for residue in chain:
+            if residue.het_flag == "H" and residue.name in BICYCLIC_LINKER_ATOM_MAP:
+                linker_res = residue
+                linker_code = residue.name
+                break
+        if linker_res is not None:
+            break
+    if linker_res is None:
+        return {"linker": None, "all_bonded": None, "bonds": []}
+
+    anchors = BICYCLIC_LINKER_ATOM_MAP[linker_code]
+    sg_atoms = []
+    for chain in st[0]:
+        for residue in chain:
+            sg = residue.find_atom("SG", "*")
+            if sg is not None and residue.name == "CYS":
+                sg_atoms.append((residue.seqid.num, sg))
+    bonds = []
+    remaining = list(sg_atoms)  # one-to-one: symmetric linkers repeat an
+    for anchor_name in anchors:  # anchor atom; nearest-per-anchor would let
+        anchor_atom = linker_res.find_atom(anchor_name, "*")  # one SG win all
+        if anchor_atom is None or not remaining:
+            bonds.append({"anchor": anchor_name, "cys_resnum": None,
+                          "distance": None, "bonded": False})
+            continue
+        best = min(
+            remaining,
+            key=lambda item: (
+                (item[1].pos.x - anchor_atom.pos.x) ** 2
+                + (item[1].pos.y - anchor_atom.pos.y) ** 2
+                + (item[1].pos.z - anchor_atom.pos.z) ** 2),
+        )
+        remaining.remove(best)
+        dist = math.sqrt(
+            (best[1].pos.x - anchor_atom.pos.x) ** 2
+            + (best[1].pos.y - anchor_atom.pos.y) ** 2
+            + (best[1].pos.z - anchor_atom.pos.z) ** 2)
+        bonds.append({
+            "anchor": anchor_name,
+            "cys_resnum": best[0],
+            "distance": round(dist, 3),
+            "bonded": bool(dist <= 2.5),
+        })
+    distinct = len({b["cys_resnum"] for b in bonds if b["cys_resnum"] is not None})
+    return {
+        "linker": linker_code,
+        "all_bonded": bool(all(b["bonded"] for b in bonds)
+                           and distinct == len(bonds)),
+        "distinct_cys": distinct,
+        "bonds": bonds,
+        "cutoff_a": 2.5,
+    }
+
+
+def _assert_product_chirality(
+    product_pdb: Path,
+    reference_structure_path: Optional[Path] = None,
+    rmsd_limit: float | None = 0.5,
+) -> Dict[str, Any]:
+    """Hard gate on the flipped product: receptor must be L (positive CA
+    volumes), peptide must be D (negative), and the receptor must coincide
+    with the ORIGINAL input geometry (exact x->-x round trip)."""
+    peplm_root = str(_resolve_capability_dir("peptide_lm"))
+    if peplm_root not in sys.path:
+        sys.path.insert(0, peplm_root)
+    from peplm.dpeptide import chirality_report
+
+    st = gemmi.read_structure(str(product_pdb))
+    st.setup_entities()
+
+    # receptor = the protein chain with the most standard residues; peptide =
+    # the next-largest protein chain. Ligand/HETATM chains are ignored.
+    protein_chains = [
+        chain for chain in st[0]
+        if sum(1 for res in chain if res.het_flag != "H") >= 3
+    ]
+    protein_chains.sort(key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+    if len(protein_chains) < 2:
+        raise RuntimeError(
+            f"D-peptide product gate failed: expected >=2 protein chains, got "
+            f"{[c.name for c in st[0]]}"
+        )
+    receptor_chain, peptide_chain = protein_chains[0], protein_chains[1]
+
+    rec_report = chirality_report(st, receptor_chain.name)
+    pep_report = chirality_report(st, peptide_chain.name)
+    chirality_flags = []
+    if rec_report.n_scored <= 0 or pep_report.n_scored <= 0:
+        chirality_flags.append("no_scorable_ca")
+    if rec_report.mean_volume <= 0:
+        chirality_flags.append(
+            f"receptor_not_L({rec_report.mean_volume:+.3f})")
+    if pep_report.mean_volume >= 0:
+        chirality_flags.append(
+            f"peptide_not_D({pep_report.mean_volume:+.3f})")
+    if chirality_flags:
+        # telemetry, not rejection: the sampler's backbone chirality guard and
+        # the staged strain relief are the source-level fixes; a flag here is
+        # diagnostics for the report, the product still ships
+        print(
+            f"[d-peptide] product chirality flags: {chirality_flags}",
+            file=sys.stderr,
+        )
+
+    rmsd = None
+    if reference_structure_path is not None:
+        # order-based pairing: engine writers renumber residues and rename
+        # chains (A -> A1), so resnum/name matching silently mispairs.
+        ref_pts = []
+        ref_st = gemmi.read_structure(str(reference_structure_path))
+        ref_st.setup_entities()
+        ref_chains = sorted(
+            (c for c in ref_st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+            key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+        if not ref_chains:
+            raise RuntimeError("D-peptide product gate: reference has no protein chain.")
+        for residue in ref_chains[0]:
+            ca = residue.find_atom("CA", "*")
+            if ca is not None:
+                ref_pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
+        prod_pts = []
+        for residue in receptor_chain:
+            ca = residue.find_atom("CA", "*")
+            if ca is not None:
+                prod_pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
+        if len(prod_pts) == len(ref_pts) and len(prod_pts) >= 20:
+            deltas = np.stack(prod_pts) - np.stack(ref_pts)
+            rmsd = float(math.sqrt((deltas ** 2).sum(axis=1).mean()))
+            if rmsd_limit is not None and rmsd > rmsd_limit:
+                print(
+                    f"[d-peptide] product alignment flag: receptor deviates by "
+                    f"RMSD {rmsd:.3f} A (> {rmsd_limit}); telemetry only.",
+                    file=sys.stderr,
+                )
+
+    return {
+        "receptor_chain": receptor_chain.name,
+        "peptide_chain": peptide_chain.name,
+        "receptor_mean_ca_volume": float(rec_report.mean_volume),
+        "peptide_mean_ca_volume": float(pep_report.mean_volume),
+        "receptor_vs_input_rmsd": (float(rmsd) if rmsd is not None else None),
+        "receptor_config": "L",
+        "peptide_config": "D",
+        "chirality_flags": chirality_flags,
+    }
+
+
 def run_peptide_design_backend(
     temp_dir: str,
     yaml_content: str,
@@ -7238,6 +7779,7 @@ def run_peptide_design_backend(
     gpu_ids: Optional[List[int]] = None,
     subtask_queue: Optional[str] = None,
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
+    template_inputs: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     designer_dir = str(_resolve_capability_dir("designer"))
     if designer_dir not in sys.path:
@@ -7258,8 +7800,37 @@ def run_peptide_design_backend(
     random_seed = seed if isinstance(seed, int) else int(time.time())
     random.seed(random_seed)
 
+    docking_engine = _is_docking_peptide_backend(backend)
     peptide_backend = _normalize_peptide_backend(backend)
     design_mode = _normalize_peptide_design_mode(options.get("peptideDesignMode") or options.get("peptide_design_mode"))
+    peptide_chirality = str(options.get("peptideChirality") or options.get("peptide_chirality") or "l").strip().lower()
+    if peptide_chirality not in ("l", "d"):
+        raise ValueError(f"Invalid peptide chirality '{peptide_chirality}'. Must be 'l' or 'd'.")
+    # NOTE: the docking-engine REQUIREMENT intentionally lives in the
+    # frontend/API contract only. Here `peptideChirality == 'd'` alone triggers
+    # the mirror workflow, because live deployments may still submit legacy
+    # backend tokens (boltz/protenix) until they restart into the version that
+    # understands the dock aliases. Linear-only remains authoritative below.
+    # Cyclic/bicyclic are SUPPORTED with D chirality: cyclization is a
+    # topological (scalar distance) constraint and mirror x->-x preserves it,
+    # so D-cyclic/D-bicyclic compose freely with the mirror workflow.
+    # The candidate prediction stage (proposer + candidate YAML) already carries
+    # cyclic/bicycling/linker/NCAA constraints unchanged.
+    if peptide_backend == "alphafold3" and design_mode in ("cyclic", "bicyclic"):
+        raise ValueError(
+            "AlphaFold3 仅支持直链肽（linear）；环肽/双环肽请使用 Protenix 后端。"
+        )
+    # Constrained rings require HARD covalent-bond enforcement. Protenix's TFG
+    # projects bond/angle atom pairs back into their RDKit bounds every
+    # guidance step (measured L products: 1.2-2.2 A); Boltz2's bond feature is
+    # only a soft diffusion prior and lets constrained rings fall apart under
+    # refinement (measured 11-15 A). Rings are therefore Protenix-only for
+    # both chirality settings; linear peptides may use any engine.
+    if design_mode in ("cyclic", "bicyclic") and peptide_backend != "protenix":
+        raise ValueError(
+            "环肽/双环肽仅支持 Protenix（protenix2dock）后端：共价键约束需要 "
+            "Protenix TFG 硬钳制；Boltz2 的键先验无法保证成环键长。"
+        )
     min_binder_len = 8 if design_mode == "bicyclic" else 5
     binder_length = _read_int_option(
         options,
@@ -7271,7 +7842,6 @@ def run_peptide_design_backend(
     iterations = _read_int_option(options, "peptideIterations", 12, min_value=1, max_value=200)
     population_size = _read_int_option(options, "peptidePopulationSize", 16, min_value=1, max_value=200)
     elite_size = _read_int_option(options, "peptideEliteSize", 4, min_value=1, max_value=max(1, population_size))
-    mutation_rate = _read_float_option(options, "peptideMutationRate", 0.25, min_value=0.01, max_value=1.0)
     use_initial_sequence = _read_bool_option(options, "peptideUseInitialSequence", False)
     sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
@@ -7298,20 +7868,51 @@ def run_peptide_design_backend(
     }
     if design_mode == "cyclic":
         design_params["cyclic_binder"] = True
+    allow_extra_cys = False
+    bicyclic_manual_anchors = False
     if design_mode == "bicyclic":
         cys_position_mode = str(options.get("peptideBicyclicCysPositionMode") or "auto").strip().lower()
-        cys1_pos = _read_int_option(options, "peptideBicyclicCys1Pos", 3, min_value=1, max_value=max(1, binder_length - 1))
-        cys2_pos = _read_int_option(
-            options,
-            "peptideBicyclicCys2Pos",
-            max(2, binder_length // 2),
-            min_value=1,
-            max_value=max(1, binder_length - 1),
-        )
-        if cys1_pos == cys2_pos:
-            cys2_pos = min(max(1, binder_length - 1), cys2_pos + 1 if cys2_pos < binder_length - 1 else cys2_pos - 1)
+        fix_terminal_cys = _read_bool_option(options, "peptideBicyclicFixTerminalCys", True)
+        allow_extra_cys = _read_bool_option(options, "peptideBicyclicIncludeExtraCys", False)
         if cys_position_mode == "manual":
-            design_params["cys_positions"] = [cys1_pos - 1, cys2_pos - 1]
+            bicyclic_manual_anchors = True
+            cys1_pos = _read_int_option(options, "peptideBicyclicCys1Pos", 3, min_value=1, max_value=binder_length)
+            cys2_pos = _read_int_option(options, "peptideBicyclicCys2Pos", 8, min_value=1, max_value=binder_length)
+            cys3_pos = (
+                binder_length
+                if fix_terminal_cys
+                else _read_int_option(options, "peptideBicyclicCys3Pos", binder_length, min_value=1, max_value=binder_length)
+            )
+            manual_anchor_set = sorted({cys1_pos, cys2_pos, cys3_pos})
+            if len(manual_anchor_set) != 3:
+                raise ValueError(
+                    f"双环肽需要 3 个互不相同的 Cys 位置，当前为 {manual_anchor_set}。"
+                )
+            if any(b - a < 2 for a, b in zip(manual_anchor_set, manual_anchor_set[1:])):
+                raise ValueError(
+                    f"Cys 位置 {manual_anchor_set} 间隔过近：相邻锚点之间至少需要 2 个残基才能形成两个环。"
+                )
+            anchor_set_0b = {p - 1 for p in manual_anchor_set}
+            if sequence_mask:
+                for idx, mask_char in enumerate(sequence_mask):
+                    if idx in anchor_set_0b and mask_char not in ("X", "C"):
+                        raise ValueError(
+                            f"序列掩码在第 {idx + 1} 位固定了 {mask_char!r}，与手动 Cys 锚点冲突："
+                            "请将该位设为 X 或 C。"
+                        )
+                    if mask_char == "C" and idx not in anchor_set_0b and not allow_extra_cys:
+                        raise ValueError(
+                            f"序列掩码在第 {idx + 1} 位固定了 C，但该位不是 Cys 锚点 "
+                            f"{sorted(p + 1 for p in anchor_set_0b)}：请开启 Allow Extra Cys 或移动该 C。"
+                        )
+            design_params["cys_positions"] = sorted(anchor_set_0b)
+        else:
+            design_params["cys_positions"] = []
+            if sequence_mask and sequence_mask[:1] and sequence_mask[0] not in ("X", "C"):
+                raise ValueError(
+                    "双环肽默认布局要求第 1 位为 Cys："
+                    f"序列掩码第 1 位为 {sequence_mask[0]!r}，请设为 X 或 C。"
+                )
 
     linker_atom_map = BICYCLIC_LINKER_ATOM_MAP
     if design_mode == "bicyclic" and linker_ccd not in linker_atom_map:
@@ -7321,45 +7922,175 @@ def run_peptide_design_backend(
 
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
-    # A C-terminal amidated residue needs a free C-terminus, which cyclic/bicyclic peptides lack.
-    # Reject it up front so the GA does not waste a generation on candidates the engine refuses.
+    # A C-terminal amidated residue needs a free C-terminus, which cyclic/bicyclic
+    # peptides lack. Reject it up front so no generation is wasted.
     if design_mode in ("cyclic", "bicyclic") and any(row.get("placement") == "c_term" for row in unnatural_pool):
         raise ValueError("C-terminal amidated residues cannot be used in cyclic/bicyclic peptide design (no free C-terminus). Remove them or switch to linear mode.")
     custom_molecules = _merge_selected_peptide_preset_molecules(custom_molecules, unnatural_pool)
     _peptide_allowed_residues(natural_pool, design_mode)
     nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
-    nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", nonnatural_min, min_value=nonnatural_min, max_value=binder_length)
+    nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", 0, min_value=0, max_value=binder_length)
+    if "peptideNonNaturalMax" in options and nonnatural_max < nonnatural_min:
+        raise ValueError(
+            f"非天然氨基酸数量窗口无效：min {nonnatural_min} > max {nonnatural_max}。")
 
-    baseline_sequence = _random_peptide_sequence_from_pool(
-        binder_length,
-        natural_pool,
-        design_mode=design_mode,
-        sequence_mask=sequence_mask,
-        design_params=design_params,
-    )
     initial_sequence = ""
     if use_initial_sequence:
         initial_sequence = _normalize_initial_sequence(
             options.get("peptideInitialSequence"),
             binder_length=binder_length,
             sequence_mask=sequence_mask,
-            default_sequence=baseline_sequence,
         )
-        if design_mode == "bicyclic":
-            initial_sequence = _enforce_bicyclic_cys_layout(
-                initial_sequence,
-                binder_length=binder_length,
-                cys_positions=design_params.get("cys_positions"),
-            )
 
     total_tasks = iterations * population_size
     completed_tasks = 0
     evaluated_sequences: set[str] = set()
     elite_population: List[Dict[str, Any]] = []
     all_results: List[Dict[str, Any]] = []
-    best_score_seen = float("-inf")
-    stagnant_generations = 0
     peptide_started_at = time.time()
+
+    def _torch_cuda_available() -> bool:
+        try:
+            import torch
+
+            return torch.cuda.is_available()
+        except ImportError:
+            return False
+
+    # PeptideLM proposal engine — the ONLY peptide design algorithm in
+    # V-Bio (two-tier language-model design; see capabilities/peptide_lm).
+    # No fallback: a failure here is a task failure. Length is optional:
+    # when the user did not set peptideBinderLength the engine explores an
+    # adaptive range; NCAA residues come ONLY from the user-selected pool
+    # (peptideResiduePool non-natural entries + custom CCDs).
+    try:
+        _plm_sys_path = "/data/V-Bio/capabilities/peptide_lm"
+        sys.path.insert(0, _plm_sys_path)
+        try:
+            from peplm.integrate.backend_proposer import BackendProposer
+        finally:
+            sys.path.remove(_plm_sys_path)
+        # user-fixed residues from the sequence mask letters (X = free)
+        _plm_fixed: List[Dict[str, Any]] = []
+        for _idx, _ch in enumerate(sequence_mask or ""):
+            if _ch in "ACDEFGHIKLMNPQRSTVWY":
+                _plm_fixed.append({"position": _idx + 1, "residue": _ch})
+        # adaptive length only when the user left it unset
+        _plm_len: Optional[int] = binder_length
+        if "peptideBinderLength" not in options and "peptide_binder_length" not in options:
+            _plm_len = None
+        # explicit length window (frontend min/max inputs) beats both: it is
+        # a range for adaptive design, or collapses to a fixed value when
+        # min == max
+        _plm_range: Optional[Tuple[int, int]] = None
+        if "peptideLengthMin" in options or "peptide_length_min" in options:
+            _lo = _read_int_option(options, "peptideLengthMin", 8,
+                                   min_value=min_binder_len, max_value=120)
+            _hi = _read_int_option(options, "peptideLengthMax", 25,
+                                   min_value=min_binder_len, max_value=120)
+            if _hi < _lo:
+                raise ValueError(
+                    f"肽长度窗口无效：min {_lo} > max {_hi}。")
+            _plm_range = (_lo, _hi)
+            _plm_len = None
+        # manual Cys anchors reference absolute positions, so they pin the
+        # design length to the value the anchors were validated against
+        if bicyclic_manual_anchors:
+            if _plm_range is not None and _plm_range[0] != _plm_range[1]:
+                raise ValueError(
+                    "手动 Cys 位置要求固定的肽长度：请将长度范围设为同一个值，或改用 Auto 模式。"
+                )
+            _plm_range = None
+            _plm_len = binder_length
+        # user NCAA pool: preset selections + custom drawn CCDs
+        _plm_pool = [str(row.get("ccd") or "").strip().upper()
+                     for row in (unnatural_pool or []) if row.get("ccd")]
+        peptidelm_proposer = BackendProposer(
+            peptide_length=_plm_len,
+            len_range=_plm_range,
+            ncaa_min=nonnatural_min,
+            ncaa_max=nonnatural_max,
+            ncaa_pool=_plm_pool,
+            cyclic=(design_mode == "cyclic"),
+            design_mode=design_mode,
+            cys_positions=list(design_params.get("cys_positions") or []),
+            allow_extra_cys=allow_extra_cys,
+            fixed_residues=_plm_fixed,
+            ncaa_decode_bias=float(options.get("peptideNcaaDecodeBias") or 0.5),
+            device=os.environ.get("VBIO_PEPTIDELM_DEVICE") or (
+                "cuda" if _torch_cuda_available() else "cpu"),
+            log=lambda m: print(f"[peptidelm] {m}", file=sys.stderr),
+        )
+        print(
+            f"[peptidelm] 提案引擎已启用（length={'自适应' if _plm_len is None else _plm_len}, "
+            f"NCAA 池 {len(_plm_pool)} 个, 固定残基 {len(_plm_fixed)} 个, "
+            f"mode={design_mode}）",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"PeptideLM 提案引擎初始化失败：{exc}") from exc
+
+    # D-peptide mirror workflow context: mirror the target once so every
+    # candidate is designed against the fixed D-target (see module docstring
+    # block above). Chirality 'l' keeps the plain L-frame loop.
+    # user pocket (optional): "chain:num,chain:num" receptor residues (author
+    # numbering of the upload) or an explicit x,y,z center. Translated here to
+    # 1-based sequence positions — staged structures and native predictions
+    # number polymer residues 1..N — and consumed by the pocket placement in
+    # the collect loop (both chiralities). Empty = global (no pocket).
+    try:
+        pocket_author_contacts, pocket_sequence_contacts = (
+            _pocket_contacts_for_staged_space(
+                base_yaml_data, options, resolved_target_chain_id))
+    except ValueError as pocket_err:
+        raise ValueError(f"口袋定义无效：{pocket_err}") from pocket_err
+    if pocket_sequence_contacts:
+        print(
+            "[peptide-design] user pocket (sequence numbering): "
+            + ",".join(f"{c}:{n}" for c, n in pocket_sequence_contacts),
+            file=sys.stderr,
+        )
+    pocket_constraint_blueprint: Optional[Dict[str, Any]] = (
+        {"contacts": [[c, n] for c, n in pocket_author_contacts]}
+        if pocket_author_contacts else None
+    )
+
+    dpeptide_reference_target: Optional[Path] = None
+    d_target_staged: Optional[Path] = None
+    if peptide_chirality == 'd':
+        # template_inputs were popped from predict_args at the main() boundary;
+        # without re-attaching them the uploaded structure is invisible here
+        # and the display products cannot be aligned to the user's frame.
+        if template_inputs:
+            predict_args = dict(predict_args)
+            predict_args["template_inputs"] = template_inputs
+        # D-route target preparation: uploaded structure (or single-chain
+        # prediction) mirrored x->-x ONCE; every candidate stages against
+        # this exact D-target (the legacy de novo L-L complex prediction is
+        # gone — a designed peptide carries no coevolution signal, so its
+        # interface was unreliable)
+        l_target, d_target_staged = _dpeptide_prepare_d_target(
+            predict_args, base_yaml_data, options, target_chain_id,
+            _normalize_peptide_backend(backend),
+            Path(temp_dir) / "d_target_prep", int(seed if isinstance(seed, int) else 7),
+        )
+        dpeptide_reference_target = l_target
+        # Mode-anchored design: an uploaded initial peptide structure (same
+        # coordinate frame as the target structure) switches placement from
+        # the generic pocket surface search to reference-pose anchoring.
+        # Anchoring requires an UPLOADED target: against a de novo predicted
+        # target the reference frame can never match.
+        d_reference_peptide = None
+        if predict_args.get("peptide_structure_input"):
+            if not template_inputs:
+                raise ValueError(
+                    "模式锚定设计需要同时上传靶标结构：初始肽结构与靶标必须同一"
+                    "坐标系，而从头预测的靶标坐标帧无法与参考肽匹配。")
+            d_reference_peptide = _dpeptide_prepare_reference_peptide(
+                predict_args, Path(temp_dir) / "d_peptide_ref_prep",
+                binder_length=binder_length)
+    else:
+        d_reference_peptide = None
 
     def _peptide_runtime_timing(done_count: int) -> Dict[str, Any]:
         elapsed_seconds = max(0.0, time.time() - peptide_started_at)
@@ -7423,7 +8154,6 @@ def run_peptide_design_backend(
     if custom_molecules:
         runtime_predict_args["custom_ccd_molecules"] = custom_molecules
 
-    worker_entry_path = str(Path(__file__).resolve())
     resolved_subtask_queue = str(subtask_queue or "").strip() or build_capability_queue(
         "boltz2" if peptide_backend == "boltz" else peptide_backend,
         "default",
@@ -7433,19 +8163,17 @@ def run_peptide_design_backend(
     parent_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "peptide-design").strip() or "peptide-design"
     if peptide_gpu_ids:
         print(
-            f"🧵 Peptide design parallel workers: {parallel_workers} (requested_gpu_ids={peptide_gpu_ids})",
+            f"Peptide design parallel workers: {parallel_workers} (requested_gpu_ids={peptide_gpu_ids})",
             file=sys.stderr,
         )
     else:
         print(
-            f"🧵 Peptide design parallel workers: {parallel_workers} (gpu pool auto-detected)",
+            f"Peptide design parallel workers: {parallel_workers} (gpu pool auto-detected)",
             file=sys.stderr,
         )
-    print(f"🧵 Peptide design subtask celery queue: {resolved_subtask_queue}", file=sys.stderr)
+    print(f"Peptide design subtask celery queue: {resolved_subtask_queue}", file=sys.stderr)
 
     for generation in range(1, iterations + 1):
-        generation_best_before = best_score_seen
-        adaptive_mutation_rate = min(0.85, mutation_rate * (1.0 + 0.35 * stagnant_generations))
         _write_peptide_progress(
             progress_path,
             {
@@ -7460,73 +8188,49 @@ def run_peptide_design_backend(
                     "current_status": f"Generation {generation}/{iterations}",
                     "status_message": f"Running generation {generation} of {iterations}",
                     "current_best_sequences": _current_best_peptide_rows(),
-                    "adaptive_mutation_rate": adaptive_mutation_rate,
-                    "stagnant_generations": stagnant_generations,
+
+
                     **_peptide_runtime_timing(completed_tasks),
                 }
             },
         )
 
         generation_candidates: List[Dict[str, Any]] = []
-        attempts = 0
-        max_attempts = max(population_size * 30, 60)
 
-        while len(generation_candidates) < population_size and attempts < max_attempts:
-            attempts += 1
-            if generation == 1 and initial_sequence and initial_sequence not in evaluated_sequences:
-                candidate_sequence = initial_sequence
-            elif not elite_population:
-                candidate_sequence = _random_peptide_sequence_from_pool(
-                    binder_length,
-                    natural_pool,
-                    design_mode=design_mode,
-                    sequence_mask=sequence_mask,
-                    design_params=design_params,
-                )
-            else:
-                parent = random.choice(elite_population)
-                parent_seq = str(parent.get("sequence") or "")
-                parent_plddts = parent.get("plddts") if isinstance(parent.get("plddts"), list) else None
-                elite_sequences = [str(row.get("sequence") or "") for row in elite_population if str(row.get("sequence") or "")]
-                strategy = _weighted_choice(
-                    ["exploit", "diversify", "explore", "crossover"],
-                    [0.48, 0.24, 0.18, 0.10],
-                )
-                candidate_sequence = _mutate_peptide_sequence_from_pool(
-                    parent_seq,
-                    natural_pool=natural_pool,
-                    mutation_rate=adaptive_mutation_rate,
-                    plddt_scores=parent_plddts,
-                    design_mode=design_mode,
-                    sequence_mask=sequence_mask,
-                    design_params=design_params,
-                    strategy=strategy,
-                    elite_sequences=elite_sequences,
-                )
-
-            candidate_sequence = _apply_sequence_mask(candidate_sequence, sequence_mask)
-            if design_mode == "bicyclic":
-                candidate_sequence = _enforce_bicyclic_cys_layout(
-                    candidate_sequence,
-                    binder_length=binder_length,
-                    cys_positions=design_params.get("cys_positions"),
-                )
-
-            candidate_sequence, candidate_modifications = _sample_peptide_modifications(
-                candidate_sequence,
+        # PeptideLM proposals — the single proposal source. When the user
+        # supplied an initial (seed) sequence, generation 1 anchors edits on
+        # it instead of de novo sampling. Length may be adaptive; the
+        # bicyclic Cys layout and NCAA pool are enforced by the proposer's
+        # decode-time constraint plan.
+        try:
+            _proposer_elites: List[Dict[str, Any]] = list(elite_population)
+            if generation == 1 and initial_sequence and not _proposer_elites:
+                _proposer_elites = [{
+                    "sequence": initial_sequence,
+                    "modifications": [],
+                    "plddts": [],
+                }]
+            for lm_base, lm_mods, lm_anchors in peptidelm_proposer.propose(
+                natural_pool,
                 unnatural_pool,
-                nonnatural_min,
-                nonnatural_max,
-                protected_positions=_peptide_protected_indices(candidate_sequence, sequence_mask, design_mode),
-            )
-            candidate_key = _peptide_candidate_key(candidate_sequence, candidate_modifications)
-            if candidate_key in evaluated_sequences:
-                continue
-            evaluated_sequences.add(candidate_key)
-            generation_candidates.append({
-                "sequence": candidate_sequence,
-                "modifications": candidate_modifications,
-            })
+                _proposer_elites,
+                population_size,
+            ):
+                lm_sequence = _apply_sequence_mask(str(lm_base or "").upper(), sequence_mask)
+                lm_mods = [m for m in (lm_mods or []) if isinstance(m, dict)]
+                lm_key = _peptide_candidate_key(lm_sequence, lm_mods)
+                if lm_key in evaluated_sequences:
+                    continue
+                evaluated_sequences.add(lm_key)
+                generation_candidates.append({
+                    "sequence": lm_sequence,
+                    "modifications": lm_mods,
+                    "cys_positions": [int(p) for p in (lm_anchors or [])],
+                })
+                if len(generation_candidates) >= population_size:
+                    break
+        except Exception as exc:
+            raise RuntimeError(f"PeptideLM propose 失败（generation {generation}）：{exc}") from exc
 
         if not generation_candidates:
             break
@@ -7543,6 +8247,16 @@ def run_peptide_design_backend(
                 candidate_dir=candidate_dir,
                 temp_dir=temp_dir,
             )
+            # user pocket (optional): contacts come straight from the frontend
+            # residue list ("chain:num,...") in author numbering of the
+            # uploaded structure. Both engines remap to 1-based sequence
+            # positions at backend entry (boltz: run_boltz_backend, protenix:
+            # run_protenix_backend) and enforce the pocket natively during
+            # candidate prediction.
+            candidate_pocket_constraint = None
+            if pocket_constraint_blueprint:
+                candidate_pocket_constraint = dict(pocket_constraint_blueprint)
+                candidate_pocket_constraint["binder"] = binder_chain_id
             candidate_yaml = _build_peptide_candidate_yaml(
                 candidate_base_yaml_data,
                 binder_chain_id=binder_chain_id,
@@ -7553,6 +8267,9 @@ def run_peptide_design_backend(
                 linker_atom_map=linker_atom_map,
                 modifications=candidate_modifications,
                 backend=peptide_backend,
+                cys_positions=candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else None,
+                pocket_constraint=candidate_pocket_constraint,
+                binder_only=(peptide_chirality == 'd'),
             )
             archive_path = os.path.join(candidate_dir, "result.zip")
 
@@ -7566,6 +8283,7 @@ def run_peptide_design_backend(
                     "candidate_index": idx,
                     "sequence": candidate_sequence,
                     "modifications": candidate_modifications,
+                    "cys_positions": candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else [],
                     "candidate_yaml": candidate_yaml,
                     "candidate_dir": candidate_dir,
                     "archive_path": archive_path,
@@ -7604,18 +8322,20 @@ def run_peptide_design_backend(
                         "generation_completed_tasks": done_now,
                         "generation_running_tasks": running_now,
                         "generation_queued_tasks": queued_now,
-                        "adaptive_mutation_rate": adaptive_mutation_rate,
-                        "stagnant_generations": stagnant_generations,
+    
+    
                         "current_best_sequences": _current_best_peptide_rows(),
                         **_peptide_runtime_timing(global_done),
                     }
                 },
             )
 
+        # chirality=d candidates predict the ISOLATED conformer
+        # (binder_only); the D-space staging + refine happens in the
+        # collection loop below.
         completed_generation_jobs = _execute_peptide_generation_jobs(
             generation_jobs,
             parallel_workers,
-            worker_entry_path,
             resolved_subtask_queue,
             parent_task_id,
             progress_callback=_emit_generation_runtime_progress,
@@ -7681,27 +8401,236 @@ def run_peptide_design_backend(
             liability = _peptide_sequence_liability_penalty(candidate_sequence, candidate_modifications)
             liability_penalty = float(liability.get("penalty") or 0.0)
             developability_score = max(0.0, 1.0 - liability_penalty)
+            # Pocket satisfaction enters the RANKING when the user defined a
+            # pocket — a ranking signal, never a filter: every candidate
+            # ships. Measured motivation: with pure confidence ranking the
+            # rank-1 pick ignored the user's pocket even though 9-10 of 16
+            # candidates sat inside it (some at 0.6-0.9 A). The refined
+            # pocket distance arrives later (after the refine below), so the
+            # initial composite uses the native pose's pocket contact and is
+            # recomputed once the refined report exists.
+            _native_structure = _select_primary_structure_file(result_dir)
+            native_pocket_min = None
+            if pocket_sequence_contacts and _native_structure is not None:
+                try:
+                    _npr = _pocket_contact_report(Path(_native_structure), pocket_sequence_contacts)
+                    native_pocket_min = _npr.get("pocket_min_distance")
+                except Exception:
+                    native_pocket_min = None
+            pocket_satisfaction = None
+            _ps_pm = native_pocket_min
+            if pocket_sequence_contacts and isinstance(_ps_pm, (int, float)):
+                pocket_satisfaction = max(0.0, min(1.0, (8.0 - float(_ps_pm)) / 3.0)) if _ps_pm > 5.0 else 1.0
             if interface_metric_value is not None:
-                composite_score = (
-                    0.58 * interface_confidence
-                    + 0.22 * binder_confidence
-                    + 0.12 * pair_iptm_confidence
-                    + 0.08 * developability_score
-                )
+                if pocket_satisfaction is not None:
+                    composite_score = (
+                        0.40 * interface_confidence
+                        + 0.15 * binder_confidence
+                        + 0.08 * pair_iptm_confidence
+                        + 0.05 * developability_score
+                        + 0.32 * pocket_satisfaction
+                    )
+                else:
+                    composite_score = (
+                        0.58 * interface_confidence
+                        + 0.22 * binder_confidence
+                        + 0.12 * pair_iptm_confidence
+                        + 0.08 * developability_score
+                    )
             elif binder_avg_plddt > 0:
-                composite_score = (
-                    0.58 * pair_iptm_confidence
-                    + 0.30 * binder_confidence
-                    + 0.12 * developability_score
-                )
+                if pocket_satisfaction is not None:
+                    composite_score = (
+                        0.40 * pair_iptm_confidence
+                        + 0.20 * binder_confidence
+                        + 0.08 * developability_score
+                        + 0.32 * pocket_satisfaction
+                    )
+                else:
+                    composite_score = (
+                        0.58 * pair_iptm_confidence
+                        + 0.30 * binder_confidence
+                        + 0.12 * developability_score
+                    )
                 if pair_iptm is None:
                     pair_iptm_formula = "binder_avg_plddt_developability_only"
             else:
                 composite_score = None
             structure_file = _select_primary_structure_file(result_dir)
+
+            def _rescore_with_refined_pocket(refined_path: Path) -> None:
+                """Recompute the composite once the REFINED pocket distance
+                exists — the ranking must reflect the shipped pose, not the
+                native prediction's."""
+                nonlocal composite_score
+                if not (pocket_sequence_contacts and isinstance(composite_score, (int, float))):
+                    return
+                try:
+                    rpr = _pocket_contact_report(refined_path, pocket_sequence_contacts)
+                except Exception:
+                    return
+                pm = rpr.get("pocket_min_distance")
+                if not isinstance(pm, (int, float)):
+                    return
+                ps = max(0.0, min(1.0, (8.0 - float(pm)) / 3.0)) if pm > 5.0 else 1.0
+                composite_score = 0.68 * composite_score + 0.32 * ps
+
+            # D-route (chirality=d): stage the candidate's isolated conformer
+            # against the prepared D-target at the user pocket, then refine
+            # under the pinned receptor. Failure here fails the task — the
+            # D-space numbers are a mandatory deliverable, never skipped.
+            staged_path = ""
+            d_space_refined = ""
+            d_space_metrics: Optional[Dict[str, Any]] = None
+            pocket_report_row: Optional[Dict[str, Any]] = None
+            # all D candidates go through fixed-D diffusion: it resolves the
+            # placement clashes of the staged pose; the per-candidate bond gate
+            # below rejects any bicyclic candidate whose ring bonds broke
+            if peptide_chirality == 'd' and structure_file is None:
+                # a worker archive without a structure cannot enter the D
+                # route (staging/refine need coordinates); reject the
+                # candidate instead of failing the task at zip time
+                print(
+                    f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                    f"rejected: worker returned no structure",
+                    file=sys.stderr,
+                )
+                continue
+            if peptide_chirality == 'd':
+                # A candidate whose staging/refine degenerates (e.g. a
+                # collapsed diffusion sample) is rejected individually; the
+                # task only fails when NO candidate survives.
+                try:
+                    _job_seed = job.get("predict_args") if isinstance(job.get("predict_args"), dict) else {}
+                    _seed_v = _job_seed.get("seed")
+                    _seed_v = int(_seed_v) if isinstance(_seed_v, int) else random_seed
+                    staged_path = str(_dpeptide_stage_conformer_in_pocket(
+                        d_target_staged,
+                        Path(structure_file),
+                        Path(candidate_dir) / "d_space_staged.pdb",
+                        pocket_sequence_contacts,
+                        seed=_seed_v,
+                        linker_ccd=linker_ccd,
+                        reference_peptide_path=d_reference_peptide,
+                    ))
+                    refined_cif = Path(candidate_dir) / "d_space_refined.cif"
+                    if pocket_sequence_contacts:
+                        gate_result = _pocket_place_and_refine(
+                            Path(staged_path),
+                            pocket_sequence_contacts=pocket_sequence_contacts,
+                            refined_cif=refined_cif,
+                            seed=_seed_v,
+                            options=options,
+                            require_bonds=(design_mode == "bicyclic"),
+                            chirality_label="d",
+                            keep_pose=(d_reference_peptide is not None),
+                            bicyclic_cys_positions=(
+                                job.get("cys_positions")
+                                if isinstance(job.get("cys_positions"), list) else None),
+                            linker_ccd=linker_ccd,
+                        )
+                        d_space_refined = gate_result["refined"]
+                        d_space_metrics = gate_result["metrics"]
+                        pocket_report_row = gate_result["pocket"]
+                        _rescore_with_refined_pocket(Path(d_space_refined))
+                    else:
+                        d_space_metrics = _dpeptide_refine_and_validate(
+                            staged_path,
+                            refined_cif=refined_cif,
+                            seed=_seed_v,
+                            queue=build_capability_queue("protenix", "default"),
+                            options=options,
+                        )
+                        d_space_refined = str(refined_cif)
+                        if design_mode == "bicyclic":
+                            bond_report = _dpeptide_linker_bond_report(Path(d_space_refined))
+                            if not (bond_report and bond_report.get("all_bonded")):
+                                print(
+                                    f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                                    f"rejected: refined ring bonds broken {bond_report}",
+                                    file=sys.stderr,
+                                )
+                                continue
+                    print(
+                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                        f"D-space ipTM={d_space_metrics.get('iptm')}",
+                        file=sys.stderr,
+                    )
+                except (RuntimeError, ValueError) as d_exc:
+                    print(
+                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                        f"rejected: {d_exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+
+            # L chirality + user pocket: protenix-v2 has no constraint
+            # embedder, so the native prediction's peptide pose does not
+            # follow the pocket. Honor it the same way the D route does:
+            # rigidly place the free chains at the pocket on the native
+            # product's receptor, refine under the fixed receptor, gate on
+            # pocket contact (and ring bonds for bicyclic). The refined
+            # structure becomes the candidate's shipped product.
+            if (peptide_chirality == 'l' and pocket_sequence_contacts
+                    and structure_file is not None):
+                try:
+                    _job_seed = job.get("predict_args") if isinstance(job.get("predict_args"), dict) else {}
+                    _seed_v = _job_seed.get("seed")
+                    _seed_v = int(_seed_v) if isinstance(_seed_v, int) else random_seed
+                    staged_path = str(Path(candidate_dir) / "pocket_staged.pdb")
+                    st_native = gemmi.read_structure(str(structure_file))
+                    st_native.setup_entities()
+                    st_native.write_pdb(staged_path)
+                    if design_mode == "bicyclic":
+                        _append_staged_bicyclic_links(
+                            Path(staged_path),
+                            job.get("cys_positions")
+                            if isinstance(job.get("cys_positions"), list) else None,
+                            linker_ccd,
+                        )
+                    gate_result = _pocket_place_and_refine(
+                        Path(staged_path),
+                        pocket_sequence_contacts=pocket_sequence_contacts,
+                        refined_cif=Path(candidate_dir) / "pocket_refined.cif",
+                        seed=_seed_v,
+                        options=options,
+                        require_bonds=(design_mode == "bicyclic"),
+                        chirality_label="l",
+                        bicyclic_cys_positions=(
+                            job.get("cys_positions")
+                            if isinstance(job.get("cys_positions"), list) else None),
+                        linker_ccd=linker_ccd,
+                    )
+                    structure_file = Path(gate_result["refined"])
+                    staged_path = gate_result["staged"]
+                    d_space_refined = gate_result["refined"]
+                    d_space_metrics = gate_result["metrics"]
+                    pocket_report_row = gate_result["pocket"]
+                    _rescore_with_refined_pocket(Path(d_space_refined))
+                except (RuntimeError, ValueError) as pocket_exc:
+                    print(
+                        f"[l-peptide] candidate {candidate_sequence[:12]}… "
+                        f"rejected: {pocket_exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+
+            if (peptide_chirality == 'd' and isinstance(d_space_metrics, dict)
+                    and not pair_iptm
+                    and isinstance(d_space_metrics.get("iptm"), (int, float))):
+                # binder-only conformer predictions carry no interface
+                # numbers; the refined D-space complex is the interface
+                # readout for D candidates
+                pair_iptm = float(d_space_metrics["iptm"])
+                pair_iptm_formula = "d_space_refined_iptm"
+                chain_plddt = d_space_metrics.get("chain_mean_plddt")
+                if (not binder_avg_plddt and isinstance(chain_plddt, dict)
+                        and isinstance(chain_plddt.get("B"), (int, float))):
+                    binder_avg_plddt = float(chain_plddt["B"]) * 100.0
+
             result_row = {
                 "sequence": candidate_sequence,
                 "modifications": candidate_modifications,
+                "cys_positions": job.get("cys_positions") if isinstance(job.get("cys_positions"), list) else [],
                 "generation": generation,
                 "iptm": pair_iptm,
                 "pair_iptm": pair_iptm,
@@ -7731,6 +8660,18 @@ def run_peptide_design_backend(
                 "binder_chain_id": binder_chain_id,
                 "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
                 "structure_source_path": str(structure_file) if structure_file else "",
+                "d_space_staged": str(staged_path),
+                "d_space_refined": d_space_refined,
+                "pocket_min_distance": (
+                    pocket_report_row.get("pocket_min_distance")
+                    if isinstance(pocket_report_row, dict) else None),
+                "pocket_contacts_within_4p5": (
+                    pocket_report_row.get("pocket_contacts_within_4p5")
+                    if isinstance(pocket_report_row, dict) else None),
+                "d_space_iptm": (
+                    float(d_space_metrics.get("iptm"))
+                    if isinstance(d_space_metrics, dict) and isinstance(d_space_metrics.get("iptm"), (int, float))
+                    else None),
                 "structure_format": (
                     "pdb"
                     if structure_file and structure_file.suffix.lower() == ".pdb"
@@ -7757,6 +8698,15 @@ def run_peptide_design_backend(
                 }
                 for row in _select_nsga2_peptide_elites(all_results, elite_size)
             ]
+            # PeptideLM: GRPO update on this generation's scored rows so the
+            # proposal policy improves round over round
+            try:
+                peptidelm_proposer.learn(
+                    elite_population,
+                    [row for row in all_results if row.get("generation") == generation],
+                )
+            except Exception as exc:
+                raise RuntimeError(f"PeptideLM learn 失败（generation {generation}）：{exc}") from exc
 
             progress_payload = {
                 "peptide_design": {
@@ -7777,19 +8727,12 @@ def run_peptide_design_backend(
                     "generation_running_tasks": max(0, len(generation_jobs) - generation_done),
                     "generation_queued_tasks": 0,
                     "current_best_sequences": _current_best_peptide_rows(),
-                    "adaptive_mutation_rate": adaptive_mutation_rate,
-                    "stagnant_generations": stagnant_generations,
+
+
                     **_peptide_runtime_timing(completed_tasks),
                 }
             }
             _write_peptide_progress(progress_path, progress_payload)
-
-        current_generation_best = _peptide_rank_score(all_results[0]) if all_results else float("-inf")
-        if current_generation_best > generation_best_before + 1e-6:
-            best_score_seen = current_generation_best
-            stagnant_generations = 0
-        else:
-            stagnant_generations += 1
 
     all_results.sort(
         key=lambda item: (
@@ -7805,15 +8748,43 @@ def run_peptide_design_backend(
 
     zip_rows: List[Dict[str, Any]] = []
     with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        rank_cif_source = ""
         for rank, row in enumerate(top_results, start=1):
             next_row = dict(row)
             source_path = str(next_row.pop("structure_source_path", "") or "")
             structure_arcname = ""
-            if source_path and os.path.isfile(source_path):
-                suffix = Path(source_path).suffix.lower()
+            structure_source_for_rank = source_path
+            if peptide_chirality == 'd':
+                staged_path = str(next_row.pop("d_space_refined", "") or "")
+                if not (staged_path and os.path.isfile(staged_path)):
+                    staged_path = str(next_row.get("d_space_staged", "") or "")
+                if not (staged_path and os.path.isfile(staged_path)):
+                    raise RuntimeError(
+                        "D-peptide candidate is missing its D-space refined "
+                        f"structure (rank {rank}, sequence "
+                        f"{str(next_row.get('sequence'))[:16]}, staged="
+                        f"{staged_path!r})"
+                    )
+                from peplm.dpeptide import flip_product as _row_flip
+                display_path = Path(output_archive_path).parent / \
+                    f"_display_rank_{rank:02d}.pdb"
+                _row_flip(Path(staged_path), display_path)
+                if dpeptide_reference_target and Path(dpeptide_reference_target).is_file():
+                    rmsd = _dpeptide_align_product_to_input(
+                        display_path, Path(dpeptide_reference_target))
+                    print(f"[d-peptide] display rank {rank} aligned to the user "
+                          f"frame (receptor RMSD {rmsd:.3f} A)", file=sys.stderr)
+                structure_source_for_rank = str(display_path)
+            if structure_source_for_rank and os.path.isfile(structure_source_for_rank):
+                suffix = Path(structure_source_for_rank).suffix.lower()
                 ext = ".pdb" if suffix == ".pdb" else ".cif"
                 structure_arcname = f"structures/rank_{rank:02d}{ext}"
-                zipf.write(source_path, structure_arcname)
+                zipf.write(structure_source_for_rank, structure_arcname)
+                # rank_cif_source stays on the MIRROR-SPACE source: the
+                # product block flips it exactly once. Overwriting it with the
+                # already-flipped display file would double-flip.
+                if rank == 1 and not rank_cif_source:
+                    rank_cif_source = structure_source_for_rank or source_path
             next_row["rank"] = rank
             next_row["structure_file"] = structure_arcname
             next_row["structure_name"] = Path(structure_arcname).name if structure_arcname else ""
@@ -7821,15 +8792,91 @@ def run_peptide_design_backend(
             next_row.pop("plddts", None)
             zip_rows.append(next_row)
 
+        product_note: Dict[str, Any] = {}
+        if peptide_chirality == 'd':
+            # The display rank-01 file already IS the product frame
+            # (L-target + D-peptide): it must pass the chirality gate before
+            # entering the archive as the product.
+            if rank_cif_source and os.path.isfile(rank_cif_source):
+                _prod_path = Path(output_archive_path).parent / "PRODUCT_Ltarget_Dpeptide.pdb"
+                shutil.copyfile(rank_cif_source, _prod_path)
+                with open(_prod_path, "r", encoding="utf-8", errors="replace") as _head:
+                    if not _head.readline().startswith(
+                        ("ATOM", "HEADER", "CRYST1", "REMARK", "MODEL", "HET", "SEQRES", "TITLE")
+                    ):
+                        raise RuntimeError(
+                            f"D-peptide product source {rank_cif_source} is not "
+                            "PDB format; display transform did not run."
+                        )
+                gate = _assert_product_chirality(
+                    _prod_path,
+                    reference_structure_path=(
+                        dpeptide_reference_target
+                        if dpeptide_reference_target and Path(dpeptide_reference_target).is_file()
+                        else None),
+                    rmsd_limit=None,
+                )
+                integrity = _structure_integrity_report(_prod_path)
+                if not integrity.get("all_intact"):
+                    # telemetry, not rejection — the source-level fixes are the
+                    # staged strain relief + the sampler guards; the flag ships
+                    # with the report for visibility
+                    print(
+                        f"[d-peptide] product integrity flags: "
+                        f"{integrity['broken_bonds'][:4]}",
+                        file=sys.stderr,
+                    )
+                bond_report = (
+                    _dpeptide_linker_bond_report(_prod_path)
+                    if design_mode == "bicyclic" else None
+                )
+                if _prod_path.exists():
+                    zipf.write(str(_prod_path), "structures/product_Ltarget_Dpeptide.pdb")
+                    product_note = {
+                        "flip_product": "structures/product_Ltarget_Dpeptide.pdb",
+                        "route": "d_target_mirror_pocket_inpaint",
+                        "product_chirality": gate,
+                        "linker_bonds": bond_report,
+                    }
+            else:
+                raise RuntimeError(
+                    "D-peptide product missing: no display structure for the "
+                    f"top-ranked candidate (rank_cif_source={rank_cif_source!r})."
+                )
+        elif peptide_chirality == 'l' and pocket_sequence_contacts and top_results:
+            # L + user pocket: the shipped rank structures are the pocket-
+            # refined poses; record the gate evidence in the summary.
+            top_row = top_results[0]
+            product_note = {
+                "route": (
+                    "native_prediction_pocket_refine"
+                    if top_row.get("pocket_min_distance") is not None
+                    else "native_prediction"
+                ),
+                "pocket_residues_sequence": [
+                    [c, n] for c, n in pocket_sequence_contacts],
+                "pocket_min_distance": top_row.get("pocket_min_distance"),
+                "pocket_contacts_within_4p5": top_row.get("pocket_contacts_within_4p5"),
+                "linker_bonds": (
+                    _dpeptide_linker_bond_report(
+                        Path(str(top_row.get("structure_source_path") or "")))
+                    if design_mode == "bicyclic"
+                    and str(top_row.get("structure_source_path") or "").strip()
+                    and os.path.isfile(str(top_row.get("structure_source_path")))
+                    else None
+                ),
+            }
+
         summary_payload = {
             "summary": {
+                **product_note,
                 "backend": peptide_backend,
+                "chirality": peptide_chirality,
                 "design_mode": design_mode,
                 "binder_length": binder_length,
                 "iterations": iterations,
                 "population_size": population_size,
                 "elite_size": elite_size,
-                "mutation_rate": mutation_rate,
                 "completed_tasks": completed_tasks,
                 "total_tasks": total_tasks,
                 "best_score": zip_rows[0].get("composite_score") if zip_rows else 0.0,
@@ -7841,7 +8888,6 @@ def run_peptide_design_backend(
                 "iterations": iterations,
                 "population_size": population_size,
                 "elite_size": elite_size,
-                "mutation_rate": mutation_rate,
                 "target_chain_id": resolved_target_chain_id,
                 "binder_chain_id": binder_chain_id,
                 "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
@@ -7894,8 +8940,6 @@ def run_peptide_design_backend(
     )
 
 
-
-
 def _merge_custom_ccd_with_existing_cache(
     source_common_dir: Path,
     overlay_root: Path,
@@ -7921,6 +8965,9 @@ def _merge_custom_ccd_with_existing_cache(
 
     custom_cif_text, custom_mols = _build_custom_ccd_bundle(custom_molecules) if custom_molecules else ("", {})
     additions = [text for text in (custom_cif_text.strip(), extra_cif_text.strip()) if text]
+    # Contract-check appended blocks before the overlay is written: a header-only loop or
+    # undefined bond atom must fail here with the CCD named, never during GPU featurization.
+    validate_ccd_additions(*additions)
     merged_cif_text = source_components.read_text(encoding="utf-8", errors="replace").rstrip()
     if additions:
         merged_cif_text = merged_cif_text + "\n" + "\n".join(additions) + "\n"
@@ -8036,7 +9083,6 @@ def run_boltz_backend(
     cli_args.pop("low_vram", None)
     if model_name:
         cli_args['model'] = model_name
-        print(f"DEBUG: Using model: {model_name}", file=sys.stderr)
     if strict_ligand_confidence_contract:
         cli_args["strict_ligand_confidence_contract"] = True
     if low_vram:
@@ -8062,17 +9108,17 @@ def run_boltz_backend(
     if requires_external_msa:
         msa_server_url = _assert_msa_server_configured("boltz")
         if not requested_use_msa:
-            print("ℹ️ Boltz2 输入缺少 MSA，已启用外部 MSA。", file=sys.stderr)
-        print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
+            print("Boltz2 输入缺少 MSA，已启用外部 MSA。", file=sys.stderr)
+        print(f"开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
         _require_complete_external_msa(normalized_yaml, str(work_root), "Boltz2")
-        print("✅ MSA 生成成功，将用于结构预测", file=sys.stderr)
+        print("MSA 生成成功，将用于结构预测", file=sys.stderr)
         normalized_yaml, injected_count = _inject_local_msa_paths_into_yaml(normalized_yaml, str(work_root))
         if injected_count > 0:
-            print(f"ℹ️ Injected local MSA paths into YAML: {injected_count}", file=sys.stderr)
+            print(f"Injected local MSA paths into YAML: {injected_count}", file=sys.stderr)
         cli_args['use_msa_server'] = True
         cli_args['msa_server_url'] = msa_server_url
     else:
-        print("ℹ️ Boltz2 输入已禁用或提供 MSA，跳过外部 MSA 生成。", file=sys.stderr)
+        print("Boltz2 输入已禁用或提供 MSA，跳过外部 MSA 生成。", file=sys.stderr)
 
     tmp_yaml_path = str(work_root / 'data.yaml')
     with open(tmp_yaml_path, 'w') as tmp_yaml:
@@ -8114,7 +9160,7 @@ def run_boltz_backend(
     extra_args = sanitize_docker_extra_args(raw_extra_args)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):
         print(
-            f"⚠️ 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
+            f"[WARN] 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
             file=sys.stderr,
         )
     shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
@@ -8231,7 +9277,7 @@ def run_boltz_backend(
             pass
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
-    print(f"🐳 运行 Boltz2 Docker: {display_command}", file=sys.stderr)
+    print(f"运行 Boltz2 Docker: {display_command}", file=sys.stderr)
 
     boltz_log_path = str(results_root / "boltz2_docker.log")
     with open(boltz_log_path, "w", encoding="utf-8") as log_file:
@@ -8262,7 +9308,7 @@ def run_boltz_backend(
             f"Last output:\n{tail_text}\n"
             f"Full log: {boltz_log_path}"
         )
-    print(f"✅ Boltz2 Docker 运行完成，日志已保存: {boltz_log_path}", file=sys.stderr)
+    print(f"Boltz2 Docker 运行完成，日志已保存: {boltz_log_path}", file=sys.stderr)
 
     cache_msa_files_from_temp_dir(str(work_root), normalized_yaml)
     assert_boltz_preprocessing_succeeded(str(results_root), normalized_yaml)
@@ -8278,7 +9324,7 @@ def run_boltz_backend(
         parsed_yaml = yaml.safe_load(normalized_yaml)
         boltz_yaml_data = parsed_yaml if isinstance(parsed_yaml, dict) else {}
     except Exception as yaml_err:
-        print(f"⚠️ Boltz IPSAE 后处理解析 YAML 失败，将跳过 IPSAE: {yaml_err}", file=sys.stderr)
+        print(f"[WARN] Boltz IPSAE 后处理解析 YAML 失败，将跳过 IPSAE: {yaml_err}", file=sys.stderr)
         boltz_yaml_data = {}
     try:
         extra_archive_files.extend(
@@ -8289,7 +9335,7 @@ def run_boltz_backend(
             )
         )
     except Exception as err:
-        print(f"⚠️ 运行 Boltz IPSAE 后处理失败: {err}", file=sys.stderr)
+        print(f"[WARN] 运行 Boltz IPSAE 后处理失败: {err}", file=sys.stderr)
 
     _append_custom_residues_ccd_from_molecules(extra_archive_files, custom_molecules, temp_dir, "boltz")
 
@@ -8312,7 +9358,7 @@ def run_alphafold3_backend(
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
     low_vram: bool = False,
 ) -> None:
-    print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
+    print("Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
     if low_vram:
         raise ValueError(
             "AlphaFold3 不支持低显存模式。如需低显存，请改用 Protenix 或 Boltz2 后端。"
@@ -8333,7 +9379,7 @@ def run_alphafold3_backend(
     try:
         yaml_data = yaml.safe_load(yaml_content) or {}
     except yaml.YAMLError as err:
-        print(f"⚠️ 无法解析 YAML，亲和力后处理将被跳过: {err}", file=sys.stderr)
+        print(f"[WARN] 无法解析 YAML，亲和力后处理将被跳过: {err}", file=sys.stderr)
         yaml_data = {}
 
     af3_results_root = _resolve_backend_results_root("alphafold3", task_id, temp_dir)
@@ -8353,13 +9399,13 @@ def run_alphafold3_backend(
 
     if use_msa_server:
         msa_server_url = _assert_msa_server_configured("alphafold3")
-        print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
+        print(f"开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
         _require_complete_external_msa(yaml_content, str(af3_work_root), "AlphaFold3")
-        print("✅ MSA 生成成功，将用于 AF3 输入", file=sys.stderr)
+        print("MSA 生成成功，将用于 AF3 输入", file=sys.stderr)
         if MSA_CACHE_CONFIG['enable_cache']:
             cache_msa_files_from_temp_dir(str(af3_work_root), yaml_content)
     else:
-        print("ℹ️ AlphaFold3 输入不需要外部 MSA 生成。", file=sys.stderr)
+        print("AlphaFold3 输入不需要外部 MSA 生成。", file=sys.stderr)
 
     cache_dir = MSA_CACHE_CONFIG['cache_dir'] if MSA_CACHE_CONFIG['enable_cache'] else None
     chain_msa_paths = collect_chain_msa_paths(prep, str(af3_work_root), cache_dir)
@@ -8600,7 +9646,7 @@ except Exception:
     extra_args = sanitize_docker_extra_args(raw_extra_args)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):
         print(
-            f"⚠️ 已忽略部分 ALPHAFOLD3_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
+            f"[WARN] 已忽略部分 ALPHAFOLD3_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
             file=sys.stderr,
         )
 
@@ -8614,7 +9660,7 @@ except Exception:
     try:
         gpu_arg = determine_docker_gpu_arg(visible_devices)
     except RuntimeError as gpu_err:
-        print(f"❌ 无法准备 AlphaFold3 GPU 环境: {gpu_err}", file=sys.stderr)
+        print(f"[ERROR] 无法准备 AlphaFold3 GPU 环境: {gpu_err}", file=sys.stderr)
         print("   ↳ 请确认此主机安装了 NVIDIA 驱动并正确设置 CUDA_VISIBLE_DEVICES。", file=sys.stderr)
         raise
 
@@ -8679,7 +9725,7 @@ except Exception:
             f"{jax_cache_host_dir}:{container_cache_dir}",
         ])
     except Exception as exc:
-        print(f"⚠️ 无法创建 JAX 编译缓存目录 {jax_cache_host_dir}: {exc}", file=sys.stderr)
+        print(f"[WARN] 无法创建 JAX 编译缓存目录 {jax_cache_host_dir}: {exc}", file=sys.stderr)
 
     # 添加 ColabFold jobs 目录挂载（如果配置了 MSA 服务器）
     if use_msa_server and MSA_SERVER_URL and COLABFOLD_JOBS_DIR and os.path.exists(COLABFOLD_JOBS_DIR):
@@ -8687,11 +9733,11 @@ except Exception:
             "--volume",
             f"{COLABFOLD_JOBS_DIR}:{container_colabfold_jobs_dir}",
         ])
-        print(f"🔗 挂载 ColabFold jobs 目录: {COLABFOLD_JOBS_DIR} -> {container_colabfold_jobs_dir}", file=sys.stderr)
+        print(f"挂载 ColabFold jobs 目录: {COLABFOLD_JOBS_DIR} -> {container_colabfold_jobs_dir}", file=sys.stderr)
     elif use_msa_server:
-        print("⚠️ 未找到 ColabFold jobs 目录或未配置 MSA 服务器", file=sys.stderr)
+        print("[WARN] 未找到 ColabFold jobs 目录或未配置 MSA 服务器", file=sys.stderr)
     else:
-        print("ℹ️ 未启用外部 MSA，跳过 ColabFold jobs 目录挂载", file=sys.stderr)
+        print("未启用外部 MSA，跳过 ColabFold jobs 目录挂载", file=sys.stderr)
 
     host_uid = os.getuid()
     host_gid = os.getgid()
@@ -8702,12 +9748,12 @@ except Exception:
 
     gpu_device_groups = collect_gpu_device_group_ids()
     if not gpu_device_groups:
-        print("⚠️ 未能检测到 GPU 设备的所属用户组，容器可能无法访问 GPU。", file=sys.stderr)
+        print("[WARN] 未能检测到 GPU 设备的所属用户组，容器可能无法访问 GPU。", file=sys.stderr)
     else:
         for gid in gpu_device_groups:
             docker_command.extend(["--group-add", str(gid)])
         print(
-            f"🔐 为容器添加 GPU 相关用户组: {', '.join(str(g) for g in gpu_device_groups)}",
+            f"为容器添加 GPU 相关用户组: {', '.join(str(g) for g in gpu_device_groups)}",
             file=sys.stderr,
         )
 
@@ -8736,7 +9782,7 @@ except Exception:
             )
         except Exception:
             pass
-    print(f"🐳 运行 AlphaFold3 Docker: {display_command}", file=sys.stderr)
+    print(f"运行 AlphaFold3 Docker: {display_command}", file=sys.stderr)
     af3_log_path = str(af3_results_root / "af3_docker.log")
     with open(af3_log_path, "w", encoding="utf-8") as log_file:
         docker_proc = subprocess.Popen(
@@ -8761,18 +9807,18 @@ except Exception:
 
     if return_code != 0:
         tail_text = "".join(output_tail[-200:])
-        print(f"❌ AlphaFold3 Docker 运行失败: {tail_text}", file=sys.stderr)
+        print(f"[ERROR] AlphaFold3 Docker 运行失败: {tail_text}", file=sys.stderr)
         raise RuntimeError(
             f"AlphaFold3 Docker run failed with exit code {return_code}. "
             f"Last output:\n{tail_text}\n"
             f"Full log: {af3_log_path}"
         )
 
-    print(f"✅ AlphaFold3 Docker 运行完成，日志已保存: {af3_log_path}", file=sys.stderr)
+    print(f"AlphaFold3 Docker 运行完成，日志已保存: {af3_log_path}", file=sys.stderr)
 
     af3_output_contents = list(Path(af3_output_dir).rglob("*"))
     if not any(p.is_file() for p in af3_output_contents):
-        print("⚠️ AlphaFold3 输出目录为空，可能推理未产生结果。", file=sys.stderr)
+        print("[WARN] AlphaFold3 输出目录为空，可能推理未产生结果。", file=sys.stderr)
 
     extra_archive_files: List[Tuple[Path, str]] = []
     try:
@@ -8785,7 +9831,7 @@ except Exception:
             )
         )
     except Exception as err:
-        print(f"⚠️ 运行 AlphaFold3 IPSAE 后处理失败: {err}", file=sys.stderr)
+        print(f"[WARN] 运行 AlphaFold3 IPSAE 后处理失败: {err}", file=sys.stderr)
     extra_archive_files.extend(
         run_af3_affinity_pipeline(
             temp_dir=temp_dir,
@@ -8917,7 +9963,11 @@ def main():
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
         if backend in {"nesso1", "nesso-1"}:
             backend = "nesso"
-        if backend not in ("boltz", "alphafold3", "protenix", "nesso", "pocketxmol"):
+        if backend == "protenix2dock":
+            backend = "protenix"
+        elif backend == "boltz2dock":
+            backend = "boltz"
+        if backend not in ("boltz", "alphafold3", "protenix", "nesso"):
             raise ValueError(f"Unsupported backend '{backend}'.")
         low_vram = resolve_low_vram(predict_args)
         workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
@@ -8946,7 +9996,6 @@ def main():
         model_name = predict_args.pop("model_name", None)
         seed = predict_args.pop("seed", None)
         template_inputs = predict_args.pop("template_inputs", None)
-        pocketxmol_inputs = predict_args.pop("pocketxmol_inputs", {})
         custom_ccd_molecules = predict_args.pop("custom_ccd_molecules", [])
         strict_ligand_confidence_contract = _read_bool_option(
             predict_args,
@@ -9005,6 +10054,7 @@ def main():
                         gpu_ids=peptide_gpu_ids,
                         subtask_queue=peptide_subtask_queue,
                         custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                        template_inputs=template_inputs if isinstance(template_inputs, list) else None,
                     )
                 finally:
                     if peptide_parent_task_id:
@@ -9041,7 +10091,7 @@ def main():
                 )
             elif backend == "protenix":
                 if template_inputs:
-                    print("ℹ️ Protenix backend 当前未启用模板输入，已忽略 template_files。", file=sys.stderr)
+                    print("Protenix backend 当前未启用模板输入，已忽略 template_files。", file=sys.stderr)
                 run_protenix_backend(
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,
@@ -9051,14 +10101,6 @@ def main():
                     task_id=runtime_task_id,
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                     low_vram=low_vram,
-                )
-            elif backend == "pocketxmol":
-                run_pocketxmol_backend(
-                    temp_dir=temp_dir,
-                    output_archive_path=output_archive_path,
-                    pocketxmol_inputs=pocketxmol_inputs if isinstance(pocketxmol_inputs, dict) else {},
-                    seed=seed,
-                    task_id=runtime_task_id,
                 )
             else:
                 if seed is not None:
@@ -9080,8 +10122,6 @@ def main():
                 raise FileNotFoundError(
                     f"CRITICAL ERROR: Archive not found at {output_archive_path} immediately after creation."
                 )
-
-            print(f"DEBUG: Archive successfully created at: {output_archive_path}", file=sys.stderr)
 
     except Exception as e:
         print(f"Error during prediction subprocess: {e}\n{traceback.format_exc()}", file=sys.stderr)

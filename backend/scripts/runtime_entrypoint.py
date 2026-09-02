@@ -52,7 +52,6 @@ def _resolve_cpu_worker_concurrency(cli_concurrency: str | None) -> int:
         cli_concurrency
         if cli_concurrency
         else os.environ.get("CPU_MAX_CONCURRENT_TASKS")
-        or os.environ.get("MMP_CELERY_CONCURRENCY")
         or "0"
     )
     try:
@@ -80,13 +79,17 @@ def _resolve_worker_queues(worker_type: str, raw_capabilities: str, include_high
 
 def run_api() -> None:
     workers = _resolve_gunicorn_workers()
+    # Loopback by default (F1): the SPA reaches the runtime through the authenticated
+    # management gateway; binding 0.0.0.0 exposed the unauthenticated runtime to the network.
+    # Set VBIO_RUNTIME_BIND=0.0.0.0 only for deployments where the gateway runs elsewhere.
+    bind_host = str(os.environ.get("VBIO_RUNTIME_BIND") or "127.0.0.1").strip() or "127.0.0.1"
     _exec_or_die(
         [
             "gunicorn",
             "--workers",
             str(workers),
             "--bind",
-            "0.0.0.0:5000",
+            f"{bind_host}:5000",
             "--timeout",
             "120",
             "backend.app:app",

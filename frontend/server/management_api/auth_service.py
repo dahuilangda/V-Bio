@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 from management_api.postgrest_client import PostgrestClient
+
+
+def _platform_token() -> str:
+    return str(os.environ.get("VBIO_RUNTIME_API_TOKEN", "") or "").strip()
+
+
+def _is_platform_token(token_plain: str) -> bool:
+    expected = _platform_token()
+    return bool(expected) and bool(token_plain) and hmac.compare_digest(token_plain, expected)
 
 
 @dataclass
@@ -17,6 +28,27 @@ class TokenContext:
     allow_submit: bool
     allow_delete: bool
     allow_cancel: bool
+
+    @property
+    def is_platform(self) -> bool:
+        """The deployment's shared runtime token: trusted cross-project (the exact trust
+        level the runtime backend itself granted before it moved behind the gateway)."""
+        return self.token_id == "platform"
+
+
+# The deployment's shared runtime token (also baked into the SPA bundle). When presented to
+# the GATEWAY it identifies the trusted platform caller — the same trust level the runtime
+# backend itself granted before it was pulled behind the gateway. Per-project API tokens
+# keep their stricter project-bound semantics when presented instead.
+PLATFORM_TOKEN_CONTEXT = TokenContext(
+    token_id="platform",
+    user_id="platform",
+    name="platform runtime token",
+    project_id=None,
+    allow_submit=True,
+    allow_delete=True,
+    allow_cancel=True,
+)
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -43,6 +75,8 @@ class AuthService:
     def validate_token(self, token_plain: str) -> TokenContext:
         if not token_plain:
             raise PermissionError("Missing X-API-Token header")
+        if _is_platform_token(token_plain):
+            return PLATFORM_TOKEN_CONTEXT
 
         token_hash = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
         rows = self.postgrest.request(
@@ -93,6 +127,8 @@ class AuthService:
 
     def authorize_submit(self, project_id: str, token_plain: str) -> TokenContext:
         token = self.validate_token(token_plain)
+        if token.is_platform:
+            return token
         if not token.allow_submit:
             raise PermissionError("This token does not allow submit")
         if not token.project_id:
@@ -104,6 +140,8 @@ class AuthService:
 
     def authorize_task_action(self, project_id: str, token_plain: str, *, require_delete: bool) -> TokenContext:
         token = self.validate_token(token_plain)
+        if token.is_platform:
+            return token
         if require_delete:
             if not token.allow_delete:
                 raise PermissionError("This token does not allow delete")
@@ -118,6 +156,8 @@ class AuthService:
 
     def authorize_project_read(self, project_id: str, token_plain: str) -> TokenContext:
         token = self.validate_token(token_plain)
+        if token.is_platform:
+            return token
         if not token.project_id:
             raise PermissionError("This token is not bound to a project")
         if token.project_id != project_id:
@@ -132,6 +172,8 @@ class AuthService:
         require_submit: bool,
     ) -> TokenContext:
         token = self.validate_token(token_plain)
+        if token.is_platform:
+            return token
         if require_submit and not token.allow_submit:
             raise PermissionError("This token does not allow submit")
         if not token.project_id:

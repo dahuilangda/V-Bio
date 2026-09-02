@@ -9,9 +9,9 @@ def normalize_workflow_key(value: Any, *, default: str = "prediction") -> str:
         return "prediction"
     if token in {"virtual_screening", "virtualscreening", "screening", "vs"}:
         return "virtual_screening"
-    if token in {"affinity", "affinity_scoring", "boltz_2_affinity"}:
+    if token in {"affinity", "affinity_scoring", "boltz_2_affinity", "docking", "dock", "molecular_docking"}:
         return "affinity"
-    if token in {"peptide", "peptide_design"}:
+    if token in {"peptide", "peptide_design", "designer", "bicyclic_designer", "bicyclicdesigner"}:
         return "peptide_design"
     if token in {"leadopt", "lead_opt", "lead_optimization"}:
         return "lead_optimization"
@@ -19,7 +19,7 @@ def normalize_workflow_key(value: Any, *, default: str = "prediction") -> str:
         return "peptide_design"
     if "screening" in token:
         return "virtual_screening"
-    if "affinity" in token:
+    if "affinity" in token or "dock" in token:
         return "affinity"
     if "lead" in token and "opt" in token:
         return "lead_optimization"

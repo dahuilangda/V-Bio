@@ -124,7 +124,7 @@
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(2, minmax(220px, 1fr));
-  align-items: end;
+  align-items: start;
   min-width: 0;
 }
 
@@ -156,6 +156,11 @@
 .peptide-runtime-grid-controls {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-width: 0;
+}
+
+.peptide-runtime-switch {
+  gap: 10px;
+  padding-block: 4px;
 }
 
 .peptide-linker-field {
@@ -334,6 +339,167 @@
   cursor: default;
   opacity: 0.62;
 }
+
+/* ── Peptide-design pocket picker (docking-style 3D box / sequence rail) ── */
+.peptide-pocket-field {
+  border: 1px solid #d3e2d8;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fbfdfc;
+}
+
+.peptide-pocket-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.peptide-pocket-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.peptide-pocket-viewer {
+  position: relative;
+  /* Same vertical extent as the docking module's .molstar-host so the pocket
+     scene gets the full standard viewer height. */
+  height: clamp(560px, 74vh, 880px);
+  border: 1px solid #d3e2d8;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.peptide-pocket-viewer .molstar-host {
+  height: 100%;
+  /* The outer container owns the height; drop the base rule's min-height so it
+     never fights the clamp on short screens. */
+  min-height: 0;
+}
+
+@media (max-width: 767px) {
+  .peptide-pocket-viewer {
+    height: clamp(320px, 50vh, 480px);
+  }
+}
+
+.peptide-pocket-rail {
+  margin-top: 6px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.pocket-box-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Embedded in the Binding target component's editor block. */
+.peptide-pocket-field-component {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.peptide-pocket-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.peptide-pocket-title {
+  font-weight: 600;
+}
+
+.peptide-pocket-sequence-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.peptide-pocket-sequence-add select {
+  min-width: 160px;
+}
+
+.peptide-pocket-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.peptide-pocket-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #bcd4c4;
+  border-radius: 999px;
+  background: #eef7f1;
+  color: #1f6b3f;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.peptide-pocket-chip:hover:not(:disabled) {
+  background: #e2f1e7;
+}
+
+.peptide-pocket-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pocket-advanced summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.pocket-advanced[open] summary {
+  margin-bottom: 2px;
+}
+
+/* Binding sidebar: pocket state + jump to the target component. */
+.peptide-pocket-sidebar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid #d3e2d8;
+  border-radius: 8px;
+  background: #fbfdfc;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.peptide-pocket-sidebar-row:hover:not(:disabled) {
+  background: #f2f8f4;
+}
+
+.peptide-pocket-sidebar-row:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.peptide-pocket-sidebar-value {
+  color: #1f6b3f;
+  font-weight: 600;
+}
+
 
 .peptide-runtime-grid-cys {
   grid-template-columns: minmax(0, 1fr);
@@ -612,21 +778,11 @@
   margin: 0;
 }
 
-.affinity-toggles-hint {
-  text-align: right;
-  line-height: 1.3;
-  margin-top: -2px;
-}
 
 .affinity-upload-ok {
   color: #2e6c53;
 }
 
-.affinity-section-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
 
 .affinity-title-with-icon {
   display: inline-flex;
@@ -634,11 +790,6 @@
   gap: 6px;
 }
 
-.affinity-chain-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
 
 .affinity-jsme-shell {
   width: 100%;
@@ -1191,5 +1342,814 @@
   .peptide-custom-editor-grid,
   .peptide-custom-editor-main {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ── Dock-mode pocket box panel ─────────────────────────────── */
+
+.affinity-pocket-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--line, #d6dfd9);
+  border-radius: 8px;
+  background: var(--surface-2, #f7fbf8);
+  width: 100%;
+  max-width: 900px;
+}
+
+.affinity-pocket-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.affinity-pocket-summary {
+  font-size: var(--text-2xs, 11px);
+  color: var(--muted, #5a6c62);
+}
+
+.affinity-pocket-summary--missing {
+  color: var(--running, #8a6216);
+}
+
+
+
+.affinity-pocket-picks {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.affinity-pocket-chip {
+  font-size: var(--text-2xs, 11px);
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--line, #d6dfd9);
+  background: var(--surface, #ffffff);
+  color: var(--text, #111a15);
+  cursor: pointer;
+}
+
+.affinity-pocket-chip:hover {
+  border-color: var(--danger, #a22a2a);
+  color: var(--danger, #a22a2a);
+}
+
+
+
+
+
+
+.affinity-upload-field--docked .affinity-docked-ligand-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted, #5a6c62);
+  /* Match .file-input-unified height so the docked placeholder keeps the
+     upload row aligned with the neighbouring fields. */
+  display: flex;
+  align-items: center;
+  height: 38px;
+  min-height: 38px;
+  border: 1px dashed var(--line, #d6dfd9);
+  border-radius: 8px;
+  padding: 0 10px;
+}
+
+/* ── Interactions panel (results) ───────────────────────────── */
+
+.interactions-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.interactions-count-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.interaction-count-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-2xs, 11px);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+
+.interaction-count-badge .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.interaction-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.interaction-group-title {
+  font-size: var(--text-2xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted, #5a6c62);
+}
+
+.interaction-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: var(--text-xs, 12px);
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+}
+
+.interaction-row:hover {
+  background: var(--surface-2, #f7fbf8);
+  border-color: var(--line, #d6dfd9);
+}
+
+.interaction-row.selected {
+  background: #e7f0ea;
+  border-color: var(--primary, #1f4f3f);
+}
+
+.interaction-row .interaction-resid {
+  font-weight: 600;
+  color: var(--text, #111a15);
+}
+
+.interaction-row .interaction-detail {
+  color: var(--muted, #5a6c62);
+  font-size: var(--text-2xs, 11px);
+}
+
+.interaction-row .interaction-dist {
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #111a15);
+}
+
+@media (max-width: 860px) {
+  
+  }
+
+/* ── AutoDock-style pocket box controls ─────────────────────────── */
+
+.pocket-grid {
+  display: grid;
+  gap: 6px;
+}
+
+
+
+.pocket-axis-label {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--primary, #1f4f3f);
+  text-align: center;
+}
+
+
+.pocket-ctrl-label {
+  font-size: 10px;
+  color: var(--muted, #5a6c62);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.pocket-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.pocket-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line, #d6dfd9);
+  border-radius: 6px;
+  background: var(--surface, #fff);
+  color: var(--text, #111a15);
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.12s ease;
+}
+
+.pocket-btn:hover:not(:disabled) {
+  background: #e7f0ea;
+  border-color: var(--primary, #1f4f3f);
+  color: var(--primary, #1f4f3f);
+}
+
+.pocket-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.pocket-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+
+
+/* Remove number input spinners */
+
+.pocket-presets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.pocket-preset-btn {
+  font-size: var(--text-2xs, 11px);
+  padding: 3px 8px;
+}
+
+.pocket-preset-btn.active {
+  border-color: var(--primary, #1f4f3f);
+  background: #e7f0ea;
+  color: var(--primary, #1f4f3f);
+}
+
+.pocket-reset-btn {
+  padding: 3px 6px;
+}
+
+@media (max-width: 860px) {
+  .pocket-axis-row {
+    grid-template-columns: 20px 1fr 1fr;
+    gap: 4px;
+  }
+    .pocket-btn {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* ── Pocket box sliders ─────────────────────────────────────────── */
+
+.pocket-slider-group {
+  display: grid;
+  gap: 2px;
+}
+
+.pocket-slider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.pocket-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  /* Track gradient set inline per-variant below */
+  background: var(--line, #d6dfd9);
+}
+
+.pocket-slider-center { background: linear-gradient(90deg, #c8ddd2, #7fa894); }
+.pocket-slider-size   { background: linear-gradient(90deg, #d4c8a8, #b8973a); }
+
+.pocket-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface, #fff);
+  border: 2px solid var(--primary, #1f4f3f);
+  cursor: grab;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+.pocket-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow: 0 2px 6px rgba(31, 79, 63, 0.3);
+}
+
+.pocket-slider::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.05);
+}
+
+.pocket-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface, #fff);
+  border: 2px solid var(--primary, #1f4f3f);
+  cursor: grab;
+}
+
+.pocket-slider:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pocket-size-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* Touch: enlarge slider hit area on phones */
+@media (max-width: 860px), (pointer: coarse) {
+  .pocket-slider {
+    height: 8px;
+  }
+  .pocket-slider::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+    border-width: 3px;
+  }
+  .pocket-slider::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border-width: 3px;
+  }
+  .pocket-btn {
+    width: 36px;
+    height: 36px;
+  }
+  .pocket-axis-row {
+    grid-template-columns: 20px 1fr;
+    grid-template-rows: auto auto;
+  }
+  .pocket-axis-row .pocket-slider-group:last-child {
+    grid-column: 2;
+  }
+}
+
+/* Value badge next to slider label */
+.pocket-slider-head .pocket-ctrl-label {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text, #111a15);
+}
+
+/* Center slider group in axis row */
+.pocket-axis-row {
+  grid-template-columns: 20px 1fr 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid #edf2ee;
+}
+
+.pocket-axis-row:last-child {
+  border-bottom: none;
+}
+
+.pocket-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--text-2xs, 11px);
+}
+
+
+/* Wider pocket panel on desktop — use horizontal layout for axis controls */
+@media (min-width: 861px) {
+  .pocket-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .pocket-axis-row {
+    display: grid;
+    grid-template-columns: 28px 1fr 1fr;
+    gap: 16px;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #edf2ee;
+  }
+
+  .pocket-axis-row:last-child {
+    border-bottom: none;
+  }
+
+  .pocket-axis-label {
+    font-size: var(--text-md);
+    font-weight: 700;
+    color: var(--primary, #1f4f3f);
+  }
+
+  .pocket-slider {
+    height: 8px;
+  }
+
+  .pocket-slider::-webkit-slider-thumb {
+    width: 18px;
+    height: 18px;
+  }
+
+  .pocket-ctrl-label {
+    font-size: var(--text-xs);
+  }
+
+  .pocket-presets {
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  .pocket-preset-btn {
+    font-size: var(--text-xs);
+    padding: 4px 12px;
+  }
+}
+
+/* ── Pocket Box floating drawer ──────────────────────────────────── */
+/* Overlays the JSME editor when expanded; toggle button floats at
+   the top of the info panel. Collapsed = JSME fully visible. */
+
+.info-panel {
+  position: relative;
+}
+
+
+
+
+.pocket-drawer-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  overflow-y: auto;
+  background: var(--surface, #fff);
+  border-radius: 10px;
+  box-shadow: 0 -4px 24px rgba(26, 56, 43, 0.15);
+  animation: pocketDrawerSlide 0.18s ease;
+  padding-top: 36px; /* space for the toggle button */
+}
+
+@keyframes pocketDrawerSlide {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* The pocket panel inside the drawer takes full overlay width */
+.pocket-drawer-overlay .affinity-pocket-panel {
+  max-width: none;
+  border: none;
+  background: transparent;
+  padding: 4px 14px 14px;
+}
+
+.pocket-drawer-overlay .pocket-grid {
+  gap: 4px;
+}
+
+.pocket-drawer-overlay .pocket-axis-row {
+  padding: 5px 0;
+}
+
+/* Mobile: drawer full width */
+@media (max-width: 860px) {
+  .pocket-drawer-overlay {
+    padding-top: 40px;
+  }
+  
+  }
+
+/* ── Pocket Box button in mode row ───────────────────────────────── */
+.pocket-box-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 14px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--line, #d6dfd9);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--text, #111a15);
+  cursor: pointer;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+}
+
+.pocket-box-btn:hover:not(:disabled) {
+  border-color: var(--primary, #1f4f3f);
+  color: var(--primary, #1f4f3f);
+  background: #eef6f1;
+}
+
+.pocket-box-btn.active {
+  background: #e7f0ea;
+  border-color: var(--primary, #1f4f3f);
+  color: var(--primary, #1f4f3f);
+  box-shadow: inset 0 1px 3px rgba(31, 79, 63, 0.12);
+}
+
+.pocket-box-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* File input height/border alignment fix */
+.affinity-upload-field .file-input-unified {
+  height: 38px;
+  min-height: 38px;
+  line-height: 36px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line, #d6dfd9);
+  background: var(--surface, #fff);
+  border-radius: 8px;
+}
+
+.affinity-upload-field--docked {
+  border: 1px dashed var(--line, #d6dfd9);
+  background: var(--surface, #fff);
+}
+
+/* Simplify mode row spacing */
+.affinity-basics-upload-row {
+  align-items: center;
+  gap: 8px;
+}
+
+/* Remove old drawer toggle positioning (now inline in mode row) */
+
+/* ── Visual polish: tighter pocket panel ─────────────────────────── */
+.pocket-drawer-overlay .affinity-pocket-panel {
+  gap: 6px;
+}
+
+.pocket-drawer-overlay .affinity-pocket-head {
+  padding: 0 2px;
+}
+
+.pocket-drawer-overlay .pocket-presets {
+  align-items: center;
+  padding-top: 2px;
+  border-top: 1px solid #edf2ee;
+  margin-top: 2px;
+}
+
+.pocket-drawer-overlay .affinity-pocket-picks {
+  border-top: 1px solid #edf2ee;
+  padding-top: 6px;
+}
+
+.affinity-pocket-chip {
+  font-size: var(--text-2xs, 11px);
+}
+
+/* Docked ligand hint — subtler */
+.affinity-upload-field--docked .affinity-docked-ligand-hint {
+  color: var(--muted, #5a6c62);
+  font-style: italic;
+  opacity: 0.8;
+}
+
+/* ── Detected ligand pocket presets ───────────────────────────────── */
+.pocket-ligand-presets {
+  border-bottom: 1px solid #edf2ee;
+  padding-bottom: 6px;
+}
+
+.pocket-ligand-btn {
+  font-size: var(--text-2xs, 11px);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  letter-spacing: 0.03em;
+}
+
+.pocket-ligand-btn.active {
+  background: #e7f0ea;
+  border-color: var(--primary, #1f4f3f);
+  color: var(--primary, #1f4f3f);
+}
+
+/* ── Floating pocket panel (draggable, follows user) ─────────────── */
+.pocket-float-panel {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 25;
+  width: min(360px, calc(100% - 16px));
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #d6dfd9);
+  border-radius: 10px;
+  box-shadow: 0 4px 24px rgba(26, 56, 43, 0.15);
+  padding: 8px 12px 12px;
+  display: grid;
+  gap: 6px;
+  user-select: none;
+}
+
+.pocket-float-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: grab;
+  padding: 2px 0 6px;
+  border-bottom: 1px solid #edf2ee;
+}
+
+.pocket-float-header:active {
+  cursor: grabbing;
+}
+
+.pocket-float-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #111a15);
+  margin-right: auto;
+}
+
+.pocket-close-btn:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
+/* Ligand chips — always visible, act as "return to auto" buttons */
+.pocket-ligand-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.pocket-ligand-chip {
+  font-size: var(--text-2xs, 11px);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line, #d6dfd9);
+  background: var(--surface, #fff);
+  color: var(--text, #111a15);
+  cursor: pointer;
+  letter-spacing: 0.03em;
+  transition: all 0.12s ease;
+}
+
+.pocket-ligand-chip:hover:not(:disabled) {
+  border-color: var(--primary, #1f4f3f);
+  color: var(--primary, #1f4f3f);
+}
+
+.pocket-ligand-chip.active {
+  background: #e7f0ea;
+  border-color: var(--primary, #1f4f3f);
+  color: var(--primary, #1f4f3f);
+}
+
+.pocket-ligand-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Compact axis rows for the floating panel */
+.pocket-float-panel .pocket-axis-row {
+  display: grid;
+  grid-template-columns: 18px 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.pocket-float-panel .pocket-btn {
+  width: 22px;
+  height: 22px;
+}
+
+.pocket-float-panel .pocket-slider {
+  height: 6px;
+}
+
+.pocket-float-panel .pocket-slider::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+}
+
+.pocket-float-panel .pocket-presets {
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid #edf2ee;
+}
+
+/* Mobile: full-width panel */
+@media (max-width: 860px) {
+  .pocket-float-panel {
+    width: calc(100% - 16px);
+    top: auto;
+    bottom: 8px;
+  }
+  
+  .pocket-float-panel .pocket-slider::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+  }
+  
+  .pocket-float-panel .pocket-btn {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* ── Mobile floating panel optimization ──────────────────────────── */
+@media (max-width: 860px), (pointer: coarse) {
+  .pocket-float-panel {
+    width: calc(100% - 12px);
+    top: auto;
+    bottom: 6px;
+    left: 6px;
+    right: 6px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 6px 10px 10px;
+    gap: 4px;
+  }
+
+  .pocket-float-header {
+    padding: 6px 0 8px;
+    margin-bottom: 2px;
+    /* Larger touch target for drag */
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    touch-action: none; /* Prevent scroll while dragging */
+  }
+
+  .pocket-float-title {
+    font-size: var(--text-md);
+  }
+
+  .pocket-float-panel .pocket-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+  }
+
+  .pocket-float-panel .pocket-close-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .pocket-float-panel .pocket-slider {
+    height: 8px;
+    margin: 4px 0;
+  }
+
+  .pocket-float-panel .pocket-slider::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    border-width: 3px;
+  }
+
+  .pocket-ligand-chip {
+    font-size: var(--text-xs);
+    padding: 6px 14px;
+    border-radius: 8px;
+  }
+
+  .pocket-float-panel .pocket-presets {
+    gap: 8px;
+    padding-top: 6px;
+  }
+
+  .pocket-float-panel .pocket-preset-btn {
+    font-size: var(--text-xs);
+    padding: 6px 14px;
+  }
+
+  .pocket-float-panel .pocket-axis-row {
+    grid-template-columns: 22px 1fr;
+    grid-template-rows: auto auto;
+    gap: 4px 8px;
+    padding: 4px 0;
+  }
+
+  .pocket-float-panel .pocket-slider-group:nth-child(3) {
+    grid-column: 2;
   }
 }

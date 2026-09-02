@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from core.modes import INTERFACE_MODE, POSE_MODE, REFINE_MODE
+from core.modes import DOCK_MODE, INTERFACE_MODE, POSE_MODE, REFINE_MODE
 from utils.result_utils import (
     discover_record_dirs,
     resolve_ipsae_file,
@@ -19,27 +21,45 @@ from utils.result_utils import (
 MODE_CONFIGS: dict[str, dict[str, object]] = {
     POSE_MODE: {
         "name": "pose_default",
-        "sigma_max": 0.25,
+        "sigma_max": 0.02,
         "sampling_steps": 8,
         "step_scale": 1.5,
         "anchor_max_distance": 5.5,
         "diffusion_samples": 5,
+        "input_init_noise_scale": 0.0,
     },
     REFINE_MODE: {
         "name": "refine_default",
-        "sigma_max": 0.35,
+        "sigma_max": 0.03,
         "sampling_steps": 10,
         "step_scale": 1.2,
         "anchor_max_distance": 6.0,
         "diffusion_samples": 5,
+        "input_init_noise_scale": 0.0,
     },
     INTERFACE_MODE: {
         "name": "interface_default",
-        "sigma_max": 0.45,
+        "sigma_max": 0.04,
         "sampling_steps": 12,
         "step_scale": 1.0,
         "anchor_max_distance": 6.5,
         "diffusion_samples": 5,
+        "input_init_noise_scale": 0.0,
+    },
+    # Docking is generation, not refinement: the full de-novo noise
+    # schedule re-poses the ligand conditioned on the input protein and the
+    # pocket contact guidance.  The 0.02-0.05 sigma ladder above polishes an
+    # existing pose and cannot escape a bad initial placement (see
+    # docs/docking.md for the CDK2/CDK8 validation numbers).
+    DOCK_MODE: {
+        "name": "dock_default",
+        "sigma_max": 160.0,
+        "sampling_steps": 200,
+        "step_scale": 1.0,
+        # anchor_max_distance is derived from the resolved pocket radius
+        # (cutoff + 1.0 A slack) in the dock pipeline, not fixed here.
+        "diffusion_samples": 16,
+        "input_init_noise_scale": 0.0,
     },
 }
 
@@ -92,18 +112,18 @@ def _build_trial_command(
         "--recycling_steps",
         str(args.recycling_steps if args.recycling_steps is not None else 3),
         "--sampling_steps",
-        str(int(config.get("sampling_steps", args.sampling_steps if args.sampling_steps is not None else 12))),
+        str(int(args.sampling_steps) if args.sampling_steps is not None else int(config["sampling_steps"])),
         "--diffusion_samples",
-        str(int(config.get("diffusion_samples", args.diffusion_samples if args.diffusion_samples is not None else 1))),
+        str(int(args.diffusion_samples) if args.diffusion_samples is not None else int(config["diffusion_samples"])),
         "--step_scale",
-        str(float(config.get("step_scale", args.step_scale))),
+        str(float(args.step_scale) if args.step_scale is not None else float(config["step_scale"])),
         "--trainer_precision",
         str(args.trainer_precision),
         "--structure_refine",
         "--anchor_contact_cutoff",
         str(args.anchor_contact_cutoff),
         "--anchor_max_distance",
-        str(float(config.get("anchor_max_distance", args.anchor_max_distance))),
+        str(float(args.anchor_max_distance) if args.anchor_max_distance is not None else float(config["anchor_max_distance"])),
         "--anchor_max_residues",
         str(args.anchor_max_residues),
         "--pose_anchor_atoms",
@@ -113,10 +133,14 @@ def _build_trial_command(
         "--anchor_strategy",
         str(args.anchor_strategy),
         "--input_init_noise_scale",
-        str(args.input_init_noise_scale),
+        str(args.input_init_noise_scale
+            if args.input_init_noise_scale is not None
+            else config["input_init_noise_scale"]),
         "--sigma_max",
-        str(float(config.get("sigma_max", args.sigma_max if args.sigma_max is not None else 0.5))),
+        str(float(args.sigma_max) if args.sigma_max is not None else float(config["sigma_max"])),
     ]
+    _append_cli_flag(cmd, "--no_kernels", args.no_kernels)
+    _append_cli_arg(cmd, "--affinity_recycling_steps", args.affinity_recycling_steps)
     _append_cli_arg(cmd, "--cache", args.cache)
     _append_cli_arg(cmd, "--checkpoint", args.checkpoint)
     _append_cli_arg(cmd, "--seed", args.seed)
@@ -134,6 +158,7 @@ def _build_trial_command(
     _append_cli_arg(cmd, "--gamma_0", args.gamma_0)
     _append_cli_arg(cmd, "--gamma_min", args.gamma_min)
     _append_cli_flag(cmd, "--compute_ipsae", args.compute_ipsae)
+    _append_cli_flag(cmd, "--compute_interactions", args.compute_interactions)
     _append_cli_flag(cmd, "--keep_work", args.keep_work)
     _append_cli_flag(cmd, "--enable_affinity", args.enable_affinity)
     _append_cli_flag(cmd, "--affinity_refine", args.affinity_refine)
@@ -209,11 +234,58 @@ def _clear_output_dir(output_dir: Path) -> None:
         output_dir / "optimization_metadata.json",
     ]:
         if stale_path.is_dir():
-            shutil.rmtree(stale_path, ignore_errors=True)
+            shutil.rmtree(stale_path)
         elif stale_path.exists():
             stale_path.unlink()
     for record_dir in discover_record_dirs(output_dir).values():
-        shutil.rmtree(record_dir, ignore_errors=True)
+        shutil.rmtree(record_dir)
+
+
+def _select_dock_ensemble_winners(output_dir: Path) -> None:
+    """Collapse the dock pose ensemble to one record per input ligand.
+
+    With ``--dock_poses > 1`` every initial placement is scored as its own
+    record named ``<ligand>__poseNN``.  Poses of one ligand are ranked by
+    the interface-aware score from their rerank summary; losing records are
+    deleted so the archive holds exactly one docked pose per ligand.  The
+    full ranking is written to ``dock_ensemble_selection.json``.
+    """
+    pose_groups: dict[str, list[Path]] = {}
+    for record_dir in sorted(set(discover_record_dirs(output_dir).values())):
+        match = re.match(r"^(?P<ligand>.*?)__pose\d{2,}$", record_dir.name)
+        if match:
+            pose_groups.setdefault(match.group("ligand"), []).append(record_dir)
+    if not pose_groups:
+        return
+
+    def _pose_score(record_dir: Path) -> dict[str, object]:
+        summary_path = record_dir / f"best_sample_{record_dir.name}.json"
+        if not summary_path.exists():
+            raise FileNotFoundError(
+                f"dock pose record is missing its rerank summary: {summary_path}")
+        payload = json.loads(summary_path.read_text())
+        selected = payload.get("selected_model")
+        row = next((m for m in payload.get("models", [])
+                    if m.get("model_stem") == selected), None)
+        if row is None:
+            raise ValueError(f"rerank summary has no selected model row: {summary_path}")
+        return {"pose": record_dir.name, **row}
+
+    summary: dict[str, object] = {}
+    for ligand, record_dirs in sorted(pose_groups.items()):
+        ranked = sorted((_pose_score(d) for d in record_dirs),
+                        key=lambda r: r["interface_rank_score"], reverse=True)
+        winner_name = ranked[0]["pose"]
+        for record_dir in record_dirs:
+            if record_dir.name != winner_name:
+                shutil.rmtree(record_dir)
+        summary[ligand] = {"winner": winner_name, "ranked_poses": ranked}
+        print(f"[Dock] Pose ensemble {ligand!r}: kept {winner_name} "
+              f"(score {ranked[0]['interface_rank_score']:.4f}), "
+              f"pruned {len(record_dirs) - 1} pose record(s)")
+
+    (output_dir / "dock_ensemble_selection.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 def run_flexible_optimization(
@@ -225,6 +297,7 @@ def run_flexible_optimization(
     _clear_output_dir(output_dir)
     print(f"[Info] Running flexible optimization config: {config['name']}")
     _run_trial(args, config, output_dir)
+    _select_dock_ensemble_winners(output_dir)
     result_artifacts = _iter_result_artifacts(output_dir)
     if not result_artifacts:
         raise RuntimeError("Flexible optimization did not produce usable outputs.")

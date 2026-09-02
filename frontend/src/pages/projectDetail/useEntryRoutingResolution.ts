@@ -1,49 +1,30 @@
 import { useEffect, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
-import type { ProjectTask } from '../../types/models';
 
 interface EntryRoutingResolutionOptions {
   projectId: string;
   hasExplicitWorkspaceQuery: boolean;
   navigate: NavigateFunction;
-  listProjectTasksCompact: (projectId: string) => Promise<ProjectTask[]>;
 }
 
 export function useEntryRoutingResolution(options: EntryRoutingResolutionOptions): boolean {
-  const { projectId, hasExplicitWorkspaceQuery, navigate, listProjectTasksCompact } = options;
+  const { projectId, hasExplicitWorkspaceQuery, navigate } = options;
   const [entryRoutingResolved, setEntryRoutingResolved] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    const resolveEntryRoute = async () => {
-      const normalizedProjectId = String(projectId || '').trim();
-      if (!normalizedProjectId) {
-        if (!cancelled) setEntryRoutingResolved(true);
-        return;
-      }
-      if (hasExplicitWorkspaceQuery) {
-        if (!cancelled) setEntryRoutingResolved(true);
-        return;
-      }
-      try {
-        const rows = await listProjectTasksCompact(normalizedProjectId);
-        if (cancelled) return;
-        if (rows.length > 0) {
-          navigate(`/projects/${normalizedProjectId}/tasks`, { replace: true });
-          return;
-        }
-      } catch {
-        // If list lookup fails, keep current route and let page-level loadProject surface actual errors.
-      }
-      if (!cancelled) setEntryRoutingResolved(true);
-    };
-
-    setEntryRoutingResolved(false);
-    void resolveEntryRoute();
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, hasExplicitWorkspaceQuery, navigate, listProjectTasksCompact]);
+    const normalizedProjectId = String(projectId || '').trim();
+    // With an explicit workspace intent (tab / task_row_id / new_task) the user lands in the
+    // workspace editor directly.
+    if (!normalizedProjectId || hasExplicitWorkspaceQuery) {
+      setEntryRoutingResolved(true);
+      return;
+    }
+    // No explicit intent: default to the task list regardless of task count. A project with zero
+    // tasks used to drop the user into the workspace with an unsaved draft task open, which read
+    // as "a task was auto-created"; the task list's "New Task" button is the explicit way to
+    // start the first task.
+    navigate(`/projects/${normalizedProjectId}/tasks`, { replace: true });
+  }, [projectId, hasExplicitWorkspaceQuery, navigate]);
 
   return entryRoutingResolved;
 }

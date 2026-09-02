@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from management_api.copilot_skill_harness import CopilotSkillDefinition
+from management_api.copilot_skill_harness import CONFIRMATION_EFFECTS, CopilotSkillDefinition
 from management_api.copilot_skills.project_list import PROJECT_LIST_ACTION_SCHEMAS
 from management_api.copilot_skills.task_list import TASK_LIST_ACTION_SCHEMAS
 from management_api.copilot_skills.workflows import infer_workflow_key
@@ -69,9 +69,16 @@ def build_context_skill_definitions(
         if isinstance(required_workflows, list) and resolved_workflow_key not in required_workflows:
             continue
         input_schema = _resolve_input_schema(schema)
+        if schema.get("requires_any_payload"):
+            # "Pass only the fields the user wants to change" still means at least one field:
+            # an empty payload is a no-op the user would be asked to confirm. Encode it in the
+            # schema so both the planner contract and the harness audit enforce it.
+            input_schema = {**input_schema, "minProperties": 1}
         defaults = dict(schema.get("payload_defaults") or {})
+        # A page action is ALWAYS a user-confirmed operation: a data-declared effect outside the
+        # confirmation taxonomy would synthesize a server-side "executable" skill with no handler.
         effect = str(schema.get("effect") or "").strip().lower()
-        if not effect:
+        if effect not in CONFIRMATION_EFFECTS:
             effect = "create" if defaults.get("create") is True else "delete" if schema.get("destructive") else "update"
         target_context = str(schema.get("target_context") or "").strip() or None
         definitions.append(

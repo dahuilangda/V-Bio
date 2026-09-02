@@ -268,12 +268,9 @@ function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
   const mutationRateRaw = readFirstFiniteFromPayloadPaths(payloads, [
     'mutation_rate',
     'peptide_mutation_rate',
-    'peptideMutationRate',
     'peptide_design.mutation_rate',
     'request.options.peptide_mutation_rate',
-    'request.options.peptideMutationRate',
     'inputs.options.peptide_mutation_rate',
-    'inputs.options.peptideMutationRate'
   ]);
   const mutationRate = mutationRateRaw === null ? null : mutationRateRaw > 1 && mutationRateRaw <= 100 ? mutationRateRaw / 100 : mutationRateRaw;
 

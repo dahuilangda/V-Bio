@@ -102,7 +102,7 @@ export function ProjectHeaderActions({
         title="Download result"
         aria-label="Download result"
       >
-        <Download size={15} />
+        <Download size={14} />
       </button>
       <button
         className="task-row-action-btn"
@@ -112,7 +112,7 @@ export function ProjectHeaderActions({
         title={saving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
         aria-label={saving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
       >
-        {saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}
+        {saving ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
       </button>
       <button
         type="button"
@@ -149,7 +149,7 @@ export function ProjectHeaderActions({
             aria-haspopup={canOpenRunMenu ? 'menu' : undefined}
             aria-expanded={canOpenRunMenu ? runMenuOpen : undefined}
           >
-            {runSubmitting || isRunRedirecting ? <LoaderCircle size={15} className="spin" /> : <RunPlayIcon size={15} />}
+            {runSubmitting || isRunRedirecting ? <LoaderCircle size={14} className="spin" /> : <RunPlayIcon size={14} />}
           </button>
           {runMenuOpen && hasUnsavedChanges && (
             <div className="run-action-menu" role="menu" aria-label="Run options">

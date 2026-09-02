@@ -1,4 +1,4 @@
-import { API_HEADERS, requestBackend, requestManagement } from './backendClient';
+import { API_HEADERS, requestBackend } from './backendClient';
 
 export interface LeadOptFragmentPreviewResponse {
   smiles: string;
@@ -58,113 +58,83 @@ export interface LeadOptReferencePreviewResponse {
   }>;
   ligand_atom_map?: Array<{
     atom_index: number;
-    chain_id: string;
-    residue_name?: string;
+    chain_id?: string;
     residue_number?: number;
+    residue_name?: string;
     atom_name?: string;
   }>;
 }
 
-export interface LeadOptPocketOverlayResponse {
-  overlay_structure_text: string;
-  overlay_structure_format: 'cif' | 'pdb';
-  residue_count: number;
+export type LeadOptHaloMode = 'denovo' | 'fragment' | 'scaffold_hop';
+export type LeadOptHaloBackend = 'protenix2dock' | 'boltz2dock' | 'alphafold3';
+
+export interface LeadOptHaloBackendsResponse {
+  backends: Array<{ id: string; label: string; default: boolean }>;
+  default: string;
+  modes: LeadOptHaloMode[];
 }
 
-export interface LeadOptMmpQueryResponse {
-  task_id?: string;
-  state?: string;
-  query_id: string;
-  query_mode: string;
-  aggregation_type?: 'individual_transforms' | 'group_by_fragment' | string;
-  grouped_by_environment?: boolean;
-  mmp_database_id?: string;
-  mmp_database_label?: string;
-  mmp_database_schema?: string;
-  transforms: Array<Record<string, unknown>>;
-  global_transforms?: Array<Record<string, unknown>>;
-  clusters: Array<Record<string, unknown>>;
-  count: number;
-  global_count?: number;
-  min_pairs?: number;
+export interface LeadOptHaloOptimizeInput {
+  mode: LeadOptHaloMode;
+  backend?: LeadOptHaloBackend;
+  protein_upload?: {
+    content_base64: string;
+    file_name: string;
+  };
+  reference_upload?: {
+    content_base64: string;
+    file_name: string;
+  };
+  reference_smiles?: string;
+  keep_fragment_smiles?: string;
+  edit_atom_indices?: string;
+  pocket?: string;
+  scaffold_hop_ratio?: number;
+  rounds?: number;
+  budget_per_round?: number;
+  oracle_concurrency?: number;
+  target_chain?: string;
+  priority?: string;
+}
+
+export interface LeadOptHaloOptimizeResponse {
+  task_id: string;
+  mode: LeadOptHaloMode;
+  backend: LeadOptHaloBackend;
+  queue: string;
+}
+
+export interface LeadOptHaloRoundEvent {
+  stage: string;
+  round?: number;
+  total_rounds?: number;
+  message?: string;
+  candidates?: number;
   stats?: Record<string, unknown>;
+  top_candidates?: Array<Record<string, unknown>>;
+  rounds_completed?: number;
 }
 
-export interface LeadOptMmpDatabaseProperty {
-  name: string;
-  label?: string;
-  display_name?: string;
-  base?: string;
-  unit?: string;
-  display_base?: string;
-  display_unit?: string;
-  change_displayed?: string;
-}
-
-export interface LeadOptMmpDatabaseStats {
-  compounds?: number | null;
-  rules?: number | null;
-  pairs?: number | null;
-}
-
-export interface LeadOptMmpDatabaseItem {
-  id: string;
-  label: string;
-  description?: string;
-  backend: 'postgres' | string;
-  schema?: string;
-  visible?: boolean;
-  is_default?: boolean;
-  status?: 'ready' | 'building' | string;
-  status_message?: string;
-  source?: string;
-  properties: LeadOptMmpDatabaseProperty[];
-  stats?: LeadOptMmpDatabaseStats;
-}
-
-export interface LeadOptMmpDatabaseCatalogResponse {
-  default_database_id?: string;
-  databases: LeadOptMmpDatabaseItem[];
-  total?: number;
-  total_visible?: number;
-  total_all?: number;
-}
-
-export interface LeadOptBackendCapability {
-  available: boolean;
-  reason?: string;
-}
-
-export interface LeadOptBackendCapabilityResponse {
-  backends: Record<string, LeadOptBackendCapability>;
-}
-
-export interface LeadOptMmpQueryStatusResponse {
-  task_id?: string;
-  state?: string;
-  progress?: Record<string, unknown>;
-  result?: LeadOptMmpQueryResponse;
-  error?: string;
-}
-
-function parseBackendErrorMessage(text: string, fallback: string): string {
-  const raw = String(text || '').trim();
-  if (!raw) return fallback;
-  try {
-    const parsed = JSON.parse(raw) as { error?: unknown };
-    const errorMessage = String(parsed?.error || '').trim();
-    if (errorMessage) return errorMessage;
-  } catch {
-    // Keep raw text fallback for non-JSON responses.
-  }
-  return raw;
-}
-
-export interface LeadOptMmpEvidenceResponse {
-  transform_id: string;
-  transform: Record<string, unknown>;
-  pairs: Array<Record<string, unknown>>;
-  n_pairs: number;
+export interface LeadOptHaloStatusResponse {
+  task_id: string;
+  state: string;
+  status: string;
+  info: {
+    status?: string;
+    details?: string;
+    payload?: { halo?: LeadOptHaloRoundEvent };
+  } & Record<string, unknown>;
+  result?: {
+    status?: string;
+    summary?: {
+      mode?: string;
+      backend?: string;
+      rounds_completed?: number;
+      total_rounds?: number;
+      n_candidates?: number;
+      top_candidates?: Array<Record<string, unknown>>;
+    };
+  } & Record<string, unknown>;
 }
 
 export async function previewLeadOptimizationFragments(smiles: string): Promise<LeadOptFragmentPreviewResponse> {
@@ -206,13 +176,21 @@ export async function previewLeadOptimizationReference(
   return (await res.json()) as LeadOptReferencePreviewResponse;
 }
 
-export async function previewLeadOptimizationPocketOverlay(payload: {
-  complex_structure_text: string;
-  complex_structure_format: 'cif' | 'pdb';
-  ligand_chain_id: string;
-  residues: Array<{ chain_id: string; residue_number: number }>;
-}): Promise<LeadOptPocketOverlayResponse> {
-  const res = await requestManagement('/vbio-api/api/lead_optimization/pocket_overlay', {
+export async function fetchLeadOptimizationHaloBackends(): Promise<LeadOptHaloBackendsResponse> {
+  const res = await requestBackend('/api/lead_optimization/halo_backends', {
+    headers: { ...API_HEADERS, Accept: 'application/json' }
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to list halo backends (${res.status}): ${text}`);
+  }
+  return (await res.json()) as LeadOptHaloBackendsResponse;
+}
+
+export async function submitLeadOptimizationHaloOptimize(
+  payload: LeadOptHaloOptimizeInput
+): Promise<LeadOptHaloOptimizeResponse> {
+  const res = await requestBackend('/api/lead_optimization/halo_optimize', {
     method: 'POST',
     headers: {
       ...API_HEADERS,
@@ -223,324 +201,20 @@ export async function previewLeadOptimizationPocketOverlay(payload: {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to build pocket overlay (${res.status}): ${text}`);
+    throw new Error(`Failed to start halo optimization (${res.status}): ${text}`);
   }
-  return (await res.json()) as LeadOptPocketOverlayResponse;
+  return (await res.json()) as LeadOptHaloOptimizeResponse;
 }
 
-export async function queryLeadOptimizationMmp(
-  payload: Record<string, unknown>,
-  options?: { onEnqueued?: (taskId: string) => void | Promise<void> }
-): Promise<LeadOptMmpQueryResponse> {
-  const enqueue = await requestBackend('/api/lead_optimization/mmp_query', {
-    method: 'POST',
-    headers: {
-      ...API_HEADERS,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify({
-      ...(payload || {}),
-      async: true
-    })
-  });
-  if (!enqueue.ok) {
-    const text = await enqueue.text();
-    throw new Error(`Failed to query MMP (${enqueue.status}): ${parseBackendErrorMessage(text, 'Request failed.')}`);
-  }
-  const enqueueData = (await enqueue.json()) as { task_id?: string; state?: string } & LeadOptMmpQueryResponse;
-  if (!enqueueData.task_id) {
-    if (Array.isArray(enqueueData.transforms)) {
-      return enqueueData as LeadOptMmpQueryResponse;
-    }
-    throw new Error('MMP query enqueue response did not include task_id.');
-  }
-
-  const taskId = String(enqueueData.task_id || '').trim();
-  if (taskId && typeof options?.onEnqueued === 'function') {
-    await options.onEnqueued(taskId);
-  }
-  while (true) {
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    const statusRes = await requestBackend(`/api/lead_optimization/mmp_query_status/${encodeURIComponent(taskId)}`, {
-      method: 'GET',
-      headers: {
-        ...API_HEADERS,
-        Accept: 'application/json'
-      }
-    });
-    if (!statusRes.ok) {
-      const text = await statusRes.text();
-      throw new Error(
-        `Failed to query MMP status (${statusRes.status}): ${parseBackendErrorMessage(text, 'Status check failed.')}`
-      );
-    }
-    const statusData = (await statusRes.json()) as LeadOptMmpQueryStatusResponse;
-    const state = String(statusData.state || '').toUpperCase();
-    if (state === 'SUCCESS') {
-      const result = statusData.result;
-      if (!result) {
-        throw new Error('MMP query finished but result payload is empty.');
-      }
-      return {
-        ...result,
-        task_id: taskId,
-        state
-      };
-    }
-    if (state === 'FAILURE') {
-      const failureMessage = String(statusData.error || '').trim();
-      throw new Error(
-        failureMessage
-          ? `MMP query task failed (task_id=${taskId}): ${failureMessage}`
-          : `MMP query task failed (task_id=${taskId}).`
-      );
-    }
-  }
-}
-
-export async function fetchLeadOptimizationMmpQueryStatus(taskId: string): Promise<LeadOptMmpQueryStatusResponse> {
-  const normalizedTaskId = String(taskId || '').trim();
-  if (!normalizedTaskId) {
-    throw new Error('Task ID is required.');
-  }
-  const statusRes = await requestBackend(`/api/lead_optimization/mmp_query_status/${encodeURIComponent(normalizedTaskId)}`, {
-    method: 'GET',
-    headers: {
-      ...API_HEADERS,
-      Accept: 'application/json'
-    }
-  });
-  if (!statusRes.ok) {
-    const text = await statusRes.text();
-    throw new Error(
-      `Failed to query MMP status (${statusRes.status}): ${parseBackendErrorMessage(text, 'Status check failed.')}`
-    );
-  }
-  return (await statusRes.json()) as LeadOptMmpQueryStatusResponse;
-}
-
-export async function fetchLeadOptimizationMmpDatabases(options?: {
-  includeHidden?: boolean;
-}): Promise<LeadOptMmpDatabaseCatalogResponse> {
-  const path = options?.includeHidden
-    ? '/api/admin/lead_optimization/mmp_databases'
-    : '/api/lead_optimization/mmp_databases';
-  const res = await requestBackend(path, {
-    method: 'GET',
-    headers: {
-      ...API_HEADERS,
-      Accept: 'application/json'
-    }
+export async function fetchLeadOptimizationHaloStatus(taskId: string): Promise<LeadOptHaloStatusResponse> {
+  const normalized = String(taskId || '').trim();
+  if (!normalized) throw new Error('taskId is required for halo status.');
+  const res = await requestBackend(`/api/lead_optimization/halo_status/${encodeURIComponent(normalized)}`, {
+    headers: { ...API_HEADERS, Accept: 'application/json' }
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(
-      `Failed to list MMP databases (${res.status}): ${parseBackendErrorMessage(text, 'Catalog request failed.')}`
-    );
+    throw new Error(`Failed to fetch halo status (${res.status}): ${text}`);
   }
-  return (await res.json()) as LeadOptMmpDatabaseCatalogResponse;
-}
-
-export async function fetchLeadOptimizationBackendCapabilities(): Promise<LeadOptBackendCapabilityResponse> {
-  const res = await requestBackend('/api/lead_optimization/backends', {
-    method: 'GET',
-    headers: {
-      ...API_HEADERS,
-      Accept: 'application/json'
-    }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to fetch lead optimization backend capabilities (${res.status}): ${text}`);
-  }
-  return (await res.json()) as LeadOptBackendCapabilityResponse;
-}
-
-export async function patchLeadOptimizationMmpDatabaseAdmin(
-  databaseId: string,
-  patch: {
-    visible?: boolean;
-    label?: string;
-    description?: string;
-    is_default?: boolean;
-  }
-): Promise<LeadOptMmpDatabaseCatalogResponse> {
-  const safeId = encodeURIComponent(String(databaseId || '').trim());
-  const res = await requestBackend(`/api/admin/lead_optimization/mmp_databases/${safeId}`, {
-    method: 'PATCH',
-    headers: {
-      ...API_HEADERS,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify(patch || {})
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to patch MMP database (${res.status}): ${text}`);
-  }
-  return (await res.json()) as LeadOptMmpDatabaseCatalogResponse;
-}
-
-export async function deleteLeadOptimizationMmpDatabaseAdmin(
-  databaseId: string,
-  options?: { dropData?: boolean }
-): Promise<LeadOptMmpDatabaseCatalogResponse> {
-  const safeId = encodeURIComponent(String(databaseId || '').trim());
-  const dropData = options?.dropData !== false ? 'true' : 'false';
-  const res = await requestBackend(`/api/admin/lead_optimization/mmp_databases/${safeId}?drop_data=${dropData}`, {
-    method: 'DELETE',
-    headers: {
-      ...API_HEADERS,
-      Accept: 'application/json'
-    }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to delete MMP database (${res.status}): ${text}`);
-  }
-  return (await res.json()) as LeadOptMmpDatabaseCatalogResponse;
-}
-
-export async function queryLeadOptimizationMmpSync(payload: Record<string, unknown>): Promise<LeadOptMmpQueryResponse> {
-  const res = await requestBackend('/api/lead_optimization/mmp_query', {
-    method: 'POST',
-    headers: {
-      ...API_HEADERS,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify({
-      ...(payload || {}),
-      async: false
-    })
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to query MMP (${res.status}): ${text}`);
-  }
-  return (await res.json()) as LeadOptMmpQueryResponse;
-}
-
-export async function clusterLeadOptimizationMmp(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await requestBackend('/api/lead_optimization/mmp_cluster', {
-    method: 'POST',
-    headers: {
-      ...API_HEADERS,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify(payload || {})
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to cluster MMP transforms (${res.status}): ${text}`);
-  }
-  return (await res.json()) as Record<string, unknown>;
-}
-
-export async function fetchLeadOptimizationMmpQueryResult(queryId: string): Promise<LeadOptMmpQueryResponse> {
-  const safeQueryId = encodeURIComponent(String(queryId || '').trim());
-  const res = await requestBackend(`/api/lead_optimization/mmp_query_result/${safeQueryId}`, {
-    method: 'GET',
-    headers: {
-      ...API_HEADERS,
-      Accept: 'application/json'
-    }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to fetch MMP query result (${res.status}): ${text}`);
-  }
-  return (await res.json()) as LeadOptMmpQueryResponse;
-}
-
-export async function fetchLeadOptimizationMmpEvidence(transformId: string): Promise<LeadOptMmpEvidenceResponse> {
-  const safeTransformId = encodeURIComponent(String(transformId || '').trim());
-  const res = await requestBackend(`/api/lead_optimization/mmp_evidence/${safeTransformId}`, {
-    method: 'GET',
-    headers: {
-      ...API_HEADERS,
-      Accept: 'application/json'
-    }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to fetch MMP evidence (${res.status}): ${text}`);
-  }
-  return (await res.json()) as LeadOptMmpEvidenceResponse;
-}
-
-export async function enumerateLeadOptimizationMmp(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await requestBackend('/api/lead_optimization/mmp_enumerate', {
-    method: 'POST',
-    headers: {
-      ...API_HEADERS,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify(payload || {})
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to enumerate MMP candidates (${res.status}): ${text}`);
-  }
-  return (await res.json()) as Record<string, unknown>;
-}
-
-export async function predictLeadOptimizationCandidate(payload: {
-  candidateSmiles: string;
-  proteinSequence?: string;
-  backend: string;
-  targetChain: string;
-  ligandChain: string;
-  pocketResidues: Array<Record<string, unknown>>;
-  variableAtomIndices?: number[];
-  referenceTemplateStructureText?: string;
-  referenceTemplateFormat?: 'cif' | 'pdb';
-  referenceTargetFilename?: string;
-  referenceTargetFileContent?: string;
-  referenceLigandFilename?: string;
-  referenceLigandFileContent?: string;
-  useMsaServer?: boolean;
-  seed?: number | null;
-}): Promise<string> {
-  const normalizedBackend = String(payload.backend || 'boltz').trim().toLowerCase();
-  const includePocketReferenceFiles = normalizedBackend === 'pocketxmol';
-  const res = await requestBackend('/api/lead_optimization/predict_candidate', {
-    method: 'POST',
-    headers: {
-      ...API_HEADERS,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
-    body: JSON.stringify({
-      candidate_smiles: payload.candidateSmiles,
-      protein_sequence: payload.proteinSequence || '',
-      backend: normalizedBackend,
-      target_chain: payload.targetChain,
-      ligand_chain: payload.ligandChain,
-      pocket_residues: payload.pocketResidues || [],
-      variable_atom_indices: payload.variableAtomIndices || [],
-      reference_template_structure_text: payload.referenceTemplateStructureText || '',
-      reference_template_structure_format: payload.referenceTemplateFormat || 'cif',
-      reference_target_filename: includePocketReferenceFiles ? payload.referenceTargetFilename || '' : '',
-      reference_target_file_content: includePocketReferenceFiles ? payload.referenceTargetFileContent || '' : '',
-      reference_ligand_filename: includePocketReferenceFiles ? payload.referenceLigandFilename || '' : '',
-      reference_ligand_file_content: includePocketReferenceFiles ? payload.referenceLigandFileContent || '' : '',
-      use_msa_server: payload.useMsaServer ?? true,
-      seed: payload.seed ?? null,
-      priority: 'high'
-    })
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to submit candidate prediction (${res.status}): ${text}`);
-  }
-  const data = (await res.json()) as { task_id?: string };
-  if (!data.task_id) {
-    throw new Error('Candidate prediction response did not include task_id.');
-  }
-  return data.task_id;
+  return (await res.json()) as LeadOptHaloStatusResponse;
 }

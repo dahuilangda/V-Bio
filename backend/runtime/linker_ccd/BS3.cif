@@ -37,10 +37,3 @@ _chem_comp_atom.alt_atom_id
 _chem_comp_atom.pdbx_component_atom_id
 BS3 BI BI 3 0.0000 0.0000 0.0000 N BI BI
 #
-loop_
-_chem_comp_bond.comp_id
-_chem_comp_bond.atom_id_1
-_chem_comp_bond.atom_id_2
-_chem_comp_bond.value_order
-_chem_comp_bond.pdbx_aromatic_flag
-#

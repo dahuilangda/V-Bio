@@ -10,11 +10,8 @@ import re
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-CAPABILITIES_DIR = BASE_DIR / "capabilities"
 
 
-def _resolve_capability_dir(name: str) -> Path:
-    return CAPABILITIES_DIR / name
 
 
 def _parse_gpu_device_ids(raw_value: str | None) -> list[int] | None:
@@ -57,26 +54,13 @@ def _parse_int_env(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
-def print_config_debug_info():
-    """打印当前配置调试信息"""
-    print("\n" + "="*60)
-    print("V-Bio 配置信息")
-    print("="*60)
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or str(raw_value).strip() == "":
+        return default
+    return str(raw_value).strip().lower() in ("1", "true", "yes", "on")
 
-    config_vars = [
-        'REDIS_URL', 'MAX_CONCURRENT_TASKS', 'CPU_MAX_CONCURRENT_TASKS', 'CENTRAL_API_URL',
-        'MSA_SERVER_URL', 'MSA_SERVER_TIMEOUT_SECONDS', 'RESULTS_BASE_DIR', 'GPU_WORKER_CAPABILITIES', 'CPU_WORKER_CAPABILITIES',
-        'GPU_POOL_NAMESPACE',
-        'BOLTZ_API_TOKEN'
-    ]
 
-    for var in config_vars:
-        value = os.environ.get(var, '未设置')
-        if var == 'BOLTZ_API_TOKEN':
-            value = '***已设置***' if value and value != '未设置' else '未设置'
-        print(f"{var:25}: {value}")
-
-    print("="*60 + "\n")
 
 # ==============================================================================
 # 1. 基础设施配置 (Core Infrastructure)
@@ -95,13 +79,36 @@ CELERY_RESULT_BACKEND = REDIS_URL
 # ==============================================================================
 
 # -- Worker 并发设置 --
+# 结构上传（PDB/CIF/SDF/MOL2）的请求体硬上限；Flask 超限直接 413。
+MAX_UPLOAD_BYTES = _parse_int_env("MAX_UPLOAD_BYTES", 64 * 1024 * 1024, minimum=1024*1024)
+# 客户端是否回显内部异常详情（默认关闭：详情可能包含内部路径/主机名）。完整错误始终进服务端日志。
+EXPOSE_ERROR_DETAILS = os.environ.get("EXPOSE_ERROR_DETAILS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Celery-level ceilings for boltz2score: GPU wait is capped at 1h and inference at 3h, so a
+# soft limit at 4.5h (graceful SoftTimeLimitExceeded handling) and a hard kill at 5h bound the
+# worker slot without touching healthy runs.
+BOLTZ2SCORE_TASK_SOFT_TIME_LIMIT_SECONDS = _parse_int_env(
+    "BOLTZ2SCORE_TASK_SOFT_TIME_LIMIT_SECONDS", 4 * 3600 + 1800, minimum=600
+)
+BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS = _parse_int_env(
+    "BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS", 5 * 3600, minimum=1200
+)
+if BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS <= BOLTZ2SCORE_TASK_SOFT_TIME_LIMIT_SECONDS + 300:
+    # A hard limit that fires at/inside the soft limit SIGKILLs the worker before the graceful
+    # SoftTimeLimitExceeded cleanup (GPU release, container teardown) can run.
+    raise RuntimeError(
+        "BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS must exceed the soft limit by at least 300s "
+        f"(soft={BOLTZ2SCORE_TASK_SOFT_TIME_LIMIT_SECONDS}, "
+        f"hard={BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS})."
+    )
+
 # Worker 可以同时运行的最大并发任务数。
 # >0: 限制可并发占用的 GPU 数；<=0: 自动使用全部探测到的可用 GPU。
-MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", -1))
+MAX_CONCURRENT_TASKS = _parse_int_env("MAX_CONCURRENT_TASKS", -1)
 
 # CPU worker 并发（独立于 GPU 数量）
 # 0 表示自动使用本机全部 CPU 核心。
-CPU_MAX_CONCURRENT_TASKS = int(os.environ.get("CPU_MAX_CONCURRENT_TASKS", 0))
+CPU_MAX_CONCURRENT_TASKS = _parse_int_env("CPU_MAX_CONCURRENT_TASKS", 0)
 
 # -- Worker 子进程超时 --
 # 常规单次预测/评分任务默认允许 3 小时。
@@ -181,16 +188,44 @@ PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX = "boltz_peptide_subtasks:"
 # 用于主 API 服务器存储从 Worker 上传回来的中心化结果文件的目录
 RESULTS_BASE_DIR = os.environ.get("RESULTS_BASE_DIR", "/data/boltz_central_results")
 
+# -- 任务列表 Excel 异步导出 --
+# 导出任务通过 Celery 队列在 CPU worker 上执行，产物与作业状态分别落盘/落在 Redis。
+EXPORTS_BASE_DIR = os.environ.get(
+    "EXPORTS_BASE_DIR",
+    os.path.join(RESULTS_BASE_DIR, "exports"),
+)
+# Redis 中导出作业记录的存活时间（秒）；到期后状态查询返回 404，产物文件按文件 TTL 清理
+EXPORT_JOB_TTL_SECONDS = _parse_int_env("EXPORT_JOB_TTL_SECONDS", 48 * 3600, minimum=3600)
+# 导出产物文件在磁盘上的保留时间（秒）；每次启动新导出时顺带清理过期文件
+EXPORT_FILE_TTL_SECONDS = _parse_int_env("EXPORT_FILE_TTL_SECONDS", 48 * 3600, minimum=3600)
+# 单次导出允许的最大任务行数（防止超大 payload 拖垮队列）；生产项目实测可达 1.3 万行
+EXPORT_MAX_TASK_ROWS = _parse_int_env("EXPORT_MAX_TASK_ROWS", 50000, minimum=1)
+# 提交导出请求时允许的最大 JSON body（字节）。
+# 与 MAX_UPLOAD_BYTES 对齐：生产实测 1.3 万行含配体 pLDDT 的导出约 40-52MB，
+# 32MB 会先于行数上限拒绝合法导出。
+EXPORT_REQUEST_MAX_BYTES = _parse_int_env("EXPORT_REQUEST_MAX_BYTES", 64 * 1024 * 1024, minimum=1024 * 1024)
+
 # -- Lead Optimization 输出目录 --
 # 控制 lead optimization 的本地输出落盘位置（任务完成后会打包上传）
 LEAD_OPTIMIZATION_OUTPUT_DIR = os.environ.get(
     "LEAD_OPTIMIZATION_OUTPUT_DIR",
     "/data/boltz_lead_optimization_results"
 )
-LEAD_OPT_MMP_QUERY_CACHE_DIR = os.environ.get(
-    "LEAD_OPT_MMP_QUERY_CACHE_DIR",
-    str(_resolve_capability_dir("lead_optimization") / "data" / "mmp_query_cache"),
-)
+
+# -- 任务结果保留与定期清理 --
+# 超过保留期的任务结果文件（结果 zip、<backend>/<task_id>/ 中间结果树、
+# lead optimization 输出、泄漏的运行时临时目录）会被自动删除。到期判据为文件
+# mtime（zip 上传完成/目录最后写入时刻）；运行或排队中的任务不受影响。
+RESULTS_RETENTION_DAYS = _parse_int_env("RESULTS_RETENTION_DAYS", 90, minimum=1)
+# 结果清理开关：由 monitor 服务按下方间隔周期执行文件系统 GC
+RESULTS_CLEANUP_ENABLED = _env_bool("RESULTS_CLEANUP_ENABLED", True)
+# 结果清理的执行间隔（秒）：monitor 启动后会先执行一轮，之后按此周期复查
+RESULTS_CLEANUP_INTERVAL_SECONDS = _parse_int_env("RESULTS_CLEANUP_INTERVAL_SECONDS", 6 * 3600, minimum=300)
+
+# -- MSA 缓存保留期 --
+# MSA(a3m) 序列缓存可整体重建，超过保留期的缓存文件由同一个 monitor 清理
+# 周期删除（默认与任务结果一致为 90 天）；缓存目录见 BOLTZ_MSA_CACHE_DIR。
+MSA_CACHE_RETENTION_DAYS = _parse_int_env("MSA_CACHE_RETENTION_DAYS", 90, minimum=1)
 
 # -- 中心 API 地址 --
 # Worker 将使用此 URL 来上传结果和更新状态
@@ -200,7 +235,6 @@ CENTRAL_API_URL = os.environ.get("CENTRAL_API_URL", "http://localhost:5000")
 # ColabFold MSA 服务器的 URL，用于生成多序列比对
 # 默认值仅用于本机联调；生产部署请显式写入 .env
 MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://localhost:8080")
-MSA_SERVER_MODE = os.environ.get("MSA_SERVER_MODE", "colabfold")
 MSA_SERVER_TIMEOUT_SECONDS = _parse_int_env("MSA_SERVER_TIMEOUT_SECONDS", 1800, minimum=60)
 
 # ColabFold 服务器缓存目录（用于清理历史任务）
@@ -225,6 +259,7 @@ BOLTZ_API_TOKEN = os.environ.get("BOLTZ_API_TOKEN", "development-api-token")
 # ==============================================================================
 
 BOLTZ2_DOCKER_IMAGE = os.environ.get("BOLTZ2_DOCKER_IMAGE", "vbio-boltz2-runtime")  # Shared by boltz2/boltz2score/affinity runtime
+BOLTZ_MSA_CACHE_DIR = os.environ.get("BOLTZ_MSA_CACHE_DIR", "/data/boltz_msa_cache")  # MSA sequence cache on the /data partition
 BOLTZ2_DOCKER_EXTRA_ARGS = os.environ.get("BOLTZ2_DOCKER_EXTRA_ARGS", "")
 BOLTZ2_DOCKER_SHM_SIZE = os.environ.get("BOLTZ2_DOCKER_SHM_SIZE", "16g")
 BOLTZ2_HOST_CACHE_DIR = os.environ.get("BOLTZ2_HOST_CACHE_DIR", "")
@@ -264,6 +299,12 @@ PROTENIX_COMMON_CACHE_DIR = os.environ.get(
     "PROTENIX_COMMON_CACHE_DIR",
     "/data/protenix/common_cache",
 )
+# Writable host dir for the whole-module pickle cache (protenix model
+# construction is ~80 s per task without it).  Empty disables the cache.
+PROTENIX_MODULE_CACHE_DIR = os.environ.get(
+    "PROTENIX_MODULE_CACHE_DIR",
+    "/data/protenix/module_cache",
+)
 
 # ==============================================================================
 # 8. Nesso Docker 集成
@@ -278,17 +319,3 @@ NESSO_NO_KERNELS = os.environ.get("NESSO_NO_KERNELS", "true")
 NESSO_RECYCLING_STEPS = _parse_int_env("NESSO_RECYCLING_STEPS", 5, minimum=0)
 NESSO_NUM_WORKERS = _parse_int_env("NESSO_NUM_WORKERS", 2, minimum=1)
 NESSO_PRECISION = os.environ.get("NESSO_PRECISION", "bf16-mixed")
-
-# ==============================================================================
-# 9. PocketXMol Docker 集成
-# ==============================================================================
-
-POCKETXMOL_ROOT_DIR = os.environ.get(
-    "POCKETXMOL_ROOT_DIR",
-    str(_resolve_capability_dir("pocketxmol"))
-)
-POCKETXMOL_DOCKER_IMAGE = os.environ.get("POCKETXMOL_DOCKER_IMAGE", "pocketxmol:cu128")
-POCKETXMOL_CONFIG_MODEL = os.environ.get("POCKETXMOL_CONFIG_MODEL", "configs/sample/pxm.yml")
-POCKETXMOL_OUTPUT_DIR = os.environ.get("POCKETXMOL_OUTPUT_DIR", "outputs_leadopt_runtime")
-POCKETXMOL_DEVICE = os.environ.get("POCKETXMOL_DEVICE", "cuda:0")
-POCKETXMOL_BATCH_SIZE = int(os.environ.get("POCKETXMOL_BATCH_SIZE", "50"))

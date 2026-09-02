@@ -55,7 +55,6 @@ Targets:
   alphafold3  alphafold3 GPU worker
   protenix    protenix GPU worker
   nesso       Nesso-1 GPU worker
-  pocketxmol  pocketxmol GPU worker
 
 Options:
   --build     Build/rebuild images on start/restart
@@ -189,7 +188,7 @@ run_logs() {
   compose_cmd "${compose_file}" "${env_file}" "${args[@]}" "$@"
 }
 
-GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso pocketxmol)
+GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso)
 
 gpu_profile_args() {
   local profiles=("$@")
@@ -209,7 +208,6 @@ gpu_service_name() {
     alphafold3) echo "gpu-worker-alphafold3" ;;
     protenix) echo "gpu-worker-protenix" ;;
     nesso) echo "gpu-worker-nesso" ;;
-    pocketxmol) echo "gpu-worker-pocketxmol" ;;
     *) return 1 ;;
   esac
 }
@@ -302,7 +300,7 @@ for target in "${EXPANDED_TARGETS[@]}"; do
       if ! has_stack_files "${CPU_COMPOSE}" "${CPU_ENV}"; then warn_missing_stack "${target}" "${CPU_COMPOSE}" "${CPU_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_compose "${CPU_COMPOSE}" "${CPU_ENV}" cpu-worker
       ;;
-    boltz2|boltz2score|affinity|alphafold3|protenix|nesso|pocketxmol)
+    boltz2|boltz2score|affinity|alphafold3|protenix|nesso)
       if ! has_stack_files "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}"; then warn_missing_stack "${target}" "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_gpu_caps "${target}"
       ;;

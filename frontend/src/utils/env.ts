@@ -83,7 +83,10 @@ export const ENV = {
 
 export const apiUrl = (path: string) => {
   if (!ENV.apiBaseUrl) {
-    return path;
+    // Gateway mode (default deployment): runtime calls go through the management gateway
+    // (/vbio-api proxy), which authenticates and scopes them — instead of a network-exposed
+    // runtime backend. Set VITE_API_BASE_URL only for standalone external runtimes.
+    return `/vbio-api${path}`;
   }
   return `${ENV.apiBaseUrl.replace(/\/$/, '')}${path}`;
 };

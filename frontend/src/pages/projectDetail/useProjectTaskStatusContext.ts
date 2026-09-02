@@ -7,7 +7,6 @@ interface UseProjectTaskStatusContextInput {
   projectTasks: ProjectTask[];
   locationSearch: string;
   statusInfo: Record<string, unknown> | null;
-  nowTs: number;
 }
 
 interface ProjectTaskStatusContext {
@@ -19,7 +18,6 @@ interface ProjectTaskStatusContext {
   displayCompletedAt: string | null;
   displayDurationSeconds: number | null;
   progressPercent: number;
-  waitingSeconds: number | null;
   isActiveRuntime: boolean;
   totalRuntimeSeconds: number | null;
 }
@@ -28,8 +26,7 @@ export function useProjectTaskStatusContext({
   project,
   projectTasks,
   locationSearch,
-  statusInfo,
-  nowTs
+  statusInfo
 }: UseProjectTaskStatusContextInput): ProjectTaskStatusContext {
   const requestedStatusTaskRow = useMemo(() => {
     const query = new URLSearchParams(locationSearch);
@@ -79,12 +76,9 @@ export function useProjectTaskStatusContext({
     return 0;
   }, [displayTaskState, statusInfo, statusContextTaskRow?.task_id, project?.task_id]);
 
-  const waitingSeconds = useMemo(() => {
-    if (!displaySubmittedAt) return null;
-    if (!['QUEUED', 'RUNNING'].includes(displayTaskState)) return null;
-    const duration = Math.floor((nowTs - new Date(displaySubmittedAt).getTime()) / 1000);
-    return Math.max(0, duration);
-  }, [displayTaskState, displaySubmittedAt, nowTs]);
+  // Elapsed time is intentionally NOT computed here: deriving it from a ticking clock
+  // would force every consumer of this context to re-render every second. The header's
+  // <ElapsedSeconds> chip computes it locally from displaySubmittedAt/displayTaskState.
 
   const isActiveRuntime = useMemo(() => {
     return displayTaskState === 'QUEUED' || displayTaskState === 'RUNNING';
@@ -110,7 +104,6 @@ export function useProjectTaskStatusContext({
     displayCompletedAt,
     displayDurationSeconds,
     progressPercent,
-    waitingSeconds,
     isActiveRuntime,
     totalRuntimeSeconds
   };

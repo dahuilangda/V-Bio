@@ -30,6 +30,7 @@ High-level idea
 """
 
 import math
+import os
 from typing import Any, Callable, Mapping
 
 import torch
@@ -67,6 +68,9 @@ def _logmeanexp(x: torch.Tensor, dim: int) -> torch.Tensor:
     This is commonly used when aggregating Monte-Carlo samples in log-space.
     """
     return torch.logsumexp(x, dim=dim) - math.log(x.shape[dim])
+
+
+_GRAD_LIMIT = 2.0
 
 
 class TFGEngine:
@@ -373,6 +377,26 @@ class TFGEngine:
             # Fail fast: terms may require specific features (e.g. bonds,
             # chirality annotations, distance restraints).
             validate_features(input_feature_dict, self.cfg.terms)
+        _nan_debug = bool(os.environ.get("PROTENIX_TFG_DEBUG_NAN", ""))
+
+        def _nan_report(tag: str, tensor: torch.Tensor) -> None:
+            if _nan_debug and tensor is not None and not bool(
+                torch.isfinite(tensor).all()
+            ):
+                bad = int((~torch.isfinite(tensor)).sum().item())
+                logger.warning(
+                    f"TFG-NAN {tag} step={step_i} nonfinite={bad}/{tensor.numel()}"
+                )
+
+        # TFG potentials mix fp32 intermediates (linalg solves, scatter_add_)
+        # with the coordinate dtype; under PROTENIX_LOW_VRAM the sampler runs
+        # bf16 and e.g. ChiralAtomPotential's projection then fails with a
+        # scatter dtype mismatch. Run all guidance math in fp32 and only the
+        # denoiser calls (whose modules own the model dtype) in orig_dtype.
+        orig_dtype = x.dtype
+        x = x.float()
+        t_hat = t_hat.float()
+        c_tau = c_tau.float()
 
         # A normalized time used by energy terms. This does not have to match
         # the sampler's `t_hat` schedule exactly; it is a convenient [0, 1]
@@ -393,8 +417,8 @@ class TFGEngine:
                 with torch.enable_grad():
                     x_var = x_work.detach().requires_grad_(True)
                     x0_pred = denoise_net(
-                        x_noisy=x_var,
-                        t_hat_noise_level=t_hat,
+                        x_noisy=x_var.to(orig_dtype),
+                        t_hat_noise_level=t_hat.to(orig_dtype),
                         input_feature_dict=input_feature_dict,
                         s_inputs=s_inputs,
                         s_trunk=s_trunk,
@@ -409,7 +433,7 @@ class TFGEngine:
                     # Estimate log p(x0_pred) (energy-only) and backprop through
                     # the denoiser to get guidance gradient on x_t.
                     avg_logp = self._logp_x0(
-                        x0_pred,
+                        x0_pred.float(),
                         eps,
                         input_feature_dict,
                         t=t,
@@ -424,6 +448,16 @@ class TFGEngine:
                     )[0]
                     if grad_xt is None:
                         grad_xt = torch.zeros_like(x_var)
+                    _nan_report("grad_xt", grad_xt)
+                    # Degenerate local geometry (e.g. near-collinear torsion
+                    # quadruples after a noise step) can blow an individual
+                    # guidance gradient to inf/NaN; one bad vector would
+                    # poison every later coordinate. Bound the guidance step
+                    # and drop non-finite components for this step only.
+                    grad_xt = torch.nan_to_num(
+                        grad_xt, nan=0.0, posinf=_GRAD_LIMIT, neginf=-_GRAD_LIMIT
+                    ).clamp(min=-_GRAD_LIMIT, max=_GRAD_LIMIT)
+                    _nan_report("x0_pred", x0_pred)
                 xt_shift = grad_xt.detach() * float(self.cfg.rho)
             else:
                 xt_shift = torch.zeros_like(x_work)
@@ -432,8 +466,8 @@ class TFGEngine:
             with torch.no_grad():
                 # The denoiser is treated as a black box in this branch.
                 x0 = denoise_net(
-                    x_noisy=x_work + xt_shift,
-                    t_hat_noise_level=t_hat,
+                    x_noisy=(x_work + xt_shift).to(orig_dtype),
+                    t_hat_noise_level=t_hat.to(orig_dtype),
                     input_feature_dict=input_feature_dict,
                     s_inputs=s_inputs,
                     s_trunk=s_trunk,
@@ -444,13 +478,15 @@ class TFGEngine:
                     chunk_size=chunk_size,
                     inplace_safe=inplace_safe,
                     enable_efficient_fusion=enable_efficient_fusion,
-                )
+                ).float()
+            _nan_report("x0_denoise", x0)
 
             # 3) projection
             x0_ref = x0.detach()
             x0_ref = x0_ref + self._project(
                 x0_ref, input_feature_dict, t=t, step_i=step_i
             )
+            _nan_report("x0_projected", x0_ref)
 
             # 4) refinement directly on x0
             for inner in range(self.cfg.inner_steps):
@@ -473,6 +509,9 @@ class TFGEngine:
                 )
                 # Gradient ascent on log p(x0) (equivalently, gradient descent
                 # on energy E). The step size is `cfg.mu`.
+                grad_x0 = torch.nan_to_num(
+                    grad_x0, nan=0.0, posinf=_GRAD_LIMIT, neginf=-_GRAD_LIMIT
+                ).clamp(min=-_GRAD_LIMIT, max=_GRAD_LIMIT)
                 x0_ref = x0_ref + grad_x0 * float(self.cfg.mu)
 
             # 5) predictor-corrector update
@@ -491,5 +530,8 @@ class TFGEngine:
             # chosen diffusion schedule.
             sigma = torch.sqrt(t_hat**2 - c_tau**2)
             x_work = x_next + sigma[..., None, None] * torch.randn_like(x_next)
+            _nan_report("x_next", x_next)
+            _nan_report("xt_shift", xt_shift)
+            _nan_report("x0_ref_final", x0_ref)
 
-        return x_next
+        return x_next.to(orig_dtype)

@@ -1,4 +1,5 @@
 import os
+import hmac
 import logging
 import threading
 from functools import wraps
@@ -10,20 +11,19 @@ from backend.core.celery_app import celery_app
 from backend.worker.tasks import (
     predict_task,
     boltz2score_task,
-    lead_optimization_mmp_query_task,
+    export_tasks_excel_task,
 )
+from backend.worker.lead_opt_halo_task import lead_optimization_halo_task
 from gpu_manager import get_redis_client, get_gpu_status
 from backend.runtime.affinity_preview import AffinityPreviewError, build_affinity_preview
-from capabilities.lead_optimization.mmp_query_service import run_mmp_query as run_mmp_query_service
 from backend.routes.admin import register_admin_routes
 from backend.routes.task import register_task_routes
 from backend.routes.affinity import register_affinity_routes
-from backend.routes.lead_opt_mmp import register_lead_opt_mmp_routes
-from backend.routes.mmp_lifecycle import register_mmp_lifecycle_admin_routes
 from backend.routes.lead_opt import register_lead_opt_routes
+from backend.routes.lead_opt_halo import register_lead_opt_halo_routes
 from backend.routes.prediction import register_prediction_routes
+from backend.routes.export import register_export_routes
 from backend.services.result_archive import ResultArchiveService
-from backend.services.mmp_service import LeadOptMmpService
 from backend.services.common_utils import (
     extract_template_meta_from_yaml,
     has_worker_for_queue,
@@ -55,6 +55,31 @@ _monitor_store_lock = threading.Lock()
 _monitor_store: MonitorStore | None = None
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = config.RESULTS_BASE_DIR
+# Hard cap on request body size: structure uploads (PDB/CIF/SDF) are at most a few MB; a cap
+# here stops an oversized/malicious upload from being fully buffered in memory before any
+# handler-level validation runs.
+app.config['MAX_CONTENT_LENGTH'] = config.MAX_UPLOAD_BYTES
+
+
+@app.before_request
+def _exempt_worker_result_uploads():
+    # Result archives legitimately reach gigabytes (embedded MSA caches), and
+    # /upload_result/<task_id> is called only by authenticated workers from inside the cluster
+    # with files this very service asked them to produce. The external-upload cap must not
+    # reject them at the final step of a completed GPU run. Werkzeug reads the limit lazily at
+    # first body access, so clearing it here applies to this request only.
+    if request.path.startswith('/upload_result/'):
+        app.config['MAX_CONTENT_LENGTH'] = None
+    else:
+        app.config['MAX_CONTENT_LENGTH'] = config.MAX_UPLOAD_BYTES
+
+
+@app.errorhandler(413)
+def _request_entity_too_large(_error):
+    # The default 413 body is an HTML page; API clients expect JSON with the limit named.
+    return jsonify({
+        'error': f'Request body exceeds the upload limit ({config.MAX_UPLOAD_BYTES} bytes).'
+    }), 413
 
 # Browser clients (V-Bio frontend) call this API directly.
 # Enable permissive CORS by default so both localhost and remote host:port frontends can submit tasks.
@@ -95,16 +120,18 @@ def handle_cors_preflight():
 def add_cors_headers(response):
     return _apply_cors_headers(response)
 
-# MSA 缓存配置
+# MSA 缓存配置（与监控 GC 共用同一目录与保留期）
 MSA_CACHE_CONFIG = {
-    'cache_dir': '/tmp/boltz_msa_cache',
-    'max_age_days': 7,  # 缓存文件最大保存天数
-    'max_size_gb': 5,   # 缓存目录最大大小（GB）
+    'cache_dir': config.BOLTZ_MSA_CACHE_DIR,
+    'max_age_days': config.MSA_CACHE_RETENTION_DAYS,
+    'max_size_gb': 5,
     'enable_cache': True
 }
 
 os.makedirs(config.RESULTS_BASE_DIR, exist_ok=True)
+os.makedirs(config.EXPORTS_BASE_DIR, exist_ok=True)
 logger.info(f"Results base directory ensured: {config.RESULTS_BASE_DIR}")
+logger.info(f"Excel export directory ensured: {config.EXPORTS_BASE_DIR}")
 
 if config.BOLTZ_API_TOKEN == "development-api-token":
     logger.warning(
@@ -155,18 +182,12 @@ def require_api_token(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         token = request.headers.get('X-API-Token')
-        if not token or not hasattr(config, 'BOLTZ_API_TOKEN') or token != config.BOLTZ_API_TOKEN:
+        if not token or not hasattr(config, 'BOLTZ_API_TOKEN') or not hmac.compare_digest(token, config.BOLTZ_API_TOKEN):
             logger.warning(f"Unauthorized API access attempt from {request.remote_addr} to {request.path}")
             return jsonify({'error': 'Unauthorized. Invalid or missing API token.'}), 403
         logger.debug(f"API token validated for {request.path} from {request.remote_addr}")
         return f(*args, **kwargs)
     return decorated_function
-
-lead_opt_mmp_service = LeadOptMmpService(
-    get_redis_client_fn=get_redis_client,
-    logger=logger,
-    mmp_query_cache_dir=getattr(config, 'LEAD_OPT_MMP_QUERY_CACHE_DIR', ''),
-)
 
 def _load_progress(redis_key: str) -> Optional[Dict]:
     return load_progress(redis_key, get_redis_client_fn=get_redis_client, logger=logger)
@@ -218,42 +239,30 @@ register_prediction_routes(
 )
 
 
+from backend.routes.lead_opt_helpers import (
+    attachment_fragment_smiles_from_atom_indices,
+    decode_smiles_atom_index_from_name,
+)
+
+register_lead_opt_halo_routes(
+    app,
+    require_api_token=require_api_token,
+    logger=logger,
+    celery_app=celery_app,
+    lead_optimization_halo_task=lead_optimization_halo_task,
+    select_queue_for_capability=_select_queue_for_capability,
+    has_worker_for_queue=_has_worker_for_queue,
+    load_progress=_load_progress,
+)
+
 register_lead_opt_routes(
     app,
     require_api_token=require_api_token,
     logger=logger,
     build_affinity_preview=build_affinity_preview,
     affinity_preview_error_cls=AffinityPreviewError,
-    attachment_fragment_smiles_from_atom_indices=lead_opt_mmp_service.attachment_fragment_smiles_from_atom_indices,
-    decode_smiles_atom_index_from_name=lead_opt_mmp_service.decode_smiles_atom_index_from_name,
-)
-
-
-register_lead_opt_mmp_routes(
-    app,
-    require_api_token=require_api_token,
-    logger=logger,
-    config_module=config,
-    celery_app=celery_app,
-    predict_task=predict_task,
-    lead_optimization_mmp_query_task=lead_optimization_mmp_query_task,
-    parse_bool=parse_bool,
-    parse_int=parse_int,
-    load_progress=_load_progress,
-    has_worker_for_queue=_has_worker_for_queue,
-    run_mmp_query_service=run_mmp_query_service,
-    materialize_mmp_query_result_cache=lead_opt_mmp_service.materialize_query_result_cache,
-    get_cached_mmp_query_id_for_task=lead_opt_mmp_service.get_cached_query_id_for_task,
-    get_cached_mmp_query_payload=lead_opt_mmp_service.get_cached_query_payload,
-    get_cached_mmp_evidence_payload=lead_opt_mmp_service.get_cached_evidence_payload,
-    build_mmp_clusters=lead_opt_mmp_service.build_mmp_clusters,
-    safe_json_object=lead_opt_mmp_service.safe_json_object,
-    compute_smiles_properties=lead_opt_mmp_service.compute_smiles_properties,
-    passes_property_constraints_simple=lead_opt_mmp_service.passes_property_constraints_simple,
-    build_lead_opt_prediction_yaml=lead_opt_mmp_service.build_lead_opt_prediction_yaml,
-    download_results=download_results,
-    select_queue_for_capability=_select_queue_for_capability,
-    capability_from_prediction_backend=_capability_from_prediction_backend,
+    attachment_fragment_smiles_from_atom_indices=attachment_fragment_smiles_from_atom_indices,
+    decode_smiles_atom_index_from_name=decode_smiles_atom_index_from_name,
 )
 
 
@@ -288,6 +297,17 @@ register_task_routes(
     get_worker_capability_snapshot=_get_worker_capability_snapshot,
 )
 
+register_export_routes(
+    app,
+    require_api_token=require_api_token,
+    celery_app=celery_app,
+    logger=logger,
+    config_module=config,
+    export_tasks_excel_task=export_tasks_excel_task,
+    select_queue_for_capability=_select_queue_for_capability,
+    get_redis_client_fn=get_redis_client,
+)
+
 
 register_admin_routes(
     app,
@@ -298,13 +318,6 @@ register_admin_routes(
     task_monitor=task_monitor,
     get_gpu_status_fn=get_gpu_status,
 )
-
-register_mmp_lifecycle_admin_routes(
-    app,
-    require_api_token=require_api_token,
-    logger=logger,
-)
-
 
 if __name__ == '__main__':
     # For production, use a WSGI server like Gunicorn/uWSGI instead of app.run().

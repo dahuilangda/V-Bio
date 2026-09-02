@@ -173,6 +173,8 @@ export interface BuildPredictionComponentsSidebarParams {
   setAffinityComponentFromWorkspace: (role: 'target' | 'ligand', componentId: string | null) => void;
   affinityEnableDisabledReason: string;
   showAffinityComputeToggle?: boolean;
+  /** Peptide design: pocket summary under Binding's Target select; clicking jumps to the target component. */
+  peptidePocket?: { summaryLabel: string; targetComponentId: string | null } | null;
 }
 
 export function buildPredictionComponentsSidebarProps(
@@ -212,7 +214,8 @@ export function buildPredictionComponentsSidebarProps(
     workspaceLigandSelectableOptions,
     setAffinityComponentFromWorkspace,
     affinityEnableDisabledReason,
-    showAffinityComputeToggle
+    showAffinityComputeToggle,
+    peptidePocket
   } = params;
 
   return {
@@ -250,7 +253,8 @@ export function buildPredictionComponentsSidebarProps(
     workspaceLigandSelectableOptions,
     onSetAffinityComponentFromWorkspace: setAffinityComponentFromWorkspace,
     affinityEnableDisabledReason,
-    showAffinityComputeToggle
+    showAffinityComputeToggle,
+    peptidePocket
   };
 }
 

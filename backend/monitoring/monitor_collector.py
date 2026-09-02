@@ -15,9 +15,16 @@ from typing import Any, Mapping
 from redis.exceptions import ResponseError
 
 from backend.core.celery_app import celery_app
+from backend.core.config import (
+    MSA_CACHE_RETENTION_DAYS,
+    RESULTS_CLEANUP_ENABLED,
+    RESULTS_CLEANUP_INTERVAL_SECONDS,
+    RESULTS_RETENTION_DAYS,
+)
 from backend.monitoring.event_transport import MONITOR_STREAM_KEY
 from backend.monitoring.migration_runner import apply_migrations
 from backend.monitoring.monitor_store import MonitorStore
+from backend.monitoring.result_cleanup import purge_stale_msa_cache, purge_stale_task_results
 from backend.scheduling.capability_router import build_worker_capability_snapshot, parse_capability_queue
 from gpu_manager import get_redis_client
 
@@ -126,6 +133,7 @@ class MonitorCollector:
         self._retry: deque[tuple[str, Mapping[Any, Any]]] = deque()
         self._stop = threading.Event()
         self._receiver_thread: threading.Thread | None = None
+        self._gc_in_progress = False
         self._last_worker_heartbeat: dict[str, float] = {}
 
     def stop(self, *_args: Any) -> None:
@@ -220,6 +228,22 @@ class MonitorCollector:
             for message_id, fields in messages:
                 self._retry.append((message_id, fields))
 
+    def _gc_task(self) -> None:
+        """后台执行一轮任务结果与 MSA 缓存清理，失败只记录日志，释放 _gc_in_progress。"""
+        try:
+            result_stats = purge_stale_task_results(RESULTS_RETENTION_DAYS, dry_run=False)
+            msa_stats = purge_stale_msa_cache(MSA_CACHE_RETENTION_DAYS, dry_run=False)
+            if result_stats.scanned_files or result_stats.scanned_dirs or msa_stats.scanned_files:
+                LOGGER.info(
+                    "Task result cleanup: deleted %d result files, %d result dirs, %d MSA cache files, freed ~%.2f GB",
+                    result_stats.deleted_files, result_stats.deleted_dirs, msa_stats.deleted_files,
+                    (result_stats.freed_bytes + msa_stats.freed_bytes) / (1024 ** 3),
+                )
+        except Exception:
+            LOGGER.exception("Task result cleanup failed; will retry next interval")
+        finally:
+            self._gc_in_progress = False
+
     def run_forever(self) -> None:
         self._ensure_consumer_group()
         try:
@@ -232,6 +256,7 @@ class MonitorCollector:
         self._start_receiver()
         next_lease_sweep = time.monotonic()
         next_reclaim = time.monotonic() + (self.reclaim_idle_ms / 1000.0)
+        next_result_gc = time.monotonic()  # 启动后立即触发首轮
         while not self._stop.is_set():
             try:
                 while self._retry:
@@ -254,6 +279,11 @@ class MonitorCollector:
                 if now >= next_reclaim:
                     self._claim_pending()
                     next_reclaim = now + (self.reclaim_idle_ms / 1000.0)
+                if RESULTS_CLEANUP_ENABLED and now >= next_result_gc:
+                    next_result_gc = now + RESULTS_CLEANUP_INTERVAL_SECONDS
+                    if not self._gc_in_progress:
+                        self._gc_in_progress = True
+                        threading.Thread(target=self._gc_task, daemon=True, name="result-cleanup").start()
             except Exception:
                 LOGGER.exception("Monitor collector iteration failed")
                 self._stop.wait(2.0)

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useOverlayHost } from '../components/ui/OverlayContext';
 import {
@@ -31,6 +31,8 @@ import { formatDateTime } from '../utils/date';
 import { canDeleteProject, canEditProject as canEditProjectAccess, canManageProjectShares } from '../utils/accessControl';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
 import type { CopilotPlanAction, Project, TaskState } from '../types/models';
+import { backendLabel } from './projectTasks/taskPresentation';
+import { readCopilotText, readCopilotNumber, isOneOf } from '../utils/copilotPayload';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -54,19 +56,6 @@ const PROJECT_STATE_FILTER_OPTIONS = ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCC
 const PROJECT_TYPE_FILTER_OPTIONS = ['all', 'prediction', 'virtual_screening', 'affinity', 'peptide_design', 'lead_optimization'] as const;
 const PROJECT_ACTIVITY_FILTER_OPTIONS = ['all', 'active', 'completed', 'failed', 'no_tasks'] as const;
 
-function readCopilotText(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function readCopilotNumber(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isOneOf<T extends readonly string[]>(value: string, options: T): value is T[number] {
-  return (options as readonly string[]).includes(value);
-}
-
 function summarizeProjectTaskStates(rows: Project[]): Record<string, number> {
   return rows.reduce<Record<string, number>>((acc, project) => {
     const counts = project.task_counts || { queued: 0, running: 0, success: 0, failure: 0, other: 0 };
@@ -88,14 +77,6 @@ function countProjectsByField(rows: Project[], field: 'task_type' | 'backend'): 
     acc[value] = (acc[value] || 0) + 1;
     return acc;
   }, {});
-}
-
-function backendLabel(value: string): string {
-  if (value === 'alphafold3') return 'AlphaFold3';
-  if (value === 'protenix') return 'Protenix';
-  if (value === 'boltz') return 'Boltz-2';
-  if (value === 'nesso') return 'Nesso-1';
-  return value ? value.toUpperCase() : 'Unknown';
 }
 
 export function ProjectsPage() {
@@ -504,6 +485,9 @@ export function ProjectsPage() {
   useEffect(() => {
     if (!hasActiveRuntime) return;
     const timer = window.setInterval(() => {
+      // Hidden tabs skip the tick (the visibilitychange handler refreshes on return) —
+      // a backgrounded tab used to keep polling every 2.5s for nothing.
+      if (document.visibilityState === 'hidden') return;
       void load({ silent: true, statusOnly: true, preferBackendStatus: true });
     }, 2500);
     return () => window.clearInterval(timer);
@@ -511,6 +495,7 @@ export function ProjectsPage() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
       void load({ silent: true, preferBackendStatus: true });
     }, 15000);
     return () => window.clearInterval(timer);
@@ -526,6 +511,20 @@ export function ProjectsPage() {
     return registerOverlay('projects:create-dialog', 'dialog');
   }, [showCreate, registerOverlay]);
 
+  // Global ⌘K palette handoff: "新建项目" navigates here with a one-shot sessionStorage
+  // flag (survives the navigation, consumed exactly once by this mount).
+  useEffect(() => {
+    try {
+      if (window.sessionStorage.getItem('vbio:palette:open-create') !== '1') return;
+      window.sessionStorage.removeItem('vbio:palette:open-create');
+    } catch {
+      return;
+    }
+    openCreateModalRef.current?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openCreateModalRef = useRef<((workflowKey?: WorkflowKey) => void) | null>(null);
   const openCreateModal = (workflowKey?: WorkflowKey) => {
     // Default to the prediction workflow only when no workflow is implied by the caller. A Copilot
     // plan that proposes projects:create carries the workflow the user asked for (affinity, virtual
@@ -535,6 +534,7 @@ export function ProjectsPage() {
     setCreateError(null);
     setShowCreate(true);
   };
+  openCreateModalRef.current = openCreateModal;
 
   const fallbackName = () => {
     const info = getWorkflowDefinition(workflow);
@@ -570,7 +570,10 @@ export function ProjectsPage() {
         throw new Error('Project was created but no project ID was returned from PostgREST.');
       }
       setShowCreate(false);
-      navigate(`/projects/${created.id}?tab=inputs`);
+      // Land on the task list, not the workspace editor — a brand-new project has no tasks yet,
+      // and dropping the user straight into a fresh draft task feels abrupt. The task list's
+      // "New Task" button is the deliberate entry point for creating the first task.
+      navigate(`/projects/${created.id}/tasks`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create project.');
     } finally {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import { CircleCheck, Dna, Eye, FlaskConical, Target } from 'lucide-react';
 import { MolstarViewer, type MolstarAtomHighlight, type MolstarResiduePick } from './MolstarViewer';
 import { JSMEEditor } from './JSMEEditor';
@@ -6,7 +6,15 @@ import { Ligand2DPreview } from './Ligand2DPreview';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
 import { resolveExactLigandAtomLinks } from './affinityAtomLinking';
-import type { AffinityScoringMode } from '../../types/models';
+import {
+  InteractionsPanel,
+  interactionResidueHighlights,
+  parseInteractionsFromAffinity,
+  type LigandInteraction
+} from './InteractionsPanel';
+import type { AffinityDockPocket, AffinityScoringMode } from '../../types/models';
+import { PocketBoxControls } from './PocketBoxControls';
+import { pocketTargetChanged, type PocketTargetSignature } from '../../utils/pocketBox';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
@@ -28,12 +36,12 @@ interface AffinityBasicsWorkspaceProps {
   submitting: boolean;
   backend: string;
   mode: AffinityScoringMode;
+  dockPocket: AffinityDockPocket | null;
   seed: number | null;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
   ligandEditorInput: string;
-  useMsa: boolean;
   confidenceOnly: boolean;
   confidenceOnlyLocked: boolean;
   previewTargetStructureText: string;
@@ -46,10 +54,10 @@ interface AffinityBasicsWorkspaceProps {
   resultsGridStyle: ResultsGridStyle;
   onTargetFileChange: (file: File | null) => void;
   onLigandFileChange: (file: File | null) => void;
-  onUseMsaChange: (checked: boolean) => void;
   onConfidenceOnlyChange: (checked: boolean) => void;
   onBackendChange: (backend: string) => void;
   onModeChange: (mode: AffinityScoringMode) => void;
+  onDockPocketChange: (pocket: AffinityDockPocket | null) => void;
   onSeedChange: (seed: number | null) => void;
   onLigandSmilesChange: (smiles: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
@@ -61,12 +69,12 @@ export function AffinityBasicsWorkspace({
   submitting,
   backend,
   mode,
+  dockPocket,
   seed,
   targetFileName,
   ligandFileName,
   ligandSmiles,
   ligandEditorInput,
-  useMsa,
   confidenceOnly,
   confidenceOnlyLocked,
   previewTargetStructureText,
@@ -79,15 +87,57 @@ export function AffinityBasicsWorkspace({
   resultsGridStyle,
   onTargetFileChange,
   onLigandFileChange,
-  onUseMsaChange,
   onConfidenceOnlyChange,
   onBackendChange,
   onModeChange,
+  onDockPocketChange,
   onSeedChange,
   onLigandSmilesChange,
   onResizerPointerDown,
   onResizerKeyDown
 }: AffinityBasicsWorkspaceProps) {
+  const isDockMode = mode === 'dock';
+  const [pickedResidues, setPickedResidues] = useState<MolstarResiduePick[]>([]);
+  const [boxWireframe, setBoxWireframe] = useState('');
+  const [pocketDrawerOpen, setPocketDrawerOpen] = useState(false);
+  // null = target not yet seen; only a real target change invalidates the pocket.
+  const lastTargetSignatureRef = useRef<PocketTargetSignature | null>(null);
+
+  useEffect(() => {
+    if (!isDockMode) {
+      setPickedResidues([]);
+      setBoxWireframe('');
+    }
+  }, [isDockMode]);
+
+  useEffect(() => {
+    // A new target structure invalidates any pocket defined against the old one — the box
+    // coordinates would dock against the wrong protein ("运行后的 box 需要记忆"; see
+    // pocketTargetChanged for why the preview-loading step must not count as a change).
+    const next = { name: targetFileName.trim(), length: previewTargetStructureText.length };
+    const previous = lastTargetSignatureRef.current;
+    lastTargetSignatureRef.current = next;
+    if (!pocketTargetChanged(previous, next)) return;
+    setPickedResidues([]);
+    setBoxWireframe('');
+    onDockPocketChange(null);
+  }, [targetFileName, previewTargetStructureText, onDockPocketChange]);
+
+  const handleResiduePick = useCallback((pick: MolstarResiduePick) => {
+    if (!isDockMode) return;
+    setPickedResidues(prev => {
+      const exists = prev.some(p => p.chainId === pick.chainId && p.residue === pick.residue);
+      return exists
+        ? prev.filter(p => !(p.chainId === pick.chainId && p.residue === pick.residue))
+        : [...prev, pick];
+    });
+  }, [isDockMode]);
+
+  const pickedHighlights = useMemo(
+    () => (isDockMode ? pickedResidues.map(p => ({ chainId: p.chainId, residue: p.residue })) : undefined),
+    [isDockMode, pickedResidues]
+  );
+
   return (
     <section className="affinity-basics-panel">
       <div className="affinity-basics-controls">
@@ -110,23 +160,34 @@ export function AffinityBasicsWorkspace({
             />
           </label>
 
-          <label className="field affinity-upload-field">
-            <span className="affinity-field-title">
-              <FlaskConical size={13} />
-              Ligand
-              {ligandFileName ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
-            </span>
-            <input
-              type="file"
-              className="file-input-unified"
-              accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
-              disabled={!canEdit || submitting}
-              onClick={(event) => {
-                (event.currentTarget as HTMLInputElement).value = '';
-              }}
-              onChange={(event) => onLigandFileChange(event.target.files?.[0] || null)}
-            />
-          </label>
+          {!isDockMode ? (
+            <label className="field affinity-upload-field">
+              <span className="affinity-field-title">
+                <FlaskConical size={13} />
+                Ligand
+                {ligandFileName ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
+              </span>
+              <input
+                type="file"
+                className="file-input-unified"
+                accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
+                disabled={!canEdit || submitting}
+                onClick={(event) => {
+                  (event.currentTarget as HTMLInputElement).value = '';
+                }}
+                onChange={(event) => onLigandFileChange(event.target.files?.[0] || null)}
+              />
+            </label>
+          ) : (
+            <div className="field affinity-upload-field affinity-upload-field--docked" title="Dock mode takes the ligand from the SMILES editor below">
+              <span className="affinity-field-title">
+                <FlaskConical size={13} />
+                Ligand via SMILES
+                {ligandSmiles.trim() ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
+              </span>
+              <div className="affinity-docked-ligand-hint">Use the editor below</div>
+            </div>
+          )}
 
           <label className="field affinity-inline-field">
             <span className="affinity-field-title">Mode</span>
@@ -139,35 +200,42 @@ export function AffinityBasicsWorkspace({
               <option value="pose">Pose</option>
               <option value="refine">Refine</option>
               <option value="interface">Interface</option>
+              <option value="dock">Dock</option>
             </select>
           </label>
 
-          <label className="switch-field affinity-inline-toggle">
-            <input
-              type="checkbox"
-              checked={useMsa}
-              disabled={!canEdit || submitting}
-              onChange={(event) => onUseMsaChange(event.target.checked)}
-            />
-            <span className="affinity-field-title">
-              <Dna size={13} />
-              Use MSA
-            </span>
-          </label>
+          {isDockMode ? (
+            <div className="field affinity-inline-field">
+              <span className="affinity-field-title">Box</span>
+              <button
+                type="button"
+                className={`btn pocket-box-btn ${pocketDrawerOpen ? 'active' : ''}`}
+                onClick={() => setPocketDrawerOpen(v => !v)}
+                disabled={!canEdit || submitting}
+              >
+                {pocketDrawerOpen ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          ) : null}
 
-          <label className="switch-field affinity-inline-toggle">
-            <input
-              type="checkbox"
-              checked={confidenceOnly}
-              disabled={!canEdit || submitting || confidenceOnlyLocked}
-              onChange={(event) => onConfidenceOnlyChange(event.target.checked)}
-            />
-            <span className="affinity-field-title">
-              <Eye size={13} />
-              Confidence Only
-            </span>
-          </label>
+          {/* Backend force-enables use_msa_server for this workflow. */}
+
+          {!isDockMode ? (
+            <label className="switch-field affinity-inline-toggle">
+              <input
+                type="checkbox"
+                checked={confidenceOnly}
+                disabled={!canEdit || submitting || confidenceOnlyLocked}
+                onChange={(event) => onConfidenceOnlyChange(event.target.checked)}
+              />
+              <span className="affinity-field-title">
+                <Eye size={13} />
+                Confidence Only
+              </span>
+            </label>
+          ) : null}
         </div>
+
       </div>
 
       <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
@@ -176,12 +244,17 @@ export function AffinityBasicsWorkspace({
             <MolstarViewer
               structureText={previewTargetStructureText}
               format={previewTargetStructureFormat}
-              overlayStructureText={previewLigandStructureText}
-              overlayFormat={previewLigandStructureFormat}
+              overlayStructureText={isDockMode && boxWireframe ? boxWireframe : previewLigandStructureText}
+              overlayFormat={isDockMode && boxWireframe ? 'pdb' : previewLigandStructureFormat}
               ligandFocusChainId={previewLigandChainId}
-              autoFocusLigand
+              autoFocusLigand={!isDockMode}
               colorMode="default"
+              onResiduePick={handleResiduePick}
+              pickMode="click"
+              highlightResidues={pickedHighlights}
             />
+          ) : targetFileName ? (
+            <div className="ligand-preview-empty" role="status">Preparing 3D preview of {targetFileName}…</div>
           ) : (
             <div className="ligand-preview-empty">Upload target file.</div>
           )}
@@ -198,6 +271,23 @@ export function AffinityBasicsWorkspace({
         />
 
         <aside className="info-panel">
+          {isDockMode ? (
+            <>
+              {pocketDrawerOpen ? (
+                <PocketBoxControls
+                  pocket={dockPocket}
+                  onPocketChange={onDockPocketChange}
+                  proteinStructureText={previewTargetStructureText}
+                  proteinStructureFormat={previewTargetStructureFormat}
+                  pickedResidues={pickedResidues}
+                  onBoxWireframeChange={setBoxWireframe}
+                  onCollapse={() => setPocketDrawerOpen(false)}
+                  canEdit={canEdit}
+                  submitting={submitting}
+                />
+              ) : null}
+            </>
+          ) : null}
           <section className="result-aside-block result-aside-block-ligand">
             <div className="jsme-editor-container affinity-jsme-shell">
               <JSMEEditor smiles={ligandEditorInput} onSmilesChange={onLigandSmilesChange} height={336} />
@@ -222,7 +312,8 @@ export function AffinityBasicsWorkspace({
               disabled={!canEdit || submitting}
               onChange={(event) => onBackendChange(event.target.value)}
             >
-              <option value="boltz">Boltz-2</option>
+              <option value="boltz">Boltz2Dock</option>
+              <option value="protenix">Protenix2Dock</option>
             </select>
           </label>
 
@@ -249,6 +340,7 @@ export function AffinityBasicsWorkspace({
 
 interface AffinityResultsWorkspaceProps {
   hasStructure: boolean;
+  snapshotAffinity?: Record<string, unknown> | null;
   structureText: string;
   structureFormat: 'cif' | 'pdb';
   colorMode: 'default' | 'alphafold';
@@ -271,6 +363,7 @@ interface AffinityResultsWorkspaceProps {
 
 export function AffinityResultsWorkspace({
   hasStructure,
+  snapshotAffinity = null,
   structureText,
   structureFormat,
   colorMode,
@@ -307,6 +400,15 @@ export function AffinityResultsWorkspace({
     [ligandSmiles, selectedLigandChainId, snapshotConfidence, structureFormat, structureText]
   );
   const [selectedLigandAtomIndex, setSelectedLigandAtomIndex] = useState<number | null>(null);
+  const interactionsReport = useMemo(() => parseInteractionsFromAffinity(snapshotAffinity), [snapshotAffinity]);
+  const [selectedInteraction, setSelectedInteraction] = useState<LigandInteraction | null>(null);
+  const [interactionAtomHighlights, setInteractionAtomHighlights] = useState<MolstarAtomHighlight[]>([]);
+  // The workspace instance is reused across task results: a selection made against task A's
+  // report must not keep highlighting residues/atoms on task B's structure.
+  useEffect(() => {
+    setSelectedInteraction(null);
+    setInteractionAtomHighlights([]);
+  }, [interactionsReport]);
 
   useEffect(() => {
     setViewerColorMode(initialViewerColorMode);
@@ -339,9 +441,18 @@ export function AffinityResultsWorkspace({
     };
   }, [exactLigandAtomLinks, selectedLigandAtomIndex]);
 
-  const highlightedLigandAtoms = useMemo<MolstarAtomHighlight[]>(
-    () => (activeLigandAtom ? [activeLigandAtom] : []),
-    [activeLigandAtom]
+  const highlightedLigandAtoms = useMemo<MolstarAtomHighlight[]>(() => {
+    const base = activeLigandAtom ? [activeLigandAtom] : [];
+    const interactionNames = new Set(interactionAtomHighlights.map((a) => a.atomName));
+    return [
+      ...interactionAtomHighlights,
+      ...base.filter((a) => !interactionNames.has(a.atomName))
+    ];
+  }, [activeLigandAtom, interactionAtomHighlights]);
+
+  const interactionResidues = useMemo(
+    () => interactionResidueHighlights(interactionsReport, selectedInteraction),
+    [interactionsReport, selectedInteraction]
   );
 
   const handleLigand2DAtomClick = (atomIndex: number) => {
@@ -377,6 +488,7 @@ export function AffinityResultsWorkspace({
               ligandFocusChainId={selectedLigandChainId || ''}
               interactionGranularity="element"
               onResiduePick={exactLigandAtomLinks ? handleLigand3DPick : undefined}
+              highlightResidues={interactionResidues}
               highlightAtoms={highlightedLigandAtoms}
               activeAtom={activeLigandAtom}
               suppressAutoFocus={false}
@@ -467,6 +579,24 @@ export function AffinityResultsWorkspace({
                 </div>
               ))}
             </div>
+          </section>
+
+          <section className="result-aside-block">
+            <div className="result-aside-title affinity-title-with-icon">
+              <Target size={13} />
+              Interactions
+            </div>
+            <InteractionsPanel
+              report={interactionsReport}
+              selectedInteraction={selectedInteraction}
+              onSelectInteraction={(interaction) => {
+                setSelectedInteraction(interaction);
+                if (!interaction) setInteractionAtomHighlights([]);
+              }}
+              onAtomHighlight={setInteractionAtomHighlights}
+              ligandChainId={exactLigandAtomLinks?.chainId}
+              ligandResidueNumber={exactLigandAtomLinks ? exactLigandAtomLinks.residue : null}
+            />
           </section>
         </aside>
       </div>

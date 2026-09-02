@@ -21,7 +21,6 @@ export function useProjectDetailLocalState() {
   const [structureFormat, setStructureFormat] = useState<'cif' | 'pdb'>('cif');
   const [structureTaskId, setStructureTaskId] = useState<string | null>(null);
   const [statusInfo, setStatusInfo] = useState<Record<string, unknown> | null>(null);
-  const [nowTs, setNowTs] = useState(Date.now());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('results');
   const [savedDraftFingerprint, setSavedDraftFingerprint] = useState('');
   const [savedComputationFingerprint, setSavedComputationFingerprint] = useState('');
@@ -102,8 +101,6 @@ export function useProjectDetailLocalState() {
     setStructureTaskId,
     statusInfo,
     setStatusInfo,
-    nowTs,
-    setNowTs,
     workspaceTab,
     setWorkspaceTab,
     savedDraftFingerprint,

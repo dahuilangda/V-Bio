@@ -43,7 +43,9 @@ RUN python -m pip install \
     redis \
     tqdm \
     pytorch-lightning \
-    click
+    click \
+    plip \
+    openbabel-wheel
 
 WORKDIR /workspace/vbio
 

@@ -1,6 +1,6 @@
 import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from 'react';
 import { AffinityBasicsWorkspace } from '../../components/project/AffinityWorkspace';
-import type { AffinityScoringMode } from '../../types/models';
+import type { AffinityDockPocket, AffinityScoringMode } from '../../types/models';
 
 export interface AffinityWorkflowSectionProps {
   visible: boolean;
@@ -8,12 +8,12 @@ export interface AffinityWorkflowSectionProps {
   submitting: boolean;
   backend: string;
   mode: AffinityScoringMode;
+  dockPocket: AffinityDockPocket | null;
   seed: number | null;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
   ligandEditorInput: string;
-  useMsa: boolean;
   confidenceOnly: boolean;
   confidenceOnlyLocked: boolean;
   previewTargetStructureText: string;
@@ -26,10 +26,10 @@ export interface AffinityWorkflowSectionProps {
   resultsGridStyle: CSSProperties;
   onTargetFileChange: (file: File | null) => void;
   onLigandFileChange: (file: File | null) => void;
-  onUseMsaChange: (value: boolean) => void;
   onConfidenceOnlyChange: (value: boolean) => void;
   onBackendChange: (backend: string) => void;
   onModeChange: (mode: AffinityScoringMode) => void;
+  onDockPocketChange: (pocket: AffinityDockPocket | null) => void;
   onSeedChange: (seed: number | null) => void;
   onLigandSmilesChange: (value: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
@@ -42,12 +42,12 @@ export function AffinityWorkflowSection({
   submitting,
   backend,
   mode,
+  dockPocket,
   seed,
   targetFileName,
   ligandFileName,
   ligandSmiles,
   ligandEditorInput,
-  useMsa,
   confidenceOnly,
   confidenceOnlyLocked,
   previewTargetStructureText,
@@ -60,10 +60,10 @@ export function AffinityWorkflowSection({
   resultsGridStyle,
   onTargetFileChange,
   onLigandFileChange,
-  onUseMsaChange,
   onConfidenceOnlyChange,
   onBackendChange,
   onModeChange,
+  onDockPocketChange,
   onSeedChange,
   onLigandSmilesChange,
   onResizerPointerDown,
@@ -77,12 +77,12 @@ export function AffinityWorkflowSection({
       submitting={submitting}
       backend={backend}
       mode={mode}
+      dockPocket={dockPocket}
       seed={seed}
       targetFileName={targetFileName}
       ligandFileName={ligandFileName}
       ligandSmiles={ligandSmiles}
       ligandEditorInput={ligandEditorInput}
-      useMsa={useMsa}
       confidenceOnly={confidenceOnly}
       confidenceOnlyLocked={confidenceOnlyLocked}
       previewTargetStructureText={previewTargetStructureText}
@@ -95,10 +95,10 @@ export function AffinityWorkflowSection({
       resultsGridStyle={resultsGridStyle}
       onTargetFileChange={onTargetFileChange}
       onLigandFileChange={onLigandFileChange}
-      onUseMsaChange={onUseMsaChange}
       onConfidenceOnlyChange={onConfidenceOnlyChange}
       onBackendChange={onBackendChange}
       onModeChange={onModeChange}
+      onDockPocketChange={onDockPocketChange}
       onSeedChange={onSeedChange}
       onLigandSmilesChange={onLigandSmilesChange}
       onResizerPointerDown={onResizerPointerDown}

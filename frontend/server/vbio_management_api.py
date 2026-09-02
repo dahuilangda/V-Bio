@@ -49,7 +49,7 @@ from management_api.copilot_settings import (
     validate_api_url,
     validate_proxy_url,
 )
-from management_api.copilot_stream import copilot_event_stream
+from management_api.copilot_stream import copilot_event_stream, register_steering, submit_follow_up, submit_steering
 from management_api.usage_tracker import UsageTracker
 from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
 
@@ -75,7 +75,7 @@ VBIO_MONITOR_DATABASE_URL = os.environ.get("VBIO_MONITOR_DATABASE_URL", "").stri
 RUNTIME_MAX_INFLIGHT_REQUESTS = int(os.environ.get("VBIO_RUNTIME_MAX_INFLIGHT_REQUESTS", "128"))
 RUNTIME_STATUS_HISTORY_SIZE = int(os.environ.get("VBIO_RUNTIME_STATUS_HISTORY_SIZE", "200"))
 
-SERVER_HOST = os.environ.get("VBIO_MGMT_HOST", "0.0.0.0")
+SERVER_HOST = os.environ.get("VBIO_MGMT_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("VBIO_MGMT_PORT", "5055"))
 LEAD_OPT_OVERLAY_MAX_WORKERS = int(os.environ.get("VBIO_LEAD_OPT_OVERLAY_MAX_WORKERS", "4"))
 LEAD_OPT_OVERLAY_MAX_PENDING = int(os.environ.get("VBIO_LEAD_OPT_OVERLAY_MAX_PENDING", "32"))
@@ -96,8 +96,26 @@ COPILOT_MODEL = (
 )
 COPILOT_ENABLED = os.environ.get("VBIO_COPILOT_ENABLED", "").strip().lower()
 COPILOT_CONFIGURED = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(COPILOT_API_URL)
-COPILOT_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_TIMEOUT_SECONDS", "90"))
-COPILOT_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_MAX_REQUEST_BYTES", "524288"))
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env var, falling back (silently) on malformed values — a bad
+    VBIO_COPILOT_TIMEOUT_SECONDS must not take the whole management API down at import."""
+    raw = os.environ.get(name, "")
+    try:
+        return float(raw) if raw.strip() else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    try:
+        return int(raw) if raw.strip() else default
+    except (TypeError, ValueError):
+        return default
+
+
+COPILOT_TIMEOUT_SECONDS = _env_float("VBIO_COPILOT_TIMEOUT_SECONDS", 90.0)
+COPILOT_MAX_REQUEST_BYTES = _env_int("VBIO_COPILOT_MAX_REQUEST_BYTES", 524288)
 COPILOT_ENABLE_THINKING = os.environ.get("VBIO_COPILOT_ENABLE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
 # Inline auto-complete model. Optional VBIO_COPILOT_COMPLETE_* overrides let a smaller/faster model
 # serve per-keystroke completions; each falls back to the planner value when unset.
@@ -161,6 +179,24 @@ FORM_FIELDS_INTERNAL = {"project_id", "task_name", "task_summary", "operation_mo
 DEFAULT_PROTENIX_PREDICT_SEED = 42
 
 app = Flask(__name__)
+# Streamed-body cap for the COPILOT routes only (request.content_length alone is
+# bypassable with chunked encoding). Scoped via before_request: an app-wide
+# MAX_CONTENT_LENGTH would also cap /predict multipart uploads (MSA files exceed 512 KiB).
+
+
+@app.before_request
+def _copilot_body_cap():
+    if request.path.startswith("/vbio-api/copilot/"):
+        declared = request.content_length
+        if declared is None or declared > COPILOT_MAX_REQUEST_BYTES:
+            # None = chunked (no Content-Length) — read bounded and check actual size.
+            if declared is None:
+                data = request.get_data(cache=True)
+                if len(data) > COPILOT_MAX_REQUEST_BYTES:
+                    return jsonify({"error": "Copilot request is too large."}), 413
+            else:
+                return jsonify({"error": "Copilot request is too large."}), 413
+    return None
 
 runtime_http = create_pooled_session(
     pool_connections=max(8, RUNTIME_HTTP_POOL_SIZE),
@@ -234,6 +270,17 @@ copilot_completer = CopilotCompleter(
 # Apply persisted runtime settings (proxy / LLM overrides) so restarts honor user config saved via
 # the Copilot UI.  Each field is only applied when the saved value is non-empty, preserving env-var
 # defaults for unconfigured fields.
+def _recompute_copilot_configured(settings: Dict[str, Any]) -> None:
+    """Recompute the live 'configured' flag from the current effective config.
+
+    Properly resets to ``False`` when there is no effective API URL, so clearing the
+    URL in the UI disables Copilot instead of leaving the flag stuck ``True``.
+    """
+    effective_url = str(settings.get("api_url") or "").strip() or COPILOT_API_URL
+    enabled = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(effective_url)
+    _copilot_runtime_state["configured"] = enabled
+
+
 _copilot_saved_settings = load_saved_settings()
 if _copilot_saved_settings:
     apply_runtime_overrides(copilot_assistant, copilot_completer, _copilot_saved_settings)
@@ -435,18 +482,15 @@ gateway = GatewayHandlers(
 
 @app.get("/vbio-api/healthz")
 def healthz() -> Tuple[Response, int]:
-    return jsonify(
-        {
-            "ok": True,
-            "runtime_api_base_url": RUNTIME_API_BASE_URL,
-            "postgrest_url": VBIO_POSTGREST_URL,
-            "monitor_postgresql_configured": monitor_store is not None,
-        }
-    ), 200
+    # Liveness only — internal topology (URLs) belongs behind the admin gate.
+    return jsonify({"ok": True}), 200
 
 
 @app.get("/vbio-api/runtime_status")
 def runtime_status() -> Tuple[Response, int]:
+    forbidden = _require_platform_admin()
+    if forbidden:
+        return forbidden
     return jsonify(
         {
             "ok": True,
@@ -459,17 +503,6 @@ def runtime_status() -> Tuple[Response, int]:
 @app.get("/vbio-api/copilot/config")
 def copilot_config() -> Tuple[Response, int]:
     return jsonify({"enabled": _copilot_is_configured(), "completionEnabled": _copilot_is_completion_enabled()}), 200
-
-
-def _recompute_copilot_configured(settings: Dict[str, Any]) -> None:
-    """Recompute the live 'configured' flag from the current effective config.
-
-    Properly resets to ``False`` when there is no effective API URL, so clearing the
-    URL in the UI disables Copilot instead of leaving the flag stuck ``True``.
-    """
-    effective_url = str(settings.get("api_url") or "").strip() or COPILOT_API_URL
-    enabled = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(effective_url)
-    _copilot_runtime_state["configured"] = enabled
 
 
 @app.get("/vbio-api/copilot/settings")
@@ -551,6 +584,83 @@ def copilot_test_settings() -> Tuple[Response, int]:
         logger.exception("Copilot settings connectivity test failed")
         return jsonify({"error": _safe_error(exc)}), 500
     return jsonify(results), 200
+
+
+# ── F2: server-side auth surface (registration/profile/users/tokens) ─────────────────────
+from management_api.auth_endpoints import (  # noqa: E402
+    handle_admin_create_user,
+    handle_admin_list_users,
+    handle_admin_update_user,
+    handle_create_token,
+    handle_delete_token,
+    handle_list_tokens,
+    handle_me,
+    handle_register,
+    handle_update_profile,
+    handle_update_token,
+    handle_users_by_ids,
+    handle_users_search,
+)
+
+
+@app.post("/vbio-api/auth/register")
+def auth_register() -> Tuple[Response, int]:
+    return handle_register(gateway)
+
+
+@app.get("/vbio-api/auth/me")
+def auth_me() -> Tuple[Response, int]:
+    return handle_me(gateway)
+
+
+@app.patch("/vbio-api/auth/profile")
+def auth_update_profile() -> Tuple[Response, int]:
+    return handle_update_profile(gateway)
+
+
+@app.post("/vbio-api/auth/users/by-ids")
+def auth_users_by_ids() -> Tuple[Response, int]:
+    return handle_users_by_ids(gateway)
+
+
+@app.get("/vbio-api/auth/users/search")
+def auth_users_search() -> Tuple[Response, int]:
+    return handle_users_search(gateway)
+
+
+@app.get("/vbio-api/admin/users")
+def admin_list_users() -> Tuple[Response, int]:
+    return handle_admin_list_users(gateway)
+
+
+@app.post("/vbio-api/admin/users")
+def admin_create_user() -> Tuple[Response, int]:
+    return handle_admin_create_user(gateway)
+
+
+@app.patch("/vbio-api/admin/users/<user_id>")
+def admin_update_user(user_id: str) -> Tuple[Response, int]:
+    return handle_admin_update_user(gateway, user_id)
+
+
+@app.get("/vbio-api/tokens")
+def list_tokens() -> Tuple[Response, int]:
+    return handle_list_tokens(gateway)
+
+
+@app.post("/vbio-api/tokens")
+def create_token() -> Tuple[Response, int]:
+    return handle_create_token(gateway)
+
+
+@app.patch("/vbio-api/tokens/<token_id>")
+def update_token(token_id: str) -> Tuple[Response, int]:
+    return handle_update_token(gateway, token_id)
+
+
+@app.delete("/vbio-api/tokens/<token_id>")
+def delete_token(token_id: str) -> Tuple[Response, int]:
+    return handle_delete_token(gateway, token_id)
 
 
 @app.post("/vbio-api/auth/login")
@@ -873,7 +983,16 @@ def copilot_stream() -> Response:
     username = str(payload.get("username") or "").strip()
     content = str(payload.get("content") or "").strip()
 
-    def plan(on_step, abort):
+    # The client-generated turn key rides the stream so mid-turn interjections (steering)
+    # can address exactly this in-flight turn. Registered EAGERLY here — a Flask response
+    # stream's body runs lazily (first consumer read), so in-generator registration would
+    # miss steers arriving before the first frame; the generator's finally still unregisters.
+    turn_key = str(payload.get("turn_key") or "").strip()
+    if turn_key:
+        register_steering(turn_key)
+        register_steering(turn_key + "::followup")
+
+    def plan(on_step, abort, get_steering=None, get_follow_ups=None):
         # No silent downgrade: non-convergence is already a normal state="failed" result from
         # plan_turn; any exception here is a genuine fault that copilot_event_stream surfaces as
         # an honest event:error frame (never a fabricated state="complete" result).
@@ -885,61 +1004,38 @@ def copilot_stream() -> Response:
             content=content,
             on_event=on_step,
             abort=abort,
+            get_steering=get_steering,
+            get_follow_ups=get_follow_ups,
         )
 
-    return Response(stream_with_context(copilot_event_stream(plan)), mimetype="text/event-stream")
+    return Response(
+        stream_with_context(copilot_event_stream(plan, turn_key=turn_key)),
+        mimetype="text/event-stream",
+    )
 
 
-@app.post("/vbio-api/copilot/assistant")
-def copilot_assistant_answer() -> Tuple[Response, int]:
-    _check_settings_reload()
+@app.post("/vbio-api/copilot/steer")
+def copilot_steer() -> Tuple[Response, int]:
+    """Queue a user interjection for an in-flight streaming turn (pi steering alignment)."""
     if not _copilot_is_configured():
         return jsonify({"error": "Copilot is not configured."}), 404
-    if _copilot_request_too_large():
-        return jsonify({"error": "Copilot request is too large. Attach files by reference instead of sending file content."}), 413
     payload = request.get_json(silent=True) or {}
-    try:
-        content = copilot_assistant.answer_context(
-            context_type=str(payload.get("context_type") or "").strip(),
-            context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
-            user_id=str(payload.get("user_id") or "").strip(),
-            username=str(payload.get("username") or "").strip(),
-            content=str(payload.get("content") or "").strip(),
-        )
-        return jsonify({"content": content}), 200
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logger.exception("Copilot assistant failed")
-        return jsonify({"error": _safe_error(exc)}), 502
-
-
-@app.post("/vbio-api/copilot/plan_actions")
-def copilot_plan_actions() -> Tuple[Response, int]:
-    _check_settings_reload()
-    if not _copilot_is_configured():
-        return jsonify({"error": "Copilot is not configured.", "actions": []}), 404
-    if _copilot_request_too_large():
-        return jsonify({"error": "Copilot request is too large. Attach files by reference instead of sending file content.", "actions": []}), 413
-    payload = request.get_json(silent=True) or {}
-    ctx_type = str(payload.get("context_type") or "").strip()
-    content = str(payload.get("content") or "").strip()
-    try:
-        actions = copilot_assistant.plan_actions(
-            context_type=ctx_type,
-            context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
-            user_id=str(payload.get("user_id") or "").strip(),
-            username=str(payload.get("username") or "").strip(),
-            content=content,
-        )
-        return jsonify({"actions": actions}), 200
-    except ValueError as exc:
-        return jsonify({"error": str(exc), "actions": []}), 400
-    except Exception as exc:
-        # Same policy as the /turn endpoint: never echo raw exception text to the client (it can
-        # leak internal hostnames/paths); log the cause server-side and return a generic error.
-        logger.exception("Copilot action planning failed")
-        return jsonify({"error": _safe_error(exc), "actions": []}), 502
+    turn_key = str(payload.get("turn_key") or "").strip()
+    text = str(payload.get("text") or "").strip()
+    if not turn_key or not text:
+        return jsonify({"error": "turn_key and text are required."}), 400
+    if len(text) > 4000:
+        return jsonify({"error": "Steering text is too large."}), 413
+    is_follow_up = bool(payload.get("follow_up")) or turn_key.endswith("::followup")
+    queued = (
+        submit_follow_up(turn_key.removesuffix("::followup"), text)
+        if is_follow_up
+        else submit_steering(turn_key, text)
+    )
+    if queued:
+        return jsonify({"queued": True}), 200
+    # Unknown key (turn ended or never existed) or full queue — both honest, actionable.
+    return jsonify({"queued": False, "error": "No in-flight turn with that key (it may have finished), or the steering queue is full."}), 409
 
 
 @app.post("/vbio-api/copilot/complete")
@@ -948,7 +1044,7 @@ def copilot_complete() -> Tuple[Response, int]:
     # error to the user. When disabled or on any failure it returns an empty suggestion.
     _check_settings_reload()
     if not _copilot_is_completion_enabled():
-        return jsonify({"suggestion": ""}), 200
+        return jsonify({"suggestion": "", "completions": []}), 200
     content_length = request.content_length
     if content_length is not None and content_length > COPILOT_COMPLETE_MAX_REQUEST_BYTES:
         return jsonify({"suggestion": ""}), 200
@@ -961,10 +1057,12 @@ def copilot_complete() -> Tuple[Response, int]:
             user_id=str(payload.get("user_id") or "").strip(),
             username=str(payload.get("username") or "").strip(),
         )
-        return jsonify({"suggestion": suggestion}), 200
+        # Backward compatible: ``suggestion`` stays the top-ranked suffix (legacy single-ghost
+        # consumers), ``completions`` carries the full ranked top-10 for the picker.
+        return jsonify({"suggestion": suggestion[0] if suggestion else "", "completions": suggestion}), 200
     except Exception as exc:  # never 5xx — autocomplete must degrade silently to "no suggestion"
         logger.debug("Copilot completion failed: %s", str(exc)[:300])
-        return jsonify({"suggestion": ""}), 200
+        return jsonify({"suggestion": "", "completions": []}), 200
 
 
 @app.post("/vbio-api/predict")
@@ -977,6 +1075,11 @@ def submit_boltz2score() -> Tuple[Response, int]:
     return gateway.forward_submit("/api/boltz2score", "submit_boltz2score")
 
 
+@app.post("/vbio-api/api/affinity_train")
+def submit_affinity_train() -> Tuple[Response, int]:
+    return gateway.forward_submit("/api/affinity_train", "submit_affinity_train")
+
+
 @app.post("/vbio-api/api/lead_optimization/submit")
 def submit_lead_optimization() -> Tuple[Response, int]:
     return (
@@ -984,7 +1087,7 @@ def submit_lead_optimization() -> Tuple[Response, int]:
             {
                 "error": (
                     "Legacy /api/lead_optimization/submit pipeline is disabled. "
-                    "Use Lead Optimization MMP workflow APIs."
+                    "Use the HALO generative workflow: /api/lead_optimization/halo_optimize."
                 )
             }
         ),
@@ -1009,7 +1112,12 @@ def get_results(task_id: str) -> Tuple[Response, int]:
 
 @app.get("/vbio-api/results/<task_id>/view")
 def get_results_view(task_id: str) -> Tuple[Response, int]:
-    return gateway.forward_task_read(task_id, "/results", "read_results_view")
+    return gateway.forward_task_read(task_id, "/results", "read_results_view", upstream_suffix="/view")
+
+
+@app.get("/vbio-api/results/<task_id>/screening")
+def get_results_screening(task_id: str) -> Tuple[Response, int]:
+    return gateway.forward_task_read(task_id, "/results", "read_screening", upstream_suffix="/screening")
 
 
 @app.get("/vbio-api/tasks/<task_id>/ccd")
@@ -1020,10 +1128,13 @@ def get_task_ccd(task_id: str) -> Tuple[Response, int]:
     try:
         project_id = gateway._read_project_id_from_query()
         token_plain = (request.headers.get("X-API-Token") or "").strip()
-        gateway._authorize_project_read(project_id, token_plain)
-        task_row = gateway.task_store.find_project_task(task_id, project_id)
-        if not task_row:
-            return jsonify({"error": "Task not found"}), 404
+        token = gateway._authorize_project_read(project_id, token_plain)
+        # Platform token without a project_id skips the scoped lookup (same as task reads);
+        # project tokens always carry one and must match a visible task row.
+        if project_id:
+            task_row = gateway.task_store.find_project_task(task_id, project_id)
+            if not task_row:
+                return jsonify({"error": "Task not found"}), 404
     except PermissionError as exc:
         return jsonify({"error": str(exc)}), 403
     except Exception:
@@ -1040,6 +1151,58 @@ register_lead_opt_routes(
     forward_quick_get=gateway.forward_quick_get,
     pocket_overlay_handler=gateway.handle_lead_optimization_pocket_overlay,
 )
+
+
+# ── F1 hardening: gateway coverage for every path the SPA used to call directly ──────────
+from management_api.gateway_runtime_index import handle_tasks_runtime_index  # noqa: E402
+
+
+@app.get("/vbio-api/tasks/runtime_index")
+def tasks_runtime_index() -> Tuple[Response, int]:
+    """Project-filtered runtime worker index (the raw index is cross-tenant)."""
+    return handle_tasks_runtime_index(gateway)
+
+
+@app.post("/vbio-api/api/affinity/preview")
+def affinity_preview() -> Tuple[Response, int]:
+    # Stateless structure preview (no task) — project-bound token, read-level.
+    return gateway.forward_quick_multipart("/api/affinity/preview", "affinity_preview", require_submit=False)
+
+
+
+@app.post("/vbio-api/api/export/tasks_excel")
+def export_tasks_excel() -> Tuple[Response, int]:
+    return gateway.forward_quick_json("/api/export/tasks_excel", "export_tasks_excel", require_submit=True)
+
+
+@app.get("/vbio-api/api/export/tasks_excel/<export_id>/status")
+def export_tasks_excel_status(export_id: str) -> Tuple[Response, int]:
+    from urllib.parse import quote
+
+    return gateway.forward_quick_get(
+        f"/api/export/tasks_excel/{quote(export_id, safe='')}/status", "export_tasks_excel_status"
+    )
+
+
+@app.post("/vbio-api/api/export/tasks_excel/<export_id>/cancel")
+def export_tasks_excel_cancel(export_id: str) -> Tuple[Response, int]:
+    from urllib.parse import quote
+
+    return gateway.forward_quick_json(
+        f"/api/export/tasks_excel/{quote(export_id, safe='')}/cancel",
+        "export_tasks_excel_cancel",
+        require_submit=True,
+    )
+
+
+@app.get("/vbio-api/api/export/tasks_excel/<export_id>/download")
+def export_tasks_excel_download(export_id: str) -> Tuple[Response, int]:
+    from urllib.parse import quote
+
+    # Binary passthrough (Content-Disposition preserved by build_flask_response).
+    return gateway.forward_quick_get(
+        f"/api/export/tasks_excel/{quote(export_id, safe='')}/download", "export_tasks_excel_download"
+    )
 
 
 @app.delete("/vbio-api/tasks/<task_id>")

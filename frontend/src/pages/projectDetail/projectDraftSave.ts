@@ -19,7 +19,6 @@ export interface SaveDraftDeps {
   draft: SaveDraftFields;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   metadataOnlyDraftDirty: boolean;
-  sourceTaskRowId: string | null;
   affinityLigandSmiles: string;
   affinityPreviewLigandSmiles: string;
   affinityTargetFile: File | null;
@@ -27,8 +26,6 @@ export interface SaveDraftDeps {
   affinityCurrentUploads: AffinityPersistedUploads;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   customResidueLibrary: CustomCcdMoleculeInput[];
-  requestedStatusTaskRowId: string | null;
-  activeStatusTaskRowId: string | null;
   normalizeConfigForBackend: (inputConfig: ProjectInputConfig, backend: string) => ProjectInputConfig;
   nonEmptyComponents: (components: InputComponent[]) => InputComponent[];
   computeUseMsaFlag: (components: InputComponent[], fallback?: boolean) => boolean;
@@ -57,7 +54,6 @@ export interface SaveDraftDeps {
     }
   ) => Promise<ProjectTask>;
   resolveEditableDraftTaskRowId: () => string | null;
-  resolveRuntimeTaskRowId: () => string | null;
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
   rememberTemplatesForTaskRow: (taskRowId: string | null, templates: Record<string, ProteinTemplateUpload>) => void;
@@ -77,15 +73,12 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     draft,
     workspaceTab,
     metadataOnlyDraftDirty,
-    sourceTaskRowId,
     affinityLigandSmiles,
     affinityPreviewLigandSmiles,
     affinityTargetFile,
     affinityLigandFile,
     affinityCurrentUploads,
     proteinTemplates,
-    requestedStatusTaskRowId,
-    activeStatusTaskRowId,
     normalizeConfigForBackend,
     nonEmptyComponents,
     computeUseMsaFlag,
@@ -97,7 +90,6 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     addTemplatesToTaskSnapshotComponents,
     persistDraftTaskSnapshot,
     resolveEditableDraftTaskRowId,
-    resolveRuntimeTaskRowId,
     patch,
     patchTask,
     rememberTemplatesForTaskRow,
@@ -113,8 +105,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
 
   const workflowDef = getWorkflowDefinition(project.task_type);
   const persistedBackend = workflowDef.key === 'affinity' ? 'boltz' : draft.backend;
-  const normalizedConfigBase = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
-  const normalizedConfig = normalizedConfigBase;
+  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
   const activeComponents = nonEmptyComponents(normalizedConfig.components);
   const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
   const msaComponents = workflowDef.key === 'affinity' ? normalizedConfig.components : activeComponents;
@@ -148,25 +139,27 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   };
 
   if (metadataOnlyDraftDirty) {
-    const metadataTaskRowId =
-      sourceTaskRowId ||
-      requestedStatusTaskRowId ||
-      activeStatusTaskRowId ||
-      resolveRuntimeTaskRowId() ||
-      resolveEditableDraftTaskRowId();
+    // Metadata-only saves may rename the user's own editable DRAFT row and
+    // nothing else. Viewing a finished task puts its row id in the URL — a
+    // rename saved there would rewrite the finished task ("始终不要影响现在的
+    // 任务"); with no editable draft row the save falls through to the
+    // full-save INSERT below, creating a NEW draft that carries the rename.
+    const metadataTaskRowId = resolveEditableDraftTaskRowId();
     if (metadataTaskRowId) {
       await patchTask(metadataTaskRowId, {
         name: nextDraft.taskName,
         summary: nextDraft.taskSummary,
       });
+      setDraft(nextDraft);
+      setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+      setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
+      setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+      setSavedAffinityUploadsFingerprint(createAffinityUploadsFingerprint(affinityCurrentUploads));
+      setRunMenuOpen(false);
+      return;
     }
-    setDraft(nextDraft);
-    setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
-    setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
-    setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
-    setSavedAffinityUploadsFingerprint(createAffinityUploadsFingerprint(affinityCurrentUploads));
-    setRunMenuOpen(false);
-    return;
+    // No editable draft row (e.g. viewing a finished task): fall through to the
+    // full-save INSERT, which creates a NEW draft carrying the rename.
   }
 
   const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
@@ -200,8 +193,15 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
   setSavedAffinityUploadsFingerprint(createAffinityUploadsFingerprint(affinityCurrentUploads));
   setRunMenuOpen(false);
+  // Docking (affinity) keeps its whole editor (target upload, ligand, preview,
+  // run controls) on the Components tab; navigating to Basics after each save
+  // hid the workspace the user was working in.
   const nextTab =
-    workspaceTab === 'basics' ? 'basics' : isPredictionLikeWorkflowKey(workflowDef.key) ? 'components' : 'basics';
+    workspaceTab === 'basics'
+      ? 'basics'
+      : isPredictionLikeWorkflowKey(workflowDef.key) || workflowDef.key === 'affinity'
+        ? 'components'
+        : 'basics';
   const query = new URLSearchParams({
     tab: nextTab,
     task_row_id: draftTaskRow.id,

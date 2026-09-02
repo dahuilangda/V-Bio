@@ -857,15 +857,6 @@ select:focus {
   gap: 8px;
 }
 
-.project-card {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: linear-gradient(180deg, #ffffff 0%, #fafdfb 100%);
-  padding: 10px 11px;
-  display: grid;
-  gap: 6px;
-}
-
 .project-card h3 {
   font-size: var(--text-lg);
   line-height: 1.3;
@@ -1454,6 +1445,7 @@ select:focus {
 .modal {
   width: min(780px, 95vw);
   max-height: 92vh;
+  max-height: 92dvh;
   overflow: auto;
   background: #fff;
   border-radius: 14px;
@@ -1940,6 +1932,50 @@ select:focus {
 
 
 @media (max-width: 1100px) {
+  /* Phones/narrow tablets: the sticky vertical stepper uses a negative
+     margin-left that renders it fully off-screen at small viewport widths
+     (width 36px, margin -36..-78px). Convert it to the same centered
+     horizontal row used in the 1101-1540px window so Basics/Components/
+     Constraints/Results remain reachable. */
+  .workspace-shell {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .workspace-stepper {
+    position: static;
+    width: auto;
+    margin-left: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .workspace-stepper-track {
+    display: none;
+  }
+
+  .workspace-step {
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+  }
+
+  .workspace-step-dot {
+    width: 38px;
+    height: 38px;
+  }
+
+  .workspace-step::after {
+    left: 50%;
+    top: -6px;
+    transform: translate(-50%, -100%);
+  }
+
   .two-columns {
     grid-template-columns: 1fr;
   }
@@ -2178,10 +2214,6 @@ select:focus {
 }
 
 @media (max-width: 860px) {
-  .workspace-step {
-    min-height: 38px;
-    width: 38px;
-  }
 
   .workspace-step-dot {
     width: 32px;
@@ -2210,6 +2242,8 @@ select:focus {
 
   .nav-hamburger {
     display: inline-flex;
+    width: 44px;
+    height: 44px;
   }
 
   .top-nav:not(.nav-open) .top-nav-links {
@@ -2221,6 +2255,7 @@ select:focus {
     top: 100%;
     left: 0;
     right: 0;
+    z-index: 60;
     flex-direction: column;
     align-items: stretch;
     gap: 2px;
@@ -2394,4 +2429,88 @@ select:focus {
     flex-wrap: wrap;
     gap: 4px;
   }
+}
+
+
+/* ── Mobile touch hardening ─────────────────────────────────────────────
+   1. iOS Safari zooms the page when focusing inputs with font-size < 16px.
+      The app-wide form font is --text-md (≈13.5-14.5px), so every text/select
+      field triggered a zoom-in that never zoomed back. 16px on coarse/small
+      viewports stops the zoom at the source.
+   2. Tap targets below ~40px are hard to hit with a thumb: checkboxes and
+      detail tabs get larger hit areas on phones. */
+@media (max-width: 860px), (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  .affinity-inline-toggle > input[type='checkbox'],
+  .affinity-enable-toggle input[type='checkbox'],
+  .checkbox-inline input[type='checkbox'] {
+    width: 20px;
+    height: 20px;
+  }
+
+  .detail-tab {
+    padding: 10px 12px;
+  }
+
+  .peptide-residue-help {
+    width: 26px;
+    height: 26px;
+  }
+}
+
+
+/* Touch enlargements: interactive icon buttons stay >=40px on coarse pointers. */
+@media (pointer: coarse) {
+  .task-row-action-btn,
+  .icon-btn,
+  .copilot-attach-btn,
+  .copilot-send-btn,
+  .copilot-history-new,
+  .copilot-history-delete {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+/* 861-1100 band: with the full link set + user chip the fixed-height header wraps badly —
+   collapse to the hamburger one step earlier than the phone layout. */
+@media (max-width: 1100px) {
+  .nav-hamburger {
+    display: inline-flex;
+  }
+
+  .top-nav:not(.nav-open) .top-nav-links {
+    display: none;
+  }
+
+  .user-chip-text {
+    min-width: 0;
+  }
+
+  .user-chip-text .user-name {
+    display: block;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* Inline-completion top-10 picker: reuses the mention menu surface; the suffix preview
+ * sits in the muted small line under the typed prefix. */
+.copilot-chat-window .copilot-completion-menu {
+  bottom: calc(100% + 6px);
+}
+.copilot-completion-menu .copilot-mention-file-text strong {
+  font-weight: 500;
+  color: var(--muted, #5a6c62);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

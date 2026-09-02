@@ -22,6 +22,7 @@ them with the atom indices used by the BioTite `AtomArray`.
 
 import copy
 import functools
+import math
 from collections import defaultdict
 from itertools import chain, combinations
 from typing import List, Optional, Tuple
@@ -359,8 +360,15 @@ def extract_experimental_torsion_from_mol(mol: Chem.Mol):
     marked_bonds = set()
     for torsion in et:
         atom_indices = list(torsion["atomIndices"])
+        v_values = [float(v) for v in torsion["V"]]
+        # RDKit emits NaN force constants for torsions without experimental
+        # statistics (custom CCDs like the bicyclic linkers); a single NaN row
+        # poisons the whole TFG energy and every sampled coordinate. No data
+        # means no constraint — drop the torsion instead.
+        if any(math.isnan(v) for v in v_values):
+            continue
         index.append(atom_indices)
-        force_constant.append(list(torsion["V"]))
+        force_constant.append(v_values)
         sign.append(list(torsion["signs"]))
         marked_bonds.add(tuple(sorted((atom_indices[1], atom_indices[2]))))
     # Add extra defined torsions for sp2 atoms in rings of size 4, 5, 6

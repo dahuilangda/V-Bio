@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Sequence
 
@@ -32,10 +31,14 @@ ION_RESNAMES = {
 }
 
 
-def is_hydrogen_like(element_or_name: str) -> bool:
-    token = str(element_or_name or "").strip().upper()
-    token = re.sub(r"^[0-9]+", "", token)
-    return token in {"H", "D", "T"} or token.startswith(("H", "D", "T"))
+def is_hydrogen_element(element: str) -> bool:
+    """True only for protium/deuterium/tritium element symbols.
+
+    Requires a real element assignment. Element symbols such as Hg/Ti/Ta
+    whose PDB atom *names* collide with hydrogen-name conventions are
+    correctly recognized as heavy atoms.
+    """
+    return str(element or "").strip().upper() in {"H", "D", "T"}
 
 
 def normalize_name_key(name: str) -> str:
@@ -68,10 +71,14 @@ def extract_ligand_bfactors_by_chain(structure_path: Path) -> dict[str, dict[str
                 continue
 
             values: dict[str, float] = {}
+            missing_elements: list[str] = []
             for atom in residue:
-                element = str(atom.element.name or atom.name[:1]).strip()
+                element = str(atom.element.name or "").strip()
                 atom_name = str(atom.name or "").strip()
-                if is_hydrogen_like(element or atom_name):
+                if not element or element.upper() == "X":
+                    missing_elements.append(atom_name or "<unnamed>")
+                    continue
+                if is_hydrogen_element(element):
                     continue
                 key = normalize_name_key(atom_name)
                 if not key:
@@ -81,6 +88,13 @@ def extract_ligand_bfactors_by_chain(structure_path: Path) -> dict[str, dict[str
                         f"Duplicate ligand atom name in structure chain {chain_name}: {atom_name}"
                     )
                 values[key] = float(atom.b_iso)
+
+            if missing_elements:
+                raise RuntimeError(
+                    f"Ligand atoms without an element assignment in structure chain "
+                    f"{chain_name} ({resname}): {missing_elements[:10]}. "
+                    "Element annotations are required; fix the source structure."
+                )
 
             if values:
                 by_chain[chain_name] = values

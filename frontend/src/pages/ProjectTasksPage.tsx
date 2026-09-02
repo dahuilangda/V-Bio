@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { terminateTask as terminateBackendTask } from '../api/backendApi';
+import { rcsbCifUrl } from '../utils/structureParser';
 import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/ProjectCopilotModal';
 import { SharingModal } from '../components/project/SharingModal';
 import { ApiAccessPage } from './ApiAccessPage';
 import { useAuth } from '../hooks/useAuth';
 import { useCopilotAvailability } from '../hooks/useCopilotAvailability';
-import { ProjectTasksHeader } from './projectTasks/ProjectTasksHeader';
+import { ProjectTasksHeader, type ExportProgressInfo } from './projectTasks/ProjectTasksHeader';
 import { ProjectTasksWorkspace } from './projectTasks/ProjectTasksWorkspace';
 import { exportTaskRowsToExcel } from './projectTasks/exportTaskRowsToExcel';
+import { cancelTasksExcelExport } from '../api/backendExportApi';
+import { countProjectTasks } from '../api/supabaseLite';
+import type { TaskListRow } from './projectTasks/taskListTypes';
 import { useProjectTaskRowActions } from './projectTasks/useProjectTaskRowActions';
 import { useProjectTasksDataLoader } from './projectTasks/useProjectTasksDataLoader';
 import { useTaskListFiltering } from './projectTasks/useTaskListFiltering';
@@ -20,6 +24,7 @@ import { canEditProject, canManageProjectShares } from '../utils/accessControl';
 import { getWorkflowDefinition } from '../utils/workflows';
 import type { CopilotPlanAction, ProjectTask } from '../types/models';
 import '../styles/project-tasks.css';
+import { readCopilotText, readCopilotNumber, isOneOf } from '../utils/copilotPayload';
 
 const TASK_STATE_FILTER_OPTIONS = ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE', 'REVOKED'] as const;
 const TASK_SORT_OPTIONS = ['submitted', 'plddt', 'ipsae', 'iptm', 'pae', 'backend', 'seed', 'mode'] as const;
@@ -30,18 +35,13 @@ const TASK_PAGE_SIZE_OPTIONS = [8, 12, 20, 50] as const;
 const TASK_METRIC_COLUMN_OPTIONS = ['plddt', 'ipsae', 'iptm', 'pae'] as const;
 const WORKFLOW_FILTER_OPTIONS = ['all', 'prediction', 'virtual_screening', 'affinity', 'peptide_design', 'lead_optimization'] as const;
 
-function readCopilotText(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function readCopilotNumber(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isOneOf<T extends readonly string[]>(value: string, options: T): value is T[number] {
-  return (options as readonly string[]).includes(value);
-}
+// A confirmed Copilot action can reference a task that is no longer in the loaded list (deleted,
+// or the list reloaded since the plan was made). The message must tell BOTH audiences the way
+// out: the user (refresh and retry, or ask Copilot to create a new task) and the planner, whose
+// PLAN RECOVERY reads this same error text on the next turn.
+const COPILOT_TASK_NOT_FOUND_ERROR =
+  'Could not find the task Copilot referenced — it may have been deleted or is no longer in this list. ' +
+  'Refresh the task list and pick again, or ask Copilot to create a new task.';
 
 function summarizeTaskStates(rows: ProjectTask[]): Record<string, number> {
   return rows.reduce<Record<string, number>>((acc, row) => {
@@ -63,6 +63,23 @@ export function ProjectTasksPage() {
   });
 
   const [exportingExcel, setExportingExcel] = useState(false);
+  const [exportProgress, setExportProgress] = useState<ExportProgressInfo | null>(null);
+  // The route is NOT keyed by projectId, so a project switch reuses this
+  // component instance. An in-flight export must die with its project: the
+  // cancelled ref alone cannot do it (React reruns cleanup+setup back-to-back
+  // on dep change, leaving no observable window), so compare the live project
+  // id against the one captured at click time.
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+  const exportCancelledRef = useRef(false);
+  // Export id of the in-flight server job (for real cancellation).
+  const activeExportIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    exportCancelledRef.current = false;
+    return () => {
+      exportCancelledRef.current = true;
+    };
+  }, [projectId]);
   const [sharedTaskRow, setSharedTaskRow] = useState<ProjectTask | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_list', projectId, userId: session?.userId || null }));
   useEffect(() => {
@@ -81,8 +98,10 @@ export function ProjectTasksPage() {
     loading,
     refreshing,
     error,
+    allTasksLoaded,
     setTasks,
     setError,
+    ensureAllTasksLoaded,
   } = useProjectTasksDataLoader({
     projectId,
     sessionUserId: session?.userId || null,
@@ -100,7 +119,6 @@ export function ProjectTasksPage() {
     currentTaskRow,
     backToCurrentTaskHref,
     createTaskHref,
-    workspacePairPreference,
     taskRows,
     workflowOptions,
     backendOptions
@@ -170,6 +188,12 @@ export function ProjectTasksPage() {
     suspendPageNormalization: loading || !project
   });
 
+  // Mirrors the CURRENT filtered rows across renders so the export flow can
+  // read the complete filtered set after awaiting the full list load — a
+  // closure captured at click time only holds the rows loaded so far.
+  const filteredRowsRef = useRef<TaskListRow[]>([]);
+  filteredRowsRef.current = filteredRows;
+
   useEffect(() => {
     if (loading || !project) return;
     const query = new URLSearchParams(location.search);
@@ -231,20 +255,88 @@ export function ProjectTasksPage() {
 
   const downloadExcel = useCallback(async () => {
     if (!project || filteredRows.length === 0) return;
+    const clickedProjectId = projectId;
+    const exportAbandoned = () =>
+      exportCancelledRef.current || projectIdRef.current !== clickedProjectId;
     setExportingExcel(true);
+    activeExportIdRef.current = null;
     setError(null);
     try {
+      // 1) Precise total in one cheap request — the paginated task list may
+      //    still be loading in the background, so tasks.length alone is not
+      //    trustworthy yet. Fails hard; no estimate substitute.
+      const totalCount = await countProjectTasks(project.id, {
+        taskRowIds: project.access_scope === 'task_share' ? project.accessible_task_ids || [] : undefined,
+        accessScope: project.access_scope || 'owner',
+        accessLevel: project.access_level || 'owner',
+        editableTaskIds: project.editable_task_ids || []
+      });
+      if (exportAbandoned()) return;
+
+      // 2) Wait until every row is loaded; the export must cover the FULL set
+      //    under the current filters, not what happened to be visible at click
+      //    time. Waiting never duplicates an in-flight load; if none is running
+      //    only the missing tail rows are fetched (each exactly once).
+      if (!allTasksLoaded) {
+        setExportProgress({ phase: 'collecting', done: tasks.length, total: totalCount });
+      }
+      await ensureAllTasksLoaded((loaded) => {
+        if (exportAbandoned()) return;
+        setExportProgress({ phase: 'collecting', done: loaded, total: totalCount });
+      });
+      if (exportAbandoned()) return;
+
+      // 3) Export the complete filtered set (ref = post-load value).
+      const completeFilteredRows = filteredRowsRef.current;
+      if (completeFilteredRows.length === 0) {
+        setError('No tasks match the current filters.');
+        return;
+      }
+      let completionWarning = '';
       await exportTaskRowsToExcel({
         project,
-        filteredRows,
-        workspacePairPreference
+        filteredRows: completeFilteredRows,
+        onProgress: (info) => {
+          if (exportAbandoned()) return;
+          setExportProgress(info);
+        },
+        onWarning: (warning) => {
+          completionWarning = warning;
+        },
+        onSubmitted: (exportId) => {
+          activeExportIdRef.current = exportId;
+        },
+        isCancelled: exportAbandoned
       });
+      if (!exportAbandoned() && completionWarning) {
+        setError(`Excel export completed with a warning: ${completionWarning}`);
+      }
     } catch (err) {
+      if (exportAbandoned()) return;
       setError(err instanceof Error ? `Failed to export Excel: ${err.message}` : 'Failed to export Excel.');
     } finally {
-      setExportingExcel(false);
+      activeExportIdRef.current = null;
+      if (!exportAbandoned()) {
+        setExportingExcel(false);
+        setExportProgress(null);
+      }
     }
-  }, [project, filteredRows, workspacePairPreference, setError]);
+  }, [project, filteredRows.length, tasks.length, allTasksLoaded, projectId, ensureAllTasksLoaded, setError]);
+
+  /**
+   * Real cancellation: stop the poll loop immediately AND revoke the server
+   * job so the CPU worker stops building instead of burning the slot.
+   */
+  const cancelExcelExport = useCallback(() => {
+    exportCancelledRef.current = true;
+    setExportingExcel(false);
+    setExportProgress(null);
+    const exportId = activeExportIdRef.current;
+    activeExportIdRef.current = null;
+    if (exportId) {
+      void cancelTasksExcelExport(exportId);
+    }
+  }, []);
 
   const projectWorkflowKey = useMemo(
     () => (project ? getWorkflowDefinition(project.task_type).key : null),
@@ -259,7 +351,7 @@ export function ProjectTasksPage() {
     if (projectWorkflowKey === 'peptide_design') {
       return 'Peptide Design does not support API Access.';
     }
-    return 'API Access is available for Prediction, Virtual Screening, and Affinity Scoring.';
+    return 'API Access is available for Prediction, Virtual Screening, and Docking.';
   }, [projectWorkflowKey]);
 
   const applyTaskListCopilotAction = useCallback(async (action: CopilotPlanAction) => {
@@ -431,12 +523,37 @@ export function ProjectTasksPage() {
       navigate(url.pathname + url.search);
       return;
     }
+    if (action.id === 'tasks:create_docking') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      // Identifier-first (pi/MCP rule): the host builds the guaranteed-valid mmCIF URL from
+      // the entry id itself; a raw URL is honored only as the explicit non-RCSB fallback.
+      const targetPdbId = String(action.payload?.targetPdbId || '').trim();
+      const rawUrl = String(action.payload?.targetStructureUrl || '').trim();
+      const targetStructureUrl = targetPdbId ? rcsbCifUrl(targetPdbId) : rawUrl;
+      if (!targetStructureUrl) {
+        throw new Error('No docking target was provided — pass the chosen entry\'s targetPdbId (preferred) or a cifUrl returned by a lookup.');
+      }
+      const resolvedName = targetPdbId
+        ? (String(action.payload?.targetStructureName || '').trim() || `${targetPdbId.toUpperCase()}.cif`)
+        : String(action.payload?.targetStructureName || '').trim();
+      const url = new URL(createTaskHref, window.location.origin);
+      url.searchParams.set('copilot_docking_target_url', targetStructureUrl);
+      if (resolvedName) url.searchParams.set('copilot_docking_target_name', resolvedName);
+      const ligandSmiles = String(action.payload?.ligandSmiles || '').trim();
+      if (ligandSmiles) url.searchParams.set('copilot_docking_ligand_smiles', ligandSmiles);
+      const taskName = String(action.payload?.taskName || '').trim();
+      if (taskName) url.searchParams.set('copilot_task_name', taskName);
+      const taskSummary = String(action.payload?.taskSummary || '').trim();
+      if (taskSummary) url.searchParams.set('copilot_task_summary', taskSummary);
+      navigate(url.pathname + url.search);
+      return;
+    }
     if (action.id === 'tasks:copy') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       if (!project) throw new Error('Project is not loaded.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
-      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      if (!task) throw new Error(COPILOT_TASK_NOT_FOUND_ERROR);
       const params = new URLSearchParams();
       params.set('tab', 'components');
       params.set('new_task', '1');
@@ -459,7 +576,7 @@ export function ProjectTasksPage() {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
-      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      if (!task) throw new Error(COPILOT_TASK_NOT_FOUND_ERROR);
       await removeTask(task);
       return;
     }
@@ -467,7 +584,7 @@ export function ProjectTasksPage() {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
-      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      if (!task) throw new Error(COPILOT_TASK_NOT_FOUND_ERROR);
       const nextName = typeof action.payload?.taskName === 'string' ? action.payload.taskName : undefined;
       const nextSummary = typeof action.payload?.taskSummary === 'string' ? action.payload.taskSummary : undefined;
       await updateTaskMetadata(task, { name: nextName, summary: nextSummary });
@@ -477,14 +594,14 @@ export function ProjectTasksPage() {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
-      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      if (!task) throw new Error(COPILOT_TASK_NOT_FOUND_ERROR);
       await terminateTask(task);
       return;
     }
     if (action.id === 'tasks:open') {
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
-      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      if (!task) throw new Error(COPILOT_TASK_NOT_FOUND_ERROR);
       await openTask(task);
       return;
     }
@@ -521,10 +638,13 @@ export function ProjectTasksPage() {
   ]);
 
   useEffect(() => {
+    // Until the project resolves, supportsApiAccess is false for every workflow — resetting now
+    // would destroy a `?view=api` deep link while the fetch is still in flight.
+    if (!project) return;
     if (supportsApiAccess) return;
     if (workspaceView !== 'api') return;
     setWorkspaceViewWithUrl('tasks');
-  }, [supportsApiAccess, workspaceView, setWorkspaceViewWithUrl]);
+  }, [project, supportsApiAccess, workspaceView, setWorkspaceViewWithUrl]);
 
   if (loading && !project) {
     return <div className="centered-page">Loading tasks...</div>;
@@ -555,8 +675,13 @@ export function ProjectTasksPage() {
           backToCurrentTaskHref={backToCurrentTaskHref}
           canEdit={canEdit}
           exportingExcel={exportingExcel}
+          exportProgress={exportProgress}
           filteredCount={filteredRows.length}
           onDownloadExcel={() => {
+            if (exportingExcel) {
+              cancelExcelExport();
+              return;
+            }
             void downloadExcel();
           }}
           onOpenApi={() => {
@@ -662,6 +787,15 @@ export function ProjectTasksPage() {
           currentUserId={session.userId}
           currentUsername={session.username}
           contextPayload={{
+            // The page block carries the USER-FACING workflow naming (title/shortTitle) —
+            // without it the model only sees the internal task_type token and addresses the
+            // workflow by its machine key in user-facing prose.
+            page: {
+              contextType: 'task_list',
+              workflowKey: projectWorkflowKey || project.task_type,
+              workflowTitle: project ? getWorkflowDefinition(project.task_type).title : '',
+              workflowShortTitle: project ? getWorkflowDefinition(project.task_type).shortTitle : ''
+            },
             project: { id: project.id, name: project.name, task_type: project.task_type },
             options: { workflowOptions, backendOptions },
             summary: {

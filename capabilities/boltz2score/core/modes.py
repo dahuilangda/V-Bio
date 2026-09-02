@@ -4,12 +4,14 @@ SCORE_MODE = "score"
 POSE_MODE = "pose"
 REFINE_MODE = "refine"
 INTERFACE_MODE = "interface"
+DOCK_MODE = "dock"
 
 SUPPORTED_MODES = (
     SCORE_MODE,
     POSE_MODE,
     REFINE_MODE,
     INTERFACE_MODE,
+    DOCK_MODE,
 )
 
 MODE_DESCRIPTIONS = {
@@ -17,12 +19,14 @@ MODE_DESCRIPTIONS = {
     POSE_MODE: "refine while keeping the input pose close",
     REFINE_MODE: "general flexible refinement",
     INTERFACE_MODE: "interface-focused flexible refinement",
+    DOCK_MODE: "flexible docking from SMILES (no external docking software needed)",
 }
 
 OPTIMIZATION_MODE_DESCRIPTIONS = {
     POSE_MODE: MODE_DESCRIPTIONS[POSE_MODE],
     REFINE_MODE: MODE_DESCRIPTIONS[REFINE_MODE],
     INTERFACE_MODE: MODE_DESCRIPTIONS[INTERFACE_MODE],
+    DOCK_MODE: MODE_DESCRIPTIONS[DOCK_MODE],
 }
 
 

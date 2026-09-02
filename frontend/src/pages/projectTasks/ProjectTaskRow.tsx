@@ -49,11 +49,6 @@ function formatPeptideBestScore(value: number | null): string {
   return value.toFixed(3);
 }
 
-function formatPeptideMutationRate(value: number | null): string {
-  if (value === null) return '-';
-  const normalized = value > 1 && value <= 100 ? value / 100 : value;
-  return `${Math.max(0, normalized * 100).toFixed(0)}%`;
-}
 
 export function ProjectTaskRow({
   row,
@@ -141,7 +136,6 @@ export function ProjectTaskRow({
     },
     { key: 'pop', label: 'Pop', value: row.peptidePopulationSize !== null ? String(row.peptidePopulationSize) : '-' },
     { key: 'elite', label: 'Elite', value: row.peptideEliteSize !== null ? String(row.peptideEliteSize) : '-' },
-    { key: 'mut', label: 'Mut', value: formatPeptideMutationRate(row.peptideMutationRate) }
   ];
   const peptideProgressItems = [
     {

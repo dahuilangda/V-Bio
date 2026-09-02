@@ -3,6 +3,7 @@ import { ComponentInputEditor } from '../../components/project/ComponentInputEdi
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import { MolstarViewer } from '../../components/project/MolstarViewer';
 import type { CustomCcdMoleculeInput, InputComponent, ProteinTemplateUpload } from '../../types/models';
+import { PeptidePocketPicker, type PeptideTargetPocketContext } from './PeptidePocketPicker';
 import { PredictionComponentsSidebar, type PredictionComponentsSidebarProps } from './PredictionComponentsSidebar';
 import { PredictionConstraintsWorkspace, type PredictionConstraintsWorkspaceProps } from './PredictionConstraintsWorkspace';
 
@@ -30,6 +31,8 @@ export interface PredictionWorkflowSectionProps {
   onProteinTemplateResiduePick: (pick: MolstarResiduePick) => void;
   constraintsWorkspaceProps: Omit<PredictionConstraintsWorkspaceProps, 'visible'>;
   componentsSidebarProps: Omit<PredictionComponentsSidebarProps, 'visible'>;
+  /** Peptide design only: pocket state for the Binding target component. */
+  peptideTargetPocket?: PeptideTargetPocketContext | null;
 }
 
 export function PredictionWorkflowSection({
@@ -53,7 +56,8 @@ export function PredictionWorkflowSection({
   onActiveComponentIdChange,
   onProteinTemplateResiduePick,
   constraintsWorkspaceProps,
-  componentsSidebarProps
+  componentsSidebarProps,
+  peptideTargetPocket = null
 }: PredictionWorkflowSectionProps) {
   if (!visible || workspaceTab === 'basics' || workspaceTab === 'results') return null;
 
@@ -80,6 +84,35 @@ export function PredictionWorkflowSection({
             onSelectedComponentIdChange={(id) => onActiveComponentIdChange(id)}
             showQuickAdd={false}
             compact
+            targetPocketComponentId={peptideTargetPocket ? peptideTargetPocket.componentId : null}
+            renderTargetPocketPanel={
+              peptideTargetPocket
+                ? ({ upload }) => (
+                    <PeptidePocketPicker
+                      canEdit={canEdit}
+                      targetComponentId={peptideTargetPocket.componentId}
+                      targetTemplate={
+                        upload
+                          ? {
+                              fileName: upload.fileName,
+                              format: upload.format,
+                              content: upload.content,
+                              chainId: upload.chainId
+                            }
+                          : null
+                      }
+                      targetChainId={peptideTargetPocket.chainId}
+                      targetSequence={peptideTargetPocket.sequence}
+                      pocketCenter={peptideTargetPocket.pocketCenter}
+                      pocketResidues={peptideTargetPocket.pocketResidues}
+                      pocketBox={peptideTargetPocket.pocketBox}
+                      dockPocket={peptideTargetPocket.dockPocket}
+                      onPocketFieldChange={peptideTargetPocket.onPocketFieldChange}
+                      onDockPocketChange={peptideTargetPocket.onDockPocketChange}
+                    />
+                  )
+                : undefined
+            }
             renderProteinTemplateViewer={({ upload }) => (
               <section className="component-template-inline">
                 <MolstarViewer

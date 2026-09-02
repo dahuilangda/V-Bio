@@ -3,15 +3,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   deleteProjectShare,
   deleteProjectTaskShare,
-  findUserByUsername,
   listProjectShares,
   listProjectTaskShares,
-  searchUsersForSharing,
   updateProjectShareAccessLevel,
   updateProjectTaskShareAccessLevel,
   upsertProjectShare,
   upsertProjectTaskShare
 } from '../../api/supabaseLite';
+import { searchUsers as searchUsersServer, toAppUser } from '../../api/authServerApi';
 import type { AppUser, ProjectShareRecord, ProjectTaskShareRecord, ShareAccessLevel } from '../../types/models';
 
 interface SharingModalProps {
@@ -125,11 +124,10 @@ export function SharingModal({
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSuggestionsLoading(true);
-      void searchUsersForSharing(normalized, {
-        excludeUserId: currentUserId,
-        limit: 6
-      })
-        .then((rows) => {
+      // Server-backed search (F2): the browser no longer reads app_users directly.
+      void searchUsersServer(normalized)
+        .then((serverRows) => {
+          const rows = serverRows.map(toAppUser);
           if (cancelled) return;
           setSuggestions(
             rows.filter((row) => !sharedUserIds.has(String(row.id || '').trim()))
@@ -163,7 +161,11 @@ export function SharingModal({
       const user =
         selectedUser && String(selectedUser.username || '').trim().toLowerCase() === normalizedUsername
           ? selectedUser
-          : await findUserByUsername(normalizedUsername);
+          : toAppUser(
+              (await searchUsersServer(normalizedUsername)).find(
+                (row) => String(row.username || '').trim().toLowerCase() === normalizedUsername
+              ) || { id: '', username: normalizedUsername, name: null, email: null, avatar_url: null }
+            );
       if (!user || user.deleted_at) {
         throw new Error(`User "${normalizedUsername}" was not found.`);
       }

@@ -11,9 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 import traceback
 import urllib.request
@@ -59,6 +61,63 @@ by manually adding argparse.Namespace to PyTorch's safe globals list.
 """
 
 torch.serialization.add_safe_globals([Namespace])
+
+
+_RUN_SPECIFIC_KEYS = {
+    # per-task invocation details that do not affect the model architecture;
+    # keeping them out of the cache key lets every mode and task share one
+    # module entry (the sampler/scheduler knobs differ per mode).
+    "input_json_path", "dump_dir", "seeds", "wandb_id", "run_name",
+    "sample_diffusion", "inference_noise_scheduler", "data",
+}
+
+
+def _strip_run_specific(node) -> None:
+    if isinstance(node, dict):
+        for key in list(node.keys()):
+            if key in _RUN_SPECIFIC_KEYS:
+                del node[key]
+            else:
+                _strip_run_specific(node[key])
+    elif isinstance(node, list):
+        for item in node:
+            _strip_run_specific(item)
+
+
+def _module_cache_path(configs: Any, cache_dir: str):
+    """Cache file for the built Protenix module.
+
+    Keyed by the config with per-task fields stripped (ml_collections
+    ConfigDict json is deterministic), the checkpoint identity
+    (path/size/mtime) and the torch version, so a stale cache can never be
+    reused for a different model configuration or checkpoint.
+    """
+    from pathlib import Path
+
+    cache_root = Path(cache_dir)
+    try:
+        cfg_dict = json.loads(configs.to_json(sort_keys=True))
+    except Exception:  # noqa: BLE001
+        cfg_dict = None
+    if isinstance(cfg_dict, dict):
+        _strip_run_specific(cfg_dict)
+        config_json = json.dumps(cfg_dict, sort_keys=True)
+    else:
+        config_json = repr(configs)
+
+    checkpoint = opjoin(configs.load_checkpoint_dir, f"{configs.model_name}.pt")
+    stat = os.stat(checkpoint)
+    payload = {
+        "config": config_json,
+        "checkpoint": {
+            "path": checkpoint,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        },
+        "torch": torch.__version__,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    return cache_root / f"protenix_{digest}.pt"
 
 
 class InferenceRunner(object):
@@ -138,8 +197,49 @@ class InferenceRunner(object):
     def init_model(self) -> None:
         """
         Initialize the Protenix model and move it to the appropriate device.
+
+        Construction is the dominant startup cost (~80 s): every layer is
+        built with random weights and immediately overwritten by
+        load_checkpoint.  When PROTENIX_MODULE_CACHE_DIR is set, the fully
+        built module is pickled once (keyed by config digest + checkpoint
+        identity) and loaded in seconds on later runs — the same whole-module
+        cache pattern Boltz2Score uses for its 25-50 s checkpoint loads.
+        Any cache failure falls back to the standard construction path.
         """
+        cache_dir = os.environ.get("PROTENIX_MODULE_CACHE_DIR", "").strip()
+        cache_path = None
+        if cache_dir:
+            try:
+                cache_path = _module_cache_path(self.configs, cache_dir)
+            except Exception:  # noqa: BLE001 — cache is best-effort
+                cache_path = None
+        if cache_path is not None and cache_path.exists():
+            try:
+                self.model = torch.load(cache_path, map_location="cpu", weights_only=False)
+                self.model.eval()
+                self.model = self.model.to(self.device)
+                self.print(f"Protenix model loaded from module cache ({cache_path.name}).")
+                return
+            except Exception as exc:  # noqa: BLE001 — any pickle/env mismatch falls back
+                self.print(
+                    f"Module cache load failed ({type(exc).__name__}: {exc}); "
+                    "falling back to model construction."
+                )
+
         self.model = Protenix(self.configs).to(self.device)
+
+        if cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp_path = tempfile.mkstemp(dir=cache_path.parent, suffix=".tmp")
+                os.close(fd)
+                cpu_model = self.model.to("cpu")
+                torch.save(cpu_model, tmp_path)
+                os.replace(tmp_path, cache_path)
+                self.model = self.model.to(self.device)
+                self.print(f"Protenix model module cache written: {cache_path.name}")
+            except Exception as exc:  # noqa: BLE001 — caching is best-effort
+                self.print(f"Module cache write failed ({exc}); continuing without cache.")
 
     def load_checkpoint(self) -> None:
         """

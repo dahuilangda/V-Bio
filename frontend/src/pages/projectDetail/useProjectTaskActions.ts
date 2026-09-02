@@ -1,5 +1,5 @@
 import type { Dispatch, FormEvent, MutableRefObject, SetStateAction } from 'react';
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type {
@@ -15,7 +15,6 @@ import {
   patchTaskRecord,
   persistDraftTaskSnapshotRecord,
   resolveEditableDraftTaskRowIdFromContext,
-  resolveRuntimeTaskRowIdFromContext
 } from './projectDraftPersistence';
 import { saveProjectDraftFromWorkspace, type SaveDraftFields } from './projectDraftSave';
 import { pullResultForViewerTask, refreshTaskStatus } from './projectTaskRuntime';
@@ -28,7 +27,6 @@ interface UseProjectTaskActionsInput {
   locationSearch: string;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   metadataOnlyDraftDirty: boolean;
-  sourceTaskRowId: string | null;
   affinityLigandSmiles: string;
   affinityPreviewLigandSmiles: string;
   affinityTargetFile: File | null;
@@ -36,8 +34,6 @@ interface UseProjectTaskActionsInput {
   affinityCurrentUploads: AffinityPersistedUploads;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   customResidueLibrary: CustomCcdMoleculeInput[];
-  requestedStatusTaskRowId: string | null;
-  activeStatusTaskRowId: string | null;
   statusRefreshInFlightRef: MutableRefObject<Set<string>>;
   insertProjectTask: (input: Partial<ProjectTask>) => Promise<ProjectTask>;
   updateProject: (projectId: string, patch: Partial<Project>) => Promise<Project>;
@@ -89,7 +85,6 @@ interface UseProjectTaskActionsOutput {
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
   resolveEditableDraftTaskRowId: () => string | null;
-  resolveRuntimeTaskRowId: () => string | null;
   persistDraftTaskSnapshot: (
     normalizedConfig: ProjectInputConfig,
     options?: {
@@ -117,7 +112,6 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     locationSearch,
     workspaceTab,
     metadataOnlyDraftDirty,
-    sourceTaskRowId,
     affinityLigandSmiles,
     affinityPreviewLigandSmiles,
     affinityTargetFile,
@@ -125,8 +119,6 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     affinityCurrentUploads,
     proteinTemplates,
     customResidueLibrary,
-    requestedStatusTaskRowId,
-    activeStatusTaskRowId,
     statusRefreshInFlightRef,
     insertProjectTask,
     updateProject,
@@ -198,15 +190,6 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     [requestNewTask, locationSearch, project, projectTasks, isDraftTaskSnapshot]
   );
 
-  const resolveRuntimeTaskRowId = useCallback(
-    (): string | null =>
-      resolveRuntimeTaskRowIdFromContext({
-        project,
-        projectTasks
-      }),
-    [project, projectTasks]
-  );
-
   const persistDraftTaskSnapshot = useCallback(
     async (
       normalizedConfig: ProjectInputConfig,
@@ -231,10 +214,17 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     [project, draft, insertProjectTask, updateProjectTask, setProjectTasks, sortProjectTasks]
   );
 
-  const saveDraft = useCallback(
+  const saveInFlightRef = useRef(false);
+
+const saveDraft = useCallback(
     async (event?: FormEvent) => {
       event?.preventDefault();
       if (!project || !draft) return;
+      // Save-in-flight guard: the header button disables on `saving`, but the copilot
+      // auto-save paths call saveDraft directly — two overlapping saves both resolved
+      // 'no reusable row' and INSERTED duplicate draft rows.
+      if (saveInFlightRef.current) return;
+      saveInFlightRef.current = true;
 
       setSaving(true);
       setError(null);
@@ -244,7 +234,6 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           draft,
           workspaceTab,
           metadataOnlyDraftDirty,
-          sourceTaskRowId,
           affinityLigandSmiles,
           affinityPreviewLigandSmiles,
           affinityTargetFile,
@@ -252,8 +241,6 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           affinityCurrentUploads,
           proteinTemplates,
           customResidueLibrary,
-          requestedStatusTaskRowId,
-          activeStatusTaskRowId,
           normalizeConfigForBackend,
           nonEmptyComponents,
           computeUseMsaFlag,
@@ -265,8 +252,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           addTemplatesToTaskSnapshotComponents,
           persistDraftTaskSnapshot,
           resolveEditableDraftTaskRowId,
-          resolveRuntimeTaskRowId,
-          patch,
+            patch,
           patchTask,
           rememberTemplatesForTaskRow,
           rememberAffinityUploadsForTaskRow,
@@ -281,6 +267,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
       } catch (err) {
         setError(err instanceof Error ? `Failed to save draft: ${err.message}` : 'Failed to save draft.');
       } finally {
+        saveInFlightRef.current = false;
         setSaving(false);
       }
     },
@@ -289,15 +276,12 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
       draft,
       workspaceTab,
       metadataOnlyDraftDirty,
-      sourceTaskRowId,
       affinityLigandSmiles,
       affinityPreviewLigandSmiles,
       affinityTargetFile,
       affinityLigandFile,
       affinityCurrentUploads,
       proteinTemplates,
-      requestedStatusTaskRowId,
-      activeStatusTaskRowId,
       normalizeConfigForBackend,
       nonEmptyComponents,
       computeUseMsaFlag,
@@ -309,8 +293,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
       addTemplatesToTaskSnapshotComponents,
       persistDraftTaskSnapshot,
       resolveEditableDraftTaskRowId,
-      resolveRuntimeTaskRowId,
-      patch,
+        patch,
       patchTask,
       rememberTemplatesForTaskRow,
       rememberAffinityUploadsForTaskRow,
@@ -390,7 +373,6 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     patch,
     patchTask,
     resolveEditableDraftTaskRowId,
-    resolveRuntimeTaskRowId,
     persistDraftTaskSnapshot,
     saveDraft,
     pullResultForViewer,

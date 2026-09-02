@@ -91,7 +91,7 @@ function readAffinityModeValue(task: ProjectTask, workflowKey: string): string {
       ? (properties.__vbio_input_options_v1 as Record<string, unknown>)
       : {};
   const raw = String(options.affinityMode || properties.affinity_mode_summary || '').trim().toLowerCase();
-  if (raw === 'pose' || raw === 'refine' || raw === 'interface') return raw;
+  if (raw === 'pose' || raw === 'refine' || raw === 'interface' || raw === 'dock') return raw;
   return raw === 'score' ? 'score' : '';
 }
 
@@ -327,7 +327,6 @@ export function useProjectTasksWorkspaceContext({
         peptideIterations: peptide?.iterations ?? null,
         peptidePopulationSize: peptide?.populationSize ?? null,
         peptideEliteSize: peptide?.eliteSize ?? null,
-        peptideMutationRate: peptide?.mutationRate ?? null,
         peptideCurrentGeneration: peptide?.currentGeneration ?? null,
         peptideTotalGenerations: peptide?.totalGenerations ?? null,
         peptideBestScore: peptide?.bestScore ?? null,

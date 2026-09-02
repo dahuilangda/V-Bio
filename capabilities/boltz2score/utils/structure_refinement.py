@@ -11,8 +11,7 @@ import numpy as np
 
 from boltz.data import const
 from boltz.data.types import InferenceOptions, Manifest, StructureV2, TemplateInfo
-from utils.ligand_alignment import is_hydrogen_like
-from utils.ligand_utils import fix_cif_entity_ids
+from utils.ligand_utils import fix_cif_entity_ids, sync_entity_sequences_from_first_subchain
 
 WATER_RESNAMES = {"HOH", "WAT", "H2O"}
 ION_RESNAMES = {
@@ -156,17 +155,7 @@ def filter_structure_by_chains(
 
     structure.remove_empty_chains()
     structure.setup_entities()
-
-    for entity in structure.entities:
-        if entity.entity_type.name != "Polymer" or not entity.subchains:
-            continue
-        seq = []
-        for chain in structure[0]:
-            for res in chain:
-                if res.subchain in entity.subchains:
-                    seq.append(res.name)
-        if seq:
-            entity.full_sequence = seq
+    sync_entity_sequences_from_first_subchain(structure)
 
     doc = structure.make_mmcif_document()
     doc.write_file(str(output_path))
@@ -186,26 +175,28 @@ def _iter_chain_residues(structure: StructureV2, chain: object):
         yield residue
 
 
-def _heavy_atom_coords_from_atom_block(atom_block: object) -> list[tuple[float, float, float]]:
+def _atom_coords_from_atom_block(atom_block: object) -> list[tuple[float, float, float]]:
+    """All atom coordinates from an AtomV2 block.
+
+    AtomV2 carries no element field, so no hydrogen filtering is applied —
+    every atom in the block participates in distance computations. Inputs
+    are expected to be heavy-atom structures (the dock/refine ligand SDFs
+    and the prepared receptor used by this pipeline are).
+    """
     coords: list[tuple[float, float, float]] = []
     for atom in atom_block:
-        atom_name = str(atom["name"] or "").strip()
-        if is_hydrogen_like(atom_name):
-            continue
         xyz = atom["coords"]
         coords.append((float(xyz[0]), float(xyz[1]), float(xyz[2])))
     return coords
 
 
-def _heavy_atom_entries_from_atom_block(
+def _atom_entries_from_atom_block(
     atom_block: object,
     atom_index_offset: int = 0,
 ) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for local_idx, atom in enumerate(atom_block):
         atom_name = str(atom["name"] or "").strip()
-        if is_hydrogen_like(atom_name):
-            continue
         xyz = atom["coords"]
         entries.append(
             {
@@ -321,13 +312,13 @@ def configure_anchored_refine_constraints(
     ligand_asym_id = int(ligand_chain["asym_id"])
     ligand_atom_start = int(ligand_chain["atom_idx"])
     ligand_atom_end = ligand_atom_start + int(ligand_chain["atom_num"])
-    ligand_coords = _heavy_atom_coords_from_atom_block(structure.atoms[ligand_atom_start:ligand_atom_end])
-    ligand_atom_entries = _heavy_atom_entries_from_atom_block(
+    ligand_coords = _atom_coords_from_atom_block(structure.atoms[ligand_atom_start:ligand_atom_end])
+    ligand_atom_entries = _atom_entries_from_atom_block(
         structure.atoms[ligand_atom_start:ligand_atom_end],
         atom_index_offset=ligand_atom_start,
     )
     if not ligand_coords:
-        raise RuntimeError("Anchored refinement could not find heavy atoms in the ligand chain.")
+        raise RuntimeError("Anchored refinement could not find any atoms in the ligand chain.")
 
     requested_targets = {str(chain_id or "").strip() for chain_id in requested_target_chains if str(chain_id or "").strip()}
     target_chains = []
@@ -351,7 +342,7 @@ def configure_anchored_refine_constraints(
         for residue in _iter_chain_residues(structure, chain):
             atom_start = int(residue["atom_idx"])
             atom_end = atom_start + int(residue["atom_num"])
-            residue_coords = _heavy_atom_coords_from_atom_block(structure.atoms[atom_start:atom_end])
+            residue_coords = _atom_coords_from_atom_block(structure.atoms[atom_start:atom_end])
             if not residue_coords:
                 continue
             min_distance = _min_pair_distance(ligand_coords, residue_coords)
@@ -388,7 +379,7 @@ def configure_anchored_refine_constraints(
                     continue
                 atom_start = int(residue["atom_idx"])
                 atom_end = atom_start + int(residue["atom_num"])
-                residue_coord_map[key] = _heavy_atom_coords_from_atom_block(structure.atoms[atom_start:atom_end])
+                residue_coord_map[key] = _atom_coords_from_atom_block(structure.atoms[atom_start:atom_end])
 
         for atom in _select_pose_anchor_atoms(ligand_atom_entries, max_atoms=pose_anchor_atoms):
             atom_coords = [atom["coords"]]

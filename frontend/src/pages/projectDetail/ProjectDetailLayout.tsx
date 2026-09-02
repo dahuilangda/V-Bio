@@ -34,7 +34,7 @@ export interface ProjectDetailLayoutProps {
   displayTaskState: string;
   isActiveRuntime: boolean;
   progressPercent: number;
-  waitingSeconds: number | null;
+  statusSubmittedAt: string | null;
   totalRuntimeSeconds: number | null;
   canEdit: boolean;
   loading: boolean;
@@ -97,7 +97,7 @@ export function ProjectDetailLayout({
   displayTaskState,
   isActiveRuntime,
   progressPercent,
-  waitingSeconds,
+  statusSubmittedAt,
   totalRuntimeSeconds,
   canEdit,
   loading,
@@ -152,7 +152,7 @@ export function ProjectDetailLayout({
           workflowShortTitle={workflow.shortTitle}
           isActiveRuntime={isActiveRuntime}
           progressPercent={progressPercent}
-          waitingSeconds={waitingSeconds}
+          submittedAt={statusSubmittedAt}
           totalRuntimeSeconds={totalRuntimeSeconds}
         />
 

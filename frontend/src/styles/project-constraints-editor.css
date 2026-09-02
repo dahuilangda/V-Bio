@@ -40,6 +40,11 @@
   width: 100%;
 }
 
+/* Peptide design: pocket picker embedded in the Binding target component. */
+.component-target-pocket {
+  margin-top: 8px;
+}
+
 .constraint-nav-bar {
   display: flex;
   align-items: center;

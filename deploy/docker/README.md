@@ -22,8 +22,6 @@ Docker 部署只使用对应 stack 的 env 文件，不依赖仓库根目录 `.e
 | `DOCKER_BOLTZ2_RUNTIME.Dockerfile` | `boltz2`, `boltz2score`, `affinity` |
 | `DOCKER_NESSO_RUNTIME.Dockerfile` | 固定 Nesso-1 源码与 CUDA runtime；由独立的 Virtual Screening `nesso` worker 调用 |
 | `DOCKER_PROTENIX_V2_RUNTIME.Dockerfile` | Protenix v2 runtime |
-| `DOCKER_CAP_POCKETXMOL.*` | PocketXMol |
 | `DOCKER_CAP_COLABFOLD_SERVER.*` | ColabFold MSA 服务 |
-| `DOCKER_CAP_MMP_POSTGRES.*` | Lead Opt / MMP PostgreSQL |
 
 部署步骤见 `docs/deployment/quick-start.md`，模型服务安装见 `docs/deployment/model-services.md`。

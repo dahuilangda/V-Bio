@@ -26,6 +26,12 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 CUSTOM_RESIDUE_BACKBONE_SMARTS = "[NX3;!$(NC=O)]-[C;X4]-C(=O)[O,N]"
 
 
+class CustomCCDError(ValueError):
+    """A user-supplied component failed construction/contract checks; the message
+    always names the offending CCD code so HTTP-level rejections are actionable."""
+
+
+
 def _normalize_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
     """Validate/normalize a manual backbone override (5 non-negative integer slots)."""
     if not isinstance(raw, dict):
@@ -347,13 +353,6 @@ def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optio
     mol.ref_mask = np.ones(mol.GetNumAtoms(), dtype=bool)
     return mol
 
-def _custom_ccd_mol_atom_names(mol: Chem.Mol, *, include_hydrogens: bool = False) -> List[str]:
-    names: List[str] = []
-    for atom in mol.GetAtoms():
-        if not include_hydrogens and atom.GetSymbol().upper() in {"H", "D"}:
-            continue
-        names.append(atom.GetProp("name") if atom.HasProp("name") else f"{atom.GetSymbol().upper()}{atom.GetIdx() + 1}")
-    return names
 
 
 def _custom_ccd_mol_to_cif_block(
@@ -364,6 +363,15 @@ def _custom_ccd_mol_to_cif_block(
     label: str = "",
     base_residue: str = "",
 ) -> str:
+    # A CCD component is one connected chemical species; dot-disconnected SMILES
+    # fragments (e.g. "CC.CC") or ion pairs must fail loudly instead of producing a
+    # chemically meaningless component that downstream parsers will mishandle.
+    fragment_count = len(Chem.GetMolFrags(mol))
+    if fragment_count != 1:
+        raise ValueError(
+            f"Custom CCD {ccd} SMILES defines {fragment_count} disconnected fragments; "
+            f"a chemical component must be a single connected species."
+        )
     formula = rdMolDescriptors.CalcMolFormula(mol)
     weight = Descriptors.MolWt(mol)
     comp_type = "L-PEPTIDE LINKING" if kind == "residue" else "NON-POLYMER"
@@ -436,21 +444,17 @@ def _custom_ccd_mol_to_cif_block(
         lines.append(
             f"{ccd} {atom_name} {atom.GetSymbol().upper()} {atom.GetFormalCharge()} {pos.x:.4f} {pos.y:.4f} {pos.z:.4f} {leaving} {atom_name} {atom_name}"
         )
-    lines.extend([
-        "#",
-        "loop_",
-        "_chem_comp_bond.comp_id",
-        "_chem_comp_bond.atom_id_1",
-        "_chem_comp_bond.atom_id_2",
-        "_chem_comp_bond.value_order",
-        "_chem_comp_bond.pdbx_aromatic_flag",
-    ])
     bond_order_map = {
         Chem.BondType.SINGLE: "SING",
         Chem.BondType.DOUBLE: "DOUB",
         Chem.BondType.TRIPLE: "TRIP",
         Chem.BondType.AROMATIC: "SING",
     }
+    # mmCIF chem_comp contract (as consumed by biotite/Protenix get_component): a
+    # _chem_comp_bond category may be ABSENT entirely (single-ion convention, cf. NA/ZN in
+    # the official components.cif) or present with >=1 row. A header-only empty loop is
+    # invalid and crashes downstream deserialization, so it must never be emitted.
+    bond_rows: List[str] = []
     for bond in mol.GetBonds():
         atom1 = bond.GetBeginAtom()
         atom2 = bond.GetEndAtom()
@@ -458,7 +462,29 @@ def _custom_ccd_mol_to_cif_block(
             continue
         order = bond_order_map.get(bond.GetBondType(), "SING")
         aromatic = "Y" if bond.GetIsAromatic() else "N"
-        lines.append(f"{ccd} {atom1.GetProp('name')} {atom2.GetProp('name')} {order} {aromatic}")
+        bond_rows.append(f"{ccd} {atom1.GetProp('name')} {atom2.GetProp('name')} {order} {aromatic}")
+    heavy_atom_count = sum(1 for atom in mol.GetAtoms() if atom.GetSymbol().upper() not in {"H", "D"})
+    if not bond_rows:
+        if heavy_atom_count == 1:
+            pass  # Single-atom component (e.g. BS3 = Bi3+): omit the bond category per PDB convention.
+        elif heavy_atom_count == 0:
+            raise ValueError(f"Custom CCD {ccd} contains no heavy atoms.")
+        else:
+            raise ValueError(
+                f"Custom CCD {ccd} SMILES defines {heavy_atom_count} heavy atoms with no bonds "
+                f"(disconnected components). A chemical component must be a single connected species."
+            )
+    else:
+        lines.extend([
+            "#",
+            "loop_",
+            "_chem_comp_bond.comp_id",
+            "_chem_comp_bond.atom_id_1",
+            "_chem_comp_bond.atom_id_2",
+            "_chem_comp_bond.value_order",
+            "_chem_comp_bond.pdbx_aromatic_flag",
+        ])
+        lines.extend(bond_rows)
     lines.append("#")
     return "\n".join(lines) + "\n"
 
@@ -508,7 +534,10 @@ def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict
         kind = item.get("kind") or "residue"
         ccd = item["ccd"]
         amidated = bool(item.get("cTerminalAmidated") or False)
-        mol = _build_custom_ccd_mol(item["smiles"], kind=kind, backbone=item.get("backbone"), amidated=amidated)
+        try:
+            mol = _build_custom_ccd_mol(item["smiles"], kind=kind, backbone=item.get("backbone"), amidated=amidated)
+        except Exception as exc:
+            raise CustomCCDError(f"CCD {ccd}: {exc}") from exc
         mol.name = ccd
         mols[ccd] = mol
         blocks.append(_custom_ccd_mol_to_cif_block(

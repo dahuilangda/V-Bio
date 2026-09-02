@@ -31,10 +31,14 @@ interface UseProjectTasksDataLoaderResult {
   loading: boolean;
   refreshing: boolean;
   error: string | null;
+  /** False while the paginated background load is still filling the list. */
+  allTasksLoaded: boolean;
   setProject: Dispatch<SetStateAction<Project | null>>;
   setTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   setError: Dispatch<SetStateAction<string | null>>;
   loadData: (options?: LoadTaskDataOptions) => Promise<void>;
+  /** Await the fully-loaded task list; reports merged row count per chunk. */
+  ensureAllTasksLoaded: (onProgress?: (loaded: number) => void) => Promise<void>;
 }
 
 interface TaskListAccessContext {
@@ -76,16 +80,16 @@ function hasObjectContent(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
 }
 
-function asObjectRecord(value: unknown): Record<string, unknown> {
+function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function hasPeptideCandidateRows(value: unknown): boolean {
-  const confidence = asObjectRecord(value);
+  const confidence = asRecord(value);
   if (Object.keys(confidence).length === 0) return false;
-  const peptide = asObjectRecord(confidence.peptide_design);
-  const progress = asObjectRecord(confidence.progress);
-  const peptideProgress = asObjectRecord(peptide.progress);
+  const peptide = asRecord(confidence.peptide_design);
+  const progress = asRecord(confidence.progress);
+  const peptideProgress = asRecord(peptide.progress);
   const sources = [confidence, peptide, progress, peptideProgress];
   return sources.some(
     (source) =>
@@ -96,16 +100,12 @@ function hasPeptideCandidateRows(value: unknown): boolean {
 }
 
 function mergeConfidencePreservingPeptideCandidates(nextValue: unknown, prevValue: unknown): unknown {
-  const next = asObjectRecord(nextValue);
-  const prev = asObjectRecord(prevValue);
+  const next = asRecord(nextValue);
+  const prev = asRecord(prevValue);
   if (Object.keys(next).length === 0) return prevValue;
   if (Object.keys(prev).length === 0) return nextValue;
   if (hasPeptideCandidateRows(prev) && !hasPeptideCandidateRows(next)) return prevValue;
   return nextValue;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function readRecordUpdatedAt(value: unknown): number {
@@ -349,10 +349,19 @@ export function useProjectTasksDataLoader({
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Full-list load state: the task list pages in background chunks; consumers
+  // (e.g. the Excel export) must be able to distinguish "still loading" from
+  // "everything loaded" and to await completion.
+  const [allTasksLoaded, setAllTasksLoaded] = useState(false);
+  const allTasksLoadedRef = useRef(false);
+  const fullLoadWaitersRef = useRef<Array<{ resolve: () => void; reject: (err: Error) => void }>>([]);
+  const backgroundProgressListenersRef = useRef<Set<(loaded: number) => void>>(new Set());
+  // True while ANY paginated fetch loop (initial background chunks or the
+  // on-demand tail resume) is fetching — ensures waiting, never duplication.
+  const backgroundLoadActiveRef = useRef(false);
 
   const loadSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
-  const lastFullFetchTsRef = useRef(0);
   const projectRef = useRef<Project | null>(null);
   const tasksRef = useRef<ProjectTask[]>([]);
   const runtimeStatusPollCursorRef = useRef(0);
@@ -404,7 +413,6 @@ export function useProjectTasksDataLoader({
     (projectRow: Project | null, taskRows: ProjectTask[]) => {
       if (!taskListRuntimeCacheKey || !projectRow) return;
       const now = Date.now();
-      pruneRuntimeCache(now);
       taskListRuntimeCache.delete(taskListRuntimeCacheKey);
       taskListRuntimeCache.set(taskListRuntimeCacheKey, {
         savedAt: now,
@@ -435,14 +443,21 @@ export function useProjectTasksDataLoader({
     return true;
   }, [taskListRuntimeCacheKey]);
 
+  // Read via ref inside syncRuntimeTasks so its identity (and therefore
+  // loadData's, which the mount auto-effect depends on) stays stable while the
+  // visible page's priority rows change — otherwise every filter/page change
+  // re-triggered a full list reload.
+  const priorityTaskRowIdsRef = useRef<string[]>([]);
+  priorityTaskRowIdsRef.current = priorityTaskRowIds || [];
+
   const syncRuntimeTasks = useCallback(
     async (projectRow: Project, taskRows: ProjectTask[]) =>
       syncRuntimeTaskRows(projectRow, taskRows, {
-        priorityTaskRowIds,
+        priorityTaskRowIds: priorityTaskRowIdsRef.current,
         runtimeStatusCursor: runtimeStatusPollCursorRef,
         leadOptStatusCursor: leadOptStatusPollCursorRef
       }),
-    [priorityTaskRowIds]
+    []
   );
 
   const syncInitialRuntimeTasks = useCallback(
@@ -470,8 +485,13 @@ export function useProjectTasksDataLoader({
         pendingForceRefetchRef.current = true;
       }
       setProject(synced.project);
-      setTasks(sanitizeTaskRows(synced.taskRows));
-      persistRuntimeCache(synced.project, synced.taskRows);
+      // Functional merge: rows fetched by a concurrent pagination loop during
+      // the sync's network awaits must survive this write.
+      setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(sortProjectTasks(synced.taskRows), prev)));
+      persistRuntimeCache(
+        synced.project,
+        sanitizeTaskRows(mergeTaskRowPages(sortProjectTasks(synced.taskRows), cachedTasks))
+      );
       if (pendingForceRefetchRef.current) {
         pendingForceRefetchRef.current = false;
         window.setTimeout(() => {
@@ -482,11 +502,31 @@ export function useProjectTasksDataLoader({
     [persistRuntimeCache, syncRuntimeTasks]
   );
 
+  const markFullLoadComplete = useCallback(() => {
+    allTasksLoadedRef.current = true;
+    setAllTasksLoaded(true);
+    const waiters = fullLoadWaitersRef.current;
+    fullLoadWaitersRef.current = [];
+    waiters.forEach((waiter) => waiter.resolve());
+  }, []);
+
+  const rejectFullLoadWaiters = useCallback((error: Error) => {
+    const waiters = fullLoadWaitersRef.current;
+    fullLoadWaitersRef.current = [];
+    waiters.forEach((waiter) => waiter.reject(error));
+  }, []);
+
   const loadData = useCallback(
     async (options?: LoadTaskDataOptions) => {
       if (loadInFlightRef.current) return;
+      // A paginated load (initial background chunks or export tail-resume) owns
+      // the list right now; a silent refresh would re-download what it is
+      // already fetching.
+      if (options?.silent && backgroundLoadActiveRef.current) return;
       const loadSeq = ++loadSeqRef.current;
       loadInFlightRef.current = true;
+      allTasksLoadedRef.current = false;
+      setAllTasksLoaded(false);
       const silent = Boolean(options?.silent);
       const showRefreshing = silent && options?.showRefreshing !== false;
       const preferBackendStatus = options?.preferBackendStatus !== false;
@@ -506,23 +546,6 @@ export function useProjectTasksDataLoader({
       try {
         const cachedProject = projectRef.current;
         const cachedTasks = sanitizeTaskRows(tasksRef.current);
-        const hasLeadOptRuntimeInCache = cachedTasks.some((row) => hasLeadOptPredictionRuntime(row));
-        const canUseCachedSync =
-          silent &&
-          !forceRefetch &&
-          preferBackendStatus &&
-          cachedProject &&
-          cachedTasks.length > 0 &&
-          !hasLeadOptRuntimeInCache;
-
-        if (canUseCachedSync) {
-          const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
-          if (loadSeqRef.current !== loadSeq) return;
-          setProject(synced.project);
-          setTasks(sanitizeTaskRows(synced.taskRows));
-          persistRuntimeCache(synced.project, synced.taskRows);
-          return;
-        }
 
         const projectRow = await getProjectById(projectId, { lightweight: true });
         if (!projectRow || projectRow.deleted_at) {
@@ -565,8 +588,6 @@ export function useProjectTasksDataLoader({
           limit: TASK_LIST_INITIAL_FETCH_LIMIT,
           offset: 0
         });
-
-        lastFullFetchTsRef.current = Date.now();
         const sortedTaskRows = sortProjectTasks(sanitizeTaskRows(taskRows));
         const accessibleProjectBase =
           projectAccessScope === 'task_share'
@@ -597,32 +618,51 @@ export function useProjectTasksDataLoader({
         persistRuntimeCache(nextProject, nextRows);
 
         void (async () => {
-          let offset = TASK_LIST_INITIAL_FETCH_LIMIT;
-          let mergedRows = sanitizeTaskRows(nextRows);
-          while (loadSeqRef.current === loadSeq) {
-            if (TASK_LIST_BACKGROUND_FETCH_DELAY_MS > 0) {
-              await new Promise((resolve) => window.setTimeout(resolve, TASK_LIST_BACKGROUND_FETCH_DELAY_MS));
+          backgroundLoadActiveRef.current = true;
+          try {
+            // Resume, never re-download: rows already in memory (e.g. from a
+            // previous completed load) are skipped, so a restart after a full
+            // load costs one empty-chunk probe instead of the whole list again.
+            let offset = Math.max(TASK_LIST_INITIAL_FETCH_LIMIT, sanitizeTaskRows(nextRows).length);
+            while (loadSeqRef.current === loadSeq) {
+              if (TASK_LIST_BACKGROUND_FETCH_DELAY_MS > 0) {
+                await new Promise((resolve) => window.setTimeout(resolve, TASK_LIST_BACKGROUND_FETCH_DELAY_MS));
+              }
+              const chunkRows = await listProjectTasksForList(projectId, {
+                ...baseTaskListOptions,
+                limit: TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE,
+                offset
+              });
+              if (loadSeqRef.current !== loadSeq) return;
+              if (chunkRows.length === 0) {
+                markFullLoadComplete();
+                return;
+              }
+              const sortedChunkRows = sortProjectTasks(sanitizeTaskRows(chunkRows));
+              const optimisticMerged = sanitizeTaskRows(mergeTaskRowPages(sortedChunkRows, tasksRef.current));
+              const projectForChunk = projectRef.current || nextProject;
+              runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(optimisticMerged);
+              // Functional write: rows merged by a concurrent writer during the
+              // chunk fetch must not be clobbered (a clobbered chunk would be
+              // lost forever — offset has already advanced past it).
+              setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(sortedChunkRows, prev)));
+              persistRuntimeCache(projectForChunk, optimisticMerged);
+              backgroundProgressListenersRef.current.forEach((listener) => listener(optimisticMerged.length));
+              if (chunkRows.length < TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE) {
+                markFullLoadComplete();
+                return;
+              }
+              offset += TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE;
             }
-            const chunkRows = await listProjectTasksForList(projectId, {
-              ...baseTaskListOptions,
-              limit: TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE,
-              offset
-            });
-            if (loadSeqRef.current !== loadSeq || chunkRows.length === 0) return;
-            const sortedChunkRows = sortProjectTasks(sanitizeTaskRows(chunkRows));
-            mergedRows = mergeTaskRowPages(sortedChunkRows, tasksRef.current);
-            const projectForChunk = projectRef.current || nextProject;
-            runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(mergedRows);
-            setTasks(mergedRows);
-            persistRuntimeCache(projectForChunk, mergedRows);
-            if (chunkRows.length < TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE) {
-              lastFullFetchTsRef.current = Date.now();
-              return;
-            }
-            offset += TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE;
+          } finally {
+            backgroundLoadActiveRef.current = false;
           }
-        })().catch(() => {
-          // Keep the visible first page if background chunk loading fails.
+        })().catch((err: unknown) => {
+          // Keep the visible rows, but waiters get the real error — a partial
+          // list must never masquerade as complete.
+          rejectFullLoadWaiters(
+            err instanceof Error ? err : new Error('Task list background load failed.')
+          );
         });
 
         if (!preferBackendStatus) {
@@ -659,6 +699,11 @@ export function useProjectTasksDataLoader({
         })();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load task history.');
+        // A load that fails before its pagination loop spawns must unblock
+        // exporters waiting on completion — otherwise the export hangs forever.
+        rejectFullLoadWaiters(
+          err instanceof Error ? err : new Error('Failed to load task history.')
+        );
       } finally {
         if (showRefreshing) {
           setRefreshing(false);
@@ -668,7 +713,7 @@ export function useProjectTasksDataLoader({
         loadInFlightRef.current = false;
       }
     },
-    [hydrateRuntimeCache, persistRuntimeCache, projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks]
+    [hydrateRuntimeCache, persistRuntimeCache, projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks, markFullLoadComplete]
   );
 
   useEffect(() => {
@@ -723,7 +768,9 @@ export function useProjectTasksDataLoader({
         const rowsChanged = JSON.stringify(nextRows) !== memoSignature(tasksRef.current, currentRows, currentRowsSigRef.current);
         if (!projectChanged && !rowsChanged) return;
         setProject(nextProject);
-        setTasks(nextRows);
+        // Functional merge: concurrent pagination may have added rows while the
+        // hydration requests were in flight.
+        setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(sortProjectTasks(nextRows), prev)));
         persistRuntimeCache(nextProject, nextRows);
       } catch (err) {
         console.error('Background result hydration failed; keeping lightweight rows.', err);
@@ -867,15 +914,123 @@ export function useProjectTasksDataLoader({
     };
   }, [priorityTaskRowIds, projectId, workspaceView]);
 
+  /**
+   * Continue pagination from the rows already in memory. Claims the loader
+   * (loadInFlight) so page refreshes cannot start a duplicate load, and bumps
+   * loadSeq to abort any stale background loop from a superseded page load.
+   * Progress is reported through backgroundProgressListenersRef only.
+   */
+  const resumeTailLoad = useCallback(
+    async () => {
+      const projectRow = projectRef.current;
+      const accessContext = taskListAccessContextRef.current;
+      if (!projectRow || !accessContext || !projectId) {
+        throw new Error('Task list is not ready yet.');
+      }
+      const workflowKey = normalizeWorkflowKey(projectRow.task_type);
+      const useLightweightTaskRows = workflowKey !== 'lead_optimization';
+      const baseTaskListOptions = {
+        includeComponents: workflowKey === 'prediction' || workflowKey === 'peptide_design',
+        includeConfidence: false,
+        includeConfidenceSummary: useLightweightTaskRows,
+        includeProperties: false,
+        includePropertiesSummary: useLightweightTaskRows,
+        includeLeadOptSummary: workflowKey === 'lead_optimization',
+        taskRowIds: accessContext.scope === 'task_share' ? projectRow.accessible_task_ids || [] : undefined,
+        accessScope: accessContext.scope,
+        accessLevel: accessContext.accessLevel,
+        editableTaskIds: accessContext.editableTaskIds
+      };
+      const loadSeq = ++loadSeqRef.current;
+      loadInFlightRef.current = true;
+      backgroundLoadActiveRef.current = true;
+      try {
+        let offset = tasksRef.current.length;
+        for (;;) {
+          const chunkRows = await listProjectTasksForList(projectId, {
+            ...baseTaskListOptions,
+            limit: TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE,
+            offset
+          });
+          if (loadSeqRef.current !== loadSeq) return;
+          if (chunkRows.length === 0) {
+            markFullLoadComplete();
+            return;
+          }
+          const sortedChunkRows = sortProjectTasks(sanitizeTaskRows(chunkRows));
+          const optimisticMerged = sanitizeTaskRows(mergeTaskRowPages(sortedChunkRows, tasksRef.current));
+          runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(optimisticMerged);
+          // Functional write: concurrent writers must not lose their rows.
+          setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(sortedChunkRows, prev)));
+          persistRuntimeCache(projectRef.current, optimisticMerged);
+          backgroundProgressListenersRef.current.forEach((listener) => listener(optimisticMerged.length));
+          if (chunkRows.length < TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE) {
+            markFullLoadComplete();
+            return;
+          }
+          offset += TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE;
+        }
+      } catch (err) {
+        rejectFullLoadWaiters(
+          err instanceof Error ? err : new Error('Task list tail load failed.')
+        );
+        throw err;
+      } finally {
+        backgroundLoadActiveRef.current = false;
+        loadInFlightRef.current = false;
+      }
+    },
+    [projectId, markFullLoadComplete, rejectFullLoadWaiters]
+  );
+
+  const resumeTailLoadRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => {
+    resumeTailLoadRef.current = resumeTailLoad;
+  }, [resumeTailLoad]);
+
+  /**
+   * Await the fully-loaded task list with minimal network cost:
+   * - a paginated load already running -> just wait for it (zero extra requests);
+   * - nothing running and the list partial -> fetch ONLY the missing tail rows,
+   *   each exactly once (no page restart, no duplicate full load).
+   * Failure propagates to the caller — a partial list is never reported complete.
+   */
+  const ensureAllTasksLoaded = useCallback(
+    async (onProgress?: (loaded: number) => void) => {
+      if (allTasksLoadedRef.current) {
+        onProgress?.(tasksRef.current.length);
+        return;
+      }
+      if (onProgress) {
+        backgroundProgressListenersRef.current.add(onProgress);
+        onProgress(tasksRef.current.length);
+      }
+      try {
+        if (loadInFlightRef.current || backgroundLoadActiveRef.current) {
+          await new Promise<void>((resolve, reject) => {
+            fullLoadWaitersRef.current.push({ resolve, reject });
+          });
+          return;
+        }
+        await resumeTailLoadRef.current?.();
+      } finally {
+        if (onProgress) backgroundProgressListenersRef.current.delete(onProgress);
+      }
+    },
+    []
+  );
+
   return {
     project,
     tasks,
     loading,
     refreshing,
     error,
+    allTasksLoaded,
     setProject,
     setTasks,
     setError,
     loadData,
+    ensureAllTasksLoaded,
   };
 }

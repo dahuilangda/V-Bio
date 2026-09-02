@@ -54,6 +54,10 @@ celery_app.conf.update(
     worker_send_task_events=True,
     task_send_sent_event=True,
     worker_heartbeat=15.0,
+    # Result records must outlive export job records (48h): the export status
+    # route reads the Celery result to reconcile jobs whose final Redis write
+    # was lost — an expired result would strand such a job as "running".
+    result_expires=48 * 3600,
 )
 
 # Ensure workers request tasks one at a time to avoid queue starvation and

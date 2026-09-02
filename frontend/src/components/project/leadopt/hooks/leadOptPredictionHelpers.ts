@@ -8,17 +8,6 @@ import {
 } from '../../../../pages/projectDetail/projectMetrics';
 import type { ParsedResultBundle } from '../../../../types/models';
 
-export interface LeadOptMmpPersistedSnapshot {
-  query_result?: Record<string, unknown>;
-  enumerated_candidates?: Array<Record<string, unknown>>;
-  prediction_by_smiles?: Record<string, LeadOptPredictionRecord>;
-  reference_prediction_by_backend?: Record<string, LeadOptPredictionRecord>;
-  ui_state?: Record<string, unknown>;
-  selection?: Record<string, unknown>;
-  target_chain?: string;
-  ligand_chain?: string;
-}
-
 interface LeadOptPredictionRenderPayload {
   ligandRenderSmiles: string;
   ligandRenderAtomPlddts: number[];
@@ -575,62 +564,6 @@ function shouldHydratePredictionRecord(record: LeadOptPredictionRecord | null | 
   const taskId = String(record.taskId || '').trim();
   if (!taskId || taskId.startsWith('local:')) return false;
   return !hasHydratedPredictionResult(record);
-}
-
-function isResultArchivePendingError(error: unknown): boolean {
-  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
-  if (!message) return false;
-  return (
-    (message.includes('failed to download result (404)') && message.includes('/results/')) ||
-    message.includes('result file not found on disk') ||
-    message.includes('task has not completed yet') ||
-    message.includes('state: pending') ||
-    message.includes('"state":"pending"') ||
-    message.includes('state: queued') ||
-    message.includes('"state":"queued"') ||
-    message.includes('state: running') ||
-    message.includes('"state":"running"')
-  );
-}
-
-function isResultArchiveMissingError(error: unknown): boolean {
-  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
-  if (!message) return false;
-  return message.includes('result file information not found in task metadata or on disk');
-}
-
-function isMmpQueryExpiredError(error: unknown): boolean {
-  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
-  if (!message) return false;
-  return (
-    message.includes('failed to fetch mmp query result (404)') ||
-    message.includes('query_id not found or expired') ||
-    message.includes('"query_id not found or expired"')
-  );
-}
-
-function buildMissingResultArchiveMessage(taskId: string): string {
-  const normalizedTaskId = readText(taskId).trim();
-  return normalizedTaskId
-    ? `Result archive missing for task ${normalizedTaskId}.`
-    : 'Result archive missing for this task.';
-}
-
-function inferPendingRuntimeStateFromError(error: unknown): PredictionState {
-  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
-  if (!message) return 'RUNNING';
-  if (message.includes('state: success') || message.includes('"state":"success"')) return 'SUCCESS';
-  if (
-    message.includes('state: pending') ||
-    message.includes('"state":"pending"') ||
-    message.includes('state: queued') ||
-    message.includes('"state":"queued"') ||
-    message.includes('received') ||
-    message.includes('retry')
-  ) {
-    return 'QUEUED';
-  }
-  return 'RUNNING';
 }
 
 function isSyntheticStaleFailureMessage(error: unknown): boolean {
@@ -1286,11 +1219,6 @@ export {
   hasHydratedPredictionResult,
   shouldProbeTaskStatus,
   shouldHydratePredictionRecord,
-  isResultArchivePendingError,
-  isResultArchiveMissingError,
-  isMmpQueryExpiredError,
-  buildMissingResultArchiveMessage,
-  inferPendingRuntimeStateFromError,
   isSyntheticStaleFailureMessage,
   extractPredictionMetricsFromStatusInfo,
   computeHydrationRetryDelayMs,

@@ -1,3 +1,13 @@
+function isPeptideStructureUpload(value: unknown): value is {
+  fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
+} {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.fileName === 'string'
+    && typeof v.content === 'string'
+    && (v.format === 'pdb' || v.format === 'cif');
+}
+
 import type {
   InputComponent,
   MoleculeType,
@@ -9,7 +19,8 @@ import type {
   PredictionProperties,
   ProjectInputConfig,
   ProteinTemplateUpload,
-  VirtualScreeningPredictionRecord
+  VirtualScreeningPredictionRecord,
+  AffinityDockPocket
 } from '../types/models';
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
@@ -56,7 +67,6 @@ const DEFAULT_PEPTIDE_SEQUENCE_MASK = '';
 const DEFAULT_PEPTIDE_ITERATIONS = 12;
 const DEFAULT_PEPTIDE_POPULATION_SIZE = 16;
 const DEFAULT_PEPTIDE_ELITE_SIZE = 5;
-const DEFAULT_PEPTIDE_MUTATION_RATE = 0.25;
 const DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD = 'SEZ';
 const VALID_PEPTIDE_BICYCLIC_LINKER_CCD = new Set(['SEZ', '29N', 'BS3']);
 const DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE = 'auto';
@@ -66,8 +76,8 @@ const DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS = false;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS = 3;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS = 8;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS = 15;
-const DEFAULT_AFFINITY_MODE = 'score';
-const VALID_AFFINITY_MODES = new Set(['score', 'pose', 'refine', 'interface']);
+const DEFAULT_AFFINITY_MODE = 'dock';
+const VALID_AFFINITY_MODES = new Set(['score', 'pose', 'refine', 'interface', 'dock']);
 const VALID_PEPTIDE_POOL_KINDS = new Set(['natural', 'preset', 'custom']);
 const DEFAULT_PEPTIDE_RESIDUE_POOL: NonNullable<PredictionOptions['peptideResiduePool']> = [
   'ALA',
@@ -304,14 +314,30 @@ function normalizePeptideBicyclicCysPositionMode(value: unknown): 'auto' | 'manu
   return DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE as 'auto' | 'manual';
 }
 
-function normalizeAffinityMode(value: unknown): 'score' | 'pose' | 'refine' | 'interface' {
+function normalizeAffinityDockPocket(value: unknown): AffinityDockPocket | null {
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  const nums = ['centerX', 'centerY', 'centerZ', 'sizeX', 'sizeY', 'sizeZ'].map(
+    (k) => Number(obj[k])
+  );
+  if (nums.some((v) => !Number.isFinite(v))) return null;
+  if (nums.slice(3).some((v) => v <= 0)) return null;
+  const method = String(obj.method || 'manual');
+  return {
+    centerX: nums[0], centerY: nums[1], centerZ: nums[2],
+    sizeX: nums[3], sizeY: nums[4], sizeZ: nums[5],
+    method: (['residues', 'manual', 'ligand'].includes(method) ? method : 'manual') as 'residues' | 'manual' | 'ligand'
+  };
+}
+
+function normalizeAffinityMode(value: unknown): 'score' | 'pose' | 'refine' | 'interface' | 'dock' {
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (VALID_AFFINITY_MODES.has(normalized)) {
-      return normalized as 'score' | 'pose' | 'refine' | 'interface';
+      return normalized as 'score' | 'pose' | 'refine' | 'interface' | 'dock';
     }
   }
-  return DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface';
+  return DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface' | 'dock';
 }
 
 function readFiniteNumber(value: unknown): number | null {
@@ -329,13 +355,6 @@ function normalizeIntegerOption(
   const parsed = readFiniteNumber(value);
   if (parsed === null) return fallback;
   return Math.max(minValue, Math.min(maxValue, Math.floor(parsed)));
-}
-
-function normalizeRateOption(value: unknown, fallback: number, minValue: number, maxValue: number): number {
-  const parsed = readFiniteNumber(value);
-  if (parsed === null) return fallback;
-  const clamped = Math.max(minValue, Math.min(maxValue, parsed));
-  return Math.round(clamped * 100) / 100;
 }
 
 function normalizeBooleanOption(value: unknown, fallback: boolean): boolean {
@@ -427,8 +446,9 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
       virtualScreeningInput: isVirtualScreeningWorkflow ? '' : undefined,
       virtualScreeningInputMode: isVirtualScreeningWorkflow ? 'upload' : undefined,
       virtualScreeningInputFileName: isVirtualScreeningWorkflow ? '' : undefined,
-      affinityMode: DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface',
+      affinityMode: DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface' | 'dock',
       peptideDesignMode: DEFAULT_PEPTIDE_DESIGN_MODE,
+      peptideChirality: 'l' as 'l' | 'd',
       peptideBinderLength: DEFAULT_PEPTIDE_BINDER_LENGTH,
       peptideUseInitialSequence: DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE,
       peptideInitialSequence: DEFAULT_PEPTIDE_INITIAL_SEQUENCE,
@@ -436,7 +456,6 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
       peptideIterations: DEFAULT_PEPTIDE_ITERATIONS,
       peptidePopulationSize: DEFAULT_PEPTIDE_POPULATION_SIZE,
       peptideEliteSize: DEFAULT_PEPTIDE_ELITE_SIZE,
-      peptideMutationRate: DEFAULT_PEPTIDE_MUTATION_RATE,
       peptideResiduePool: DEFAULT_PEPTIDE_RESIDUE_POOL,
       peptideNonNaturalMin: 0,
       peptideNonNaturalMax: 0,
@@ -446,7 +465,21 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
       peptideBicyclicIncludeExtraCys: DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS,
       peptideBicyclicCys1Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS,
       peptideBicyclicCys2Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS,
-      peptideBicyclicCys3Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS
+      peptideBicyclicCys3Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS,
+      peptidePocketCenter: '',
+      peptidePocketResidues: '',
+      peptidePocketBox: 6,
+      peptideDockPocket: null,
+      leadOptDockPocket: null,
+      leadOptPocketCenter: '',
+      leadOptMode: 'fragment',
+      leadOptBackend: 'protenix2dock',
+      leadOptRounds: 6,
+      leadOptBudgetPerRound: 48,
+      leadOptScaffoldHopRatio: 0.4,
+      leadOptReferenceSmiles: '',
+      leadOptKeepFragmentSmiles: '',
+      leadOptEditAtomIndices: ''
     }
   };
 }
@@ -524,25 +557,55 @@ function normalizeOptions(value: unknown): PredictionOptions {
     raw.virtualScreeningPredictions ?? rawObj.virtual_screening_predictions
   );
   const affinityMode = normalizeAffinityMode(raw.affinityMode ?? rawObj.affinity_mode ?? rawObj.mode);
+  const affinityDockPocket = normalizeAffinityDockPocket(raw.affinityDockPocket ?? rawObj.affinity_dock_pocket);
+  const peptideDockPocket = normalizeAffinityDockPocket(raw.peptideDockPocket ?? rawObj.peptide_dock_pocket);
+  const leadOptDockPocket = normalizeAffinityDockPocket(raw.leadOptDockPocket ?? rawObj.lead_opt_dock_pocket);
+  const leadOptMode = raw.leadOptMode === 'denovo' || raw.leadOptMode === 'scaffold_hop' ? raw.leadOptMode : 'fragment';
+  const leadOptBackend =
+    raw.leadOptBackend === 'boltz2dock' || raw.leadOptBackend === 'alphafold3' ? raw.leadOptBackend : 'protenix2dock';
+  const leadOptRoundsRaw = Number(raw.leadOptRounds ?? rawObj.lead_opt_rounds);
+  const leadOptRounds = Number.isFinite(leadOptRoundsRaw) ? Math.min(100, Math.max(1, Math.floor(leadOptRoundsRaw))) : 6;
+  const leadOptBudgetRaw = Number(raw.leadOptBudgetPerRound ?? rawObj.lead_opt_budget_per_round);
+  const leadOptBudgetPerRound = Number.isFinite(leadOptBudgetRaw) ? Math.min(512, Math.max(1, Math.floor(leadOptBudgetRaw))) : 48;
+  const leadOptHopRaw = Number(raw.leadOptScaffoldHopRatio ?? rawObj.lead_opt_scaffold_hop_ratio);
+  const leadOptScaffoldHopRatio = Number.isFinite(leadOptHopRaw) ? Math.min(1, Math.max(0, leadOptHopRaw)) : 0.4;
+  const readLeadOptText = (camelKey: keyof PredictionOptions, snakeKey: string): string =>
+    String(raw[camelKey] ?? rawObj[snakeKey] ?? '').trim();
   const peptideDesignMode = normalizePeptideDesignMode(raw.peptideDesignMode ?? rawObj.peptide_design_mode);
+  const peptideChirality =
+    String(raw.peptideChirality ?? rawObj.peptide_chirality ?? 'l').trim().toLowerCase() === 'd'
+      ? 'd'
+      : 'l';
   const minPeptideLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
-  const peptideBinderLength = normalizeIntegerOption(
-    raw.peptideBinderLength ?? rawObj.peptide_binder_length ?? rawObj.binder_length,
+  // length window (min/max); min == max behaves as a fixed value.
+  const peptideLengthMin = normalizeIntegerOption(
+    raw.peptideLengthMin ?? rawObj.peptide_length_min,
     DEFAULT_PEPTIDE_BINDER_LENGTH,
     minPeptideLength,
     80
   );
+  const peptideLengthMax = normalizeIntegerOption(
+    raw.peptideLengthMax ?? rawObj.peptide_length_max,
+    DEFAULT_PEPTIDE_BINDER_LENGTH,
+    peptideLengthMin,
+    80
+  );
+  // mask/pool layout normalization needs a concrete length: use the window max
+  const effectiveBinderLength = peptideLengthMax;
+  // single-value legacy field: only set when the user pinned min == max
+  const peptideBinderLength = peptideLengthMin === peptideLengthMax
+    ? peptideLengthMin : undefined;
   const peptideUseInitialSequence = normalizeBooleanOption(
     raw.peptideUseInitialSequence ?? rawObj.peptide_use_initial_sequence ?? rawObj.use_initial_sequence,
     DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE
   );
   const peptideInitialSequence = normalizePeptideInitialSequence(
     raw.peptideInitialSequence ?? rawObj.peptide_initial_sequence ?? rawObj.initial_sequence,
-    peptideBinderLength
+    effectiveBinderLength
   );
   const peptideSequenceMask = normalizePeptideSequenceMask(
     raw.peptideSequenceMask ?? rawObj.peptide_sequence_mask ?? rawObj.sequence_mask,
-    peptideBinderLength
+    effectiveBinderLength
   );
   const peptideIterations = normalizeIntegerOption(
     raw.peptideIterations ?? rawObj.peptide_iterations ?? rawObj.generations,
@@ -568,12 +631,6 @@ function normalizeOptions(value: unknown): PredictionOptions {
       )
     )
   );
-  const peptideMutationRate = normalizeRateOption(
-    raw.peptideMutationRate ?? rawObj.peptide_mutation_rate ?? rawObj.mutation_rate,
-    DEFAULT_PEPTIDE_MUTATION_RATE,
-    0.01,
-    1
-  );
   const rawPeptideResiduePool = raw.peptideResiduePool ?? rawObj.peptide_residue_pool;
   const peptideResiduePool = Array.isArray(rawPeptideResiduePool)
     ? normalizePeptideResiduePool(rawPeptideResiduePool)
@@ -584,7 +641,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
         raw.peptideNonNaturalMin ?? rawObj.peptide_non_natural_min ?? rawObj.non_natural_min,
         0,
         0,
-        peptideBinderLength
+        effectiveBinderLength
       )
     : 0;
   const peptideNonNaturalMax = hasSelectedNonNaturalResidues
@@ -592,7 +649,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
         raw.peptideNonNaturalMax ?? rawObj.peptide_non_natural_max ?? rawObj.non_natural_max,
         Math.max(1, peptideNonNaturalMin),
         Math.max(1, peptideNonNaturalMin),
-        peptideBinderLength
+        effectiveBinderLength
       )
     : 0;
   const peptideBicyclicLinkerCcd = normalizePeptideBicyclicLinkerCcd(
@@ -616,21 +673,31 @@ function normalizeOptions(value: unknown): PredictionOptions {
     raw.peptideBicyclicCys1Pos ?? rawObj.peptide_bicyclic_cys1_pos ?? rawObj.cys1_pos,
     DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS,
     1,
-    Math.max(1, peptideBinderLength - 2)
+    Math.max(1, effectiveBinderLength - 2)
   );
   const peptideBicyclicCys2Pos = normalizeIntegerOption(
     raw.peptideBicyclicCys2Pos ?? rawObj.peptide_bicyclic_cys2_pos ?? rawObj.cys2_pos,
     DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS,
     1,
-    peptideBicyclicFixTerminalCys ? Math.max(1, peptideBinderLength - 2) : Math.max(1, peptideBinderLength - 1)
+    peptideBicyclicFixTerminalCys ? Math.max(1, effectiveBinderLength - 2) : Math.max(1, effectiveBinderLength - 1)
+  );
+  const peptidePocketCenter = typeof raw.peptidePocketCenter === 'string'
+    ? raw.peptidePocketCenter.trim()
+    : (typeof rawObj.peptide_pocket_center === 'string' ? String(rawObj.peptide_pocket_center).trim() : '');
+  const peptidePocketResidues = typeof raw.peptidePocketResidues === 'string'
+    ? raw.peptidePocketResidues.trim()
+    : (typeof rawObj.peptide_pocket_residues === 'string' ? String(rawObj.peptide_pocket_residues).trim() : '');
+  const peptidePocketBox = normalizeIntegerOption(
+    raw.peptidePocketBox ?? rawObj.peptide_pocket_box,
+    4, 40, 6
   );
   const peptideBicyclicCys3Pos = peptideBicyclicFixTerminalCys
-    ? peptideBinderLength
+    ? effectiveBinderLength
     : normalizeIntegerOption(
         raw.peptideBicyclicCys3Pos ?? rawObj.peptide_bicyclic_cys3_pos ?? rawObj.cys3_pos,
         DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS,
         1,
-        peptideBinderLength
+        effectiveBinderLength
       );
   if (seed === null) {
     return {
@@ -640,7 +707,12 @@ function normalizeOptions(value: unknown): PredictionOptions {
       virtualScreeningInputFileName,
       virtualScreeningPredictions,
       affinityMode,
+      affinityDockPocket,
       peptideDesignMode,
+      peptideChirality,
+      peptideStructureUpload: isPeptideStructureUpload(raw.peptideStructureUpload)
+        ? raw.peptideStructureUpload
+        : null,
       peptideBinderLength,
       peptideUseInitialSequence,
       peptideInitialSequence,
@@ -648,7 +720,6 @@ function normalizeOptions(value: unknown): PredictionOptions {
       peptideIterations,
       peptidePopulationSize,
       peptideEliteSize,
-      peptideMutationRate,
       peptideResiduePool,
       peptideNonNaturalMin,
       peptideNonNaturalMax,
@@ -658,7 +729,21 @@ function normalizeOptions(value: unknown): PredictionOptions {
       peptideBicyclicIncludeExtraCys,
       peptideBicyclicCys1Pos,
       peptideBicyclicCys2Pos,
-      peptideBicyclicCys3Pos
+      peptideBicyclicCys3Pos,
+      peptidePocketCenter,
+      peptidePocketResidues,
+      peptidePocketBox,
+      peptideDockPocket,
+      leadOptDockPocket,
+      leadOptPocketCenter: readLeadOptText('leadOptPocketCenter', 'lead_opt_pocket_center'),
+      leadOptMode,
+      leadOptBackend,
+      leadOptRounds,
+      leadOptBudgetPerRound,
+      leadOptScaffoldHopRatio,
+      leadOptReferenceSmiles: readLeadOptText('leadOptReferenceSmiles', 'lead_opt_reference_smiles'),
+      leadOptKeepFragmentSmiles: readLeadOptText('leadOptKeepFragmentSmiles', 'lead_opt_keep_fragment_smiles'),
+      leadOptEditAtomIndices: readLeadOptText('leadOptEditAtomIndices', 'lead_opt_edit_atom_indices')
     };
   }
   return {
@@ -668,7 +753,12 @@ function normalizeOptions(value: unknown): PredictionOptions {
     virtualScreeningInputFileName,
     virtualScreeningPredictions,
     affinityMode,
+    affinityDockPocket,
     peptideDesignMode,
+    peptideChirality,
+    peptideStructureUpload: isPeptideStructureUpload(raw.peptideStructureUpload)
+      ? raw.peptideStructureUpload
+      : null,
     peptideBinderLength,
     peptideUseInitialSequence,
     peptideInitialSequence,
@@ -676,7 +766,6 @@ function normalizeOptions(value: unknown): PredictionOptions {
     peptideIterations,
     peptidePopulationSize,
     peptideEliteSize,
-    peptideMutationRate,
     peptideResiduePool,
     peptideNonNaturalMin,
     peptideNonNaturalMax,
@@ -686,7 +775,21 @@ function normalizeOptions(value: unknown): PredictionOptions {
     peptideBicyclicIncludeExtraCys,
     peptideBicyclicCys1Pos,
     peptideBicyclicCys2Pos,
-    peptideBicyclicCys3Pos
+    peptideBicyclicCys3Pos,
+    peptidePocketCenter,
+    peptidePocketResidues,
+    peptidePocketBox,
+    peptideDockPocket,
+    leadOptDockPocket,
+    leadOptPocketCenter: readLeadOptText('leadOptPocketCenter', 'lead_opt_pocket_center'),
+    leadOptMode,
+    leadOptBackend,
+    leadOptRounds,
+    leadOptBudgetPerRound,
+    leadOptScaffoldHopRatio,
+    leadOptReferenceSmiles: readLeadOptText('leadOptReferenceSmiles', 'lead_opt_reference_smiles'),
+    leadOptKeepFragmentSmiles: readLeadOptText('leadOptKeepFragmentSmiles', 'lead_opt_keep_fragment_smiles'),
+    leadOptEditAtomIndices: readLeadOptText('leadOptEditAtomIndices', 'lead_opt_edit_atom_indices')
   };
 }
 

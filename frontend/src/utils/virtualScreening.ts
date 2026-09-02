@@ -314,15 +314,19 @@ export function buildVirtualScreeningYaml(params: {
   proteinSequence?: string;
   rawInput: string;
   batchName?: string;
+  /** The library will be uploaded as a compounds_file part instead of inline YAML. */
+  libraryFromFile?: boolean;
 }): {
   yaml: string;
   compounds: VirtualScreeningCompound[];
   warnings: string[];
   chainPlan: VirtualScreeningChainPlan;
 } {
-  const parsed = parseVirtualScreeningInput(params.rawInput);
+  const parsed = params.libraryFromFile
+    ? { compounds: [] as VirtualScreeningCompound[], warnings: [] as string[], errors: [] as string[] }
+    : parseVirtualScreeningInput(params.rawInput);
   if (parsed.errors.length) throw new Error(parsed.errors.join(' '));
-  if (!parsed.compounds.length) throw new Error('Add at least one compound SMILES before running.');
+  if (!params.libraryFromFile && !parsed.compounds.length) throw new Error('Add at least one compound SMILES before running.');
   const compatibilityProtein = String(params.proteinSequence || '').replace(/\s+/g, '').toUpperCase();
   const components = Array.isArray(params.components) && params.components.length > 0
     ? params.components
@@ -362,18 +366,20 @@ export function buildVirtualScreeningYaml(params: {
       ? { ligand: { id, ccd: value.toUpperCase() } }
       : { ligand: { id, smiles: value } };
   });
-  const payload = {
+  const payload: Record<string, unknown> = {
     version: 1,
-    sequences,
-    virtual_screening: {
+    sequences
+  };
+  if (!params.libraryFromFile) {
+    payload.virtual_screening = {
       name: params.batchName || 'Virtual screening',
       compounds: parsed.compounds.map((compound) => ({
         id: compound.id,
         name: compound.name,
         smiles: compound.smiles
       }))
-    }
-  };
+    };
+  }
   return {
     yaml: yaml.dump(payload, { lineWidth: -1, noRefs: true, sortKeys: false }),
     compounds: parsed.compounds,

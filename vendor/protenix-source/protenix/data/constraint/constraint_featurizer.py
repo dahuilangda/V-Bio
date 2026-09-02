@@ -336,9 +336,13 @@ class ConstraintFeatureGenerator:
             )
             num_binder = binder_asym_id.unique().numel()
             if num_binder == 0:
-                logger.info(f"Binder does not exist. {i},{num_binder}")
+                logger.warning(
+                    f"Binder does not exist for the given binder_chain: {binder}"
+                )
             elif num_binder > 1:
-                logger.info(f"#Binders is more than 1. {i},{num_binder}")
+                logger.warning(
+                    f"Binder chain mask spans {num_binder} asymmetric chains: {binder}"
+                )
             else:
                 binder_token_list = atom_to_token_idx[atom_mask_binder]
 
@@ -358,7 +362,10 @@ class ConstraintFeatureGenerator:
                     pocket_token_list = atom_to_token_idx[atom_mask_pocket]
 
                     if np.size(pocket_token_list) == 0:
-                        logger.info(f"Pocket not found: {i}:{j}")
+                        logger.warning(
+                            f"Pocket residue not found: entity={pocket_res['entity']} "
+                            f"copy={pocket_res['copy']} position={pocket_res['position']}"
+                        )
                         continue
 
                     pocket_specifics.append(

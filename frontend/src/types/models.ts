@@ -6,7 +6,18 @@ export type ProteinModificationTerminal = 'internal' | 'n_term' | 'c_term';
 export type PredictionConstraintType = 'contact' | 'bond' | 'pocket';
 export type PeptideDesignMode = 'linear' | 'cyclic' | 'bicyclic';
 export type PeptideResiduePoolKind = 'natural' | 'preset' | 'custom';
-export type AffinityScoringMode = 'score' | 'pose' | 'refine' | 'interface';
+export type AffinityScoringMode = 'score' | 'pose' | 'refine' | 'interface' | 'dock';
+
+/** Serializable dock-mode pocket definition persisted in inputConfig.options. */
+export interface AffinityDockPocket {
+  centerX: number;
+  centerY: number;
+  centerZ: number;
+  sizeX: number;
+  sizeY: number;
+  sizeZ: number;
+  method: 'residues' | 'manual' | 'ligand';
+}
 
 // Manual backbone atom assignment for a custom non-natural residue, as 0-based RDKit
 // heavy-atom indices — the same index space as the 2D depiction and the backend CCD builder.
@@ -148,26 +159,51 @@ export interface PredictionOptions {
   virtualScreeningInputFileName?: string;
   virtualScreeningPredictions?: Record<string, VirtualScreeningPredictionRecord>;
   affinityMode?: AffinityScoringMode;
+  affinityDockPocket?: AffinityDockPocket | null;
   peptideDesignMode?: PeptideDesignMode;
+  peptideChirality?: 'l' | 'd';
   peptideBinderLength?: number;
+  peptideLengthMin?: number;
+  peptideLengthMax?: number;
   peptideUseInitialSequence?: boolean;
   peptideInitialSequence?: string;
   peptideSequenceMask?: string;
   peptideIterations?: number;
   peptidePopulationSize?: number;
   peptideEliteSize?: number;
-  peptideMutationRate?: number;
   peptideResiduePool?: PeptideResiduePoolSelection[];
   peptideCustomResidueDefinitions?: CustomCcdMoleculeInput[];
   peptideNonNaturalMin?: number;
   peptideNonNaturalMax?: number;
   peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
+  peptideStructureUpload?: {
+    fileName: string;
+    format: 'pdb' | 'cif';
+    content: string;
+    chainId: string;
+  } | null;
   peptideBicyclicCysPositionMode?: 'auto' | 'manual';
   peptideBicyclicFixTerminalCys?: boolean;
   peptideBicyclicIncludeExtraCys?: boolean;
   peptideBicyclicCys1Pos?: number;
   peptideBicyclicCys2Pos?: number;
   peptideBicyclicCys3Pos?: number;
+  peptidePocketCenter?: string;
+  peptidePocketResidues?: string;
+  peptidePocketBox?: number;
+  peptideDockPocket?: AffinityDockPocket | null;
+  /** Lead optimization (HALO): interactive pocket box on the target upload. */
+  leadOptDockPocket?: AffinityDockPocket | null;
+  /** Derived pocket center "x,y,z" submitted with the run (empty = blind). */
+  leadOptPocketCenter?: string;
+  leadOptMode?: 'denovo' | 'fragment' | 'scaffold_hop';
+  leadOptBackend?: 'protenix2dock' | 'boltz2dock' | 'alphafold3';
+  leadOptRounds?: number;
+  leadOptBudgetPerRound?: number;
+  leadOptScaffoldHopRatio?: number;
+  leadOptReferenceSmiles?: string;
+  leadOptKeepFragmentSmiles?: string;
+  leadOptEditAtomIndices?: string;
   lowVram?: boolean;
 }
 
@@ -392,6 +428,8 @@ export interface CopilotPlannerQuestion {
   kind: CopilotQuestionKind;
   options?: CopilotQuestionOption[];
   defaultValue?: string;
+  /** False disables the free-text "Other ___" answer on choice questions. Default: enabled. */
+  allowOther?: boolean;
 }
 
 /**
@@ -459,6 +497,12 @@ export interface PredictionSubmitInput {
   properties?: PredictionProperties;
   peptideDesignOptions?: PredictionOptions;
   peptideDesignTargetChainId?: string | null;
+  peptideStructureUpload?: {
+    fileName: string;
+    format: 'pdb' | 'cif';
+    content: string;
+    chainId: string;
+  } | null;
   seed?: number | null;
   backend: string;
   useMsa: boolean;
@@ -496,6 +540,7 @@ export interface AffinityPreviewPayload {
 }
 
 export interface AffinitySubmitInput {
+  projectId: string;
   inputStructureText: string;
   inputStructureName?: string;
   targetFile?: File | null;
@@ -511,6 +556,7 @@ export interface AffinitySubmitInput {
   affinityRefine?: boolean;
   useMsa?: boolean;
   useTemplate?: boolean;
+  dockPocket?: AffinityDockPocket | null;
 }
 
 export interface TaskStatusResponse {

@@ -74,6 +74,8 @@ export interface PredictionSubmitDeps {
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
   updateProjectTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask>;
+  findProjectTaskByTaskId: (taskId: string, projectId?: string) => Promise<ProjectTask | null>;
+  deleteProjectTask: (taskRowId: string) => Promise<void>;
   sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
   saveProjectInputConfig: (projectId: string, config: ProjectInputConfig) => void;
 }
@@ -154,7 +156,11 @@ function buildQueuedPeptideDesignConfidenceSnapshot(options: ProjectInputConfig[
     requestOptions.peptide_design_mode = designMode;
     peptideDesign.design_mode = designMode;
   }
-  if (typeof options.peptideBinderLength === 'number' && Number.isFinite(options.peptideBinderLength)) {
+  if (typeof options.peptideLengthMin === 'number' && typeof options.peptideLengthMax === 'number') {
+    requestOptions.peptide_length_min = Math.max(0, Math.floor(options.peptideLengthMin));
+    requestOptions.peptide_length_max = Math.max(0, Math.floor(options.peptideLengthMax));
+    peptideDesign.binder_length = options.peptideLengthMax;
+  } else if (typeof options.peptideBinderLength === 'number' && Number.isFinite(options.peptideBinderLength)) {
     requestOptions.peptide_binder_length = options.peptideBinderLength;
     peptideDesign.binder_length = Math.max(0, Math.floor(options.peptideBinderLength));
   }
@@ -171,10 +177,6 @@ function buildQueuedPeptideDesignConfidenceSnapshot(options: ProjectInputConfig[
   if (typeof options.peptideEliteSize === 'number' && Number.isFinite(options.peptideEliteSize)) {
     requestOptions.peptide_elite_size = options.peptideEliteSize;
     peptideDesign.elite_size = Math.max(0, Math.floor(options.peptideEliteSize));
-  }
-  if (typeof options.peptideMutationRate === 'number' && Number.isFinite(options.peptideMutationRate)) {
-    requestOptions.peptide_mutation_rate = options.peptideMutationRate;
-    peptideDesign.mutation_rate = options.peptideMutationRate;
   }
 
   peptideDesign.current_status = 'queued';
@@ -288,12 +290,21 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     persistDraftTaskSnapshot,
     resolveEditableDraftTaskRowId,
     rememberTemplatesForTaskRow,
+    findProjectTaskByTaskId,
+    deleteProjectTask,
     patch,
     patchTask,
     updateProjectTask,
     sortProjectTasks,
     saveProjectInputConfig
   } = deps;
+  // In-flight guard BEFORE any await: the async validations below (RDKit load on first
+  // submit) opened a double-submit window — a second click passed runControls' check and
+  // queued two backend tasks.
+  // In-flight guard BEFORE any await (the async validations below opened a double-submit
+  // window); the function's own finally resets it.
+  if (submitInFlightRef.current) return;
+  submitInFlightRef.current = true;
 
   const effectiveBackend = isVirtualScreeningWorkflow ? 'nesso' : draft.backend;
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, effectiveBackend);
@@ -524,6 +535,9 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       properties: submissionConfig.properties,
       peptideDesignOptions: isPeptideDesignWorkflow ? submissionConfig.options : undefined,
       peptideDesignTargetChainId: isPeptideDesignWorkflow ? submissionConfig.properties.target : null,
+      peptideStructureUpload: isPeptideDesignWorkflow
+        ? (submissionConfig.options as { peptideStructureUpload?: Parameters<typeof submitPrediction>[0]['peptideStructureUpload'] }).peptideStructureUpload ?? null
+        : null,
       seed: submissionConfig.options.seed,
       backend: effectiveBackend,
       useMsa: hasMsa,
@@ -580,15 +594,36 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
         setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row))));
       }
     } catch (taskPersistError) {
-      // The backend task was queued but the local DB row couldn't be persisted — terminate the
-      // orphaned backend task so it doesn't waste GPU compute. Fire-and-forget: the primary error
-      // is the persist failure, which the caller must handle; the termination is best-effort cleanup.
-      terminateTask(taskId).catch(() => { /* ignore termination errors */ });
-      throw new Error(
-        `Task submitted (${taskId}) but failed to persist queued task row: ${
-          taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
-        }`
-      );
+      // Unique task_id conflict: the gateway's submit snapshot already claimed this task_id
+      // (it inserts a backfill row right after the runtime accepts the task). One runtime
+      // task is exactly one row — adopt the existing row (it carries the user's name and
+      // full input now) and drop the local draft row, instead of failing a submit that the
+      // runtime already queued.
+      const conflictMessage = taskPersistError instanceof Error ? taskPersistError.message : String(taskPersistError);
+      const isUniqueConflict = /PostgREST 409|23505|duplicate key|unique_project_tasks_task_id/i.test(conflictMessage);
+      if (isUniqueConflict) {
+        const existingRow = await findProjectTaskByTaskId(taskId, project.id);
+        if (existingRow && existingRow.id !== draftTaskRow.id) {
+          const adoptedRow = await updateProjectTask(existingRow.id, queuedTaskPatch);
+          await deleteProjectTask(draftTaskRow.id).catch(() => { /* the draft row is redundant; deletion is best-effort */ });
+          setProjectTasks((prev) => sortProjectTasks([
+            adoptedRow,
+            ...prev.filter((row) => row.id !== adoptedRow.id && row.id !== draftTaskRow.id)
+          ]));
+        } else {
+          throw taskPersistError;
+        }
+      } else {
+        // The backend task was queued but the local DB row couldn't be persisted — terminate the
+        // orphaned backend task so it doesn't waste GPU compute. Fire-and-forget: the primary error
+        // is the persist failure, which the caller must handle; the termination is best-effort cleanup.
+        terminateTask(taskId).catch(() => { /* ignore termination errors */ });
+        throw new Error(
+          `Task submitted (${taskId}) but failed to persist queued task row: ${
+            taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
+          }`
+        );
+      }
     }
 
     const dbPayload: Partial<Project> = {
@@ -642,3 +677,4 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     setSubmitting(false);
   }
 }
+

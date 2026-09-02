@@ -13,33 +13,36 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     "alphafold3",
     "protenix",
     "nesso",
-    "pocketxmol",
     "boltz2score",
     "lead_opt",
     "peptide_design",
+    "export",
 )
 
 GPU_CAPABILITIES = {
     "boltz2",
     "alphafold3",
     "protenix",
+    "protenix2dock",
     "nesso",
-    "pocketxmol",
     "boltz2score",
 }
-CPU_CAPABILITIES = {"lead_opt", "peptide_design"}
+CPU_CAPABILITIES = {"lead_opt", "peptide_design", "export"}
 
 _CAPABILITY_ALIASES = {
     "boltz": "boltz2",
     "boltz2": "boltz2",
+    "boltz2dock": "boltz2",
+    "boltz-2-dock": "boltz2",
     "predict_boltz": "boltz2",
     "alphafold3": "alphafold3",
     "af3": "alphafold3",
     "protenix": "protenix",
+    "protenix2dock": "protenix2dock",
+    "p2d": "protenix2dock",
     "nesso": "nesso",
     "nesso1": "nesso",
     "nesso-1": "nesso",
-    "pocketxmol": "pocketxmol",
     "affinity": "boltz2score",
     "boltz2score": "boltz2score",
     "score": "boltz2score",
@@ -47,12 +50,20 @@ _CAPABILITY_ALIASES = {
     "leadopt": "lead_opt",
     "lead-optimization": "lead_opt",
     "lead_optimization": "lead_opt",
-    "mmp": "lead_opt",
     "peptide_design": "peptide_design",
     "peptide-design": "peptide_design",
     "peptide": "peptide_design",
     "peptide_designer": "peptide_design",
     "designer": "peptide_design",
+    "export": "export",
+    "excel_export": "export",
+    "tasks_excel_export": "export",
+}
+
+# protenix2dock runs on the protenix worker (same runtime image); its tasks
+# consume the existing cap.protenix.* queues so the worker needs no env change.
+_CAPABILITY_QUEUE_HOST = {
+    "protenix2dock": "protenix",
 }
 
 _GROUP_ALIASES = {
@@ -64,8 +75,8 @@ _GROUP_ALIASES = {
 _PREDICT_BACKEND_RE = re.compile(r"""["']backend["']\s*:\s*["']([a-zA-Z0-9_\-]+)["']""")
 _TASK_NAME_CAPABILITY_FALLBACK = {
     "boltz2score_task": "boltz2score",
-    "lead_optimization_mmp_query_task": "lead_opt",
-    "lead_optimization_task": "lead_opt",
+    "lead_optimization_halo_task": "lead_opt",
+    "export_tasks_excel_task": "export",
 }
 _MAX_TASK_DETAILS_PER_WORKER = 128
 _MAX_TASK_DETAILS_PER_CAPABILITY = 256
@@ -189,7 +200,10 @@ def normalize_capability(capability: str | None) -> str | None:
 
 def capability_from_prediction_backend(backend: str | None) -> str:
     normalized = normalize_capability(str(backend or "").strip().lower())
-    if normalized in {"boltz2", "alphafold3", "protenix", "nesso", "pocketxmol"}:
+    if normalized in {"boltz2", "alphafold3", "protenix", "nesso",
+                      "protenix2dock"}:
+        # protenix2dock parents (D-peptide loop) run on the protenix worker,
+        # which has the docker CLI for its conformer sub-steps.
         return normalized
     return "boltz2"
 
@@ -293,9 +307,10 @@ def resolve_queue_for_capability(
             "checked_queues": [],
         }
 
-    preferred_queues: list[str] = [build_capability_queue(normalized_capability, normalized_priority)]
+    queue_capability = _CAPABILITY_QUEUE_HOST.get(normalized_capability, normalized_capability)
+    preferred_queues: list[str] = [build_capability_queue(queue_capability, normalized_priority)]
     if normalized_priority == "high":
-        preferred_queues.append(build_capability_queue(normalized_capability, "default"))
+        preferred_queues.append(build_capability_queue(queue_capability, "default"))
 
     for queue_name in preferred_queues:
         if has_worker_for_queue_fn(queue_name):

@@ -87,15 +87,44 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   const structureText = String(input.inputStructureText || '').trim();
   const targetFile = input.targetFile instanceof File ? input.targetFile : null;
   const ligandFile = input.ligandFile instanceof File ? input.ligandFile : null;
-  const useSeparateBoltzInputs = Boolean(targetFile && ligandFile);
+  const modeToken = String(input.mode || '').trim().toLowerCase();
+  const affinityMode =
+    modeToken === 'score' || modeToken === 'pose' || modeToken === 'refine' || modeToken === 'interface' || modeToken === 'dock'
+      ? modeToken
+      : 'dock';
+  const isDockMode = affinityMode === 'dock';
+  const useSeparateBoltzInputs = Boolean(targetFile && (ligandFile || (isDockMode && Boolean(String(input.ligandSmiles || '').trim()))));
   if (!useSeparateBoltzInputs && !structureText) {
-    throw new Error('Affinity scoring requires a prepared input structure.');
+    throw new Error('The docking run requires a prepared input structure.');
   }
   const normalizedSeed =
     typeof input.seed === 'number' && Number.isFinite(input.seed) ? Math.max(0, Math.floor(input.seed)) : null;
+  const projectId = String(input.projectId || '').trim();
+  if (!projectId) {
+    throw new Error('Submitting requires the project id — the gateway rejects submits without it.');
+  }
 
   const form = new FormData();
-  if (useSeparateBoltzInputs && targetFile && ligandFile) {
+  form.append('project_id', projectId);
+  if (isDockMode && targetFile) {
+    const dockSmiles = String(input.ligandSmiles || '').trim();
+    if (!dockSmiles) {
+      throw new Error('Dock mode requires a ligand SMILES.');
+    }
+    const pocket = input.dockPocket || null;
+    if (!pocket) {
+      throw new Error('Dock mode requires a pocket box (pick residues, set a center, or upload a reference ligand).');
+    }
+    form.append('protein_file', targetFile);
+    form.append('ligand_smiles', dockSmiles);
+    form.append('ligand_filename', 'ligand_from_smiles.sdf');
+    form.append('center_x', String(pocket.centerX));
+    form.append('center_y', String(pocket.centerY));
+    form.append('center_z', String(pocket.centerZ));
+    form.append('size_x', String(pocket.sizeX));
+    form.append('size_y', String(pocket.sizeY));
+    form.append('size_z', String(pocket.sizeZ));
+  } else if (useSeparateBoltzInputs && targetFile && ligandFile) {
     form.append('protein_file', targetFile);
     form.append('ligand_file', ligandFile);
   } else {
@@ -122,16 +151,19 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
     }
   }
 
-  const enableAffinity = Boolean(input.enableAffinity);
-  const normalizedMode = input.mode === 'pose' || input.mode === 'refine' || input.mode === 'interface' ? input.mode : 'score';
+  const enableAffinity = input.enableAffinity;
   const computeIpsae = input.computeIpsae !== false;
-  form.append('mode', normalizedMode);
+  form.append('mode', affinityMode);
+  // backend routes /api/boltz2score to the boltz2score (default) or the
+  // protenix2dock engine (backend=protenix) — same five-mode semantics.
+  const normalizedBackend = String(input.backend || '').trim().toLowerCase();
+  form.append('backend', normalizedBackend === 'protenix' || normalizedBackend === 'protenix2dock' || normalizedBackend === 'p2d' ? 'protenix' : 'boltz');
   if (computeIpsae) {
     form.append('compute_ipsae', 'true');
   }
   if (enableAffinity) {
     if (!targetChainIds.length || !ligandChainId || !ligandSmiles) {
-      throw new Error('Affinity mode needs target chain(s), ligand chain, and ligand SMILES.');
+      throw new Error('Affinity activity needs target chain(s), ligand chain, and ligand SMILES.');
     }
     form.append('enable_affinity', 'true');
   }
@@ -144,9 +176,7 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   const useMsaServer = input.useMsa === true;
   form.append('use_msa_server', String(useMsaServer).toLowerCase());
   form.append('priority', 'high');
-  const endpoint = '/api/boltz2score';
-
-  const res = await requestBackend(endpoint, {
+  const res = await requestBackend('/api/boltz2score', {
     method: 'POST',
     headers: {
       ...API_HEADERS,
@@ -157,7 +187,7 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to submit affinity scoring (${res.status}): ${text}`);
+    throw new Error(`Failed to submit the docking run (${res.status}): ${text}`);
   }
 
   const data = (await res.json()) as { task_id?: string };

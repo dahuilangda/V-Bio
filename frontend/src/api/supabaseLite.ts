@@ -1,5 +1,4 @@
 import type {
-  ApiToken,
   ApiTokenUsage,
   ApiTokenUsageDaily,
   AppUser,
@@ -165,10 +164,12 @@ function _requireSingleRow<T>(rows: T[]): T {
 async function listUsersByIds(userIds: string[]): Promise<AppUser[]> {
   const idFilter = buildInFilter(userIds);
   if (!idFilter) return [];
+  // No deleted_at filter here on purpose: the app_users_anon_display RLS policy enforces
+  // `deleted_at IS NULL` server-side, and anonymous callers hold no SELECT grant on that
+  // column — filtering on it locally would fail with permission denied.
   return request<AppUser[]>('/app_users', undefined, {
-    select: 'id,username,name,email,is_admin,last_login_at,deleted_at,created_at,updated_at,password_hash',
-    id: idFilter,
-    deleted_at: 'is.null'
+    select: 'id,username,name,avatar_url,created_at,last_login_at',
+    id: idFilter
   });
 }
 
@@ -257,18 +258,6 @@ function normalizeProjectRow(row: Partial<Project>): Project {
   } as Project;
 }
 
-function applyProjectAccess(project: Project, access: { scope: ProjectAccessScope; taskIds: string[]; editableTaskIds?: string[]; accessLevel: EffectiveAccessLevel }): Project {
-  const nextAccessibleTaskIds = access.scope === 'task_share' ? access.taskIds : [];
-  const nextEditableTaskIds = access.editableTaskIds || [];
-  return {
-    ...project,
-    access_scope: access.scope,
-    access_level: access.accessLevel,
-    accessible_task_ids: nextAccessibleTaskIds,
-    editable_task_ids: nextEditableTaskIds
-  };
-}
-
 function applyTaskAccess(
   task: ProjectTask,
   scope: ProjectAccessScope,
@@ -324,96 +313,11 @@ export function sanitizeProjectForTaskShare(project: Project, tasks: ProjectTask
   };
 }
 
-export async function listUsers(): Promise<AppUser[]> {
-  return request<AppUser[]>('/app_users', undefined, {
-    select: '*',
-    deleted_at: 'is.null',
-    order: 'created_at.asc'
-  });
-}
-
-export async function findUserByUsername(username: string): Promise<AppUser | null> {
-  const rows = await request<AppUser[]>('/app_users', undefined, {
-    select: '*',
-    username: `eq.${username.toLowerCase()}`,
-    deleted_at: 'is.null',
-    limit: '1'
-  });
-  return rows[0] || null;
-}
-
-export async function searchUsersForSharing(
-  queryText: string,
-  options?: { excludeUserId?: string | null; limit?: number }
-): Promise<AppUser[]> {
-  const normalizedQuery = String(queryText || '').trim().toLowerCase();
-  if (normalizedQuery.length < 2) return [];
-  const rows = await request<AppUser[]>('/app_users', undefined, {
-    select: 'id,username,name,email,is_admin,last_login_at,deleted_at,created_at,updated_at,password_hash',
-    username: `ilike.*${normalizedQuery}*`,
-    deleted_at: 'is.null',
-    order: 'username.asc',
-    limit: String(Math.max(1, Math.min(12, Number(options?.limit || 8))))
-  });
-  const excludeUserId = String(options?.excludeUserId || '').trim();
-  return rows.filter((row) => String(row.id || '').trim() !== excludeUserId);
-}
-
-export async function findUserByEmail(email: string): Promise<AppUser | null> {
-  const rows = await request<AppUser[]>('/app_users', undefined, {
-    select: '*',
-    email: `eq.${email.toLowerCase()}`,
-    deleted_at: 'is.null',
-    limit: '1'
-  });
-  return rows[0] || null;
-}
-
-export async function findUserByIdentifier(identifier: string): Promise<AppUser | null> {
-  const value = identifier.trim().toLowerCase();
-  const rows = await request<AppUser[]>('/app_users', undefined, {
-    select: '*',
-    or: `(username.eq.${value},email.eq.${value})`,
-    deleted_at: 'is.null',
-    limit: '1'
-  });
-  return rows[0] || null;
-}
-
-export async function insertUser(input: Partial<AppUser>): Promise<AppUser> {
-  const rows = await request<AppUser[]>(
-    '/app_users',
-    {
-      method: 'POST',
-      headers: {
-        Prefer: 'return=representation'
-      },
-      body: JSON.stringify(input)
-    },
-    {
-      select: '*'
-    }
-  );
-  return _requireSingleRow(rows);
-}
-
-export async function updateUser(userId: string, patch: Partial<AppUser>): Promise<AppUser> {
-  const rows = await request<AppUser[]>(
-    '/app_users',
-    {
-      method: 'PATCH',
-      headers: {
-        Prefer: 'return=representation'
-      },
-      body: JSON.stringify(patch)
-    },
-    {
-      id: `eq.${userId}`,
-      select: '*'
-    }
-  );
-  return _requireSingleRow(rows);
-}
+// app_users access note: since the F2 lockdown the anonymous role holds SELECT grants on
+// display columns only, and all user reads/writes beyond listUsersByIds go through the
+// management API's server-side endpoints (see api/authServerApi.ts). The former client-side
+// list/find/insert/update helpers were removed — keeping them would invite 401s (permission
+// denied for table app_users) if anything ever called them again.
 
 interface ListProjectsOptions {
   userId?: string;
@@ -624,79 +528,6 @@ export async function getProjectAccessInfo(
   return { scope: null, accessLevel: null, taskIds: [], editableTaskIds: [] };
 }
 
-export async function listAccessibleProjects(
-  userId: string,
-  options: ListProjectsOptions = {}
-): Promise<Project[]> {
-  const normalizedUserId = String(userId || '').trim();
-  if (!normalizedUserId) return [];
-
-  const [ownedProjects, projectShareLinks, taskShareLinks] = await Promise.all([
-    listProjects({
-      ...options,
-      userId: normalizedUserId
-    }),
-    listProjectShareLinksForUser(normalizedUserId),
-    listProjectTaskShareLinksForUser(normalizedUserId)
-  ]);
-
-  const ownedIds = new Set(ownedProjects.map((project) => String(project.id || '').trim()).filter(Boolean));
-  const projectShareByProjectId = new Map(
-    projectShareLinks
-      .map((row) => [String(row.project_id || '').trim(), normalizeShareAccessLevel(row.access_level)] as const)
-      .filter(([projectId]) => Boolean(projectId))
-  );
-  const taskShareIdsByProject = new Map<string, string[]>();
-  const editableTaskIdsByProject = new Map<string, string[]>();
-  for (const row of taskShareLinks) {
-    const projectId = String(row.project_id || '').trim();
-    const taskId = String(row.project_task_id || '').trim();
-    if (!projectId || !taskId) continue;
-    const current = taskShareIdsByProject.get(projectId) || [];
-    current.push(taskId);
-    taskShareIdsByProject.set(projectId, current);
-    if (normalizeShareAccessLevel(row.access_level) === 'editor') {
-      const editable = editableTaskIdsByProject.get(projectId) || [];
-      editable.push(taskId);
-      editableTaskIdsByProject.set(projectId, editable);
-    }
-  }
-
-  const sharedProjectIds = Array.from(
-    new Set([
-      ...Array.from(projectShareByProjectId.keys()),
-      ...Array.from(taskShareIdsByProject.keys())
-    ])
-  ).filter((id) => !ownedIds.has(id));
-
-  const sharedProjects = await listProjectsByIds(sharedProjectIds, { lightweight: options.lightweight });
-  const sharedById = new Map(sharedProjects.map((project) => [project.id, project] as const));
-
-  const rows: Project[] = [];
-  for (const project of ownedProjects) {
-    rows.push(applyProjectAccess(project, { scope: 'owner', taskIds: [], editableTaskIds: [], accessLevel: 'owner' }));
-  }
-  for (const projectId of sharedProjectIds) {
-    const project = sharedById.get(projectId);
-    if (!project) continue;
-    const taskIds = Array.from(new Set(taskShareIdsByProject.get(projectId) || []));
-    const editableTaskIds = Array.from(new Set(editableTaskIdsByProject.get(projectId) || []));
-    const projectShareLevel = projectShareByProjectId.get(projectId);
-    const scope: ProjectAccessScope = projectShareLevel ? 'project_share' : 'task_share';
-    rows.push(
-      applyProjectAccess(project, {
-        scope,
-        taskIds,
-        editableTaskIds,
-        accessLevel: projectShareLevel ? toEffectiveAccessLevel(projectShareLevel) : editableTaskIds.length > 0 ? 'editor' : 'viewer'
-      })
-    );
-  }
-
-  rows.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-  return rows;
-}
-
 export async function insertProject(input: Partial<Project>): Promise<Project> {
   const rows = await request<Project[]>(
     '/projects',
@@ -739,18 +570,44 @@ interface ProjectTaskAccessOptions {
   editableTaskIds?: string[];
 }
 
-export async function listProjectTasks(projectId: string, options?: ProjectTaskAccessOptions): Promise<ProjectTask[]> {
+/**
+ * Precise task-row count for a project in one cheap request
+ * (PostgREST `Prefer: count=exact` + limit=1 → Content-Range). Used by the
+ * Excel export to know the full total before the paginated task list has
+ * finished loading in the background. Throws on failure — callers must not
+ * silently substitute an estimate.
+ */
+export async function countProjectTasks(
+  projectId: string,
+  options?: ProjectTaskAccessOptions
+): Promise<number> {
   const taskIdFilter = buildInFilter(options?.taskRowIds || []);
-  const rows = await request<ProjectTask[]>('/project_tasks', undefined, {
-    select: '*',
+  const candidates = buildSupabaseUrlCandidates('/project_tasks', {
+    select: 'id',
     project_id: `eq.${projectId}`,
     ...(taskIdFilter ? { id: taskIdFilter } : {}),
-    order: 'created_at.desc'
+    limit: '1'
   });
-  const scope = options?.accessScope || 'owner';
-  const accessLevel = options?.accessLevel || (scope === 'owner' ? 'owner' : 'viewer');
-  const editableTaskIdSet = buildEditableTaskIdSet(options?.editableTaskIds || []);
-  return rows.map((row) => applyTaskAccess(row, scope, accessLevel, editableTaskIdSet));
+  let lastFailure: Error | null = null;
+  for (const url of candidates) {
+    try {
+      const res = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { 'Prefer': 'count=exact' }
+      });
+      if (!res.ok) {
+        lastFailure = new Error(`Task count request failed (${res.status}).`);
+        continue;
+      }
+      const range = res.headers.get('Content-Range') || '';
+      const total = Number.parseInt(range.split('/')[1] || '', 10);
+      if (Number.isFinite(total)) return total;
+      lastFailure = new Error('Task count response did not include a usable Content-Range header.');
+    } catch (error) {
+      lastFailure = error instanceof Error ? error : new Error('Unknown network error');
+    }
+  }
+  throw lastFailure || new Error('Task count request failed.');
 }
 
 export async function listProjectTasksCompact(
@@ -851,6 +708,9 @@ export async function listProjectTasksForList(
     'backend',
     'seed',
     'ligand_smiles',
+    // Small scalar jsonb; the Excel export reads it from the already-loaded rows
+    // so the worker does not have to open every result archive for it.
+    'affinity',
     ...(includePropertiesSummary
       ? [
           'properties_target:properties->>target',
@@ -1856,29 +1716,6 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
   return results.flat();
 }
 
-export async function listRuntimeCandidateProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
-  const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
-  if (normalizedIds.length === 0) return [];
-
-  const chunkSize = 150;
-  const chunks: string[][] = [];
-  for (let i = 0; i < normalizedIds.length; i += chunkSize) {
-    chunks.push(normalizedIds.slice(i, i + chunkSize));
-  }
-
-  const results = await Promise.all(
-    chunks.map((chunk) =>
-      request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
-        select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
-        project_id: `in.(${chunk.join(',')})`,
-        task_id: 'neq.',
-        completed_at: 'is.null'
-      })
-    )
-  );
-  return results.flat();
-}
-
 export async function listProjectTaskCountsByProjects(projectIds: string[]): Promise<Map<string, ProjectTaskCounts>> {
   const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) return new Map();
@@ -2022,16 +1859,6 @@ export async function findProjectTaskByTaskId(taskId: string, projectId?: string
   }
   const rows = await request<ProjectTask[]>('/project_tasks', undefined, query);
   return rows[0] || null;
-}
-
-export async function updateProjectTaskByTaskId(
-  taskId: string,
-  patch: Partial<ProjectTask>,
-  projectId?: string
-): Promise<ProjectTask | null> {
-  const current = await findProjectTaskByTaskId(taskId, projectId);
-  if (!current) return null;
-  return updateProjectTask(current.id, patch);
 }
 
 export async function deleteProjectTask(taskRowId: string): Promise<void> {
@@ -2621,7 +2448,13 @@ export async function insertProjectCopilotMessage(input: {
       },
       { select: '*' }
     );
-    const row = normalizeProjectCopilotMessage(rows[0] || {});
+    // A 2xx with an EMPTY body (proxy stripped Prefer, RLS blocked representation) must not
+    // produce an id-less row (breaks React keys, skips deletion) — treat it as the local path.
+    const returned = rows.length > 0 ? rows[0] : null;
+    if (!returned || !String((returned as unknown as Record<string, unknown>).id || '').trim()) {
+      throw new Error('project_copilot_messages insert returned no row');
+    }
+    const row = normalizeProjectCopilotMessage(returned);
     const key = copilotLocalStorageKey({
       contextType,
       projectId: input.projectId || null,
@@ -2632,7 +2465,10 @@ export async function insertProjectCopilotMessage(input: {
     writeLocalRows(key, [...readLocalRows<ProjectCopilotMessage>(key), row]);
     return row;
   } catch (error) {
-    if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
+    if (
+      !isMissingRelationError(error, 'project_copilot_messages') &&
+      !/returned no row/.test(String((error as Error)?.message || ''))
+    ) throw error;
     const now = new Date().toISOString();
     const row = normalizeProjectCopilotMessage({
       id: createLocalId('copilot'),
@@ -2915,97 +2751,9 @@ export async function listOutgoingTaskShares(userId: string): Promise<ProjectTas
   });
 }
 
-export async function listApiTokens(userId: string): Promise<ApiToken[]> {
-  const normalizedUserId = String(userId || '').trim();
-  if (!normalizedUserId) return [];
-  return request<ApiToken[]>('/api_tokens', undefined, {
-    select: '*',
-    user_id: `eq.${normalizedUserId}`,
-    order: 'created_at.desc'
-  });
-}
-
-export async function findApiTokenByHash(tokenHash: string): Promise<ApiToken | null> {
-  const normalizedHash = String(tokenHash || '').trim();
-  if (!normalizedHash) return null;
-  const rows = await request<ApiToken[]>('/api_tokens', undefined, {
-    select: '*',
-    token_hash: `eq.${normalizedHash}`,
-    limit: '1'
-  });
-  return rows[0] || null;
-}
-
-export async function insertApiToken(input: Partial<ApiToken>): Promise<ApiToken> {
-  const rows = await request<ApiToken[]>(
-    '/api_tokens',
-    {
-      method: 'POST',
-      headers: {
-        Prefer: 'return=representation'
-      },
-      body: JSON.stringify(input)
-    },
-    {
-      select: '*'
-    }
-  );
-  return _requireSingleRow(rows);
-}
-
-export async function updateApiToken(tokenId: string, patch: Partial<ApiToken>): Promise<ApiToken> {
-  const rows = await request<ApiToken[]>(
-    '/api_tokens',
-    {
-      method: 'PATCH',
-      headers: {
-        Prefer: 'return=representation'
-      },
-      body: JSON.stringify(patch)
-    },
-    {
-      id: `eq.${tokenId}`,
-      select: '*'
-    }
-  );
-  return _requireSingleRow(rows);
-}
-
-export async function revokeApiToken(tokenId: string): Promise<ApiToken> {
-  return updateApiToken(tokenId, {
-    is_active: false,
-    revoked_at: new Date().toISOString()
-  });
-}
-
-export async function deleteApiToken(tokenId: string): Promise<void> {
-  await request<ApiToken[]>(
-    '/api_tokens',
-    {
-      method: 'DELETE',
-      headers: {
-        Prefer: 'return=minimal'
-      }
-    },
-    {
-      id: `eq.${tokenId}`
-    }
-  );
-}
-
-export async function listApiTokenUsage(tokenId: string, sinceIso?: string): Promise<ApiTokenUsage[]> {
-  const normalizedTokenId = String(tokenId || '').trim();
-  if (!normalizedTokenId) return [];
-  const query: Record<string, string | undefined> = {
-    select: '*',
-    token_id: `eq.${normalizedTokenId}`,
-    order: 'created_at.desc'
-  };
-  if (sinceIso?.trim()) {
-    query.created_at = `gte.${sinceIso.trim()}`;
-  }
-  return request<ApiTokenUsage[]>('/api_token_usage', undefined, query);
-}
+// api_tokens CRUD lives server-side (api/authServerApi.ts) since the F2 lockdown — the
+// anonymous role has zero access to that table, so client-side helpers were removed.
+// Only usage-log reads remain here (api_token_usage keeps anonymous read access).
 
 function parseTotalFromContentRange(value: string | null): number {
   if (!value) return 0;

@@ -22,7 +22,6 @@ interface RunFeedbackOverlaysProps {
 export function RunFeedbackOverlays({
   runSuccessNotice,
   onOpenTaskHistory,
-  isRunRedirecting,
   showQuickRunFab,
   onRunAction,
   runDisabled,
@@ -46,17 +45,6 @@ export function RunFeedbackOverlays({
             <button type="button" className="run-inline-toast-link" onClick={onOpenTaskHistory}>
               Tasks
             </button>
-          </div>
-        </div>
-      )}
-
-      {isRunRedirecting && (
-        <div className="run-submit-transition" role="status" aria-live="polite" aria-label="Task submitted, opening task history">
-          <div className="run-submit-transition-card">
-            <span className="run-submit-transition-icon" aria-hidden="true">
-              <CheckCircle2 size={15} />
-            </span>
-            <span className="run-submit-transition-title">Task queued. Opening Tasks...</span>
           </div>
         </div>
       )}

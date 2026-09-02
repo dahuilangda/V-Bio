@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
+import zipfile
 from typing import Any, Callable, Dict
 
 from celery.result import AsyncResult
 from flask import jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
+
+# A 200-compound screening ranking is a few hundred KB; 32 MB leaves orders of magnitude
+# of headroom while bounding decompression of a crafted archive member.
+SCREENING_JSON_MAX_BYTES = 32 * 1024 * 1024
 
 
 def register_task_routes(
@@ -208,11 +214,13 @@ def register_task_routes(
         return response
 
     @app.route('/status/<task_id>', methods=['GET'])
+    @require_api_token
     def get_task_status(task_id):
         logger.debug('Received status request for task ID: %s', task_id)
         return jsonify(build_task_status_response(task_id))
 
     @app.route('/status/batch', methods=['POST'])
+    @require_api_token
     def get_task_status_batch():
         payload = request.get_json(silent=True) or {}
         task_ids_input = payload.get('task_ids')
@@ -230,6 +238,7 @@ def register_task_routes(
         })
 
     @app.route('/results/<task_id>', methods=['GET'])
+    @require_api_token
     def download_results(task_id):
         logger.info('Received download request for task ID: %s', task_id)
         try:
@@ -257,6 +266,7 @@ def register_task_routes(
         )
 
     @app.route('/results/<task_id>/view', methods=['GET'])
+    @require_api_token
     def download_results_view(task_id):
         logger.info('Received view download request for task ID: %s', task_id)
         try:
@@ -291,8 +301,66 @@ def register_task_routes(
             mimetype='application/zip',
         )
 
+    @app.route('/results/<task_id>/screening', methods=['GET'])
+    @require_api_token
+    def get_screening_results(task_id):
+        logger.info('Received screening-results request for task ID: %s', task_id)
+        try:
+            _, filepath = resolve_result_archive_path(task_id)
+        except FileNotFoundError as exc:
+            task_result = AsyncResult(task_id, app=celery_app)
+            logger.warning('Failed to resolve results for task %s: %s', task_id, exc)
+            return jsonify({'error': str(exc), 'state': task_result.state}), 404
+        except PermissionError as exc:
+            logger.error('Invalid result path for task %s: %s', task_id, exc)
+            return jsonify({'error': 'Invalid file path detected.'}), 400
+        except Exception as exc:
+            logger.exception('Unexpected error while resolving results for task %s: %s', task_id, exc)
+            return jsonify({'error': f'Failed to resolve result archive: {exc}'}), 500
+
+        try:
+            with zipfile.ZipFile(filepath) as archive:
+                member = next(
+                    (name for name in archive.namelist() if name.lower() == 'nesso/screening.json'),
+                    None,
+                )
+                if member is None:
+                    return jsonify({
+                        'error': 'Result archive does not contain nesso/screening.json; only virtual-screening tasks produce a screening ranking.',
+                    }), 404
+                # Cap the decompressed member size: archives are uploaded compressed, and a
+                # crafted member could otherwise decompress to gigabytes in memory.
+                if archive.getinfo(member).file_size > SCREENING_JSON_MAX_BYTES:
+                    logger.error(
+                        'nesso/screening.json for task %s exceeds %d bytes.',
+                        task_id,
+                        SCREENING_JSON_MAX_BYTES,
+                    )
+                    return jsonify({'error': 'nesso/screening.json is too large to serve.'}), 500
+                screening = json.loads(archive.read(member).decode('utf-8'))
+        except zipfile.BadZipFile as exc:
+            logger.error('Result archive for task %s is not a valid ZIP: %s', task_id, exc)
+            return jsonify({'error': 'Result archive is not a valid ZIP file.'}), 500
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.error('Invalid screening JSON in results for task %s: %s', task_id, exc)
+            return jsonify({'error': f'Failed to parse nesso/screening.json: {exc}'}), 500
+        except Exception as exc:
+            logger.exception('Unexpected error while reading screening results for task %s: %s', task_id, exc)
+            return jsonify({'error': f'Failed to read screening results: {exc}'}), 500
+
+        if not isinstance(screening, dict) or not isinstance(screening.get('compounds'), list):
+            return jsonify({'error': 'nesso/screening.json must be an object with a compounds array.'}), 500
+
+        response = jsonify(screening)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
     @app.route('/upload_result/<task_id>', methods=['POST'])
+    @require_api_token
     def upload_result_from_worker(task_id):
+        # Authenticated (worker sends X-API-Token=BOLTZ_API_TOKEN): unauthenticated, any
+        # caller could POST '<task_id>_results.zip' and flip a QUEUED task to SUCCESS with
+        # forged metrics via the archive-presence inference.
         logger.info('Received file upload request from worker for task ID: %s', task_id)
 
         if 'file' not in request.files:

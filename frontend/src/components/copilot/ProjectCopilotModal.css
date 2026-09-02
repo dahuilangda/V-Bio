@@ -8,8 +8,8 @@
   right: 24px;
   bottom: 24px;
   z-index: 90;
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   border: 1px solid #c6d7ce;
   border-radius: 50%;
   background: #fff;
@@ -25,6 +25,16 @@
 
 .copilot-launcher:hover {
   background: #f6faf8;
+}
+
+/* Mobile: align the launcher with the run FAB stacked above it (same right inset, same edge
+   rhythm). Without this the run FAB's 14px mobile inset left the two floating buttons 10px
+   apart horizontally — visibly misaligned. */
+@media (max-width: 760px) {
+  .copilot-launcher {
+    right: 14px;
+    bottom: max(24px, calc(env(safe-area-inset-bottom) + 20px));
+  }
 }
 
 .copilot-floating-panel {
@@ -545,6 +555,16 @@
   padding-right: 2px;
 }
 
+/* Deterministic honesty line above the pending card: whatever the assistant message above
+ * says, this step has NOT executed. Muted small text, matching .copilot-question-hint. No
+ * extra margin — the parent grid's gap already sets the rhythm. */
+.copilot-chat-window .copilot-plan-pending-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 /* A confirmation step: a horizontal row with the step content on the left and a per-step Apply
  * button on the right. Keeps the minimal pale-sage palette; the visible Apply label makes each step
  * independently confirmable (the old card was a single opaque button with no affordance). */
@@ -912,41 +932,6 @@
 }
 
 /* Voice input button — kept for the listening animation if used inline elsewhere. */
-.copilot-voice-btn {
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 50%;
-  background: #f2f6f3;
-  color: #294b3d;
-  display: inline-grid;
-  place-items: center;
-  padding: 0;
-  cursor: pointer;
-  align-self: end;
-  flex-shrink: 0;
-}
-
-.copilot-voice-btn:hover:not(:disabled) {
-  background: #e7f0eb;
-}
-
-.copilot-voice-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.copilot-voice-btn.is-listening {
-  background: #ef4444;
-  color: #fff;
-  animation: copilot-voice-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes copilot-voice-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
-}
-
 .copilot-chat-window .copilot-composer textarea {
   width: 100%;
   min-height: 30px;
@@ -1064,10 +1049,10 @@
   display: none;
 }
 
-/* Failed action receipt: red-tinted background so the user immediately sees something went wrong. */
+/* Failed action receipt: soft red tint so the user sees something went wrong — no border bar,
+   the receipt text (with the failure reason) is the single error surface. */
 .copilot-chat-window .copilot-message.is-action-failed {
   background: #fef2f2;
-  border-left: 3px solid #ef4444;
 }
 
 .copilot-chat-window .copilot-message.is-action-failed .copilot-message-body {
@@ -1293,6 +1278,51 @@
 
 .copilot-chat-window .copilot-question-chip.is-selected:hover:not(:disabled) {
   background: #245d49;
+}
+
+/* "Other ___" free-text escape on choice questions: the chip toggles an inline input so the user
+   can always answer beyond the planner's enumerated options. */
+.copilot-chat-window .copilot-question-other-chip.is-open {
+  border-color: #1f4f3f;
+  background: #eef6f1;
+}
+
+.copilot-chat-window .copilot-question-other {
+  display: flex;
+  gap: 6px;
+}
+
+.copilot-chat-window .copilot-question-other-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #cddbd3;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: #243d32;
+  background: #fff;
+}
+
+.copilot-chat-window .copilot-question-other-input:focus {
+  outline: none;
+  border-color: #1f4f3f;
+}
+
+.copilot-chat-window .copilot-question-other-submit {
+  border: 1px solid #1f4f3f;
+  background: #1f4f3f;
+  border-radius: 6px;
+  padding: 5px 12px;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.copilot-chat-window .copilot-question-other-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 /* Answered question: dimmed so the user's attention moves to the next unanswered question. */
@@ -1622,3 +1652,32 @@
   animation: copilot-spin 0.8s linear infinite;
 }
 
+
+/* Steering interjections (pi alignment): queued mid-turn user texts, shown above the live
+ * trace until the turn ends. */
+.copilot-chat-window .copilot-steered-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 8px;
+}
+
+.copilot-chat-window .copilot-steered-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px dashed #cddbd3;
+  border-radius: 8px;
+  background: #f9fcfa;
+  font-size: var(--text-xs);
+}
+
+.copilot-chat-window .copilot-steered-badge {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.copilot-chat-window .copilot-steered-text {
+  color: #243d32;
+  overflow-wrap: anywhere;
+}

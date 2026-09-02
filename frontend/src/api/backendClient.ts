@@ -22,6 +22,17 @@ export const API_HEADERS: Record<string, string> = new Proxy(
 
 export const BACKEND_TIMEOUT_MS = 20000;
 
+function managementSessionHeader(): string | null {
+  try {
+    const raw = localStorage.getItem('vbio_session');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { managementToken?: string };
+    return parsed.managementToken || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = BACKEND_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -45,8 +56,15 @@ export async function fetchWithTimeout(url: string, init: RequestInit = {}, time
 
 export async function requestBackend(path: string, init: RequestInit, timeoutMs = BACKEND_TIMEOUT_MS): Promise<Response> {
   const url = apiUrl(path);
+  const headers = { ...(init.headers as Record<string, string> | undefined) };
+  // Gateway admin passthrough routes authenticate with the management session, not the
+  // shared runtime token.
+  if (url.startsWith('/vbio-api/admin/') || url.startsWith('/vbio-api/api/admin/')) {
+    const sessionHeader = managementSessionHeader();
+    if (sessionHeader) headers['X-VBio-Session'] = sessionHeader;
+  }
   try {
-    return await fetchWithTimeout(url, init, timeoutMs);
+    return await fetchWithTimeout(url, { ...init, headers }, timeoutMs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Backend request failed for ${path} (${url}): ${message}`);

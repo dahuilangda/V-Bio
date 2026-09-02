@@ -69,11 +69,13 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
     setProject,
   } = params;
 
+  // Stale-while-revalidate: only the FIRST load (or a project switch) shows the placeholder
+  // — a refetch of the same project keeps the workspace and its task list on screen while
+  // fresh data arrives; clearing them upfront was the visible flash.
   setLoading(true);
   setSaving(false);
   setSubmitting(false);
   setError(null);
-  setProjectTasks([]);
 
   try {
     const loaded = await loadProjectFlow({

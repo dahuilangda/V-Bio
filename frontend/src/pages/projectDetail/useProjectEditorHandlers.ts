@@ -1,5 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type {
+  AffinityDockPocket,
   InputComponent,
   PeptideResiduePoolSelection,
   PredictionConstraint,
@@ -21,19 +22,25 @@ import {
   handleRuntimeBackendChangeAction,
   handleRuntimePeptideBinderLengthChangeAction,
   handleRuntimePeptideDesignModeChangeAction,
+  handleRuntimePeptideChiralityChangeAction,
+  handleRuntimePeptideStructureUploadChangeAction,
   handleRuntimePeptideEliteSizeChangeAction,
   handleRuntimePeptideInitialSequenceChangeAction,
   handleRuntimePeptideIterationsChangeAction,
   handleRuntimePeptideSequenceMaskChangeAction,
-  handleRuntimePeptideMutationRateChangeAction,
   handleRuntimePeptideNonNaturalRangeChangeAction,
   handleRuntimePeptidePopulationSizeChangeAction,
   handleRuntimePeptideResiduePoolChangeAction,
   handleRuntimePeptideUseInitialSequenceChangeAction,
   handleRuntimeSeedChangeAction,
+  handleRuntimePeptidePocketFieldChangeAction,
+  handleRuntimePeptideDockPocketChangeAction,
+  handleRuntimeLeadOptDockPocketChangeAction,
+  handleRuntimeLeadOptOptionChangeAction,
   handleRuntimeLowVramChangeAction,
   handleTaskNameChangeAction,
-  handleTaskSummaryChangeAction
+  handleTaskSummaryChangeAction,
+  handleRuntimePeptideLengthRangeAction
 } from './editorActions';
 import type { ProjectWorkspaceDraft } from './workspaceTypes';
 
@@ -56,14 +63,26 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimeSeedChange: (seed: number | null) => void;
   handleRuntimeLowVramChange: (lowVram: boolean) => void;
   handleRuntimePeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
+  handleRuntimePeptideChiralityChange: (chirality: 'l' | 'd') => void;
+  handleRuntimePeptideStructureUploadChange: (upload: {
+    fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
+  } | null) => void;
   handleRuntimePeptideBinderLengthChange: (value: number) => void;
+  handleRuntimePeptideLengthRange: (min: number, max: number) => void;
   handleRuntimePeptideUseInitialSequenceChange: (value: boolean) => void;
   handleRuntimePeptideInitialSequenceChange: (value: string) => void;
   handleRuntimePeptideSequenceMaskChange: (value: string) => void;
   handleRuntimePeptideIterationsChange: (value: number) => void;
   handleRuntimePeptidePopulationSizeChange: (value: number) => void;
   handleRuntimePeptideEliteSizeChange: (value: number) => void;
-  handleRuntimePeptideMutationRateChange: (value: number) => void;
+  handleRuntimePeptidePocketFieldChange: (field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox', value: string | number | null) => void;
+  handleRuntimePeptideDockPocketChange: (pocket: AffinityDockPocket | null) => void;
+  handleRuntimeLeadOptOptionChange: (
+    key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
+      | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices',
+    value: string | number | null
+  ) => void;
+  handleRuntimeLeadOptDockPocketChange: (pocket: AffinityDockPocket | null) => void;
   handleRuntimePeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   handleRuntimePeptideNonNaturalRangeChange: (min: number, max: number) => void;
   handleRuntimePeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
@@ -123,6 +142,29 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   };
 
+  const handleRuntimePeptidePocketFieldChange = (
+    field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox',
+    value: string | number | null
+  ) => {
+    handleRuntimePeptidePocketFieldChangeAction({ field, value, setDraft });
+  };
+
+  const handleRuntimePeptideDockPocketChange = (pocket: AffinityDockPocket | null) => {
+    handleRuntimePeptideDockPocketChangeAction({ pocket, setDraft });
+  };
+
+  const handleRuntimeLeadOptOptionChange = (
+    key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
+      | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices',
+    value: string | number | null
+  ) => {
+    handleRuntimeLeadOptOptionChangeAction({ key, value, setDraft });
+  };
+
+  const handleRuntimeLeadOptDockPocketChange = (pocket: AffinityDockPocket | null) => {
+    handleRuntimeLeadOptDockPocketChangeAction({ pocket, setDraft });
+  };
+
   const handleRuntimeLowVramChange = (lowVram: boolean) => {
     handleRuntimeLowVramChangeAction({
       lowVram,
@@ -137,9 +179,30 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   };
 
+  const handleRuntimePeptideChiralityChange = (chirality: 'l' | 'd') => {
+    handleRuntimePeptideChiralityChangeAction({
+      peptideChirality: chirality,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideStructureUploadChange = (upload: {
+    fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
+  } | null) => {
+    handleRuntimePeptideStructureUploadChangeAction({ upload, setDraft });
+  };
+
   const handleRuntimePeptideBinderLengthChange = (value: number) => {
     handleRuntimePeptideBinderLengthChangeAction({
       peptideBinderLength: value,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideLengthRange = (min: number, max: number) => {
+    handleRuntimePeptideLengthRangeAction({
+      peptideLengthMin: min,
+      peptideLengthMax: max,
       setDraft
     });
   };
@@ -182,13 +245,6 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
   const handleRuntimePeptideEliteSizeChange = (value: number) => {
     handleRuntimePeptideEliteSizeChangeAction({
       peptideEliteSize: value,
-      setDraft
-    });
-  };
-
-  const handleRuntimePeptideMutationRateChange = (value: number) => {
-    handleRuntimePeptideMutationRateChangeAction({
-      peptideMutationRate: value,
       setDraft
     });
   };
@@ -279,14 +335,20 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handleRuntimeSeedChange,
     handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
+    handleRuntimePeptideChiralityChange,
+    handleRuntimePeptideStructureUploadChange,
     handleRuntimePeptideBinderLengthChange,
+    handleRuntimePeptideLengthRange,
     handleRuntimePeptideUseInitialSequenceChange,
     handleRuntimePeptideInitialSequenceChange,
     handleRuntimePeptideSequenceMaskChange,
     handleRuntimePeptideIterationsChange,
+    handleRuntimePeptidePocketFieldChange,
+    handleRuntimePeptideDockPocketChange,
+    handleRuntimeLeadOptOptionChange,
+    handleRuntimeLeadOptDockPocketChange,
     handleRuntimePeptidePopulationSizeChange,
     handleRuntimePeptideEliteSizeChange,
-    handleRuntimePeptideMutationRateChange,
     handleRuntimePeptideResiduePoolChange,
     handleRuntimePeptideNonNaturalRangeChange,
     handleRuntimePeptideBicyclicLinkerCcdChange,

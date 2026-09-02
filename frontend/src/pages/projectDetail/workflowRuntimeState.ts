@@ -1,5 +1,6 @@
 import { parseVirtualScreeningInput } from '../../utils/virtualScreening';
 import type { InputComponent } from '../../types/models';
+import { normalizeAffinityBackend } from '../apiAccessHelpers';
 
 export interface BuildRunUiStateParams {
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
@@ -20,6 +21,8 @@ export interface BuildRunUiStateParams {
   affinityPreviewLoading: boolean;
   affinityPreviewCurrent: boolean;
   affinityPreviewError: string;
+  affinityDockMode: boolean;
+  affinityDockPocketPresent: boolean;
   affinityTargetChainCount: number;
   affinityLigandChainId: string;
   affinityLigandSmiles: string;
@@ -70,12 +73,15 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
     affinitySupportsActivity,
     affinityConfidenceOnly,
     affinityConfidenceOnlyLocked,
+    draftBackend,
   } = params;
 
   const componentStepLabel = 'Components';
   const showQuickRunFab = showFloatingRunButton && !isRunRedirecting;
 
-  const affinityBackendSupportsActivity = true;
+  // protenix2dock ignores the boltz-only affinity head (enable_affinity), so
+  // the activity toggle is forced off / locked for that backend.
+  const affinityBackendSupportsActivity = normalizeAffinityBackend(draftBackend) === 'boltz';
   const affinityConfidenceOnlyForced = !affinityBackendSupportsActivity;
   const affinityConfidenceOnlyUiValue = affinityConfidenceOnlyForced ? true : affinityConfidenceOnly;
   const affinityConfidenceOnlyUiLocked = affinityConfidenceOnlyLocked || affinityConfidenceOnlyForced;
@@ -93,13 +99,18 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
         ? 'Building preview input...'
         : !affinityPreviewCurrent
           ? affinityPreviewError || 'Failed to prepare preview input from uploaded files.'
-          : affinityUseActivity && !affinityTargetChainCount
-            ? 'No target chain could be inferred from target structure.'
-            : affinityUseActivity && !affinityLigandChainId.trim()
-              ? 'No ligand chain is available for activity mode.'
-              : affinityUseActivity && !affinityLigandSmiles.trim()
-                ? 'Ligand SMILES is required for activity mode.'
-                : '';
+          : params.affinityDockMode && !params.affinityDockPocketPresent
+            // Dock mode cannot run without a pocket box (submit enforces it): surface the
+            // blocker HERE so runBlockedReason names it and the copilot can resolve it with
+            // task_detail:set_docking_pocket_box instead of eating a failed submit.
+            ? 'Set a docking pocket box before running.'
+            : affinityUseActivity && !affinityTargetChainCount
+              ? 'No target chain could be inferred from target structure.'
+              : affinityUseActivity && !affinityLigandChainId.trim()
+                ? 'No ligand chain is available for activity mode.'
+                : affinityUseActivity && !affinityLigandSmiles.trim()
+                  ? 'Ligand SMILES is required for activity mode.'
+                  : '';
 
   const parsedScreening = isVirtualScreeningWorkflow
     ? parseVirtualScreeningInput(virtualScreeningInput)

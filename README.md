@@ -53,6 +53,8 @@ VBIO_SESSION_SECRET=<server-session-secret>
 - `docs/configuration/env.md`：环境变量
 - `docs/apis/external-system-login.md`：外部系统登录
 - `docs/apis/worker-services.md`：worker 服务接口
+- `docs/peptide-design.md`：多肽设计（L/D，直链/环/双环/非天然）
+- `docs/docking.md`：dock 模式机制与回归
 - `deploy/docker/README.md`：Docker 文件索引
 
 ## 验证

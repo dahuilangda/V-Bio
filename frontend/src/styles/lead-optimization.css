@@ -2688,3 +2688,117 @@
     grid-template-columns: minmax(320px, var(--lead-opt-result-left-width)) 10px minmax(var(--lead-opt-result-main-min-width), 1fr);
   }
 }
+
+/* ── HALO optimization panels (mmpdb query flow retired) ── */
+.lead-opt-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 12px;
+  align-items: start;
+}
+
+.lead-opt-side .lead-opt-panel {
+  position: sticky;
+  top: 12px;
+}
+
+.lead-opt-panel-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.lead-opt-halo-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.lead-opt-halo-grid .field-span-2 {
+  grid-column: span 2;
+}
+
+.lead-opt-halo-run-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.lead-opt-halo-progress {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.lead-opt-halo-best {
+  font-weight: 600;
+  color: #1f6b3f;
+}
+
+.lead-opt-halo-topchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.lead-opt-halo-topchip {
+  border: 1px solid #bcd4c4;
+  border-radius: 8px;
+  background: #eef7f1;
+  color: #1f6b3f;
+  font-size: 11px;
+  padding: 3px 8px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lead-opt-halo-candidates .lead-opt-table-wrap {
+  overflow-x: auto;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.lead-opt-halo-candidates table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.lead-opt-halo-candidates th,
+.lead-opt-halo-candidates td {
+  border-bottom: 1px solid #e3ece6;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.lead-opt-halo-candidates th {
+  position: sticky;
+  top: 0;
+  background: #f4f9f5;
+  font-weight: 600;
+}
+
+.lead-opt-cand-smiles {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+}
+
+.lead-opt-cand-2d {
+  width: 110px;
+}
+
+@media (max-width: 1080px) {
+  .lead-opt-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .lead-opt-side .lead-opt-panel {
+    position: static;
+  }
+}

@@ -27,7 +27,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     {
         "name": "project_list_filter_sort",
         "description": "Plan and apply project list search, workflow/state/backend/activity filters, recency filters, min task count, and sorting.",
-        "trigger": "Commands such as show failed projects, active projects, newest updated projects, Boltz projects, or projects with at least N tasks.",
+        "trigger": "Requests to filter, sort, or summarize the project portfolio.",
         "inputs": "Current list controls and visible project statistics.",
         "confirmation": "Must present a plan. The UI applies it only after the user clicks the confirmation action.",
         "execution_boundary": "Only change list UI controls; never delete or create projects.",
@@ -43,7 +43,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     {
         "name": "task_list_filter_sort",
         "description": "Plan and apply task list search, state/workflow/backend filters, metric visibility, advanced filters, and sorting.",
-        "trigger": "Commands such as show failures, show running tasks, sort by pLDDT, show recent tasks, or filter by backend.",
+        "trigger": "Requests to filter, sort, or summarize a project's task list.",
         "inputs": "Current task controls and visible task rows.",
         "confirmation": "Must present a plan. The UI applies it only after explicit confirmation.",
         "execution_boundary": "Only change list UI controls; never submit, cancel, or delete tasks.",
@@ -57,9 +57,17 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
         "execution_boundary": "Do not claim experiments were rerun or files changed.",
     },
     {
+        "name": "task_creation_planning",
+        "description": "Plan creating a new task from the task list with prefilled inputs, matched to the project workflow's accepted input types.",
+        "trigger": "User asks to start a new task or to fill a task input while on a task list page.",
+        "inputs": "Visible task rows, project workflow, retrieved inputs.",
+        "confirmation": "Always confirm the create action; resolve the new-vs-existing-task choice before it.",
+        "execution_boundary": "Prefill only through the workflow's create action; inputs must match the workflow's accepted input types.",
+    },
+    {
         "name": "task_submission_planning",
         "description": "Draft a parameter-change and submission plan for the current task/project using existing UI form state, or copy a visible task-list row into a new draft and adjust it on the task-detail page.",
-        "trigger": "Commands to rerun, change seed/backend/mode/parameters, submit variants, copy a best-scoring visible task, or batch submit candidates.",
+        "trigger": "Commands to rerun, change seed/backend/mode/parameters, submit variants, copy a visible task row, or submit confirmed tasks.",
         "inputs": "Current draft/task parameters, visible task rows when in task_list, workflow, editable status, run disabled reason, requested changes.",
         "confirmation": "Always require a plan and explicit user confirmation before execution. If required parameters are missing, ask concise follow-up questions.",
         "execution_boundary": "Never submit directly from the model response. The host app must execute through the existing validated submit path after confirmation.",
@@ -82,16 +90,16 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "affinity.submit_plan",
-        "description": "Plan Affinity workflow mode/seed updates and submission.",
-        "trigger": "Affinity score/pose/refine/interface mode change, seed change, or submit request.",
-        "inputs": "Current Affinity draft, target/ligand upload state, affinityMode, seed, run disabled reason.",
+        "description": "Plan Docking workflow mode/seed updates and submission.",
+        "trigger": "Docking (dock mode) request, mode change, seed change, or submit request. Dock is the default mode: protein structure plus ligand SMILES, docking and affinity computed together.",
+        "inputs": "Current Docking draft, target structure / ligand SMILES state, affinityMode, seed, run disabled reason.",
         "confirmation": "Always require explicit user confirmation before applying mode/seed or running.",
-        "execution_boundary": "Allowed patch keys: seed, affinityMode. Execution uses the existing Affinity Run path.",
+        "execution_boundary": "Allowed patch keys: seed, affinityMode (dock is default). Execution uses the existing Docking Run path.",
     },
     {
         "name": "peptide_design.submit_plan",
         "description": "Plan Peptide Design runtime option updates and submission.",
-        "trigger": "Peptide binder length, design mode, iterations, population, elite size, mutation rate, seed, or submit request.",
+        "trigger": "Peptide chirality (L/D), design mode, length window, NCAA pool, pocket residues, iterations, population, elite size, seed, or submit request.",
         "inputs": "Current Peptide Design draft, peptide runtime options, components, run disabled reason.",
         "confirmation": "Always require explicit user confirmation before applying options or running.",
         "execution_boundary": "Allowed patch keys: seed and peptide* runtime options. Execution uses the existing Peptide Design Run path.",
@@ -108,20 +116,54 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
 
 
 TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
-    "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix"]},
+    "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix", "protenix2dock", "boltz2dock"]},
     "seed": {"type": "int", "min": 0, "max": 2147483647},
-    "affinityMode": {"type": "enum", "values": ["score", "pose", "refine", "interface"]},
+    "affinityMode": {
+        "type": "enum",
+        "values": ["dock", "score", "pose", "refine", "interface"],
+        "description": (
+            "dock is the DEFAULT mode and what a docking request means: it takes a protein structure "
+            "plus a ligand SMILES, places the ligand in the binding site, and computes the binding "
+            "pose and affinity together — no ligand structure file is uploaded, but a pocket search "
+            "box must be set before the run. The pose / refine / interface modes consume separately "
+            "uploaded target and ligand structure files. The score mode requires the uploaded target "
+            "structure only — no ligand file and no ligand SMILES."
+        ),
+    },
     "affinityBinding": {"type": "affinity_binding"},
     "lowVram": {"type": "bool"},
     "peptideDesignMode": {"type": "enum", "values": ["linear", "cyclic", "bicyclic"]},
-    "peptideBinderLength": {"type": "int", "min": 1, "max": 200},
-    "peptideIterations": {"type": "int", "min": 1, "max": 10000},
-    "peptidePopulationSize": {"type": "int", "min": 1, "max": 10000},
-    "peptideEliteSize": {"type": "int", "min": 1, "max": 10000},
-    "peptideMutationRate": {"type": "float", "min": 0.0, "max": 1.0},
+    "peptideChirality": {
+        "type": "enum", "values": ["l", "d"],
+        "description": (
+            "d designs D-peptides via the mirror workflow: the target is "
+            "mirrored x->-x into a D-target, the candidate L-peptide is "
+            "placed at the pocket and refined against the pinned receptor, "
+            "then the product is flipped back to L-target + D-peptide. "
+            "Works with linear, cyclic and bicyclic modes; requires a "
+            "docking backend (protenix2dock or boltz2dock)."
+        ),
+    },
+    "peptideBinderLength": {"type": "int", "min": 5, "max": 120},
+    "peptideLengthMin": {"type": "int", "min": 5, "max": 120},
+    "peptideLengthMax": {"type": "int", "min": 5, "max": 120},
+    "peptideIterations": {"type": "int", "min": 1, "max": 200},
+    "peptidePopulationSize": {"type": "int", "min": 1, "max": 200},
+    "peptideEliteSize": {"type": "int", "min": 1, "max": 200},
     "peptideUseInitialSequence": {"type": "bool"},
     "peptideInitialSequence": {"type": "string", "max_length": 200},
     "peptideSequenceMask": {"type": "string", "max_length": 200},
+    "peptideNonNaturalMin": {"type": "int", "min": 0, "max": 120},
+    "peptideNonNaturalMax": {"type": "int", "min": 0, "max": 120},
+    "peptideNcaaDecodeBias": {"type": "float", "min": 0.0, "max": 1.0},
+    "peptidePocketResidues": {
+        "type": "string", "max_length": 500,
+        "description": (
+            "Receptor pocket residues in author numbering of the uploaded "
+            "target structure, e.g. 'A:54,A:61,A:67'. Requires an uploaded "
+            "target structure; empty means whole-surface design."
+        ),
+    },
     "peptideBicyclicLinkerCcd": {"type": "enum", "values": ["SEZ", "29N", "BS3"]},
     "peptideBicyclicCysPositionMode": {"type": "enum", "values": ["auto", "manual"]},
     "peptideBicyclicFixTerminalCys": {"type": "bool"},
@@ -135,16 +177,22 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
 WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
     "prediction": ["backend", "seed", "affinityBinding", "lowVram", "componentsReplacement"],
     "virtual_screening": ["backend", "seed"],
-    "affinity": ["seed", "affinityMode"],
+    "affinity": ["backend", "seed", "affinityMode"],
     "peptide_design": [
         "backend",
         "seed",
         "peptideDesignMode",
+        "peptideChirality",
         "peptideBinderLength",
+        "peptideLengthMin",
+        "peptideLengthMax",
         "peptideIterations",
         "peptidePopulationSize",
         "peptideEliteSize",
-        "peptideMutationRate",
+        "peptideNonNaturalMin",
+        "peptideNonNaturalMax",
+        "peptideNcaaDecodeBias",
+        "peptidePocketResidues",
         "peptideUseInitialSequence",
         "peptideInitialSequence",
         "peptideSequenceMask",
@@ -157,6 +205,27 @@ WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
         "peptideBicyclicCys3Pos",
     ],
     "lead_optimization": [],
+}
+
+# The input TYPES each workflow's task accepts — environment facts the planner reads alongside
+# the context, so a field's accepted type is known at plan time, not discovered from a skill
+# description mid-round. Type declarations only; sourcing and ordering stay the model's to derive.
+WORKFLOW_INPUT_CONTRACT: Dict[str, Dict[str, str]] = {
+    "prediction": {
+        "components": "amino-acid or nucleic-acid sequences; ligands as CCD codes or SMILES",
+    },
+    "virtual_screening": {
+        "target": "protein sequence (protein and ligand components only — DNA/RNA are rejected; standard 20 residues only)",
+        "library": "small-molecule SMILES list (at most 200 compounds per run)",
+    },
+    "affinity": {
+        "target": "3D structure file (.pdb / .cif / .mmcif)",
+        "ligand": "mode-dependent: dock takes a ligand SMILES and requires a pocket search box; pose/refine/interface take an uploaded ligand structure file; score requires no ligand input",
+    },
+    "peptide_design": {
+        "target": "protein sequence",
+        "binder": "designed peptide (sequence generated by the workflow)",
+    },
 }
 
 
@@ -233,9 +302,15 @@ def _task_parameter_json_schema(workflow_key: str) -> Dict[str, Any]:
     }
     for key in WORKFLOW_PARAMETER_KEYS.get(normalized_workflow, []):
         spec = TASK_PARAMETER_SCHEMA[key]
+        # A declared description rides along into the generated property schema — the planner
+        # reads parameter semantics (e.g. which mode is the default and what it requires) from
+        # the schema itself, not from guesses.
+        schema_description = str(spec.get("description") or "").strip()
         if spec["type"] == "enum":
             values = _backend_values_for_workflow(normalized_workflow) if key == "backend" else spec["values"]
             properties[key] = {"type": "string", "enum": values}
+            if schema_description:
+                properties[key]["description"] = schema_description
         elif spec["type"] == "bool":
             properties[key] = {"type": "boolean"}
         elif spec["type"] == "string":
@@ -292,14 +367,28 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
             name="task_detail:create_new_task",
             label="New task",
             description=(
-                "Create a NEW task in the current project, prefilled with the target components. "
-                "Use when the user asks to start a new task or create another one from the current "
-                "task's target. The host navigates to the new-task page and applies the provided "
-                "components to the draft."
+                "Create a NEW task in the current project, prefilled with the target components and "
+                "an optional name/summary. Use when the user asks to start a new task or create "
+                "another one from the current task's target. The host navigates to the new-task "
+                "page and applies the provided components (and metadata) to the draft. When the "
+                "components' data must be fetched first, emit this operation in the SAME round as "
+                "the lookups, consuming their results via $fromObservation plus depends_on — the "
+                "harness executes the reads and completes the action from them automatically."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
+                    "taskName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Optional name for the new task.",
+                    },
+                    "taskSummary": {
+                        "type": "string",
+                        "maxLength": 512,
+                        "description": "Optional summary for the new task.",
+                    },
                     "components": {
                         "type": "array",
                         "description": "Every structural component for the new task. Copy the target protein component from the current task when the user says the target is the current one.",
@@ -422,62 +511,129 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
     # for prediction avoids the planner proposing it on affinity/peptide/lead_opt where it would error.
     if normalized_workflow == "prediction":
         definitions.append(
-            CopilotSkillDefinition(
-                name="task_detail:apply_structure_template",
-                label="Apply structure as template",
-                description=(
-                    "Fetch a structure file from a URL and attach it as the template for the protein component of the "
-                    "current prediction task. Pass the structureUrl returned by a prior rcsb.resolve / rcsb.search / "
-                    "alphafold.resolve observation (its pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif "
-                    "file. Prediction tasks only."
-                ),
+                CopilotSkillDefinition(
+                    name="task_detail:apply_structure_template",
+                    label="Apply structure as template",
+                    description=(
+                        "Fetch a structure file from a URL and attach it as the template for the protein component of the "
+                        "current prediction task. Pass the chosen RCSB entry's pdbId as structurePdbId — the host "
+                        "downloads its mmCIF file itself. For an alphafold.resolve model pass its cifUrl as "
+                        "structureUrl; never paste the record's sourceUrl (an entry page, not a file). The URL "
+                        "must be a cifUrl or pdbUrl explicitly returned by a skill observation, pointing to a "
+                        ".pdb, .cif, or .mmcif file. When the structure search returned several entries, apply "
+                        "only the entry the user chose. Prediction tasks only."
+                    ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "structurePdbId": {
+                            "type": "string",
+                            "pattern": "^[0-9A-Za-z]{4}$",
+                            "description": "The chosen RCSB entry's pdbId — the host downloads its mmCIF file. Preferred over a URL.",
+                        },
+                        "structureUrl": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                            "description": "Only for a non-RCSB source: a cifUrl explicitly returned by a skill observation.",
+                        },
                         "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
                     },
-                    "required": ["structureUrl"],
+                    "required": [],
+                    "anyOf": [
+                        {"required": ["structurePdbId"]},
+                        {"required": ["structureUrl"]},
+                    ],
                     "additionalProperties": False,
                 },
                 effect="update",
                 context_type="task_detail",
             )
         )
-    # The affinity-specific upload skills (target structure / ligand SMILES) belong only to the
-    # standalone affinity workflow. Prediction tasks enable affinity via the affinityBinding parameter
-    # on apply_parameter_patch instead, so these skills are withheld for non-affinity workflows to
-    # avoid the model proposing a path the host blocks.
+    # The docking-specific skills (target structure / ligand SMILES) belong only to the docking
+    # workflow. Prediction tasks enable affinity via the affinityBinding parameter on
+    # apply_parameter_patch instead, so these skills are withheld for other workflows to avoid
+    # the model proposing a path the host blocks.
     if normalized_workflow == "affinity":
         definitions.extend(
             [
                 CopilotSkillDefinition(
-                    name="task_detail:apply_affinity_target_structure",
-                    label="Apply structure as affinity target",
+                    name="task_detail:apply_docking_target_structure",
+                    label="Apply structure as docking target",
                     description=(
-                        "Fetch a structure file from a URL and set it as the target/receptor structure for the current "
-                        "affinity task. Pass the structureUrl from a prior rcsb.resolve / rcsb.search / alphafold.resolve "
-                        "observation (pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif file. Affinity tasks "
-                        "only."
+                        "Set the protein target/receptor of the current docking task by fetching a structure "
+                        "file from a URL or RCSB entry id. The target of this workflow is a STRUCTURE FILE, never a bare "
+                        "amino-acid sequence: when the user names the target by protein and/or organism, "
+                        "source it with rcsb.search first (experimental structures — when several entries "
+                        "match, ask the user to choose) or alphafold.resolve when a predicted model is "
+                        "acceptable, then pass the chosen entry's pdbId as structurePdbId (preferred — the host "
+                        "downloads its mmCIF itself) or its cifUrl as structureUrl. The URL must point "
+                        "to a .pdb, .cif, or .mmcif file. Docking tasks only."
                     ),
                     input_schema={
                         "type": "object",
                         "properties": {
-                            "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
+                            "structurePdbId": {
+                                "type": "string",
+                                "pattern": "^[0-9A-Za-z]{4}$",
+                                "description": "The chosen RCSB entry's pdbId — the host downloads its mmCIF file. Preferred over a URL.",
+                            },
+                            "structureUrl": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512,
+                                "description": "Only for a non-RCSB source: a cifUrl explicitly returned by a skill observation.",
+                            },
                             "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
                         },
-                        "required": ["structureUrl"],
+                        "required": [],
+                        "anyOf": [
+                            {"required": ["structurePdbId"]},
+                            {"required": ["structureUrl"]},
+                        ],
                         "additionalProperties": False,
                     },
                     effect="update",
                     context_type="task_detail",
                 ),
                 CopilotSkillDefinition(
-                    name="task_detail:apply_affinity_ligand_smiles",
-                    label="Set affinity binder (SMILES)",
+                    name="task_detail:set_docking_pocket_box",
+                    label="Set docking pocket box",
                     description=(
-                        "Set the binder / ligand for the current affinity task from a SMILES string. Pass the smiles from a "
-                        "prior pubchem.search observation. Affinity tasks only."
+                        "Set the dock-mode search box (pocket) on the uploaded target structure. "
+                        "mode 'auto' (preferred): the host detects co-crystallized ligands and "
+                        "boxes the largest one's site — that IS the binding pocket; when the "
+                        "structure has no ligand it boxes the whole protein (large box, blind "
+                        "docking). mode 'protein': always the whole-protein box. Dock mode cannot "
+                        "run without a pocket (runBlockedReason names it) — chain this before "
+                        "task_detail:submit_current via depends_on when no pocket exists yet. "
+                        "Docking tasks only."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "mode": {
+                                "type": "string",
+                                "enum": ["auto", "protein"],
+                                "description": "'auto': ligand pocket if present else whole protein. 'protein': whole protein.",
+                            },
+                        },
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    effect="update",
+                    context_type="task_detail",
+                ),
+                CopilotSkillDefinition(
+                    name="task_detail:apply_docking_ligand_smiles",
+                    label="Set docking ligand (SMILES)",
+                    description=(
+                        "Set the ligand of the current docking task from a SMILES string. In dock mode "
+                        "(the default) the ligand is defined by SMILES alone — no ligand structure file "
+                        "is uploaded; the docking run places the ligand and computes the binding pose and "
+                        "affinity together. Pass the smiles from a prior pubchem.search observation, or "
+                        "the SMILES the user provided directly — no lookup is needed when the user "
+                        "already gave a SMILES. Docking tasks only."
                     ),
                     input_schema={
                         "type": "object",
@@ -492,11 +648,19 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
         )
     parameter_schema = _task_parameter_json_schema(normalized_workflow)
     if parameter_schema["properties"]:
+        # The description must name EXACTLY the keys this workflow's schema declares — a generic
+        # "(backend, seed, …, components, etc.)" list lets the planner send a key the schema (and
+        # the host) rejects for this workflow, burning the whole round budget on rejections.
+        parameter_keys = ", ".join(sorted(parameter_schema["properties"].keys()))
         definitions.append(
             CopilotSkillDefinition(
                 name="task_detail:apply_parameter_patch",
                 label="Update task parameters",
-                description="Update the current task's runtime parameters (backend, seed, affinity binding, components, etc.). The available parameter keys depend on the workflow.",
+                description=(
+                    "Update the current task's runtime parameters via a parameterPatch object. For THIS "
+                    f"workflow the patch supports exactly these keys: {parameter_keys}. Any other key is "
+                    "rejected by the schema audit."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {"parameterPatch": parameter_schema},

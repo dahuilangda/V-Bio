@@ -55,10 +55,10 @@ export const WORKFLOWS: WorkflowDefinition[] = [
   {
     key: 'affinity',
     taskType: 'affinity',
-    title: 'Affinity Scoring',
-    shortTitle: 'Affinity',
-    description: 'Binding affinity estimation and scoring.',
-    runLabel: 'Run Affinity',
+    title: 'Docking',
+    shortTitle: 'Docking',
+    description: 'Dock a ligand SMILES into a target pocket and score the binding pose.',
+    runLabel: 'Run Docking',
     supportsSequenceInputs: false
   }
 ];
@@ -93,10 +93,16 @@ const taskTypeAlias: Record<string, WorkflowKey> = {
   leadopt: 'lead_optimization',
   affinity: 'affinity',
   affinity_scoring: 'affinity',
+  boltz_2_affinity: 'affinity',
   affinityscore: 'affinity',
   binding_affinity: 'affinity',
   score_binding_affinity: 'affinity',
-  'affinity prediction': 'affinity'
+  'affinity prediction': 'affinity',
+  docking: 'affinity',
+  dock: 'affinity',
+  'dock ligand': 'affinity',
+  molecular_docking: 'affinity',
+  molecule_docking: 'affinity'
 };
 
 export function normalizeWorkflowKey(taskTypeRaw: string | null | undefined): WorkflowKey {

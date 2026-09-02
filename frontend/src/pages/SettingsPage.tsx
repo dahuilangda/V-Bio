@@ -2,8 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { KeyRound, UserRound } from 'lucide-react';
 import type { AppUser } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
-import { findUserByUsername, updateUser } from '../api/supabaseLite';
-import { hashPassword } from '../utils/crypto';
+import { fetchMe, toAppUser, updateProfile } from '../api/authServerApi';
 import { getAvatarOverride, setAvatarOverride } from '../utils/profilePrefs';
 
 export function SettingsPage() {
@@ -32,7 +31,7 @@ export function SettingsPage() {
       setLoading(true);
       setError(null);
       try {
-        const found = await findUserByUsername(session.username);
+        const found = toAppUser(await fetchMe());
         if (!found) {
           throw new Error('Current user not found.');
         }
@@ -62,28 +61,15 @@ export function SettingsPage() {
     setProfileSaving(true);
     setError(null);
     setSuccess(null);
-
-    const patchBase: Partial<AppUser> = {
-      name: displayName.trim(),
-      email: email.trim().toLowerCase() || null
-    };
     const avatar = avatarUrl.trim();
 
     try {
-      let updated: AppUser;
-      try {
-        updated = await updateUser(user.id, {
-          ...patchBase,
-          avatar_url: avatar || null
-        } as Partial<AppUser>);
-      } catch (avatarError) {
-        const text = avatarError instanceof Error ? avatarError.message : '';
-        const looksLikeMissingAvatarColumn = text.toLowerCase().includes('avatar_url');
-        if (!looksLikeMissingAvatarColumn) {
-          throw avatarError;
-        }
-        updated = await updateUser(user.id, patchBase);
-      }
+      const updated = toAppUser(
+        await updateProfile({
+          name: displayName.trim(),
+          avatar_url: avatar || undefined
+        })
+      );
 
       setAvatarOverride(user.id, avatar);
       setUser(updated);
@@ -114,13 +100,9 @@ export function SettingsPage() {
         throw new Error('New password confirmation does not match.');
       }
 
-      const currentHash = await hashPassword(user.username, currentPassword);
-      if (currentHash !== user.password_hash) {
-        throw new Error('Current password is incorrect.');
-      }
-
-      const newHash = await hashPassword(user.username, newPassword);
-      const updated = await updateUser(user.id, { password_hash: newHash });
+      // Server verifies the current password (scrypt) and writes the new hash — the
+      // browser no longer touches password hashes at all.
+      const updated = toAppUser(await updateProfile({ password: newPassword, current_password: currentPassword }));
       setUser(updated);
       setCurrentPassword('');
       setNewPassword('');

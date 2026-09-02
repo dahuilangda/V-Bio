@@ -1,5 +1,5 @@
 import type { ProjectTask } from '../../types/models';
-import { getWorkflowDefinition, isPredictionLikeWorkflowKey, normalizeWorkflowKey, type WorkflowKey } from '../../utils/workflows';
+import { isPredictionLikeWorkflowKey, normalizeWorkflowKey, type WorkflowKey } from '../../utils/workflows';
 import type { MetricTone } from './taskListTypes';
 
 function hasObjectFields(value: unknown): boolean {
@@ -38,14 +38,6 @@ export function toneForProbability(value: number | null): MetricTone {
   if (normalized >= 70) return 'good';
   if (normalized >= 50) return 'medium';
   return 'low';
-}
-
-export function toneForInterfaceMetric(
-  value: number | null,
-  source: 'ipsae' | 'iptm' | 'none'
-): MetricTone {
-  if (source === 'ipsae') return toneForProbability(value);
-  return toneForIptm(value);
 }
 
 export function toneForPae(value: number | null): MetricTone {
@@ -134,13 +126,4 @@ export function resolveTaskWorkflowKey(task: ProjectTask, fallbackTaskType: stri
   }
 
   return 'prediction';
-}
-
-export function workflowLabelForTask(task: ProjectTask, fallbackTaskType: string): string {
-  const key = resolveTaskWorkflowKey(task, fallbackTaskType);
-  return getWorkflowDefinition(key).shortTitle;
-}
-
-export function workflowClassNameForTask(task: ProjectTask, fallbackTaskType: string): string {
-  return resolveTaskWorkflowKey(task, fallbackTaskType).replace(/_/g, '-');
 }
