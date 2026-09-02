@@ -44,14 +44,7 @@
 6. **前端快照 backend 值**：仍为表单原值（protenix），展示无逻辑分支，暂可接受
 7. **ESM 缺席**：架构级改进，需引入 ESM 嵌入通道到 head 输入（训练管线改造），列入后续路线
 
-## 三-旧、其余建议：`compute_ipsae / enable_affinity / affinity_refine / recycling_steps` 等 boltz 专属字段在 protenix 分支被传入但忽略。应在 route 层显式校验（不认识的 affinity 选项 + backend=protenix 时返回 400 或至少 202 响应里注明 ignored_fields），否则用户以为开了 affinity 实际没跑。
-2. **docker 命令构造重复**：`_build_protenix2dock_command` 与 boltz2score 的 `_build_gpu_docker_python_command` 约 60% 相同（labels/shm/labels/挂载骨架）。应抽公共 builder，差异只在 image + mounts + env。
-3. **stdout 未流式上报**：dock 任务 stdout 只在结束后进 stderr tail；训练任务已做 [progress] 流式解析，dock 也应解析 CLI 的 log 行做心跳（CLI 已改 logging，格式可机器解析）。
-4. **IPSAE 权重硬编码**：`_INTERFACE_WEIGHTS` 注释已声明 cdk8 标定来源，但应挪到 config/env 可覆盖。
-5. **前端快照不识别 backend=protenix 的重跑语义**：`build_affinity_task_snapshot` 对两种后端生成相同快照；重跑（rerun）走 boltz 参数集。protenix 重跑需要 size/center 字段已在快照中（已做），但 workflow 标签仍是 affinity——可接受，待 UI 有独立 protenix 入口再分。
-6. **任务行 backend 值**：前端存的是表单原值 `protenix`，而 capability 是 `protenix2dock`——目前前端只做展示无逻辑分支，统一成 `protenix2dock` 更一致。
-
-## 四、去 AI 味清理原则（本次已应用）
+## 四、本次同步应用的编码规范
 
 - 删除自我指涉注释（"our fix" / "Nesso-style we added"），只留契约与非显然约束
 - print("[Info]...") 杂烩 → logging 统一格式（可解析、可静默）

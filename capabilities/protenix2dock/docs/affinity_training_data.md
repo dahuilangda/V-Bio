@@ -1,9 +1,9 @@
 # protenix2dock 原生 affinity head：训练数据研究与策展方案
 
-来源研究（一手资料）：
+来源研究：
 - Boltz-2 论文全文（bioRxiv 2025.06.14.659707 / PMC12262699），Data 章节 + Table 1
 - Nesso-1 技术报告（valencelabs.com, 2026.07, §2.1-2.3）
-- 二者为我们 head 的直接参照系（protenix trunk + 独立 affinity 头 = 同族设计）
+- 二者是本 head 的直接参照系（protenix trunk + 独立 affinity 头为同族设计）
 
 ---
 
@@ -22,8 +22,7 @@
 
 1. **只留高质量 assay**：单蛋白靶点；biochemical/functional 类别；排除
    low-confidence/unreliable 标记；回归值只取 Ki/Kd/IC50/AC50/EC50/XC50，
-   统一 log10(µM)；"数据不足或亲和力标准差过低的 assay 丢弃"——强迫模型
-   学 **intra-assay 差值** 而非 inter-assay 偏移。
+   统一 log10(µM)；测量数量不足或亲和力标准差过低的 assay 整体丢弃，使模型学习 intra-assay 差值而非 inter-assay 偏移。
 2. **抗偏差合成 decoys**：hit-to-lead 的 binder 跨靶点 shuffle 造负例；
    要求 decoy 与该蛋白所有已知 binder 的 Tanimoto < 0.3（控制假阴性）。
    扩大负例覆盖 + 消 HTS 的伪相关。
@@ -38,9 +37,9 @@ HTS 阳性要求在**独立 assay** 有定量测量（Ki/Kd/XC50）佐证。
 数据**完全复用 Bolt-2 Table 1**（公平对比），改进在：
 
 1. **泄漏约束**：与 FEP+ benchmark 蛋白 ≥90% 序列相似的训练点全部移除
-   （boltz2 只做报告划分，nesso 做了训练集剔除）。
+   （Boltz-2 只划分报告集，Nesso-1 额外从训练集中剔除）。
 2. **TerraBind 式矛盾过滤**：丢弃 H_PL > 0.7 且 pIC50 ≥ 6 的复合物
-   （结构-亲和力自相矛盾：熵高却声称强结合 → 标签可疑）。
+   （界面熵高而实验称强结合，标签可信度不足）。
 3. **z 掩码**：affinity 模块只见距配体 15Å 内的蛋白 token（口袋聚焦）。
 4. **损失**：分类 focal loss；回归 Huber **拆成绝对项 + 相对差项，相对项
    加权**（显式优化 intra-assay 排序，抑制 inter-assay 偏差）。
@@ -49,7 +48,7 @@ HTS 阳性要求在**独立 assay** 有定量测量（Ki/Kd/XC50）佐证。
 7. **泛化关键**：frozen ESM2 嵌入替代 MSA（无 MSA 依赖）+ 蒸馏结构数据
    （AFDB 蛋白 + SAIR 复合物）多阶段（口袋裁剪渐进）训练。
 
-### Nesso-1 的泛化评估方法（我们照抄）
+### Nesso-1 的泛化评估协议（本方案沿用）
 
 - **化学相似度分桶**：按测试配体与训练集的 mean-max Tanimoto 分桶报
   Pearson——诚实展示"相似化学上性能好、低相似度上退化多少"。
@@ -100,7 +99,7 @@ boltz2 四层 + nesso 增补，全部落地：
 - **时间划分**（有日期元数据时）：train 用旧数据，test 用新——模拟真实
   zero-shot。
 - **评估必报**：整体 Spearman + 按 Tanimoto 相似度分桶的 Spearman
-  （nesso Figure 7 协议）+ MW 基线对照（连 MW 都打不过就别上线）。
+  （nesso Figure 7 协议）+ MW 基线对照（低于 MW 基线的模型不应进入生产使用）。
 
 ### 训练配置（承接 train_affinity.py）
 
@@ -112,8 +111,8 @@ boltz2 四层 + nesso 增补，全部落地：
 
 ## 四、风险与诚实预期
 
-- OpenBind 上 nesso 也只与 MW 基线拉开不显著差距——公共数据训练的
-  zero-shot 泛化有硬上限；我们的第一目标应定为 **FEP 式系列内排序**
-  （benchmark 超过 cross-engine bridge 的 +0.40），zero-shot 为 stretch。
+- OpenBind 上 Nesso-1 与 MW 基线的差距也不显著，说明公共数据训练的
+  zero-shot 泛化存在上限；第一阶段目标定为 FEP 式系列内排序
+  （benchmark 超过 cross-engine bridge 的 +0.40），zero-shot 作为扩展目标。
 - 评估集固定用已有的 10 靶 FEP + cdk8（本仓库 benchmark），与 nesso/boltz2
-  可直接对比；训练前先跑蛋白 90% 聚类确认 FEP 靶点不在训练集。
+  可直接对比；训练前先做蛋白 90% 序列聚类，确认 FEP 靶点不在训练集内。
