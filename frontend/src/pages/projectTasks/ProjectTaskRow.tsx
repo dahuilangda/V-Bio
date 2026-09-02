@@ -44,12 +44,6 @@ interface ProjectTaskRowProps {
   onEditingTaskNameValueChange: (value: string) => void;
 }
 
-function formatPeptideBestScore(value: number | null): string {
-  if (value === null) return '-';
-  return value.toFixed(3);
-}
-
-
 export function ProjectTaskRow({
   row,
   mode,
@@ -137,30 +131,6 @@ export function ProjectTaskRow({
     { key: 'pop', label: 'Pop', value: row.peptidePopulationSize !== null ? String(row.peptidePopulationSize) : '-' },
     { key: 'elite', label: 'Elite', value: row.peptideEliteSize !== null ? String(row.peptideEliteSize) : '-' },
   ];
-  const peptideProgressItems = [
-    {
-      key: 'gen',
-      label: 'Gen',
-      value:
-        row.peptideCurrentGeneration !== null
-          ? row.peptideTotalGenerations !== null
-            ? `${row.peptideCurrentGeneration}/${row.peptideTotalGenerations}`
-            : String(row.peptideCurrentGeneration)
-          : '-'
-    },
-    { key: 'best', label: 'Best', value: formatPeptideBestScore(row.peptideBestScore) },
-    { key: 'cand', label: 'Cand', value: row.peptideCandidateCount !== null ? String(row.peptideCandidateCount) : '-' },
-    {
-      key: 'tasks',
-      label: 'Tasks',
-      value:
-        row.peptideTotalTasks !== null
-          ? `${row.peptideCompletedTasks ?? 0}/${row.peptideTotalTasks}`
-          : row.peptideCompletedTasks !== null || row.peptidePendingTasks !== null
-            ? `${row.peptideCompletedTasks ?? 0}/${(row.peptideCompletedTasks ?? 0) + (row.peptidePendingTasks ?? 0)}`
-            : '-'
-    }
-  ];
 
   return (
     <tr key={task.id}>
@@ -244,20 +214,18 @@ export function ProjectTaskRow({
                   </span>
                 ))}
               </div>
-            </div>
-          </td>
-          <td className="task-col-peptide-progress">
-            <div className="task-peptide-cell">
-              <div className="task-peptide-inline" aria-label="Peptide iteration progress">
-                {peptideProgressItems.map((item) => (
-                  <span key={item.key} className="task-peptide-inline-item">
-                    <span className="task-peptide-inline-key">{item.label}</span>
-                    <span className="task-peptide-inline-value">{item.value}</span>
-                  </span>
-                ))}
-              </div>
               {row.peptideStatusMessage ? <div className="task-peptide-note">{row.peptideStatusMessage}</div> : null}
             </div>
+          </td>
+          <td className="task-col-metric task-col-metric-plddt">
+            <span className={`task-metric-value metric-value-${toneForPlddt(metrics.plddt)}`}>
+              {formatMetric(metrics.plddt, 1)}
+            </span>
+          </td>
+          <td className="task-col-metric task-col-metric-ipsae">
+            <span className={`task-metric-value metric-value-${toneForProbability(metrics.ipsae)}`}>
+              {formatMetric(metrics.ipsae, 3)}
+            </span>
           </td>
         </>
       ) : (

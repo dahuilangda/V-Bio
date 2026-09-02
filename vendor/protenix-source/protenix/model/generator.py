@@ -150,6 +150,9 @@ def sample_diffusion(
     anchor_lower: Optional[torch.Tensor] = None,
     chiral_quads: Optional[torch.Tensor] = None,
     chiral_sign: Optional[torch.Tensor] = None,
+    bond_index: Optional[torch.Tensor] = None,
+    bond_upper: Optional[torch.Tensor] = None,
+    bond_lower: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
     It performances denoising steps from time 0 to time T.
@@ -212,6 +215,61 @@ def sample_diffusion(
         logger.info("Guidance is enabled.")
         # fp32: TFG math (projections, linalg) requires it; see TFGEngine.step.
         tfg = TFGEngine(tfg_cfg, device=device, dtype=torch.float32)
+
+    _pin_col_for_bands = (
+        pin_mask.to(device=device, dtype=torch.float32)
+        if pin_mask is not None
+        else None
+    )
+
+    def _make_band_projector(
+        idx: torch.Tensor,
+        up: torch.Tensor,
+        lo: torch.Tensor,
+    ):
+        """Damped-Jacobi band projector on the given pairs (see the anchor
+        notes below for why not a min-norm solve). Weights come from the
+        free/pinned split: pinned endpoints take zero correction (constants),
+        free-free pairs split the correction between both atoms — SHAKE-like.
+        """
+        free_col = (
+            1.0 - _pin_col_for_bands
+            if _pin_col_for_bands is not None
+            else torch.ones(idx.max().item() + 1, device=device, dtype=torch.float32)
+        )
+        _active = (free_col[idx[0]] + free_col[idx[1]]) > 0
+        idx = idx[:, _active]
+        up = up[_active]
+        lo = lo[_active]
+        wi = free_col[idx[0]]
+        wj = free_col[idx[1]]
+        if idx.numel() == 0:
+            return None
+
+        def _project(x_l: torch.Tensor, _iters: int = 30) -> None:
+            shape = x_l.shape
+            xs = x_l.reshape(-1, shape[-2], 3).float()
+            for si in range(xs.shape[0]):
+                x = xs[si]
+                for _ in range(_iters):
+                    a = x[idx[0]]
+                    b = x[idx[1]]
+                    d = (a - b).norm(dim=-1)
+                    viol = torch.where(d > up, d - up, (d - lo).clamp(max=0))
+                    if float(viol.abs().max()) < 1e-3:
+                        break
+                    u = (a - b) / d.clamp(min=1e-8).unsqueeze(-1)
+                    corr = torch.zeros_like(x)
+                    half = 0.5 * viol.clamp(-4.0, 4.0)
+                    corr.index_add_(0, idx[0], (-half).unsqueeze(-1) * u * wi.unsqueeze(-1))
+                    corr.index_add_(0, idx[1], (+half).unsqueeze(-1) * u * wj.unsqueeze(-1))
+                    corr_norm = corr.norm(dim=-1, keepdim=True)
+                    corr = corr * (corr_norm.clamp(max=0.5) / corr_norm.clamp(min=1e-8))
+                    x += corr
+                xs[si] = x
+            x_l.copy_(xs.to(dtype).reshape(shape))
+
+        return _project
 
     _anchor_state = None
     if (
@@ -343,6 +401,29 @@ def sample_diffusion(
         logger.info(
             f"Backbone chirality guard enabled: {int(_q.shape[1])} residues."
         )
+
+    # Free-chain covalent bond projector. Bonds project AFTER the pocket and
+    # clash bands each step (the official PairwiseDistancePotential ordering:
+    # angles first, bonds last), so a steric correction on one atom
+    # distributes through its bond network as a side-chain torsion change
+    # instead of displacing the atom off its residue. Bonds are chemistry,
+    # not guidance: they apply whether or not anchor/guidance channels are
+    # active.
+    _bond_state = None
+    if bond_index is not None and bond_upper is not None:
+        _b_idx = bond_index.to(device=device, dtype=torch.long)
+        _b_up = bond_upper.to(device=device, dtype=torch.float32)
+        _b_lo = (
+            bond_lower.to(device=device, dtype=torch.float32)
+            if bond_lower is not None
+            else torch.maximum(_b_up - 0.24, torch.tensor(0.5))
+        )
+        _bond_fn = _make_band_projector(_b_idx, _b_up, _b_lo)
+        if _bond_fn is not None:
+            _bond_state = {"project": _bond_fn}
+            logger.info(
+                f"Covalent bond bands enabled: {int(_b_idx.shape[1])} bonds."
+            )
 
     def _chunk_sample_diffusion(chunk_n_sample, inplace_safe, chunk_offset=0):
         # init noise
@@ -511,6 +592,10 @@ def sample_diffusion(
                     _anchor_state["project"](x_l)
                 if _chiral_state is not None:
                     _chiral_state["project"](x_l)
+                if _bond_state is not None:
+                    # bonds LAST: official angles-then-bonds ordering — bond
+                    # geometry wins the negotiation with pocket/clash bands
+                    _bond_state["project"](x_l)
                 if _nan_dbg and not bool(torch.isfinite(x_l).all()):
                     logger.warning(
                         f"SAMPLER-NAN post-pin step={step_i} nonfinite="
@@ -529,6 +614,10 @@ def sample_diffusion(
                 _anchor_state["project"](x_l)
             if _chiral_state is not None:
                 _chiral_state["project"](x_l)
+        if _bond_state is not None:
+            # final polish after every projection family: exact covalent
+            # geometry at ship, pin or no pin (blind runs keep it too)
+            _bond_state["project"](x_l, _iters=60)
 
         return x_l
 

@@ -108,8 +108,27 @@ export function ProjectTasksTable({
                     <th>
                       <span className="project-th">Design Setup</span>
                     </th>
-                    <th>
-                      <span className="project-th">Gen</span>
+                    <th className="task-th-metric task-th-metric-plddt">
+                      <button
+                        type="button"
+                        className={`task-th-sort ${sortKey === 'plddt' ? 'active' : ''}`}
+                        onClick={() => onSort('plddt')}
+                      >
+                        <span className="project-th">
+                          pLDDT <span className="task-th-arrow">{sortMark('plddt')}</span>
+                        </span>
+                      </button>
+                    </th>
+                    <th className="task-th-metric task-th-metric-ipsae">
+                      <button
+                        type="button"
+                        className={`task-th-sort ${sortKey === 'ipsae' ? 'active' : ''}`}
+                        onClick={() => onSort('ipsae')}
+                      >
+                        <span className="project-th">
+                          IPSAE <span className="task-th-arrow">{sortMark('ipsae')}</span>
+                        </span>
+                      </button>
                     </th>
                   </>
                 ) : (

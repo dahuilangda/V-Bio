@@ -61,6 +61,7 @@ def _load_p2d_side_channels():
         os.environ.get("PROTENIX_SCORE_ONLY", ""),
         os.environ.get("PROTENIX_PIN_MASK_PATH", ""),
         os.environ.get("PROTENIX_ANCHOR_PAIRS_PATH", ""),
+        os.environ.get("PROTENIX_COVALENT_BONDS_PATH", ""),
     )
     if cache is not None and cache[0] == key:
         return cache[1]
@@ -121,8 +122,40 @@ def _load_p2d_side_channels():
             "index": np.asarray(blob["pair_index"], dtype=np.int64),
             "upper": np.asarray(blob["upper"], dtype=np.float32),
         }
+    cov_path = os.environ.get("PROTENIX_COVALENT_BONDS_PATH", "").strip()
+    if cov_path and os.path.exists(cov_path):
+        # Free-chain covalent bonds as hard bands: the pocket/clash
+        # projection corrects single atoms, so the bond bands ride the same
+        # sweep to distribute every correction through the bond network.
+        blob = np.load(cov_path, allow_pickle=False)
+        c_idx = np.asarray(blob["pair_index"], dtype=np.int64)
+        c_up = np.asarray(blob["upper"], dtype=np.float32)
+        c_lo = (
+            np.asarray(blob["lower"], dtype=np.float32)
+            if "lower" in blob.files
+            else np.zeros_like(c_up)
+        )
+        if c_idx.ndim == 2 and c_idx.shape[1] == 2 and c_idx.shape[0] == c_up.shape[0]:
+            # producers write [M, 2]; the sampler consumes [2, M]
+            out["cov_index"] = c_idx.T.copy()
+            out["cov_upper"] = c_up
+            out["cov_lower"] = c_lo
+        else:
+            logger.warning(
+                "protenix2dock covalent bonds malformed (pair_index must be "
+                "[M,2] matching upper [M]); ignoring covalent bands."
+            )
     _load_p2d_side_channels._cache = (key, out)
     return out
+
+
+def _p2d_tensor(p2d: dict[str, Any], key: str) -> Any:
+    """Optional numpy entry of the p2d side channels as a torch tensor."""
+    if p2d.get(key) is None:
+        return None
+    import torch
+
+    return torch.from_numpy(np.asarray(p2d[key]))
 
 
 def _build_chiral_quads(input_feature_dict, init_coords, pin):
@@ -886,6 +919,47 @@ class Protenix(nn.Module):
             logger.info(
                 f"protenix2dock: injected {idx.shape[0]} pocket contact pairs into TFG."
             )
+        # Free-chain covalent bonds also enter the official TFG soft channel
+        # (is_bond=1): PairwiseDistancePotential applies its bond buffer,
+        # VDW clamps and angles-then-bonds projection ordering to the x0
+        # prediction of every guided step, keeping the denoiser's
+        # clean-structure estimate chemically valid.
+        if (
+            p2d.get("cov_index") is not None
+            and "pairwise_distance_index" in input_feature_dict
+        ):
+            cov_idx = _p2d_tensor(p2d, "cov_index").to(s_inputs.device)
+            cov_up = _p2d_tensor(p2d, "cov_upper").to(s_inputs.device)
+            cov_lo = _p2d_tensor(p2d, "cov_lower").to(s_inputs.device)
+            input_feature_dict["pairwise_distance_index"] = torch.cat(
+                [input_feature_dict["pairwise_distance_index"], cov_idx], dim=-1
+            )
+            input_feature_dict["pairwise_distance_upper_bound"] = torch.cat(
+                [input_feature_dict["pairwise_distance_upper_bound"], cov_up],
+                dim=-1,
+            )
+            input_feature_dict["pairwise_distance_lower_bound"] = torch.cat(
+                [input_feature_dict["pairwise_distance_lower_bound"], cov_lo],
+                dim=-1,
+            )
+            input_feature_dict["pairwise_distance_is_bond"] = torch.cat(
+                [
+                    input_feature_dict["pairwise_distance_is_bond"],
+                    torch.ones_like(cov_up),
+                ],
+                dim=-1,
+            )
+            input_feature_dict["pairwise_distance_is_angle"] = torch.cat(
+                [
+                    input_feature_dict["pairwise_distance_is_angle"],
+                    torch.zeros_like(cov_up),
+                ],
+                dim=-1,
+            )
+            logger.info(
+                f"protenix2dock: injected {cov_idx.shape[1]} free-chain covalent "
+                "bond pairs into TFG (is_bond)."
+            )
         if p2d.get("score_only") and p2d_coords is not None:
             # Score mode: skip diffusion entirely and evaluate the confidence
             # heads directly on the input coordinates. Ensembles carry no
@@ -928,18 +1002,40 @@ class Protenix(nn.Module):
                     else None
                 ),
                 anchor_index=(
-                    torch.from_numpy(p2d["anchor_index"]).to(s_inputs.device)
-                    if p2d_coords is not None and "anchor_index" in p2d
+                    _p2d_tensor(p2d, "anchor_index").to(s_inputs.device)
+                    if p2d.get("anchor_index") is not None
                     else None
                 ),
                 anchor_upper=(
-                    torch.from_numpy(p2d["anchor_upper"]).to(s_inputs.device)
-                    if p2d_coords is not None and "anchor_upper" in p2d
+                    _p2d_tensor(p2d, "anchor_upper").to(s_inputs.device)
+                    if p2d.get("anchor_upper") is not None
                     else None
                 ),
                 anchor_lower=(
-                    torch.from_numpy(p2d["anchor_lower"]).to(s_inputs.device)
-                    if p2d_coords is not None and "anchor_lower" in p2d
+                    _p2d_tensor(p2d, "anchor_lower").to(s_inputs.device)
+                    if p2d.get("anchor_lower") is not None
+                    else None
+                ),
+                # Free-chain covalent bonds as their OWN projection family:
+                # the generator projects them AFTER the pocket/clash bands
+                # each step (official angle->bond ordering in
+                # tfg.potentials.PairwiseDistancePotential._project) so bond
+                # geometry wins the negotiation. Independent of the anchor
+                # npz — blind/no-guidance runs keep them (chemistry, not
+                # guidance).
+                bond_index=(
+                    _p2d_tensor(p2d, "cov_index").to(s_inputs.device)
+                    if p2d.get("cov_index") is not None
+                    else None
+                ),
+                bond_upper=(
+                    _p2d_tensor(p2d, "cov_upper").to(s_inputs.device)
+                    if p2d.get("cov_upper") is not None
+                    else None
+                ),
+                bond_lower=(
+                    _p2d_tensor(p2d, "cov_lower").to(s_inputs.device)
+                    if p2d.get("cov_lower") is not None
                     else None
                 ),
             )
