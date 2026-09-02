@@ -14,6 +14,7 @@ import {
 } from '../../api/supabaseLite';
 import { canEditProject, isTaskEditableForProject } from '../../utils/accessControl';
 import { saveProjectInputConfig } from '../../utils/projectInputs';
+import { pocketOptionsWithRestoredTemplate } from '../../utils/peptidePocket';
 import { validateComponents } from '../../utils/inputValidation';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { createWorkflowSubmitters } from './workflowSubmitters';
@@ -1391,6 +1392,12 @@ export function useProjectDetailRuntimeContext() {
         });
       }
 
+      // Pocket picks reference the uploaded target structure; when no
+      // structure content is available they are dropped (plain sequence
+      // picks stay).
+      const hasTargetTemplate = Object.values(proteinTemplates).some(
+        (template) => String(template?.content || '').trim().length > 0
+      );
       setDraft((prev) => {
         if (!prev) return prev;
         const mergedConfig = normalizeConfigForBackend(
@@ -1401,7 +1408,13 @@ export function useProjectDetailRuntimeContext() {
           ...prev,
           taskName: String(taskRow.name || prev.taskName || '').trim(),
           taskSummary: String(taskRow.summary || prev.taskSummary || '').trim(),
-          inputConfig: mergedConfig
+          inputConfig: {
+            ...mergedConfig,
+            options: pocketOptionsWithRestoredTemplate(
+              mergedConfig.options,
+              hasTargetTemplate
+            )
+          }
         };
       });
     };
@@ -1442,6 +1455,7 @@ export function useProjectDetailRuntimeContext() {
     getProjectTaskDetailCached,
     isPeptideDesignWorkflow,
     location.search,
+    proteinTemplates,
     project?.task_id,
     projectTasks,
     setDraft,

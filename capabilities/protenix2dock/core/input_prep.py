@@ -19,6 +19,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import math
+from itertools import combinations
+
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -499,87 +502,195 @@ _PLAUSIBLE_BOND_ELEMENTS = {key: True for key in (
     "CC", "CN", "CO", "CS", "SS", "CP", "OP", "NP", "SP")}
 
 
-def compute_covalent_bond_bands(
+# Standard amino-acid heavy-atom bond graphs (per residue type). Chemistry,
+# not geometry: bonds exist because of the residue's covalent structure, so a
+# deformed or partially rebuilt input cannot lose a bond from the constraint
+# set the way a distance cut-off can. Peptide C(i)-N(i+1) links and the C=O
+# carbonyl are added from the backbone.
+_STD_AA_BONDS = {
+    'ALA': [('CA', 'CB')],
+    'ARG': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'NE'),
+            ('NE', 'CZ'), ('CZ', 'NH1'), ('CZ', 'NH2')],
+    'ASN': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'OD1'), ('CG', 'ND2')],
+    'ASP': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'OD1'), ('CG', 'OD2')],
+    'CYS': [('CA', 'CB'), ('CB', 'SG')],
+    'GLN': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'OE1'),
+            ('CD', 'NE2')],
+    'GLU': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'OE1'),
+            ('CD', 'OE2')],
+    'GLY': [],
+    'HIS': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'ND1'), ('CG', 'CD2'),
+            ('ND1', 'CE1'), ('CD2', 'NE2'), ('CE1', 'NE2')],
+    'ILE': [('CA', 'CB'), ('CB', 'CG1'), ('CB', 'CG2'), ('CG1', 'CD1')],
+    'LEU': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2')],
+    'LYS': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'CE'),
+            ('CE', 'NZ')],
+    'MET': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'SD'), ('SD', 'CE')],
+    'PHE': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2'),
+            ('CD1', 'CE1'), ('CD2', 'CE2'), ('CE1', 'CZ'), ('CE2', 'CZ')],
+    'PRO': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'N')],
+    'SER': [('CA', 'CB'), ('CB', 'OG')],
+    'THR': [('CA', 'CB'), ('CB', 'OG1'), ('CB', 'CG2')],
+    'TRP': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2'),
+            ('CD1', 'NE1'), ('CD2', 'CE2'), ('CD2', 'CE3'), ('NE1', 'CE2'),
+            ('CE2', 'CZ2'), ('CE3', 'CZ3'), ('CZ2', 'CH2'), ('CH2', 'CZ3')],
+    'TYR': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2'),
+            ('CD1', 'CE1'), ('CD2', 'CE2'), ('CE1', 'CZ'), ('CE2', 'CZ'),
+            ('CZ', 'OH')],
+    'VAL': [('CA', 'CB'), ('CB', 'CG1'), ('CB', 'CG2')],
+}
+# ideal heavy-atom bond lengths (A) by element pair
+_IDEAL_BOND = {('C', 'C'): 1.52, ('C', 'N'): 1.47, ('C', 'O'): 1.43,
+               ('C', 'S'): 1.81, ('S', 'S'): 2.05, ('N', 'O'): 1.40,
+               ('C', 'P'): 1.84, ('O', 'P'): 1.60, ('N', 'P'): 1.70,
+               ('S', 'P'): 2.05}
+
+
+def _ideal_bond_length(elem_a: str, elem_b: str) -> float:
+    key = tuple(sorted((elem_a, elem_b)))
+    return _IDEAL_BOND.get(key, 1.50)
+
+
+def compute_free_chain_tfg_constraints(
     info: dict[str, Any],
     coords: np.ndarray,
     mask: np.ndarray,
     free_entities: set[int] | None = None,
-    bond_cutoff: float = 1.95,
-    sulfur_cutoff: float = 2.15,
-    band: float = 0.12,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Free-chain covalent bonds as hard-anchor bands.
+    bond_band: float = 0.15,
+) -> dict[str, np.ndarray] | None:
+    """Bond and angle constraints for the free chains in official TFG format.
 
-    The anchor projection constrains ATOMS, not groups: a steric shove on
-    one atom must negotiate against its own bonds or the atom tears off its
-    residue. Every covalent bond of the free chains therefore joins the same
-    damped-Jacobi sweep as a tight band around its rest length, projected
-    after the pocket/clash bands so bond geometry wins (the official
-    PairwiseDistancePotential ordering: angles first, bonds last).
+    Follows extract_pairwise_distance_bounds_from_mol semantics
+    (protenix/data/core/geometry_featurizer.py): bonds from the residue
+    chemical graph with ideal element-pair lengths, angles from bond
+    triples (pairs sharing a bonded centre). The output feeds the TFG
+    PairwiseDistancePotential, which projects x0 with the official
+    angles-then-bonds ordering and a minimum-norm solve.
 
-    Bonds are detected on the assembled table (coords/mask/info from
-    align_complex_init_coords) — the geometry the sampler actually moves,
-    including atoms rebuilt from the CCD reference geometry. Detection is
-    all-pairs within each free chain: any bond topology the input carries
-    (intra-residue, peptide C-N, disulfide S-S at ~2.05 A, non-consecutive
-    cross-links) is covered, while 1,3-pairs (~2.4 A and up in valid
-    geometry) never fall inside the cut-offs. A distance test alone would
-    also latch onto chemically impossible pairs of a deformed input (two
-    backbone oxygens 1.4 A apart), so candidates must additionally be an
-    element pair that forms bonds in biomolecular chemistry. Rest length =
-    detected distance (input chemistry is exact by construction; CCD
-    rebuilds carry ideal geometry).
+    Standard residues use _STD_AA_BONDS (chemistry, independent of input
+    deformation); non-standard components use distance detection on the
+    assembled coordinates (CCD conformer geometry is intact). The peptide
+    C(i)-N(i+1) link and the terminal C-OXT bond always apply.
 
-    Coverage contract: bonds WITHIN the free entities (the chains that
-    denoise). Receptor atoms are pinned bit-exact every step, so
-    receptor-internal bonds need no constraint, and receptor<->free
-    covalent links belong to the explicit bond_pairs channel (bicyclic
-    linker). Atoms with mask == 0 carry no coordinates and are rebuilt
-    from the CCD reference geometry before this point; bonds of a wholly
-    absent residue are outside the staged-input contract.
-
-    With free_entities given, only free entities are scanned. Returns
-    (pairs [M,2] int64, upper [M] float32, lower [M] float32) or None.
+    Returns the pairwise_distance_* arrays or None.
     """
     asym = info["asym"]
+    res_id = info["res_id"]
+    comp_source = info.get("comp_ids")
+    if comp_source is None:
+        comp_source = info.get("res_names")
+    comp_of = np.asarray(comp_source if comp_source is not None
+                         else [""] * len(asym))
+    atom_names = [str(a) for a in np.asarray(info["atom_names"]).astype(str)]
+    elements = np.char.upper(np.asarray(info["elements"]).astype(str))
     asym_to_entity = info["asym_to_entity"]
-    elements = np.char.upper(
-        np.asarray(info["elements"]).astype(str))
 
-    pairs: list[list[int]] = []
-    rest: list[float] = []
-    free_rows_by_asym: dict[int, list[int]] = {}
+    groups: dict[tuple[int, int], list[int]] = {}
+    order: dict[int, list[int]] = {}
     for i in range(len(asym)):
         if mask[i] <= 0:
             continue
-        if free_entities is not None and asym_to_entity[int(asym[i])] not in free_entities:
+        asym_v, rid = int(asym[i]), int(res_id[i])
+        if free_entities is not None and asym_to_entity[asym_v] not in free_entities:
             continue
-        free_rows_by_asym.setdefault(int(asym[i]), []).append(i)
+        groups.setdefault((asym_v, rid), []).append(i)
+        seq = order.setdefault(asym_v, [])
+        if rid not in seq:
+            seq.append(rid)
 
-    for rows in free_rows_by_asym.values():
-        pts = np.asarray(coords[rows], dtype=np.float64)
-        elem = elements[rows]
-        d2 = ((pts[:, None, :] - pts[None, :, :]) ** 2).sum(-1)
-        is_sulfur = elem == "S"
-        cutoff2 = np.where(is_sulfur[:, None] | is_sulfur[None, :],
-                           sulfur_cutoff, bond_cutoff) ** 2
-        lo = np.where(elem[:, None] < elem[None, :], elem[:, None], elem[None, :])
-        hi = np.where(elem[:, None] < elem[None, :], elem[None, :], elem[:, None])
-        pair_key = np.char.add(lo, hi)
-        plausible = np.isin(pair_key, list(_PLAUSIBLE_BOND_ELEMENTS))
-        iu = np.triu_indices(len(rows), k=1)
-        keep = (d2[iu] <= cutoff2[iu]) & plausible[iu]
-        for a, b in zip(iu[0][keep], iu[1][keep]):
-            i, j = rows[a], rows[b]
-            pairs.append([i, j])
-            rest.append(float(np.linalg.norm(coords[i] - coords[j])))
+    index: list[list[int]] = []
+    upper: list[float] = []
+    lower: list[float] = []
+    is_bond: list[int] = []
+    is_angle: list[int] = []
 
-    if not pairs:
+    for asym_v, rids in order.items():
+        residues: list[tuple[int, str, dict[str, int]]] = []
+        for rid in rids:
+            rows = groups.get((asym_v, rid), [])
+            comp = str(comp_of[rows[0]]).upper() if rows else ""
+            residues.append((rid, comp, {atom_names[i]: i for i in rows}))
+
+        chain_bonds: set[tuple[int, int]] = set()
+
+        def bond(i: int, j: int) -> None:
+            key = (min(i, j), max(i, j))
+            if key in chain_bonds:
+                return
+            chain_bonds.add(key)
+            rest = _ideal_bond_length(elements[i], elements[j])
+            index.append([i, j])
+            upper.append(rest + bond_band)
+            lower.append(max(rest - bond_band, 0.5))
+            is_bond.append(1)
+            is_angle.append(0)
+
+        for rid, comp, atoms in residues:
+            graph = _STD_AA_BONDS.get(comp)
+            if graph is not None:
+                for a, b in graph:
+                    if a in atoms and b in atoms:
+                        bond(atoms[a], atoms[b])
+            else:
+                names = sorted(atoms)
+                for x in range(len(names)):
+                    for y in range(x + 1, len(names)):
+                        i, j = atoms[names[x]], atoms[names[y]]
+                        d = float(np.linalg.norm(coords[i] - coords[j]))
+                        cutoff = 2.15 if 'S' in (elements[i], elements[j]) else 1.95
+                        if d <= cutoff:
+                            bond(i, j)
+            for a, b in (('N', 'CA'), ('CA', 'C'), ('C', 'O'), ('C', 'OXT')):
+                if a in atoms and b in atoms:
+                    bond(atoms[a], atoms[b])
+        for pos in range(len(residues) - 1):
+            c_atom = residues[pos][2].get('C')
+            n_atom = residues[pos + 1][2].get('N')
+            if c_atom is not None and n_atom is not None:
+                bond(c_atom, n_atom)
+        # disulfide: CYS SG-SG within bonding distance is chemistry
+        sg_atoms = [(rid, atoms['SG']) for rid, comp, atoms in residues
+                    if comp == 'CYS' and 'SG' in atoms]
+        for x in range(len(sg_atoms)):
+            for y in range(x + 1, len(sg_atoms)):
+                i, j = sg_atoms[x][1], sg_atoms[y][1]
+                if float(np.linalg.norm(coords[i] - coords[j])) <= 2.15:
+                    bond(i, j)
+
+        # angle pairs: two bonds sharing a centre, official
+        # build_angle_triples_from_bonds semantics
+        neighbours: dict[int, set[int]] = {}
+        for a, b in chain_bonds:
+            neighbours.setdefault(a, set()).add(b)
+            neighbours.setdefault(b, set()).add(a)
+        seen: set[tuple[int, int]] = set(chain_bonds)
+        for shared, partners in neighbours.items():
+            for i, j in combinations(sorted(partners), 2):
+                key = (i, j) if i < j else (j, i)
+                if key in seen:
+                    continue
+                seen.add(key)
+                l1 = _ideal_bond_length(elements[i], elements[shared])
+                l2 = _ideal_bond_length(elements[shared], elements[j])
+                rest = math.sqrt(max(
+                    l1 * l1 + l2 * l2
+                    - 2 * l1 * l2 * math.cos(math.radians(109.5)), 0.25))
+                index.append([key[0], key[1]])
+                upper.append(rest + 0.40)
+                lower.append(max(rest - 0.40, 0.5))
+                is_bond.append(0)
+                is_angle.append(1)
+
+    if not index:
         return None
-    index = np.asarray(pairs, dtype=np.int64)
-    upper = np.asarray(rest, dtype=np.float32) + float(band)
-    lower = np.maximum(np.asarray(rest, dtype=np.float32) - float(band), 0.5)
-    return index, upper, lower
+    return {
+        "pairwise_distance_index": np.asarray(index, dtype=np.int64).T,
+        "pairwise_distance_upper_bound": np.asarray(upper, dtype=np.float32),
+        "pairwise_distance_lower_bound": np.asarray(lower, dtype=np.float32),
+        "pairwise_distance_is_bond": np.asarray(is_bond, dtype=np.float32),
+        "pairwise_distance_is_angle": np.asarray(is_angle, dtype=np.float32),
+    }
+
 
 
 def compute_ligand_covalent_bands(
@@ -622,6 +733,28 @@ def compute_ligand_covalent_bands(
     upper = np.asarray(rest, dtype=np.float32) + float(band)
     lower = np.maximum(np.asarray(rest, dtype=np.float32) - float(band), 0.5)
     return index, upper, lower
+
+
+def tfg_constraints_as_bands(
+    constraints: dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Bond constraints from the TFG set in hard-band format for x_t.
+
+    The TFG soft channel guides x0 (the denoiser's clean prediction);
+    pocket anchors constrain x_t directly. When a pocket anchor pushes an
+    atom against its covalent network, the soft channel cannot prevent
+    x_t from drifting between steps. The bond subset therefore also
+    projects x_t after every pocket/clash anchor sweep — covalent bonds
+    outrank pocket geometry in the physical hierarchy, so chemistry wins
+    the negotiation on the trajectory itself.
+    """
+    is_bond = np.asarray(constraints["pairwise_distance_is_bond"]) > 0.5
+    if not is_bond.any():
+        return None
+    idx = np.asarray(constraints["pairwise_distance_index"])[:, is_bond]
+    upper = np.asarray(constraints["pairwise_distance_upper_bound"])[is_bond]
+    lower = np.asarray(constraints["pairwise_distance_lower_bound"])[is_bond]
+    return idx, upper, lower
 
 
 def compute_clash_floor_pairs(
@@ -895,6 +1028,8 @@ def align_complex_init_coords(
         "entity_rows": entity_rows,
         "elements": np.asarray(
             [str(e) for e in np.asarray(atom_array.element)]),
+        "comp_ids": np.asarray(
+            [str(cn) for cn in np.asarray(atom_array.res_name)]),
         "entity_chain_names": entity_chain_names,
         "asym": asym,
         "res_id": res_id,

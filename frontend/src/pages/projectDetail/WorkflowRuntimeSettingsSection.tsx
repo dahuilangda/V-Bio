@@ -967,10 +967,6 @@ export function WorkflowRuntimeSettingsSection({
                       </div>
                     ) : null}
                   </div>
-                  <div className="muted small">
-                    上传后启用模式锚定：设计产物保持该参考肽的结合方式（需与靶标结构同一坐标系，
-                    仅 D-peptide 模式）。不传则按口袋自由设计。
-                  </div>
                 </label>
                 <label className="field peptide-length-range">
                   <span>Peptide Length (min–max)</span>
@@ -990,9 +986,6 @@ export function WorkflowRuntimeSettingsSection({
                       onCommit={(v) => onPeptideLengthRange(peptideLengthMin, v)}
                       disabled={!canEdit}
                     />
-                  </div>
-                  <div className="muted small">
-                    min = max 时为固定长度；min &lt; max 时引擎在区间内自适应。
                   </div>
                 </label>
                 <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">

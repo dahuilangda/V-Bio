@@ -6,6 +6,7 @@ import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '
 import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, Project, ProjectInputConfig, ProjectTask, ProteinModification, ProteinTemplateUpload } from '../../types/models';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 import { selectedCustomResidueDefinitions } from './peptideCustomResidues';
+import { pocketOptionsWithRestoredTemplate } from '../../utils/peptidePocket';
 import { loadRDKitModule } from '../../utils/rdkit';
 import { parseVirtualScreeningInput, validateVirtualScreeningSmiles } from '../../utils/virtualScreening';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
@@ -239,7 +240,7 @@ async function validateAllCustomResidueBackbones(
       const smiles = String(mod.smiles || '').trim();
       if (!smiles) continue;
       const first = firstBackboneSlotError(validateCustomResidueBackbone(rdkit, smiles, mod.backbone, Boolean(mod.cTerminalAmidated)));
-      if (first) return `自定义残基 ${mod.ccd || '(未命名)'}（位置 ${mod.position}）：${first}`;
+      if (first) return `Custom residue ${mod.ccd || '(unnamed)'} (position ${mod.position}): ${first}`;
     }
   }
   if (isPeptideDesignWorkflow) {
@@ -248,7 +249,7 @@ async function validateAllCustomResidueBackbones(
       const smiles = String(def.smiles || '').trim();
       if (!smiles) continue;
       const first = firstBackboneSlotError(validateCustomResidueBackbone(rdkit, smiles, def.backbone, Boolean(def.cTerminalAmidated)));
-      if (first) return `自定义残基 ${def.ccd}：${first}`;
+      if (first) return `Custom residue ${def.ccd}: ${first}`;
     }
   }
   return null;
@@ -365,6 +366,24 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   }
 
   const activeComponents = submissionConfig.components;
+  if (isPeptideDesignWorkflow) {
+    // Serialize the pocket against what this submission actually carries: a
+    // target structure translates chain-prefixed picks; a sequence-only
+    // target carries plain sequence positions, and structure-frame
+    // definitions (chain-prefixed picks, explicit centers) have no meaning
+    // there.
+    const targetHasStructure = activeComponents.some(
+      (component) => component.type === 'protein'
+        && Boolean(proteinTemplates[component.id]?.content?.trim())
+    );
+    submissionConfig = {
+      ...submissionConfig,
+      options: pocketOptionsWithRestoredTemplate(
+        submissionConfig.options,
+        targetHasStructure
+      )
+    };
+  }
   const validationError = validateComponents(activeComponents);
   if (validationError) {
     setError(validationError);
