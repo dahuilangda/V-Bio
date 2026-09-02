@@ -7278,12 +7278,133 @@ def _dpeptide_refine_and_validate(
     if not scored:
         raise RuntimeError(
             f"D-space refine produced no samples under {structure_dir}.")
-    scored.sort(reverse=True)
-    for _iptm, _cif in scored:
-        shutil.copyfile(_cif, keep_dir / _cif.name)
-    shutil.copyfile(scored[0][1], refined_cif)
-    metrics["refined_iptm"] = scored[0][0]
+    # Covalent integrity, then clash-freedom, break ties BEFORE ipTM: the
+    # anchor projections of the vendored sampler historically tore single
+    # side-chain atoms off their residues (measured: 30+ detached atoms
+    # across one task's shipped ranks, CZ-OH 1.37 -> 2.6 A); a chemically
+    # intact sample with slightly lower ipTM ships instead of a torn one.
+    # The sampler now also carries covalent bond bands + VDW clash floors
+    # (official tfg.potentials semantics), so clean samples should dominate.
+    ranked = []
+    for iptm, cif in scored:
+        try:
+            detached = _covalent_detached_atoms(Path(cif))
+            clashes = _interchain_clash_count(Path(cif))
+        except Exception:  # noqa: BLE001
+            detached = ["integrity-check-failed"]
+            clashes = 10**6
+        ranked.append((0 if detached else 1, -clashes, iptm, cif.name, cif, detached))
+    ranked.sort(key=lambda r: (r[0], r[1], r[2], r[3]), reverse=True)
+    best = ranked[0]
+    shutil.copyfile(best[4], refined_cif)
+    metrics["refined_iptm"] = best[2]
+    metrics["refined_covalent_intact"] = bool(best[0])
+    metrics["refined_interchain_clashes"] = -int(best[1])
+    for r in ranked:
+        shutil.copyfile(r[4], keep_dir / Path(r[4]).name)
+    if best[5]:
+        metrics["refined_detached_atoms"] = best[5][:8]
+        print(
+            f"[d-peptide] refined sample picked with {len(best[5])} detached "
+            f"atoms (no intact sample survived): {best[5][:4]}",
+            file=sys.stderr,
+        )
+    # Per-chain mean pLDDT from the confidence B-factors of the best sample —
+    # the design candidate rows need a native pLDDT (binder_avg_plddt); the
+    # engine never emits it as a scalar, but the CIF B-factor column carries
+    # the per-atom confidence.
+    try:
+        metrics["chain_mean_plddt"] = _chain_mean_plddt_from_structure(scored[0][1])
+    except Exception:  # noqa: BLE001
+        metrics["chain_mean_plddt"] = {}
     return metrics
+
+
+def _chain_mean_plddt_from_structure(path: Path) -> Dict[str, float]:
+    """Mean B-factor (== per-atom pLDDT in engine structure output) per chain."""
+    st = gemmi.read_structure(str(path))
+    st.setup_entities()
+    means: Dict[str, float] = {}
+    for chain in st[0]:
+        values = []
+        for residue in chain:
+            for atom in residue:
+                b_iso = float(getattr(atom, "b_iso", 0.0) or 0.0)
+                if b_iso > 0:
+                    values.append(b_iso)
+        if values:
+            # 0-1 scale: the candidate-row contract multiplies by 100 downstream.
+            means[chain.name] = sum(values) / len(values) / 100.0
+    return means
+
+
+def _covalent_detached_atoms(
+    structure_path: Path,
+    threshold: float = 2.2,
+) -> List[str]:
+    """Heavy atoms further than `threshold` from any atom of their own chain.
+
+    Catches every covalent tear the diffusion projections produced on the
+    free chains — terminal side chains (OH/CD1/CD2/...), backbone C-N, even
+    whole-residue rips — which the CA-CB-only integrity report misses
+    (measured on shipped ranks: 30+ detached atoms across 25 structures).
+    """
+    st = gemmi.read_structure(str(structure_path))
+    st.setup_entities()
+    detached: List[str] = []
+    for chain in st[0]:
+        pts = np.array([
+            [a.pos.x, a.pos.y, a.pos.z]
+            for residue in chain for a in residue
+            if a.element != gemmi.Element("H")
+        ])
+        labels = [
+            (residue, atom)
+            for residue in chain for atom in residue
+            if atom.element != gemmi.Element("H")
+        ]
+        if len(pts) < 2:
+            continue
+        d2 = ((pts[:, None, :] - pts[None, :, :]) ** 2).sum(-1)
+        np.fill_diagonal(d2, np.inf)
+        nearest = np.sqrt(d2.min(axis=1))
+        for (residue, atom), dist in zip(labels, nearest):
+            if dist > threshold:
+                detached.append(
+                    f"{chain.name}{int(residue.seqid.num)}"
+                    f"{residue.name}:{atom.name}({dist:.1f}A)")
+    return detached
+
+
+def _interchain_clash_count(
+    structure_path: Path,
+    threshold: float = 2.2,
+) -> int:
+    """Heavy-atom contacts below `threshold` between the largest (receptor)
+    chain and every other chain. Complements the covalent check: the
+    projections can leave the pose chemically intact yet clashing."""
+    st = gemmi.read_structure(str(structure_path))
+    st.setup_entities()
+    chains = sorted(st[0], key=lambda c: -len(c))
+    if len(chains) < 2:
+        return 0
+    rec = np.array([
+        [a.pos.x, a.pos.y, a.pos.z]
+        for residue in chains[0] for a in residue
+        if a.element != gemmi.Element("H")
+    ])
+    count = 0
+    for chain in chains[1:]:
+        other = np.array([
+            [a.pos.x, a.pos.y, a.pos.z]
+            for residue in chain for a in residue
+            if a.element != gemmi.Element("H")
+        ])
+        if not len(other):
+            continue
+        d2 = ((rec[:, None, :] - other[None, :, :]) ** 2).sum(-1)
+        count += int((d2 < threshold * threshold).sum())
+    return count
 
 
 def _structure_integrity_report(
@@ -8625,7 +8746,11 @@ def run_peptide_design_backend(
                 chain_plddt = d_space_metrics.get("chain_mean_plddt")
                 if (not binder_avg_plddt and isinstance(chain_plddt, dict)
                         and isinstance(chain_plddt.get("B"), (int, float))):
-                    binder_avg_plddt = float(chain_plddt["B"]) * 100.0
+                    # chain values arrive in either 0-1 or 0-100 scale; pLDDT of
+                    # exactly 0 is a placeholder, never a measurement.
+                    chain_b = float(chain_plddt["B"])
+                    if chain_b > 0:
+                        binder_avg_plddt = chain_b * 100.0 if chain_b <= 1.0 else chain_b
 
             result_row = {
                 "sequence": candidate_sequence,

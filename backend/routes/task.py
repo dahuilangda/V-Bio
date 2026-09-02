@@ -47,7 +47,153 @@ def register_task_routes(
             info['message'] = status_text
         response['info'] = info
 
+    def _read_archive_result_payloads(archive_name: str) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
+        """Read results_summary.json / design_results.json from a result archive.
+
+        Returns (design_summary, design_results); (None, None) when the archive
+        does not carry a completion summary (i.e. it is not evidence of a
+        finished task).
+        """
+        try:
+            directory = app.config['UPLOAD_FOLDER']
+            filepath = os.path.join(directory, secure_filename(archive_name))
+            design_summary = None
+            design_results = None
+            with zipfile.ZipFile(filepath) as src_zip:
+                names = src_zip.namelist()
+                summary_name = next(
+                    (n for n in names if os.path.basename(n).lower() == 'results_summary.json'), None
+                )
+                if summary_name:
+                    design_summary = json.loads(src_zip.read(summary_name))
+                results_name = next(
+                    (n for n in names if os.path.basename(n).lower() == 'design_results.json'), None
+                )
+                if results_name:
+                    try:
+                        design_results = json.loads(src_zip.read(results_name))
+                    except Exception:
+                        design_results = None
+            if not isinstance(design_summary, dict):
+                return None, None
+            return design_summary, design_results
+        except Exception:
+            return None, None
+
+    def _archive_chain_mean_plddt(archive_name: str, structure_name: str) -> Dict[str, float]:
+        """Per-chain mean B-factor (engine per-atom pLDDT) of an archived structure."""
+        try:
+            directory = app.config['UPLOAD_FOLDER']
+            filepath = os.path.join(directory, secure_filename(archive_name))
+            means: Dict[str, Dict[str, float]] = {}
+            with zipfile.ZipFile(filepath) as src_zip:
+                member = next(
+                    (n for n in src_zip.namelist()
+                     if os.path.basename(n) == structure_name or n.endswith('/' + structure_name)),
+                    None
+                )
+                if not member:
+                    return {}
+                for line in src_zip.read(member).decode('utf-8', 'replace').splitlines():
+                    if not line.startswith('ATOM'):
+                        continue
+                    chain_id = line[21]
+                    try:
+                        b_iso = float(line[60:66])
+                    except ValueError:
+                        continue
+                    if b_iso <= 0:
+                        continue
+                    atom_name = line[12:16].strip()
+                    means.setdefault(chain_id, {'sum': 0.0, 'count': 0.0})
+                    means[chain_id]['sum'] += b_iso
+                    means[chain_id]['count'] += 1
+            out: Dict[str, float] = {}
+            for chain_id, agg in means.items():
+                if agg['count'] >= 3:
+                    out[chain_id] = agg['sum'] / agg['count']
+            return out
+        except Exception:
+            return {}
+
+    def _archive_completed_info(task_id: str, archive_name: str) -> Dict[str, Any]:
+        """Build the completed-task info block from durable storage.
+
+        The result archive on disk is the source of truth for finished tasks;
+        this keeps /status (and the UI) fully independent of redis/celery
+        result-metadata retention.
+        """
+        info: Dict[str, Any] = {
+            'status': 'Task completed successfully.',
+            'result_file': archive_name,
+        }
+        design_summary, _design_results = _read_archive_result_payloads(archive_name)
+        if isinstance(design_summary, dict):
+            summary = _as_record(design_summary.get('summary'))
+            top_results = design_summary.get('top_results')
+            if not isinstance(top_results, list) or not top_results:
+                candidate_list = design_summary.get('best_sequences')
+                top_results = candidate_list if isinstance(candidate_list, list) else []
+            best_row = _as_record(top_results[0]) if isinstance(top_results, list) and top_results else {}
+            iterations = summary.get('iterations')
+            info['peptide_design'] = {
+                'best_score': summary.get('best_score'),
+                'best_sequences': top_results,
+                'candidate_count': len(top_results) if isinstance(top_results, list) else None,
+                'completed_tasks': summary.get('completed_tasks'),
+                'total_tasks': summary.get('total_tasks'),
+                'current_status': 'completed',
+                'current_generation': iterations,
+                'total_generations': iterations,
+                'progress_percent': 100,
+                'status_message': 'Task completed.',
+            }
+            # Top-level confidences describe the featured (best-ranked) candidate
+            # so the UI list/detail never shows placeholder zeros for finished tasks.
+            for src_key, dst_key in (
+                ('iptm', 'iptm'),
+                ('pair_iptm', 'pair_iptm'),
+                ('plddt', 'ligand_plddt'),
+                ('ligand_ipsae_max', 'ligand_ipsae_max'),
+                ('binder_chain_id', 'binder_chain_id'),
+                ('target_chain_id', 'target_chain_id'),
+            ):
+                value = best_row.get(src_key)
+                if value is not None:
+                    info[dst_key] = value
+            structure_name = str(best_row.get('structure_name') or '').strip()
+            if structure_name:
+                info['structure_name'] = structure_name
+                chain_means = _archive_chain_mean_plddt(archive_name, structure_name)
+                if chain_means:
+                    info['chain_mean_plddt'] = chain_means
+        compact_metrics = get_compact_prediction_metrics(task_id)
+        if isinstance(compact_metrics, dict) and compact_metrics:
+            info['compact_metrics'] = compact_metrics
+            info['lead_opt_metrics'] = compact_metrics
+        return info
+
     def build_task_status_response(task_id: str) -> Dict[str, Any]:
+        # Completed results are served from durable storage: the result archive
+        # on disk is the source of truth for finished tasks, so /status never
+        # depends on redis/celery result-metadata retention. Celery is consulted
+        # only for tasks without a completion archive (queued / running / failed
+        # without artifacts).
+        archive_name = find_result_archive(task_id)
+        if archive_name:
+            design_summary, _ = _read_archive_result_payloads(archive_name)
+            if isinstance(design_summary, dict):
+                response: Dict[str, Any] = {
+                    'task_id': task_id,
+                    'state': 'SUCCESS',
+                    'info': _archive_completed_info(task_id, archive_name),
+                }
+                logger.debug(
+                    "Task %s served from result archive '%s' (durable storage).",
+                    task_id, archive_name
+                )
+                return response
+
         task_result = AsyncResult(task_id, app=celery_app)
 
         response: Dict[str, Any] = {'task_id': task_id, 'state': task_result.state, 'info': {}}

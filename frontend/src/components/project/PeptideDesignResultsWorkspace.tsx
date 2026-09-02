@@ -51,6 +51,8 @@ interface PeptideDesignCandidate {
   interfaceMetric: number | null;
   interfaceMetricLabel: 'IPSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
+  iptm: number | null;
+  ipsae: number | null;
   generation: number | null;
   modelLabel: string;
   structureText: string;
@@ -1238,6 +1240,8 @@ function mergeCandidateRows(rows: PeptideDesignCandidate[]): PeptideDesignCandid
           : prev.interfaceMetricSource !== 'none'
             ? prev.interfaceMetricSource
             : row.interfaceMetricSource,
+      iptm: prev.iptm ?? row.iptm,
+      ipsae: prev.ipsae ?? row.ipsae,
       generation: prev.generation ?? row.generation,
       modelLabel: prev.modelLabel || row.modelLabel,
       structureText: rowHasStructure && !prevHasStructure ? row.structureText : prev.structureText,
@@ -1303,14 +1307,18 @@ function parseCandidateRows(
         .trim()
         .toUpperCase();
       const modifications = parsePeptideCandidateModifications(row, sequence.length);
-      const plddt = normalizePlddt(
-        firstFiniteMetric(row, ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt'])
-      );
+      // pLDDT of exactly 0 is a design-backend placeholder (never a real measurement) — treat as missing.
+      const plddtRaw = firstFiniteMetric(row, ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt']);
+      const plddt = normalizePlddt(plddtRaw === 0 ? null : plddtRaw);
       const interfaceMetric = readPreferredInterfaceMetricForCandidate(
         row,
         preferredTargetChainId,
         preferredLigandChainId
       );
+      // ipSAE is the sensitive interface metric — read it independently so the
+      // card always exposes pLDDT / ipTM / ipSAE side by side.
+      const ipsae = normalizeIptm(firstFiniteMetric(row, ['ligand_ipsae_max', 'ligandIpsaeMax', 'ipsae_dom', 'ipsaeDom']));
+      const iptm = normalizeIptm(firstFiniteMetric(row, ['pair_iptm', 'iptm', 'ligand_iptm', 'protein_iptm']));
       const score = computePeptideCompositeScore(row, plddt, interfaceMetric.value);
       const generation = firstFiniteMetric(row, ['generation', 'iteration', 'iter']);
       const rankRaw = firstFiniteMetric(row, ['rank', 'ranking', 'order']);
@@ -1344,6 +1352,8 @@ function parseCandidateRows(
         interfaceMetric: interfaceMetric.value,
         interfaceMetricLabel: interfaceMetric.label,
         interfaceMetricSource: interfaceMetric.source,
+        iptm,
+        ipsae,
         generation: generation === null ? null : Math.max(0, Math.floor(generation)),
         modelLabel,
         structureText: structure.structureText,
@@ -1720,7 +1730,6 @@ interface PeptideCandidateCardProps {
   selected: boolean;
   scoreMin: number | null;
   scoreMax: number | null;
-  interfaceMetricHeaderLabel: string;
   onSelect: (candidateId: string) => void;
 }
 
@@ -1729,14 +1738,12 @@ const PeptideCandidateCard = memo(function PeptideCandidateCard({
   selected,
   scoreMin,
   scoreMax,
-  interfaceMetricHeaderLabel,
   onSelect
 }: PeptideCandidateCardProps) {
   const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreMin, scoreMax));
   const plddtTone = confidenceTone(candidate.plddt);
-  const interfaceTone = confidenceTone(
-    candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
-  );
+  const iptmTone = confidenceTone(candidate.iptm === null ? null : candidate.iptm * 100);
+  const ipsaeTone = confidenceTone(candidate.ipsae === null ? null : candidate.ipsae * 100);
   const sequenceRows = useMemo(() => {
     const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
     return Array.from(
@@ -1809,15 +1816,13 @@ const PeptideCandidateCard = memo(function PeptideCandidateCard({
           <span className="lead-opt-card-pill-key">pLDDT</span>
           <strong>{formatPlddt(candidate.plddt)}</strong>
         </span>
-        <span className={`lead-opt-card-pill conf-tone-${interfaceTone}`}>
-          <span className="lead-opt-card-pill-key">
-            {candidate.interfaceMetricSource === 'ipsae' ? 'IPSAE' : interfaceMetricHeaderLabel}
-          </span>
-          <strong>{formatInterfaceMetric(candidate.interfaceMetric)}</strong>
+        <span className={`lead-opt-card-pill conf-tone-${iptmTone}`}>
+          <span className="lead-opt-card-pill-key">ipTM</span>
+          <strong>{formatInterfaceMetric(candidate.iptm)}</strong>
         </span>
-        <span className="lead-opt-card-pill">
-          <span className="lead-opt-card-pill-key">Gen</span>
-          <strong>{candidate.generation !== null ? candidate.generation : '-'}</strong>
+        <span className={`lead-opt-card-pill conf-tone-${ipsaeTone}`}>
+          <span className="lead-opt-card-pill-key">IPSAE</span>
+          <strong>{formatInterfaceMetric(candidate.ipsae)}</strong>
         </span>
       </div>
     </article>
@@ -2289,7 +2294,6 @@ export function PeptideDesignResultsWorkspace({
                 selected={candidate.id === selectedCandidateStableId}
                 scoreMin={scoreRange.min}
                 scoreMax={scoreRange.max}
-                interfaceMetricHeaderLabel={interfaceMetricHeaderLabel}
                 onSelect={selectCandidateCard}
               />
             ))}

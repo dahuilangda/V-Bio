@@ -39,7 +39,10 @@ from core.input_prep import (
     build_input_json,
     build_peptide_complex_input,
     compute_bond_contact_pairs,
+    compute_clash_floor_pairs,
+    compute_covalent_bond_bands,
     compute_contact_pairs,
+    compute_ligand_covalent_bands,
     load_ligand_pose,
     place_dock_conformer,
     resolve_msa,
@@ -537,6 +540,27 @@ def _run_peptide_engine(
             anchor_idx.append(bond_band[0])
             anchor_up.append(bond_band[1])
             anchor_lo.append(bond_band[2])
+    # Physics bands for the free chains (peptide + linker), built on the
+    # assembled atom table — the coordinates the sampler actually moves:
+    #   - every intra-chain covalent bond as a tight rest-length band
+    #   - a VDW clash floor on every receptor x free heavy pair
+    # Both ride the anchor projection so a steric shove distributes over
+    # bonded neighbours instead of tearing atoms off; bonds project last
+    # (official angles-then-bonds ordering). The receptor stays pinned —
+    # the projector's free/pinned weights never move pinned atoms.
+    free_entities = {
+        len(receptor_names),
+        *((len(receptor_names) + 1,) if linker_entity is not None else ()),
+    }
+    cov_bands = compute_covalent_bond_bands(
+        info, coords, mask, free_entities=free_entities)
+    clash = compute_clash_floor_pairs(
+        info, coords, mask, free_entities=free_entities)
+    if clash is not None:
+        anchor_idx.append(clash[0])
+        anchor_up.append(clash[1])
+        anchor_lo.append(clash[2])
+        log.info("clash floor pairs: %d receptor-free VDW bands", len(clash[1]))
     if anchor_idx:
         anchors = work_dir / "anchor_pairs.npz"
         np.savez(
@@ -547,10 +571,22 @@ def _run_peptide_engine(
         )
         os.environ["PROTENIX_ANCHOR_PAIRS_PATH"] = str(anchors)
         log.info(
-            "hard anchor pairs: %d pocket + %d ring-bond",
-            len(pocket[0]) if (float(args.anchor_slack) > 0 and pocket is not None) else 0,
+            "hard anchor pairs: %d pocket + %d ring-bond + %d clash-floor",
+            len(pocket[0]) if (guidance and float(args.anchor_slack) > 0 and pocket is not None) else 0,
             len(bond_band[0]) if (staged_bond_pairs and bond_band is not None) else 0,
+            len(clash[1]) if clash is not None else 0,
         )
+
+    if cov_bands is not None:
+        cov_npz = work_dir / "covalent_bonds.npz"
+        np.savez(
+            cov_npz,
+            pair_index=cov_bands[0],
+            upper=cov_bands[1],
+            lower=cov_bands[2],
+        )
+        os.environ["PROTENIX_COVALENT_BONDS_PATH"] = str(cov_npz)
+        log.info("covalent bond bands: %d free-chain bonds", len(cov_bands[1]))
 
     return input_json, {
         "coords": coords,
@@ -883,6 +919,18 @@ def main(argv=None):
             pin_npz = work_dir / "pin_mask.npz"
             np.savez(pin_npz, pin=pin)
             os.environ["PROTENIX_PIN_MASK_PATH"] = str(pin_npz)
+            # Ligand covalent bonds (RDKit graph, exact topology): same
+            # every-step projection as peptide mode — the steric floor alone
+            # can shove one ligand atom off its bonded neighbour. Blind dock
+            # keeps the untouched full-noise generation path.
+            lig_cov = compute_ligand_covalent_bands(lig_rows, ligand_mol)
+            if lig_cov is not None:
+                lig_cov_npz = work_dir / "covalent_bonds.npz"
+                np.savez(
+                    lig_cov_npz,
+                    pair_index=lig_cov[0], upper=lig_cov[1], lower=lig_cov[2])
+                os.environ["PROTENIX_COVALENT_BONDS_PATH"] = str(lig_cov_npz)
+                log.info("dock mode: %d ligand covalent bond bands", len(lig_cov[1]))
             log.info("dock mode: pinned %d/%d protein atoms, %d steric floor pairs",
                      int(pin.sum()), len(pin), len(steric[0]))
         if guidance:

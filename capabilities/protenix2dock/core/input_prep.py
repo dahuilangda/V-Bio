@@ -459,6 +459,227 @@ def _bond_pairs_as_rows(
     return index, up, lo
 
 
+def _assembled_residue_order(
+    info: dict[str, Any],
+) -> tuple[dict[int, list[int]], dict[tuple[int, int], list[int]]]:
+    """Residue structure of the assembled atom table.
+
+    Returns ({asym: [res_id by first appearance]}, {(asym, res_id): rows}).
+    First-appearance order (not res_id arithmetic) defines residue
+    neighbours: author numbering may be non-contiguous.
+    """
+    asym = info["asym"]
+    res_id = info["res_id"]
+    order: dict[int, list[int]] = {}
+    groups: dict[tuple[int, int], list[int]] = {}
+    for i in range(len(asym)):
+        asym_v, rid = int(asym[i]), int(res_id[i])
+        seq = order.setdefault(asym_v, [])
+        if rid not in seq:
+            seq.append(rid)
+        groups.setdefault((asym_v, rid), []).append(i)
+    return order, groups
+
+
+# rdkit VDW radii (A) by element; the official clash floor in
+# protenix.tfg.potentials is 0.35 + 0.5 * (ri + rj).
+_VDW_RADII = {
+    "C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80, "P": 1.80,
+    "SE": 1.90, "CL": 1.75, "BR": 1.85, "I": 1.98, "F": 1.47,
+    "B": 1.92, "ZN": 1.39, "MG": 1.73, "CA": 2.31, "FE": 1.94,
+}
+_VDW_DEFAULT = 1.70
+
+
+# Element pairs that form covalent bonds in biomolecules (protein/peptide
+# chemistry; keyed as sorted element-pair strings). O-O, N-N, S-O etc. are
+# never bonded here — a sub-cutoff pair of those elements marks a deformed
+# input, not a bond to preserve.
+_PLAUSIBLE_BOND_ELEMENTS = {key: True for key in (
+    "CC", "CN", "CO", "CS", "SS", "CP", "OP", "NP", "SP")}
+
+
+def compute_covalent_bond_bands(
+    info: dict[str, Any],
+    coords: np.ndarray,
+    mask: np.ndarray,
+    free_entities: set[int] | None = None,
+    bond_cutoff: float = 1.95,
+    sulfur_cutoff: float = 2.15,
+    band: float = 0.12,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Free-chain covalent bonds as hard-anchor bands.
+
+    The anchor projection constrains ATOMS, not groups: a steric shove on
+    one atom must negotiate against its own bonds or the atom tears off its
+    residue. Every covalent bond of the free chains therefore joins the same
+    damped-Jacobi sweep as a tight band around its rest length, projected
+    after the pocket/clash bands so bond geometry wins (the official
+    PairwiseDistancePotential ordering: angles first, bonds last).
+
+    Bonds are detected on the assembled table (coords/mask/info from
+    align_complex_init_coords) — the geometry the sampler actually moves,
+    including atoms rebuilt from the CCD reference geometry. Detection is
+    all-pairs within each free chain: any bond topology the input carries
+    (intra-residue, peptide C-N, disulfide S-S at ~2.05 A, non-consecutive
+    cross-links) is covered, while 1,3-pairs (~2.4 A and up in valid
+    geometry) never fall inside the cut-offs. A distance test alone would
+    also latch onto chemically impossible pairs of a deformed input (two
+    backbone oxygens 1.4 A apart), so candidates must additionally be an
+    element pair that forms bonds in biomolecular chemistry. Rest length =
+    detected distance (input chemistry is exact by construction; CCD
+    rebuilds carry ideal geometry).
+
+    Coverage contract: bonds WITHIN the free entities (the chains that
+    denoise). Receptor atoms are pinned bit-exact every step, so
+    receptor-internal bonds need no constraint, and receptor<->free
+    covalent links belong to the explicit bond_pairs channel (bicyclic
+    linker). Atoms with mask == 0 carry no coordinates and are rebuilt
+    from the CCD reference geometry before this point; bonds of a wholly
+    absent residue are outside the staged-input contract.
+
+    With free_entities given, only free entities are scanned. Returns
+    (pairs [M,2] int64, upper [M] float32, lower [M] float32) or None.
+    """
+    asym = info["asym"]
+    asym_to_entity = info["asym_to_entity"]
+    elements = np.char.upper(
+        np.asarray(info["elements"]).astype(str))
+
+    pairs: list[list[int]] = []
+    rest: list[float] = []
+    free_rows_by_asym: dict[int, list[int]] = {}
+    for i in range(len(asym)):
+        if mask[i] <= 0:
+            continue
+        if free_entities is not None and asym_to_entity[int(asym[i])] not in free_entities:
+            continue
+        free_rows_by_asym.setdefault(int(asym[i]), []).append(i)
+
+    for rows in free_rows_by_asym.values():
+        pts = np.asarray(coords[rows], dtype=np.float64)
+        elem = elements[rows]
+        d2 = ((pts[:, None, :] - pts[None, :, :]) ** 2).sum(-1)
+        is_sulfur = elem == "S"
+        cutoff2 = np.where(is_sulfur[:, None] | is_sulfur[None, :],
+                           sulfur_cutoff, bond_cutoff) ** 2
+        lo = np.where(elem[:, None] < elem[None, :], elem[:, None], elem[None, :])
+        hi = np.where(elem[:, None] < elem[None, :], elem[None, :], elem[:, None])
+        pair_key = np.char.add(lo, hi)
+        plausible = np.isin(pair_key, list(_PLAUSIBLE_BOND_ELEMENTS))
+        iu = np.triu_indices(len(rows), k=1)
+        keep = (d2[iu] <= cutoff2[iu]) & plausible[iu]
+        for a, b in zip(iu[0][keep], iu[1][keep]):
+            i, j = rows[a], rows[b]
+            pairs.append([i, j])
+            rest.append(float(np.linalg.norm(coords[i] - coords[j])))
+
+    if not pairs:
+        return None
+    index = np.asarray(pairs, dtype=np.int64)
+    upper = np.asarray(rest, dtype=np.float32) + float(band)
+    lower = np.maximum(np.asarray(rest, dtype=np.float32) - float(band), 0.5)
+    return index, upper, lower
+
+
+def compute_ligand_covalent_bands(
+    ligand_rows: np.ndarray,
+    ligand_mol: Any,
+    band: float = 0.12,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Ligand covalent bonds from the RDKit graph as hard-anchor bands.
+
+    Dock-mode counterpart of compute_covalent_bond_bands: the molecular
+    graph gives the exact topology (no distance heuristics) and the input
+    conformer the rest lengths. ligand_rows holds HEAVY-atom rows in order
+    (the assembled table carries no hydrogens, and the align contract
+    writes the conformer through those rows), so the molecule is stripped
+    to heavy atoms before its graph is read; a molecule whose heavy-atom
+    count does not match the rows has no valid row correspondence and is
+    rejected (the alignment drops the ligand in that case as well).
+    """
+    if ligand_rows is None or len(ligand_rows) == 0 or ligand_mol is None:
+        return None
+    from rdkit import Chem
+
+    mol = Chem.RemoveHs(ligand_mol) if any(
+        a.GetAtomicNum() == 1 for a in ligand_mol.GetAtoms()) else ligand_mol
+    if mol.GetNumAtoms() != len(ligand_rows):
+        return None
+
+    conf = mol.GetConformer()
+    pairs: list[list[int]] = []
+    rest: list[float] = []
+    for bond in mol.GetBonds():
+        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        p, q = conf.GetAtomPosition(i), conf.GetAtomPosition(j)
+        d = float(np.linalg.norm(np.array(p) - np.array(q)))
+        pairs.append([int(ligand_rows[i]), int(ligand_rows[j])])
+        rest.append(d)
+    if not pairs:
+        return None
+    index = np.asarray(pairs, dtype=np.int64)
+    upper = np.asarray(rest, dtype=np.float32) + float(band)
+    lower = np.maximum(np.asarray(rest, dtype=np.float32) - float(band), 0.5)
+    return index, upper, lower
+
+
+def compute_clash_floor_pairs(
+    info: dict[str, Any],
+    coords: np.ndarray,
+    mask: np.ndarray,
+    free_entities: set[int],
+    cutoff: float = 8.0,
+    max_pairs: int = 4000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Receptor x free-chain VDW clash floors as anchor bands.
+
+    Official semantics (protenix.tfg.potentials
+    PairwiseDistancePotential): a non-bond constrained pair's lower bound is
+    the VDW contact distance 0.35 + 0.5 * (ri + rj) with no upper bound.
+    The pocket contact pairs anchor each receptor atom only to its staged
+    NEAREST free atom; this builder floors EVERY receptor/free heavy pair
+    within `cutoff` on the assembled table, so any atom the diffusion moves
+    into the receptor surface is pushed back out.
+
+    Pairs span entity families by construction (pinned receptor x free
+    chains). Returns (pairs [M,2] int64, upper [M] float32 (=inf as 1e3),
+    lower [M] float32) or None.
+    """
+    asym = info["asym"]
+    asym_to_entity = info["asym_to_entity"]
+    elements = [str(e).upper() for e in np.asarray(info["elements"])]
+
+    pinned: list[tuple[int, float]] = []
+    free: list[tuple[int, float]] = []
+    for i in range(len(asym)):
+        if mask[i] <= 0:
+            continue
+        radius = _VDW_RADII.get(elements[i], _VDW_DEFAULT)
+        entity = asym_to_entity[int(asym[i])]
+        (free if entity in free_entities else pinned).append((i, radius))
+    if not pinned or not free:
+        return None
+    pin_idx = np.array([r for r, _ in pinned], dtype=np.int64)
+    pin_rad = np.array([rad for _, rad in pinned], dtype=np.float32)
+    free_idx = np.array([r for r, _ in free], dtype=np.int64)
+    free_rad = np.array([rad for _, rad in free], dtype=np.float32)
+
+    pin_xyz = np.asarray(coords[pin_idx], dtype=np.float64)
+    free_xyz = np.asarray(coords[free_idx], dtype=np.float64)
+    d2 = ((pin_xyz[:, None, :] - free_xyz[None, :, :]) ** 2).sum(-1)
+    sel = np.argwhere(d2 <= cutoff * cutoff)
+    if sel.size == 0:
+        return None
+    if len(sel) > max_pairs:
+        order = np.argsort(d2[sel[:, 0], sel[:, 1]])[:max_pairs]
+        sel = sel[order]
+    lo = (0.35 + 0.5 * (pin_rad[sel[:, 0]] + free_rad[sel[:, 1]])).astype(np.float32)
+    pairs = np.stack([pin_idx[sel[:, 0]], free_idx[sel[:, 1]]], axis=1).astype(np.int64)
+    upper = np.full(len(pairs), 1.0e3, dtype=np.float32)  # unbounded above
+    return pairs, upper, lo
+
+
 def build_peptide_complex_input(
     *,
     receptor_chains: list[ProteinChainData],
@@ -672,6 +893,8 @@ def align_complex_init_coords(
     )
     return coords, mask, {
         "entity_rows": entity_rows,
+        "elements": np.asarray(
+            [str(e) for e in np.asarray(atom_array.element)]),
         "entity_chain_names": entity_chain_names,
         "asym": asym,
         "res_id": res_id,
