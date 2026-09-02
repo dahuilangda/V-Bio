@@ -255,7 +255,11 @@ export async function downloadResultBlob(
   }
   const url = apiUrl(params.size > 0 ? `${path}?${params.toString()}` : path);
   const res = await fetchWithTimeout(url, {
-    cache: 'no-store'
+    cache: 'no-store',
+    // The runtime gateway authorizes task reads by X-API-Token (platform token) or an
+    // explicit project_id query — every other gateway call spreads API_HEADERS; a bare
+    // fetch here 403'd result downloads with "project_id query is required".
+    headers: { ...API_HEADERS }
   });
   if (!res.ok) {
     const text = await res.text();

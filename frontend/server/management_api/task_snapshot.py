@@ -1,16 +1,94 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import logging
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
 from management_api.runtime_proxy import read_upload_text
+from management_api.screening_library import parse_screening_compounds_file
+
+logger = logging.getLogger(__name__)
 
 
 AFFINITY_TARGET_UPLOAD_COMPONENT_ID = "__affinity_target_upload__"
 AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = "__affinity_ligand_upload__"
 TASK_INPUT_OPTIONS_KEY = "__vbio_input_options_v1"
+
+_RESIDUE_SPEC_PATTERN = re.compile(r"^([A-Za-z]+):(\d+)$")
+
+
+def _pocket_centroid_from_residues(protein_text: str, residue_specs: str) -> Optional[Tuple[float, float, float]]:
+    """Cα centroid of the specified residues — mirrors the capability's
+    extract_pocket_center_from_residues (first model, chain names upper-cased) so the
+    snapshot's pocket box matches what the run actually used."""
+    try:
+        import gemmi
+    except ImportError:
+        return None
+    specs: set[Tuple[str, int]] = set()
+    for token in str(residue_specs).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        match = _RESIDUE_SPEC_PATTERN.match(token)
+        if not match:
+            return None
+        specs.add((match.group(1).upper(), int(match.group(2))))
+    if not specs:
+        return None
+    try:
+        structure = gemmi.read_pdb_string(protein_text)
+        if len(structure) == 0:
+            return None
+        coords: List[Tuple[float, float, float]] = []
+        found: set[Tuple[str, int]] = set()
+        for chain in structure[0]:
+            chain_name = chain.name.strip().upper()
+            for residue in chain:
+                key = (chain_name, residue.seqid.num)
+                if key in specs and key not in found:
+                    for atom in residue:
+                        if atom.name.strip().upper() == "CA":
+                            coords.append((atom.pos.x, atom.pos.y, atom.pos.z))
+                            found.add(key)
+                            break
+        if not coords or found != specs:
+            # The capability hard-errors on missing residues, so a successful run always has
+            # them all; anything else here means the snapshot cannot mirror the run.
+            return None
+        count = len(coords)
+        return tuple(round(sum(coord[axis] for coord in coords) / count, 3) for axis in range(3))  # type: ignore[return-value]
+    except Exception:
+        return None
+
+
+def _pocket_centroid_from_ligand(ligand_text: str, filename: str) -> Optional[Tuple[float, float, float]]:
+    """Heavy-atom centroid of a reference ligand — mirrors extract_pocket_center_from_ligand."""
+    try:
+        from rdkit import Chem
+    except ImportError:
+        return None
+    suffix = "." + str(filename).rsplit(".", 1)[-1].lower() if "." in str(filename) else ""
+    molecule = None
+    try:
+        if suffix in (".sdf", ".sd", ".mol"):
+            # First molecule block of the (possibly multi-record) SDF, like SDMolSupplier's first hit.
+            molecule = Chem.MolFromMolBlock(ligand_text.split("$$$$")[0], removeHs=True)
+        elif suffix == ".mol2":
+            molecule = Chem.MolFromMol2Block(ligand_text, removeHs=True)
+        elif suffix == ".pdb":
+            molecule = Chem.MolFromPDBBlock(ligand_text, removeHs=True)
+    except Exception:
+        return None
+    if molecule is None or molecule.GetNumAtoms() == 0:
+        return None
+    conformer = molecule.GetConformer()
+    count = molecule.GetNumAtoms()
+    positions = [(p.x, p.y, p.z) for p in (conformer.GetAtomPosition(i) for i in range(count))]
+    return tuple(round(sum(pos[axis] for pos in positions) / count, 3) for axis in range(3))  # type: ignore[return-value]
 
 
 def _normalize_chain_id_list(value: Any) -> List[str]:
@@ -227,6 +305,36 @@ def build_prediction_task_snapshot_from_yaml(request_obj: Any, logger: Any) -> D
     if not isinstance(sequences, list):
         sequences = []
 
+    # A library uploaded as compounds_file is merged into the runtime's YAML before the
+    # task runs; mirror that here so the snapshot reflects what was actually submitted.
+    # Both inline and file libraries are rejected by the runtime, so only one source
+    # ever reaches this merge.
+    compounds_upload = getattr(request_obj, "files", {}).get("compounds_file")
+    if compounds_upload is not None and str(compounds_upload.filename or "").strip():
+        try:
+            # Strict UTF-8 like the runtime route (read_upload_text is lenient with
+            # replacement chars, which would fabricate compounds the runtime rejects).
+            raw = compounds_upload.read()
+            compounds_text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            if isinstance(yaml_data.get("virtual_screening"), dict) and isinstance(
+                yaml_data["virtual_screening"].get("compounds"), list
+            ):
+                inline = [
+                    item
+                    for item in yaml_data["virtual_screening"]["compounds"]
+                    if isinstance(item, dict) and str(item.get("smiles") or "").strip()
+                ]
+                if inline:
+                    raise ValueError("compound library provided both inline and as compounds_file")
+            screening_section = yaml_data.get("virtual_screening")
+            if not isinstance(screening_section, dict):
+                screening_section = {}
+                yaml_data["virtual_screening"] = screening_section
+            screening_section["compounds"] = parse_screening_compounds_file(compounds_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to parse compounds_file for task snapshot backfill: %s", exc)
+
+
     components: List[Dict[str, Any]] = []
     first_protein_sequence = ""
     first_ligand_sequence = ""
@@ -341,9 +449,70 @@ def build_affinity_task_snapshot(request_obj: Any, upstream_path: str) -> Dict[s
         ligand_smiles = next(iter(ligand_smiles_map.values()))
 
     enable_affinity = parse_bool_form(request_obj, "enable_affinity", False)
-    mode = (request_obj.form.get("mode") or "score").strip().lower()
-    if mode not in {"score", "pose", "refine", "interface"}:
-        mode = "score"
+    mode = (request_obj.form.get("mode") or "dock").strip().lower()
+    if mode not in {"dock", "score", "pose", "refine", "interface"}:
+        mode = "dock"
+    # Dock pocket definition (center/size axes) rides along so an API-submitted dock task
+    # round-trips its pocket into the task snapshot instead of silently losing it. Each axis
+    # parses independently: the route accepts center-without-size (sizes default 22 Å), so a
+    # missing size axis must not discard a valid center.
+    dock_pocket = None
+    if mode == "dock":
+        def _axis(name: str) -> Optional[float]:
+            raw = (request_obj.form.get(name) or "").strip()
+            if not raw:
+                return None
+            try:
+                return float(raw)
+            except ValueError:
+                return None
+
+        center = [_axis(f"center_{axis}") for axis in ("x", "y", "z")]
+        size = [_axis(f"size_{axis}") for axis in ("x", "y", "z")]
+        pocket_residues = (request_obj.form.get("pocket_residues") or "").strip()
+        pocket_ligand = getattr(request_obj, "files", {}).get("pocket_ligand")
+        pocket_ligand_name = (
+            str(getattr(pocket_ligand, "filename", "") or "").strip() if pocket_ligand is not None else ""
+        )
+
+        def _sized(center_tuple: Tuple[float, float, float], method: str) -> Dict[str, Any]:
+            return {
+                "centerX": center_tuple[0], "centerY": center_tuple[1], "centerZ": center_tuple[2],
+                "sizeX": size[0] if size[0] is not None and size[0] > 0 else 22.0,
+                "sizeY": size[1] if size[1] is not None and size[1] > 0 else 22.0,
+                "sizeZ": size[2] if size[2] is not None and size[2] > 0 else 22.0,
+                "method": method,
+            }
+
+        if all(c is not None and c == c for c in center):
+            dock_pocket = _sized((center[0], center[1], center[2]), "manual")
+        elif pocket_residues:
+            # Mirror the capability's Cα centroid so the UI shows (and a re-run submits) the
+            # same box the original residues definition produced.
+            protein_upload = getattr(request_obj, "files", {}).get("protein_file")
+            centroid = None
+            if protein_upload is not None and str(getattr(protein_upload, "filename", "") or "").strip():
+                centroid = _pocket_centroid_from_residues(read_upload_text(protein_upload), pocket_residues)
+            if centroid is not None:
+                dock_pocket = _sized(centroid, "residues")
+            else:
+                logger.warning(
+                    "Could not mirror pocket_residues into a numeric pocket box for the task snapshot"
+                )
+                dock_pocket = {"pocketResidues": pocket_residues, "method": "residues"}
+        elif pocket_ligand_name:
+            centroid = _pocket_centroid_from_ligand(
+                read_upload_text(pocket_ligand), pocket_ligand_name
+            )
+            if centroid is not None:
+                dock_pocket = _sized(centroid, "ligand")
+            else:
+                logger.warning(
+                    "Could not mirror pocket_ligand into a numeric pocket box for the task snapshot"
+                )
+                # Mirror the residues-branch fallback: retain the input reference so a
+                # re-run from the snapshot keeps the ligand-defined pocket.
+                dock_pocket = {"pocketLigandName": pocket_ligand_name, "method": "ligand"}
     activity_enabled = bool(enable_affinity and target_chain and ligand_chain and ligand_smiles)
     properties: Dict[str, Any] = {
         "affinity": activity_enabled,
@@ -351,7 +520,8 @@ def build_affinity_task_snapshot(request_obj: Any, upstream_path: str) -> Dict[s
         "ligand": ligand_chain or None,
         "binder": ligand_chain or None,
         TASK_INPUT_OPTIONS_KEY: {
-            "affinityMode": mode
+            "affinityMode": mode,
+            **({"affinityDockPocket": dock_pocket} if dock_pocket else {}),
         },
     }
 

@@ -205,8 +205,8 @@ export function parseCopilotTrace(value: unknown): CopilotTraceStep[] {
 
 /**
  * Validate structured planner questions defensively: a malformed question must never fail a turn.
- * Drop anything that is not a valid {text, kind, options?} object and return the clean list. A
- * choice question without at least two options is dropped; freeform/confirm need no options.
+ * Drop anything that is not a valid {text, kind, options?, allowOther?} object and return the clean
+ * list. A choice question without at least two options is dropped; freeform/confirm need no options.
  */
 export function parseCopilotQuestions(value: unknown): CopilotPlannerQuestion[] {
   if (!Array.isArray(value)) return [];
@@ -238,6 +238,9 @@ export function parseCopilotQuestions(value: unknown): CopilotPlannerQuestion[] 
     }
     if (typeof raw.defaultValue === 'string' && raw.defaultValue.trim()) {
       question.defaultValue = String(raw.defaultValue).trim();
+    }
+    if (typeof raw.allowOther === 'boolean') {
+      question.allowOther = raw.allowOther;
     }
     questions.push(question);
   }
@@ -394,6 +397,7 @@ export async function streamCopilotTurn(
     userId: string;
     username: string;
     content: string;
+    turnKey?: string;
   },
   onTrace: (step: CopilotTraceStep) => void,
   signal?: AbortSignal
@@ -421,7 +425,8 @@ export async function streamCopilotTurn(
           context_payload: sanitizeCopilotContextPayload(input.contextPayload),
           user_id: input.userId,
           username: input.username,
-          content: input.content
+          content: input.content,
+          ...(input.turnKey ? { turn_key: input.turnKey } : {})
         }),
         signal: combinedSignal
       }
@@ -444,9 +449,27 @@ export async function streamCopilotTurn(
   const decoder = new TextDecoder();
   let buffer = '';
   let result: CopilotTurnResult | null = null;
+  // Idle-read timeout: SSE frames arrive every few seconds (model rounds + keepalives), so a
+  // long silence means a half-open connection. Bounding each read stops `sending` from hanging
+  // forever on a dead socket; the timeout fires per-read, so a healthy long turn never trips it.
+  const STREAM_IDLE_TIMEOUT_MS = 180_000;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleExpired = false;
+  const clearIdle = () => {
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
   try {
   for (;;) {
+    clearIdle();
+    idleTimer = setTimeout(() => {
+      idleExpired = true;
+      reader.cancel().catch(() => undefined);
+    }, STREAM_IDLE_TIMEOUT_MS);
     const { done, value } = await reader.read();
+    clearIdle();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     let separator = buffer.indexOf('\n\n');
@@ -461,11 +484,15 @@ export async function streamCopilotTurn(
         if (step) onTrace(step);
       } else if (parsed.event === 'result') {
         result = validateCopilotTurnPayload((parseJsonSafe(parsed.data) as Record<string, unknown>) || {});
+        // The result is complete — stop reading now instead of waiting for the server to close
+        // the stream (an external abort in that tail window would discard a finished result).
+        break;
       } else if (parsed.event === 'error') {
         const errorPayload = (parseJsonSafe(parsed.data) as { error?: string }) || {};
         throw new Error(errorPayload.error || 'Copilot stream reported an error.');
       }
     }
+    if (result) break;
   }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError' && signal?.aborted) {
@@ -473,83 +500,47 @@ export async function streamCopilotTurn(
     }
     throw error;
   } finally {
+    clearIdle();
+    // Cancel the stream when it did not run to its natural end — releasing the lock alone
+    // leaves the underlying HTTP connection open until the server closes it.
+    if (!result) {
+      await reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
-  if (!result) throw new Error('Copilot stream ended without a result.');
+  if (!result) {
+    // A half-open connection (no data for the idle window) reads back as done — distinguish it
+    // from a server that closed the stream without sending a result; the two need different ops.
+    if (idleExpired) {
+      throw new Error(`Copilot stream timed out (no data for ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} s).`);
+    }
+    throw new Error('Copilot stream ended without a result.');
+  }
   return result;
 }
-export async function requestCopilotAssistant(input: {
-  contextType: string;
-  contextPayload: Record<string, unknown>;
-  userId: string;
-  username: string;
-  content: string;
-}): Promise<string> {
-  const res = await requestManagement(
-    '/vbio-api/copilot/assistant',
-    {
-      method: 'POST',
-      headers: {
-        ...API_HEADERS,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        context_type: input.contextType,
-        context_payload: sanitizeCopilotContextPayload(input.contextPayload),
-        user_id: input.userId,
-        username: input.username,
-        content: input.content
-      })
-    },
-    90000
-  );
-  const payload = (await res.json().catch(() => ({}))) as { content?: string; error?: string };
-  if (!res.ok) {
-    throw new Error(payload.error || `Copilot assistant failed with HTTP ${res.status}.`);
-  }
-  const content = String(payload.content || '').trim();
-  if (!content) throw new Error('Copilot assistant returned an empty response.');
-  return content;
-}
 
-export async function requestCopilotPlanActions(input: {
-  contextType: string;
-  contextPayload: Record<string, unknown>;
-  userId: string;
-  username: string;
-  content: string;
-}): Promise<CopilotPlanAction[]> {
-  const res = await requestManagement(
-    '/vbio-api/copilot/plan_actions',
-    {
-      method: 'POST',
-      headers: {
-        ...API_HEADERS,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        context_type: input.contextType,
-        context_payload: sanitizeCopilotContextPayload(input.contextPayload),
-        user_id: input.userId,
-        username: input.username,
-        content: input.content
-      })
-    },
-    90000
-  );
-  const payload = (await res.json().catch(() => ({}))) as { actions?: CopilotPlanAction[]; error?: string };
-  if (!res.ok) {
-    throw new Error(payload.error || `Copilot action planning failed with HTTP ${res.status}.`);
-  }
-  return Array.isArray(payload.actions) ? payload.actions : [];
-}
 
 /**
  * Fetch a short inline-completion suggestion for the in-progress draft. Best-effort: returns "" on
  * any failure (timeout, abort, non-ok, parse error) so the composer never blocks. Uses its own
  * short timeout and links an external AbortSignal so a newer keystroke can cancel an in-flight call.
  */
-export async function requestCopilotCompletion(
+export async function submitCopilotSteering(input: { turnKey: string; text: string }): Promise<boolean> {
+  try {
+    const res = await fetch(managementApiUrl('/vbio-api/copilot/steer'), {
+      method: 'POST',
+      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ turn_key: input.turnKey, text: input.text })
+    });
+    if (!res.ok) return false;
+    const payload = (await res.json().catch(() => ({}))) as { queued?: boolean };
+    return payload.queued === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function requestCopilotCompletions(
   input: {
     contextType: string;
     contextPayload: Record<string, unknown>;
@@ -558,7 +549,7 @@ export async function requestCopilotCompletion(
     content: string;
   },
   signal?: AbortSignal
-): Promise<string> {
+): Promise<string[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 4000);
   const onExternalAbort = () => controller.abort();
@@ -582,11 +573,19 @@ export async function requestCopilotCompletion(
       }),
       signal: controller.signal
     });
-    if (!res.ok) return '';
-    const payload = (await res.json().catch(() => ({}))) as { suggestion?: string };
-    return typeof payload.suggestion === 'string' ? payload.suggestion : '';
+    if (!res.ok) return [];
+    const payload = (await res.json().catch(() => ({}))) as {
+      suggestion?: string;
+      completions?: unknown;
+    };
+    // Ranked top-10 when the backend sent them; the legacy single-suggestion shape wraps
+    // into a one-element list so both deployments behave identically.
+    if (Array.isArray(payload.completions)) {
+      return payload.completions.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+    }
+    return typeof payload.suggestion === 'string' && payload.suggestion.trim() ? [payload.suggestion] : [];
   } catch {
-    return '';
+    return [];
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onExternalAbort);

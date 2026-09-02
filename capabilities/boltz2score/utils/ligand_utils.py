@@ -32,6 +32,32 @@ def element_prefix_for_atom(atom: Chem.Atom) -> str:
     return symbol[:1]
 
 
+def _digit_stripped_name_collides(atom_name: str, element_symbol: str) -> bool:
+    """True if the upstream Boltz writer would misread this name's element.
+
+    The boltz2 mmCIF writer strips digits from the atom name and looks the
+    remainder up in ``const.ambiguous_atoms``; the '*' default then REPLACES
+    the true element (e.g. name "C00L" -> key "CL" -> chlorine). Names whose
+    stripped key maps to a different element must never be generated.
+    """
+    try:
+        from boltz.data import const
+    except ImportError:
+        return False
+    import re as _re
+
+    key = _re.sub(r"\d", "", atom_name)
+    if not key:
+        return False
+    entry = const.ambiguous_atoms.get(key)
+    if entry is None:
+        return False
+    default = entry if isinstance(entry, str) else entry.get("*")
+    if default is None:
+        return False
+    return default.upper() != element_symbol.upper()
+
+
 def generate_atom_name(prefix: str, serial: int) -> str:
     prefix = normalize_atom_name(prefix or "X")
     if len(prefix) >= 2:
@@ -77,7 +103,7 @@ def ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
             while True:
                 generated = generate_atom_name(prefix, serial)
                 serial += 1
-                if generated not in used:
+                if generated not in used and not _digit_stripped_name_collides(generated, atom.GetSymbol()):
                     candidate = generated
                     break
             serial_by_prefix[prefix] = serial
@@ -233,6 +259,29 @@ def fix_cif_entity_ids(cif_file: Path) -> None:
     Path(cif_file).write_text(content)
 
 
+def sync_entity_sequences_from_first_subchain(structure: gemmi.Structure) -> None:
+    """Rebuild each polymer entity's full_sequence from its FIRST subchain only.
+
+    One gemmi entity can own several subchains (a homodimer's two copies share
+    an entity). Collecting residues across ALL subchains concatenates the copies
+    into a single N*len sequence; the mmCIF writer then attaches that sequence
+    to every chain of the entity, and downstream parsing gives each chain the
+    doubled polymer — the model folds the duplicated half into garbage.
+    Mirrors the first-subchain convention in core.prepare_inputs.
+    """
+    for entity in structure.entities:
+        if entity.entity_type.name != "Polymer" or not entity.subchains:
+            continue
+        subchain_id = entity.subchains[0]
+        seq = []
+        for chain in structure[0]:
+            for res in chain:
+                if res.subchain == subchain_id:
+                    seq.append(res.name)
+        if seq:
+            entity.full_sequence = seq
+
+
 def slugify_identifier(value: str, fallback: str) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
     text = text.strip("._-")
@@ -304,6 +353,34 @@ def load_ligand_entries_from_file(ligand_path: Path) -> list[dict[str, object]]:
     return entries
 
 
+def _strip_nonpolymer_artifacts(structure: gemmi.Structure) -> int:
+    """Drop non-polymer hetero artifacts (UNX/SO4/GOL/free ions) from every chain.
+
+    Raw crystal structures carry buffer/unknown components inside the protein
+    auth chains (e.g. 1H1A: UNX, SO4, GOL, CA subchains within chains A/B).
+    Boltz's writer re-emits them as ligands without element annotations, which
+    crashes the downstream atom-confidence diagnostics. Upstream benchmark
+    inputs are pre-cleaned to polymer + waters; this applies the same rule so
+    user-uploaded crystal files work without manual preparation.
+    """
+    keep_subchains: set[str] = set()
+    for entity in structure.entities:
+        if entity.entity_type.name in ("Polymer", "Water"):
+            keep_subchains.update(entity.subchains)
+    removed = 0
+    for model in structure:
+        for chain in model:
+            drop_indices = [
+                idx for idx, residue in enumerate(chain)
+                if residue.subchain not in keep_subchains
+            ]
+            for idx in reversed(drop_indices):  # gemmi Chain exposes __delitem__
+                del chain[idx]
+                removed += 1
+    structure.remove_empty_chains()
+    return removed
+
+
 def build_combined_input_from_parts(
     protein_path: Path,
     ligand_mol: Chem.Mol,
@@ -317,6 +394,12 @@ def build_combined_input_from_parts(
 
     structure = gemmi.read_structure(str(protein_path))
     structure.setup_entities()
+    stripped = _strip_nonpolymer_artifacts(structure)
+    if stripped:
+        print(
+            f"[Info] Stripped {stripped} non-polymer artifact residue(s) "
+            "(buffers/ions/unknowns) from protein structure; kept polymer + waters."
+        )
 
     ligand_mol = Chem.Mol(ligand_mol)
     ligand_mol, _ = ensure_unique_ligand_atom_names(ligand_mol)
@@ -363,17 +446,7 @@ def build_combined_input_from_parts(
     ligand_chain.add_residue(residue)
     structure[0].add_chain(ligand_chain)
     structure.setup_entities()
-
-    for entity in structure.entities:
-        if entity.entity_type.name != "Polymer" or not entity.subchains:
-            continue
-        seq = []
-        for chain in structure[0]:
-            for res in chain:
-                if res.subchain in entity.subchains:
-                    seq.append(res.name)
-        if seq:
-            entity.full_sequence = seq
+    sync_entity_sequences_from_first_subchain(structure)
 
     combined_dir = work_dir / "combined"
     combined_dir.mkdir(parents=True, exist_ok=True)

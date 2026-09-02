@@ -86,7 +86,12 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
     query.delete('tab');
     query.delete('task_row_id');
     query.delete('task_list_page');
-    query.delete('copilot_parameter_patch');
+    // EVERY copilot_* prefill param is consumed in-place by the prefill effect (which also
+    // navigate(replace)s them out of the URL). Any one left here would key a full reload that
+    // wipes the just-applied prefill with the server's default draft.
+    Array.from(query.keys())
+      .filter((key) => key.startsWith('copilot_'))
+      .forEach((key) => query.delete(key));
     const next = query.toString();
     return next ? `?${next}` : '';
   }, [locationSearch]);

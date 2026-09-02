@@ -46,7 +46,6 @@ logger = logging.getLogger(__name__)
 LINKER_ATOM_MAP = {
     'SEZ': ['CD', 'C1', 'C2'],
     '29N': ['C16', 'C19', 'C25'],
-    'BS3': ['BI', 'BI', 'BI'],
     # 可以添加其他连接体, 例如: 'XYZ': ['A1', 'A2', 'A3']
 }
 
@@ -97,10 +96,9 @@ class Designer:
             'pos_select_temp': {'base': 1.0, 'max': 10.0, 'decay': 0.9, 'increase': 1.5},
         }
         
-        # === 增强版功能集成 ===
         self.mutation_engine = AdvancedMutationEngine()
         self.pareto_optimizer = ParetoOptimizer()
-        self.enable_enhanced_features = True  # 控制是否使用增强功能
+        self.enable_enhanced_features = True  # Pareto 精英选择 / 收敛检测开关
         
         # 收敛检测参数
         self.convergence_window = 5
@@ -497,7 +495,7 @@ class Designer:
                     all_results_data.append(entry)
                     current_generation_results.append(entry)
                 
-                # === 增强版精英选择 (Pareto优化) ===
+                # Pareto 精英选择
                 if self.enable_enhanced_features and current_generation_results:
                     # 更新Pareto前沿
                     self.pareto_optimizer.update_pareto_front(current_generation_results)
@@ -553,7 +551,7 @@ class Designer:
                 # --- 3. 动态调整超参数 ---
                 self._update_adaptive_hparams(attempts, len(candidates_to_evaluate))
                 
-                # === 增强版功能：收敛检测和温度调整 ===
+                # 收敛检测
                 if self.enable_enhanced_features and elite_population:
                     current_best_score = elite_population[0]['metrics'].get('composite_score', 0.0)
                     self.score_history.append(current_best_score)

@@ -18,8 +18,10 @@ from management_api.task_snapshot import (
 
 # A single bounded thread pool for snapshot persistence — replaces the per-submit daemon thread
 # that could spawn unboundedly under load and was silently dropped on process exit. The pool is
-# shared across all submit calls; if it's saturated, the snapshot is persisted synchronously as a
-# fallback (same as usage_tracker's pattern). Pool size 4 is enough for typical burst patterns.
+# shared across all submit calls. Note the executor's queue is unbounded, so submit() only rejects
+# after shutdown (process exit); snapshots still queued at that point are dropped — snapshots are
+# best-effort display backfill, the runtime task row remains the authority. Pool size 4 keeps the
+# PostgREST write pressure bounded under bursts.
 _snapshot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vbio-snapshot")
 
 

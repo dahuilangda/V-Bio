@@ -14,3 +14,106 @@
 .mmp-life-icon-spin {
   animation: mmp-life-spin 0.9s linear infinite;
 }
+
+/* Async Excel export: circular ring on the toolbar button + a floating status
+   card beneath it (matches the app popover look). No text bleeds into the bar. */
+.task-export-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.task-export-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 224px;
+  padding: 10px 12px 9px;
+  border: 1px solid #d3e1d9;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(26, 56, 43, 0.14);
+  z-index: 30;
+}
+
+.task-export-popover-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.task-export-popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.task-export-popover-pct {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-export-popover-bar {
+  height: 5px;
+  border-radius: 999px;
+  background: #e5eee8;
+  overflow: hidden;
+}
+
+.task-export-popover-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 0.4s ease;
+}
+
+.task-export-popover-fill--pulse {
+  width: 40%;
+  animation: task-export-indeterminate 1.2s ease-in-out infinite;
+}
+
+.task-export-popover-sub {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes task-export-indeterminate {
+  0% { margin-left: -40%; }
+  50% { margin-left: 65%; }
+  100% { margin-left: 100%; }
+}
+
+/* While exporting, hovering the button turns it into a real cancel control:
+   progress ring hides, an X appears, and the danger color signals the action. */
+.task-export-cancel-icon {
+  display: none;
+}
+
+.task-export-anchor:hover .task-export-cancel-icon,
+.task-export-anchor:focus-visible .task-export-cancel-icon {
+  display: block;
+}
+
+.task-export-anchor:hover .task-export-progress-ring,
+.task-export-anchor:focus-visible .task-export-progress-ring {
+  display: none;
+}
+
+.task-export-anchor:hover .task-row-action-btn {
+  color: #8a3434;
+  border-color: #e2cdcd;
+  background: #faefef;
+}
+
+.task-export-popover-hint {
+  margin-top: 5px;
+  font-size: 10.5px;
+  color: #8a3434;
+}

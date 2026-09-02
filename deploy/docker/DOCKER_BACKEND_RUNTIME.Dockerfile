@@ -8,6 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     docker.io \
+    libx11-6 \
+    libxext6 \
+    libxrender1 \
+    libexpat1 \
+    libfreetype6 \
+    libpng16-16 \
+    libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/runtime

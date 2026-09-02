@@ -29,9 +29,12 @@ export function readPlannerTrace(value: unknown): CopilotTraceStep[] {
  * as copilot_memory so a follow-up about a previously retrieved entity need not re-search. Capped to
  * match the backend's per-turn record cap; most-recent turns win, kept chronologically.
  *
- * Long fields (sequence, SMILES) are truncated to 60 chars in memory to avoid context overflow —
- * the full values are still shown in the 'Retrieved data' card via the display path; the planner
- * only needs the identity to recognize a previously retrieved entity.
+ * Long fields (sequence, SMILES) are DROPPED from memory entirely — never prefix-truncated
+ * (the backend's _compact_memory_records contract): a 60-char SMILES prefix is structurally
+ * INVALID data, one weak paste away from a write action's parameters, which the schema
+ * (string, ≤2048) cannot catch. The full values are still shown in the 'Retrieved data'
+ * card via the display path; the planner only needs the identity to recognize a
+ * previously retrieved entity, and can re-retrieve exact values when needed.
  */
 export function collectCopilotMemory(
   messages: ProjectCopilotMessage[],
@@ -48,11 +51,16 @@ export function collectCopilotMemory(
     if (!Array.isArray(observations)) continue;
     for (const record of observations) {
       if (record && typeof record === 'object' && !Array.isArray(record)) {
-        // Truncate long fields for memory carry-forward (full values are in the display path)
+        // Memory carries IDENTITY, never full data: long identity fields are dropped, and
+        // EVERY string caps at 80 — external record text (titles, names) is untrusted
+        // data, and memory re-injects it into the next turn's context, so it must not
+        // carry hostile instruction-shaped payloads across turns either.
         const compact: Record<string, unknown> = {};
         for (const [key, val] of Object.entries(record as Record<string, unknown>)) {
           if (LONG_FIELDS.has(key) && typeof val === 'string' && val.length > 60) {
-            compact[key] = val.slice(0, 60);
+            continue;
+          } else if (typeof val === 'string' && val.length > 80) {
+            compact[key] = val.slice(0, 80);
           } else {
             compact[key] = val;
           }
@@ -110,21 +118,23 @@ export function formatTraceStep(step: CopilotTraceStep): string {
       return 'Complete';
     }
     case 'no_convergence':
-      return 'Could not settle on a plan — please try rephrasing';
+      // Mirrors the backend's honest failure copy: the request is fine, the planner failed —
+      // the final message names the actual blocker. Never tell the user to rephrase.
+      return 'Could not settle on a plan — the reply explains what broke';
     case 'outline': {
       const steps = Array.isArray(detail.steps) ? detail.steps.length : 0;
       return steps > 0 ? `Outlined ${steps}-step plan` : 'Planning';
     }
-    case 'step_start': {
-      const stepNum = Number(detail.step) || 0;
-      const total = Number(detail.total) || 0;
-      const desc = String(detail.description || '').trim();
-      const prefix = total > 0 ? `Step ${stepNum}/${total}` : `Step ${stepNum}`;
-      return desc ? `${prefix}: ${desc}` : prefix;
-    }
     case 'step_done': {
       const desc = String(detail.description || '').trim();
-      return desc ? `✓ ${desc}` : '✓ Step complete';
+      if (desc) return `✓ ${desc}`;
+      const materialized = Number(detail.materialized) || 0;
+      if (materialized > 0) return `✓ Prepared ${materialized} action${materialized === 1 ? '' : 's'} from retrieved data`;
+      return '✓ Step complete';
+    }
+    case 'writes_materialized': {
+      const n = Number(detail.materialized) || 0;
+      return `✓ Prepared ${n} action${n === 1 ? '' : 's'} from retrieved data`;
     }
     case 'skill_observations': {
       const observations = Array.isArray(detail.observations) ? detail.observations : [];

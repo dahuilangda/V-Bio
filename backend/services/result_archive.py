@@ -586,6 +586,28 @@ class ResultArchiveService:
                     include.append(summary)
                 if confidences:
                     include.append(confidences)
+            elif any(name.lower().endswith('halo_results.json') for name in names):
+                # HALO lead-optimization run artifacts: the structured
+                # halo_results.json is the whole deliverable (structureless).
+                halo_file = next(
+                    (name for name in names if name.lower().endswith('halo_results.json')),
+                    None,
+                )
+                if halo_file:
+                    include.append(halo_file)
+                for candidate_artifact in (
+                    'candidates.csv',
+                    'oracle_scores.csv',
+                    'rounds.jsonl',
+                    'config.json',
+                ):
+                    matches = [
+                        name for name in names
+                        if name.lower().endswith(candidate_artifact)
+                    ]
+                    if matches:
+                        include.append(sorted(matches, key=len)[0])
+
             elif is_protenix:
                 if preferred_structure:
                     structure = preferred_structure
@@ -644,7 +666,18 @@ class ResultArchiveService:
                 include.append(ipsae)
 
             if not include:
-                raise RuntimeError('Unable to build view archive: no renderable files found.')
+                # Surface the engine's own error log (e.g. protenix2dock writes
+                # ERR/*.txt when the runtime crashed internally) so the caller
+                # sees the real failure instead of a generic 500.
+                err_detail = ''
+                for err_name in sorted(name for name in names if '/err/' in f"/{name}".lower()):
+                    try:
+                        err_detail += f"\n--- {err_name} ---\n{src_zip.read(err_name).decode('utf-8', 'replace')[-2000:]}"
+                    except (KeyError, OSError):
+                        continue
+                raise RuntimeError(
+                    'Unable to build view archive: no renderable files found.' + err_detail
+                )
 
             include_unique: list[str] = []
             seen = set()
@@ -1086,13 +1119,20 @@ class ResultArchiveService:
             self.logger.debug('Failed to extract compact prediction metrics from %s: %s', source_zip_path, exc)
             return None
 
-    def get_compact_prediction_metrics(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_compact_prediction_metrics(
+        self,
+        task_id: str,
+        source_zip_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return None
-        try:
-            _, source_zip_path = self.resolve_result_archive_path(normalized_task_id)
-        except Exception:
+        if source_zip_path is None:
+            try:
+                _, source_zip_path = self.resolve_result_archive_path(normalized_task_id)
+            except Exception:
+                return None
+        if not source_zip_path:
             return None
 
         try:

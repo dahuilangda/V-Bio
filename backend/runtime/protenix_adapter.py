@@ -76,14 +76,20 @@ def _coerce_positive_int(value: Any, context: str) -> int:
 
 
 def _normalize_ion_symbol(smiles_value: str) -> Optional[str]:
-    text = str(smiles_value).strip()
-    match = re.fullmatch(r"\[([A-Za-z]{1,2})\]", text)
-    if not match:
+    """Element symbol for a single-atom SMILES, else None.
+
+    RDKit-based so every single-atom species is recognized regardless of
+    charge, implicit hydrogens, or isotope notation: [Fe], [Fe+3], [Cl-],
+    [Na+], [NH4+] (ammonium -> N), [OH-] (hydroxide -> O).  Multi-atom
+    SMILES and unparseable input return None (normal ligand path).
+    """
+    from rdkit import Chem
+
+    mol = Chem.MolFromSmiles(str(smiles_value).strip())
+    if mol is None or mol.GetNumAtoms() != 1 or mol.GetNumBonds() != 0:
         return None
-    symbol = match.group(1)
-    if len(symbol) == 1:
-        return symbol.upper()
-    return symbol[0].upper() + symbol[1].lower()
+    symbol = mol.GetAtomWithIdx(0).GetSymbol()
+    return symbol[0].upper() + symbol[1:].lower()
 
 
 def _normalize_protenix_ccd_code(value: Any, context: str) -> str:
@@ -376,6 +382,7 @@ def parse_yaml_for_protenix(
     covalent_bonds: List[Dict[str, Any]] = []
 
     constraints_data = data.get("constraints") or []
+    pocket_constraints_data: List[Dict[str, Any]] = []
     if constraints_data:
         for constraint in constraints_data:
             if not isinstance(constraint, dict):
@@ -397,13 +404,62 @@ def parse_yaml_for_protenix(
                     )
                 )
             else:
-                raise ValueError("This backend supports bond constraints only; remove contact/pocket constraints.")
+                # pocket constraint: converted to protenix's native
+                # constraint.pocket block below (PocketFeaturizer encodes it
+                # and the diffusion was trained with pocket augmentation)
+                pocket_constraints_data.append(constraint.get("pocket"))
 
     payload: List[Dict[str, Any]] = [{
         "name": input_name,
         "sequences": sequences_payload,
         "covalent_bonds": covalent_bonds,
     }]
+
+    constraint_blocks: List[Dict[str, Any]] = []
+    for pocket_data in pocket_constraints_data:
+        binder = pocket_data.get("binder")
+        binder_assignment = (
+            chain_assignments.get(chain_alias_map.get(str(binder), ""))
+            if binder is not None else None
+        )
+        if binder_assignment is None:
+            raise ValueError(f"Pocket constraint references unknown binder chain {binder!r}.")
+        # ChainAssignment.entity is already the 1-based protenix entity id over
+        # the sequences list (covalent bonds consume it directly); position must
+        # be the 1-based residue index within the chain, i.e. author numbering
+        # from the uploaded structure has to be remapped upstream.
+        binder_entity = binder_assignment.entity
+        binder_copy = binder_assignment.copy_index
+        contact_residues = []
+        for contact in pocket_data.get("contacts") or []:
+            contact = list(contact)
+            chain_raw, residue_raw = contact[0], contact[1]
+            resolved = (
+                chain_alias_map.get(str(chain_raw))
+                or chain_alias_map.get(str(chain_raw).upper())
+                or chain_alias_map.get(str(chain_raw).lower())
+            )
+            assignment = chain_assignments.get(resolved) if resolved else None
+            if assignment is None:
+                raise ValueError(f"Pocket constraint references unknown chain {chain_raw!r}.")
+            contact_residues.append({
+                "entity": assignment.entity,
+                "copy": assignment.copy_index,
+                "position": int(residue_raw),
+            })
+        max_distance = float(pocket_data.get("max_distance") or 8.0)
+        constraint_blocks.append({
+            "pocket": {
+                "max_distance": max_distance,
+                "binder_chain": {"entity": binder_entity, "copy": binder_copy},
+                "contact_residues": contact_residues,
+            }
+        })
+
+    if constraint_blocks:
+        if len(constraint_blocks) > 1:
+            raise ValueError("Protenix supports a single pocket constraint per prediction.")
+        payload[0]["constraint"] = constraint_blocks[0]
 
     return ProtenixPreparation(
         input_name=input_name,

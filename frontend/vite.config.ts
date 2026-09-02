@@ -40,13 +40,9 @@ export default defineConfig(({ mode }) => {
     '/vbio-api': {
       target: managementTarget,
       changeOrigin: true
-    },
-    '/predict': target,
-    '/status': target,
-    '/results': target,
-    '/tasks': target,
-    '/api': target,
-    '/monitor': target
+    }
+    // Direct runtime proxies removed (F1): every runtime call now goes through
+    // /vbio-api (the authenticated gateway). The runtime backend itself binds loopback.
   };
 
   return {

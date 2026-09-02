@@ -4,9 +4,10 @@ import type { AffinityScoringMode, InputComponent, ProjectTask } from '../../typ
 import { getTaskStatuses } from '../../api/backendApi';
 import { useAuth } from '../../hooks/useAuth';
 import {
+  deleteProjectTask,
+  findProjectTaskByTaskId,
   getProjectTaskById,
   insertProjectTask,
-  listProjectTasksCompact,
   listProjectTasksForList,
   updateProject,
   updateProjectTask
@@ -42,14 +43,13 @@ import {
 } from './projectDraftUtils';
 import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
 import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
-import { materializeLeadOptCompletedTask } from './projectTaskRuntime';
 
 function normalizeAffinityMode(value: unknown): AffinityScoringMode {
   const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'pose' || normalized === 'refine' || normalized === 'interface') {
+  if (normalized === 'score' || normalized === 'pose' || normalized === 'refine' || normalized === 'interface' || normalized === 'dock') {
     return normalized;
   }
-  return 'score';
+  return 'dock';
 }
 import { useResultSnapshot } from './useResultSnapshot';
 import { useProjectRunUiEffects } from './useProjectRunUiEffects';
@@ -758,8 +758,6 @@ export function useProjectDetailRuntimeContext() {
     setStructureTaskId,
     statusInfo,
     setStatusInfo,
-    nowTs,
-    setNowTs,
     workspaceTab,
     setWorkspaceTab,
     savedDraftFingerprint,
@@ -826,7 +824,6 @@ export function useProjectDetailRuntimeContext() {
     projectId,
     hasExplicitWorkspaceQuery,
     navigate,
-    listProjectTasksCompact,
   });
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
@@ -1173,39 +1170,6 @@ export function useProjectDetailRuntimeContext() {
                   const runtimeStatusText = String(readStatusText(status) || '').trim();
                   const runtimeFailureText =
                     inferred === 'FAILURE' ? buildTaskRuntimeFailureMessage(status, runtimeStatusText || 'Task failed.').trim() : '';
-                  if (workflowKey === 'lead_optimization' && inferred === 'SUCCESS' && runtimeRow) {
-                    try {
-                      const materializedRow = await materializeLeadOptCompletedTask({
-                        task: runtimeRow as ProjectTask,
-                        taskId,
-                        persistTask: async (taskRowId, patch) => {
-                          try {
-                            const updated = await updateProjectTask(taskRowId, patch, { minimalReturn: true });
-                            return updated
-                              ? ({ ...runtimeRow, ...patch, ...updated } as ProjectTask)
-                              : ({ ...runtimeRow, ...patch } as ProjectTask);
-                          } catch (err) {
-                            console.error('updateProjectTask persistence failed; showing unsaved state.', err);
-                            return { ...runtimeRow, ...patch } as ProjectTask;
-                          }
-                        }
-                      });
-                      if (materializedRow) {
-                        const normalizedMaterializedRow = normalizeLeadOptRuntimeRow(materializedRow);
-                        const nextRowIndex = nextRows.findIndex((row) => String(row.id || '').trim() === runtimeRowId);
-                        if (nextRowIndex >= 0) {
-                          nextRows[nextRowIndex] = normalizedMaterializedRow;
-                        }
-                        runtimeEnhancedRows = runtimeEnhancedRows.map((row) =>
-                          String(row.id || '').trim() === runtimeRowId ? normalizedMaterializedRow : row
-                        );
-                        runtimeRowByTaskId.set(taskId, normalizedMaterializedRow);
-                        continue;
-                      }
-                    } catch (err) {
-                      console.error('Terminal status materialization failed; keeping in-memory state.', err);
-                    }
-                  }
                   try {
                     await updateProjectTask(
                       runtimeRowId,
@@ -1290,6 +1254,10 @@ export function useProjectDetailRuntimeContext() {
             }
           }
         }
+
+        // A cancelled/teardown poll must not land its (stale-closure) writes — it could
+        // paint the previous active task's state over the newly-focused one.
+        if (cancelled) return;
 
         setProjectTasks((prev) => {
           const prevById = new Map(prev.map((item) => [item.id, item]));
@@ -1653,16 +1621,15 @@ export function useProjectDetailRuntimeContext() {
     activeStatusTaskRow,
     statusContextTaskRow,
     displayTaskState,
+    displaySubmittedAt,
     progressPercent,
-    waitingSeconds,
     isActiveRuntime,
     totalRuntimeSeconds
   } = useProjectTaskStatusContext({
     project,
     projectTasks,
     locationSearch: location.search,
-    statusInfo,
-    nowTs
+    statusInfo
   });
 
   useEffect(() => {
@@ -1829,6 +1796,8 @@ export function useProjectDetailRuntimeContext() {
     snapshotBindingProbability,
     snapshotBindingStd,
     snapshotIc50Um,
+    snapshotPic50,
+    snapshotPic50Mw,
     snapshotIc50Error,
     snapshotPlddtTone,
     snapshotIptmTone,
@@ -2079,7 +2048,6 @@ export function useProjectDetailRuntimeContext() {
     backend: draft?.backend || project?.backend || '',
     workspaceTab,
     setWorkspaceTab,
-    setNowTs,
     proteinTemplates,
     customResidueLibrary,
     taskProteinTemplates,
@@ -2112,7 +2080,8 @@ export function useProjectDetailRuntimeContext() {
     onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
     setLigandSmiles: setAffinityLigandSmiles,
     onAffinityModeChange,
-    onAffinityUseMsaChange
+    affinityDockPocket,
+    onAffinityDockPocketChange
   } = useProjectAffinityWorkspace({
     isAffinityWorkflow,
     workspaceTab,
@@ -2159,7 +2128,6 @@ export function useProjectDetailRuntimeContext() {
     locationSearch: location.search,
     workspaceTab,
     metadataOnlyDraftDirty,
-    sourceTaskRowId: sourceTaskRowId || null,
     affinityLigandSmiles,
     affinityPreviewLigandSmiles: String(affinityPreview?.ligandSmiles || ''),
     affinityTargetFile,
@@ -2167,8 +2135,6 @@ export function useProjectDetailRuntimeContext() {
     affinityCurrentUploads,
     proteinTemplates,
     customResidueLibrary,
-    requestedStatusTaskRowId: requestedStatusTaskRow?.id || null,
-    activeStatusTaskRowId: activeStatusTaskRow?.id || null,
     statusRefreshInFlightRef,
     insertProjectTask,
     updateProject,
@@ -2323,6 +2289,8 @@ export function useProjectDetailRuntimeContext() {
     patch,
     patchTask,
     updateProjectTask,
+    findProjectTaskByTaskId,
+    deleteProjectTask,
     sortProjectTasks,
     saveProjectInputConfig,
     listIncompleteComponentOrders: (components: InputComponent[]) =>
@@ -2412,8 +2380,8 @@ export function useProjectDetailRuntimeContext() {
     activeStatusTaskRow,
     statusContextTaskRow,
     displayTaskState,
+    displaySubmittedAt,
     progressPercent,
-    waitingSeconds,
     isActiveRuntime,
     totalRuntimeSeconds,
     normalizedDraftComponents,
@@ -2449,6 +2417,8 @@ export function useProjectDetailRuntimeContext() {
     snapshotBindingProbability,
     snapshotBindingStd,
     snapshotIc50Um,
+    snapshotPic50,
+    snapshotPic50Mw,
     snapshotIc50Error,
     snapshotPlddtTone,
     snapshotIptmTone,
@@ -2492,12 +2462,13 @@ export function useProjectDetailRuntimeContext() {
     affinityConfidenceOnlyLocked,
     affinityCurrentUploads,
     affinityMode,
+    affinityDockPocket,
     onAffinityTargetFileChange,
     onAffinityLigandFileChange,
     onAffinityConfidenceOnlyChange,
     setAffinityLigandSmiles,
     onAffinityModeChange,
-    onAffinityUseMsaChange,
+    onAffinityDockPocketChange,
     metadataOnlyDraftDirty,
     hasUnsavedChanges,
     patch,

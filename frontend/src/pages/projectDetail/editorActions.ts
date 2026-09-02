@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
-import type { InputComponent, PeptideResiduePoolSelection, PredictionConstraint, PredictionOptions } from '../../types/models';
+import type { AffinityDockPocket, InputComponent, PeptideResiduePoolSelection, PredictionConstraint, PredictionOptions } from '../../types/models';
 import type { ProteinTemplateUpload } from '../../types/models';
 import { PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { limitTaskSummary } from '../../utils/taskMetadata';
@@ -125,7 +125,9 @@ function normalizePeptideInitializationOptions(
   };
 }
 
-function normalizePeptideBackendValue(value: unknown): 'boltz' | 'alphafold3' | 'protenix' {
+function normalizePeptideBackendValue(
+  value: unknown,
+): 'boltz' | 'alphafold3' | 'protenix' | 'boltz2dock' | 'protenix2dock' {
   const normalized = normalizePredictionBackend(value);
   return normalized === 'nesso' ? 'boltz' : normalized;
 }
@@ -166,7 +168,6 @@ function hasPeptideDesignOptions(options: NonNullable<DraftLike['inputConfig']['
     options.peptideIterations !== undefined ||
     options.peptidePopulationSize !== undefined ||
     options.peptideEliteSize !== undefined ||
-    options.peptideMutationRate !== undefined ||
     options.peptideResiduePool !== undefined ||
     options.peptideNonNaturalMin !== undefined ||
     options.peptideNonNaturalMax !== undefined ||
@@ -389,6 +390,53 @@ export function handleRuntimeSeedChangeAction<TDraft extends DraftLike>(params: 
   }));
 }
 
+export function handleRuntimePeptidePocketFieldChangeAction<TDraft extends DraftLike>(params: {
+  field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox';
+  value: string | number | null;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { field, value, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    [field]: value === '' || value === null ? undefined : value
+  }));
+}
+
+export function handleRuntimeLeadOptOptionChangeAction<TDraft extends DraftLike>(params: {
+  key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
+    | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices';
+  value: string | number | null;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { key, value, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    [key]: value === '' || value === null ? undefined : value
+  }));
+}
+
+export function handleRuntimeLeadOptDockPocketChangeAction<TDraft extends DraftLike>(params: {
+  pocket: AffinityDockPocket | null;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { pocket, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    leadOptDockPocket: pocket
+  }));
+}
+
+export function handleRuntimePeptideDockPocketChangeAction<TDraft extends DraftLike>(params: {
+  pocket: AffinityDockPocket | null;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { pocket, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideDockPocket: pocket
+  }));
+}
+
 export function handleRuntimeLowVramChangeAction<TDraft extends DraftLike>(params: {
   lowVram: boolean;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
@@ -400,6 +448,38 @@ export function handleRuntimeLowVramChangeAction<TDraft extends DraftLike>(param
   }));
 }
 
+export function handleRuntimePeptideStructureUploadChangeAction<TDraft extends DraftLike>(params: {
+  upload: { fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string } | null;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { upload, setDraft } = params;
+  setDraft((d) => {
+    if (!d) return d;
+    const options = ((d.inputConfig as any).options || {}) as Record<string, unknown>;
+    const nextOptions = { ...options, peptideStructureUpload: upload };
+    return {
+      ...d,
+      inputConfig: { ...(d.inputConfig as any), options: nextOptions },
+    };
+  });
+}
+
+export function handleRuntimePeptideChiralityChangeAction<TDraft extends DraftLike>(params: {
+  peptideChirality: 'l' | 'd';
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideChirality, setDraft } = params;
+  setDraft((d) => {
+    if (!d) return d;
+    const options = ((d.inputConfig as any).options || {}) as Record<string, unknown>;
+    const nextOptions = { ...options, peptideChirality };
+    return {
+      ...d,
+      inputConfig: { ...(d.inputConfig as any), options: nextOptions },
+    };
+  });
+}
+
 export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftLike>(params: {
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
@@ -408,23 +488,16 @@ export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftL
   setDraft((d) => {
     if (!d) return d;
     const options = ((d.inputConfig as any).options || {}) as NonNullable<DraftLike['inputConfig']['options']>;
-    const currentLength = Number(options.peptideBinderLength);
     const minLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
     const fallbackLength = peptideDesignMode === 'bicyclic' ? 15 : 20;
-    const peptideBinderLength = Number.isFinite(currentLength)
-      ? Math.max(minLength, Math.floor(currentLength))
-      : fallbackLength;
+    // adaptive mode keeps the length free across mode switches
+    const currentLength = Number(options.peptideBinderLength);
     const nextOptions = {
       ...options,
       peptideDesignMode,
-      peptideBinderLength,
-      peptideUseInitialSequence: options.peptideUseInitialSequence === true,
-      peptideInitialSequence: options.peptideInitialSequence || '',
-      peptideSequenceMask: options.peptideSequenceMask || '',
-      peptideBicyclicLinkerCcd: options.peptideBicyclicLinkerCcd || 'SEZ',
-      peptideBicyclicCysPositionMode: options.peptideBicyclicCysPositionMode || 'auto',
-      peptideBicyclicFixTerminalCys: options.peptideBicyclicFixTerminalCys !== false,
-      peptideBicyclicIncludeExtraCys: options.peptideBicyclicIncludeExtraCys === true
+      peptideBinderLength: Number.isFinite(currentLength)
+        ? Math.max(minLength, Math.floor(currentLength))
+        : fallbackLength
     };
     const normalizedOptions = {
       ...nextOptions,
@@ -449,19 +522,42 @@ export function handleRuntimePeptideBinderLengthChangeAction<TDraft extends Draf
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
 }): void {
   const { peptideBinderLength, setDraft } = params;
-  patchDraftOptions(setDraft, (options) => {
-    const mode = options.peptideDesignMode === 'bicyclic' ? 'bicyclic' : 'other';
-    const minLength = mode === 'bicyclic' ? 8 : 5;
-    const nextOptions = {
+  const value = Math.max(5, Math.floor(Number(peptideBinderLength) || 20));
+  patchDraftOptions(setDraft, (options): PredictionOptions => {
+    const next: PredictionOptions = {
       ...options,
-      peptideBinderLength: Math.max(minLength, Math.min(80, Math.floor(Number(peptideBinderLength) || 20)))
+      peptideBinderLength: value
     };
-    return {
-      ...nextOptions,
-      ...normalizePeptideInitializationOptions(nextOptions),
-      ...normalizeBicyclicPositions(nextOptions),
-      ...normalizePeptideNonNaturalRange(nextOptions)
+    delete next.peptideLengthMin;
+    delete next.peptideLengthMax;
+    return next;
+  });
+}
+
+export function handleRuntimePeptideLengthRangeAction<TDraft extends DraftLike>(params: {
+  peptideLengthMin: number;
+  peptideLengthMax: number;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideLengthMin, peptideLengthMax, setDraft } = params;
+  const min = Math.max(5, Math.floor(Number(peptideLengthMin) || 8));
+  const max = Math.max(min, Math.floor(Number(peptideLengthMax) || 25));
+  patchDraftOptions(setDraft, (options): PredictionOptions => {
+    const next: PredictionOptions = {
+      ...options,
+      peptideLengthMin: min,
+      peptideLengthMax: max
     };
+    // min == max behaves as a fixed length; keep the legacy single value in
+    // sync so existing consumers (snapshots, previews) keep working
+    if (min === max) {
+      next.peptideBinderLength = min;
+      delete next.peptideLengthMin;
+      delete next.peptideLengthMax;
+    } else {
+      delete next.peptideBinderLength;
+    }
+    return next;
   });
 }
 
@@ -559,17 +655,6 @@ export function handleRuntimePeptideEliteSizeChangeAction<TDraft extends DraftLi
       peptideEliteSize: Math.max(1, Math.min(population - 1, Math.floor(Number(peptideEliteSize) || 5)))
     };
   });
-}
-
-export function handleRuntimePeptideMutationRateChangeAction<TDraft extends DraftLike>(params: {
-  peptideMutationRate: number;
-  setDraft: Dispatch<SetStateAction<TDraft | null>>;
-}): void {
-  const { peptideMutationRate, setDraft } = params;
-  patchDraftOptions(setDraft, (options) => ({
-    ...options,
-    peptideMutationRate: Math.max(0.01, Math.min(1, Math.round((Number(peptideMutationRate) || 0.25) * 100) / 100))
-  }));
 }
 
 export function handleRuntimePeptideResiduePoolChangeAction<TDraft extends DraftLike>(params: {

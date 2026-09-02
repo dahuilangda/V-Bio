@@ -1,58 +1,41 @@
-import { LeadOptimizationWorkspace } from '../../components/project/LeadOptimizationWorkspace';
+import { LeadOptimizationWorkspace, type LeadOptHaloSnapshot } from '../../components/project/LeadOptimizationWorkspace';
+import type { LeadOptHaloCandidate } from '../../components/project/leadopt/hooks/useLeadOptHaloRun';
 import type { LeadOptPersistedUploads } from '../../components/project/leadopt/hooks/useLeadOptReferenceFragment';
-import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
-import type {
-  LeadOptMmpPersistedSnapshot,
-  LeadOptPredictionRecord
-} from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
-import type { WorkspaceTab } from './workspaceTypes';
+import type { AffinityDockPocket, PredictionOptions } from '../../types/models';
 
 export interface LeadOptimizationWorkflowSectionProps {
   visible: boolean;
-  workspaceTab: WorkspaceTab;
+  workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   canEdit: boolean;
   submitting: boolean;
-  backend: string;
-  onNavigateToResults?: () => void;
-  onRegisterHeaderRunAction?: (action: (() => void | Promise<void>) | null) => void;
   proteinSequence: string;
   ligandSmiles: string;
   targetChain: string;
   ligandChain: string;
   onLigandSmilesChange: (value: string) => void;
   referenceScopeKey?: string;
-  persistedReferenceUploads?: LeadOptPersistedUploads;
+  persistedReferenceUploads?: LeadOptPersistedUploads | null;
   onReferenceUploadsChange?: (uploads: LeadOptPersistedUploads) => void;
-  onMmpTaskQueued?: (payload: {
+  options: PredictionOptions;
+  onOptionChange: (
+    key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
+      | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices',
+    value: string | number | null
+  ) => void;
+  onDockPocketChange: (pocket: AffinityDockPocket | null) => void;
+  haloSnapshot: LeadOptHaloSnapshot | null;
+  onHaloTaskQueued: (payload: { taskId: string; requestPayload: Record<string, unknown> }) => Promise<void> | void;
+  onHaloTaskCompleted: (payload: {
     taskId: string;
-    requestPayload: Record<string, unknown>;
-    querySmiles: string;
-    referenceUploads: LeadOptPersistedUploads;
-  }) => void | Promise<void>;
-  onMmpTaskCompleted?: (payload: {
-    taskId: string;
-    queryId: string;
-    transformCount: number;
-    candidateCount: number;
-    elapsedSeconds: number;
-    resultSnapshot?: Record<string, unknown>;
-  }) => void | Promise<void>;
-  onMmpTaskFailed?: (payload: { taskId: string; error: string }) => void | Promise<void>;
-  initialMmpSnapshot?: LeadOptMmpPersistedSnapshot | null;
-  onMmpUiStateChange?: (payload: { uiState: LeadOptCandidatesUiState }) => void | Promise<void>;
-  onPredictionQueued?: (payload: { taskId: string; backend: string; candidateSmiles: string }) => void | Promise<void>;
-  onPredictionStateChange?: (payload: {
-    records: Record<string, LeadOptPredictionRecord>;
-    referenceRecords: Record<string, LeadOptPredictionRecord>;
-    summary: {
-      total: number;
-      queued: number;
-      running: number;
-      success: number;
-      failure: number;
-      latestTaskId: string;
-    };
-  }) => void | Promise<void>;
+    candidates: LeadOptHaloCandidate[];
+    roundsLog: Array<Record<string, unknown>>;
+    roundsCompleted: number | null;
+    totalRounds: number | null;
+    mode: string;
+    backend: string;
+  }) => Promise<void> | void;
+  onHaloTaskFailed: (payload: { taskId: string; error: string }) => Promise<void> | void;
+  onNavigateToResults?: () => void;
 }
 
 export function LeadOptimizationWorkflowSection({
@@ -60,9 +43,6 @@ export function LeadOptimizationWorkflowSection({
   workspaceTab,
   canEdit,
   submitting,
-  backend,
-  onNavigateToResults,
-  onRegisterHeaderRunAction,
   proteinSequence,
   ligandSmiles,
   targetChain,
@@ -71,25 +51,22 @@ export function LeadOptimizationWorkflowSection({
   referenceScopeKey,
   persistedReferenceUploads,
   onReferenceUploadsChange,
-  onMmpTaskQueued,
-  onMmpTaskCompleted,
-  onMmpTaskFailed,
-  initialMmpSnapshot,
-  onMmpUiStateChange,
-  onPredictionQueued,
-  onPredictionStateChange
+  options,
+  onOptionChange,
+  onDockPocketChange,
+  haloSnapshot,
+  onHaloTaskQueued,
+  onHaloTaskCompleted,
+  onHaloTaskFailed,
+  onNavigateToResults
 }: LeadOptimizationWorkflowSectionProps) {
   if (!visible) return null;
   const viewMode = workspaceTab === 'results' ? 'design' : 'reference';
-
   return (
     <LeadOptimizationWorkspace
       viewMode={viewMode}
       canEdit={canEdit}
       submitting={submitting}
-      backend={backend}
-      onNavigateToResults={onNavigateToResults}
-      onRegisterHeaderRunAction={onRegisterHeaderRunAction}
       proteinSequence={proteinSequence}
       ligandSmiles={ligandSmiles}
       targetChain={targetChain}
@@ -98,13 +75,14 @@ export function LeadOptimizationWorkflowSection({
       referenceScopeKey={referenceScopeKey}
       persistedReferenceUploads={persistedReferenceUploads}
       onReferenceUploadsChange={onReferenceUploadsChange}
-      onMmpTaskQueued={onMmpTaskQueued}
-      onMmpTaskCompleted={onMmpTaskCompleted}
-      onMmpTaskFailed={onMmpTaskFailed}
-      initialMmpSnapshot={initialMmpSnapshot}
-      onMmpUiStateChange={onMmpUiStateChange}
-      onPredictionQueued={onPredictionQueued}
-      onPredictionStateChange={onPredictionStateChange}
+      options={options}
+      onOptionChange={onOptionChange}
+      onDockPocketChange={onDockPocketChange}
+      haloSnapshot={haloSnapshot}
+      onHaloTaskQueued={onHaloTaskQueued}
+      onHaloTaskCompleted={onHaloTaskCompleted}
+      onHaloTaskFailed={onHaloTaskFailed}
+      onNavigateToResults={onNavigateToResults}
     />
   );
 }

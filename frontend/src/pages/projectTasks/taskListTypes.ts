@@ -2,6 +2,15 @@ import type { InputComponent, ProjectTask, ProteinModification } from '../../typ
 import type { WorkflowKey } from '../../utils/workflows';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
+
+/** Phases of the async server-side Excel export, in order. */
+export type ExportProgressPhase = 'collecting' | 'submitting' | 'exporting' | 'downloading';
+
+export interface ExportProgressInfo {
+  phase: ExportProgressPhase;
+  done: number;
+  total: number;
+}
 export type SortKey = 'plddt' | 'ipsae' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'mode';
 export type SortDirection = 'asc' | 'desc';
 export type TaskTableMode = 'default' | 'lead_opt' | 'peptide';
@@ -81,7 +90,6 @@ export interface TaskListRow {
   peptideIterations: number | null;
   peptidePopulationSize: number | null;
   peptideEliteSize: number | null;
-  peptideMutationRate: number | null;
   peptideCurrentGeneration: number | null;
   peptideTotalGenerations: number | null;
   peptideBestScore: number | null;

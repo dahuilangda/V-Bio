@@ -128,6 +128,14 @@ export function resolveEditableDraftTaskRowIdFromContext(params: {
     }
     return null;
   }
+
+  // No URL row and no runtime task: the load flow restores the draft from the
+  // project's latest DRAFT row, so a save must reuse THAT row — returning null
+  // here would INSERT a duplicate draft on every save ("还是 draft 的时候修改
+  // 不会产生新 task").
+  const latestDraftRow =
+    projectTasks.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
+  if (latestDraftRow && isDraftTaskSnapshot(latestDraftRow)) return latestDraftRow.id;
   return null;
 }
 
@@ -212,20 +220,16 @@ export async function persistDraftTaskSnapshotRecord(params: {
   };
 
   const reuseTaskRowId = options?.reuseTaskRowId || null;
-  if (reuseTaskRowId) {
-    if (!reuseTaskRowId.startsWith('local-')) {
-      try {
-        const updated = await updateProjectTask(reuseTaskRowId, basePayload);
-        setProjectTasks((prev) => {
-          const exists = prev.some((item) => item.id === reuseTaskRowId);
-          const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? updated : item)) : [updated, ...prev];
-          return sortProjectTasks(next);
-        });
-        return updated;
-      } catch {
-        // Fall through to insert path.
-      }
-    }
+  if (reuseTaskRowId && !reuseTaskRowId.startsWith('local-')) {
+    // Reuse is committed: a failed in-place update must surface as a failed
+    // save. Falling through to INSERT would silently duplicate the draft.
+    const updated = await updateProjectTask(reuseTaskRowId, basePayload);
+    setProjectTasks((prev) => {
+      const exists = prev.some((item) => item.id === reuseTaskRowId);
+      const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? updated : item)) : [updated, ...prev];
+      return sortProjectTasks(next);
+    });
+    return updated;
   }
 
   const inserted = await insertProjectTask(basePayload);

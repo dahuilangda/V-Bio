@@ -1,0 +1,10 @@
+# PeptideLM runtime requirements (satisfied by /data/Boltz2Score/.venv)
+# pinned versions from that environment
+torch>=2.1
+transformers>=4.38
+rdkit>=2023.09
+scikit-learn>=1.3
+numpy
+pandas
+pyyaml
+pytest

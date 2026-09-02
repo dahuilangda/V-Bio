@@ -60,8 +60,8 @@ def main():
     
     # --- 增强功能选项 ---
     enhanced_group = parser.add_argument_group('增强功能选项')
-    enhanced_group.add_argument("--enable-enhanced", action="store_true", default=True, help="启用增强版功能：自适应突变、Pareto优化、收敛检测等。")
-    enhanced_group.add_argument("--disable-enhanced", action="store_true", help="禁用增强版功能，使用传统算法。")
+    enhanced_group.add_argument("--enable-enhanced", action="store_true", default=True, help="自适应突变、Pareto 优化、收敛检测（默认启用）。")
+    enhanced_group.add_argument("--disable-enhanced", action="store_true", help="禁用上述功能。")
     enhanced_group.add_argument("--convergence-window", type=int, default=5, help="收敛检测的滑动窗口大小。")
     enhanced_group.add_argument("--convergence-threshold", type=float, default=0.001, help="收敛检测的分数方差阈值。")
     enhanced_group.add_argument("--max-stagnation", type=int, default=3, help="触发早停的最大停滞周期数。")
@@ -76,7 +76,7 @@ def main():
 
     # --- 双环肽设计 (可选) ---
     bicyclic_group = parser.add_argument_group('双环肽设计')
-    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", choices=["SEZ", "29N", "BS3"], help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
+    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", choices=["SEZ", "29N"], help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
     bicyclic_group.add_argument("--cys_positions", type=int, nargs=2, default=None, help="除末端外，另外两个半胱氨酸的初始位置(1-based索引)，例如 --cys_positions 4 10。如果未提供，将随机选择。仅在 --design_type=bicyclic 时使用。")
 
     # --- 氨基酸组成控制 ---

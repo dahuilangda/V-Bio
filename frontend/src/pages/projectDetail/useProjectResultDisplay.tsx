@@ -43,6 +43,8 @@ interface UseProjectResultDisplayOptions {
   snapshotIptm: number | null;
   snapshotSelectedPairIptm: number | null;
   snapshotIc50Um: number | null;
+  snapshotPic50?: number | null;
+  snapshotPic50Mw?: number | null;
   snapshotIc50Error: { plus: number; minus: number } | null;
   snapshotIc50Tone: MetricTone;
   snapshotBindingProbability: number | null;
@@ -119,6 +121,8 @@ export function useProjectResultDisplay({
   snapshotIptm,
   snapshotSelectedPairIptm,
   snapshotIc50Um,
+  snapshotPic50,
+  snapshotPic50Mw,
   snapshotIc50Error,
   snapshotIc50Tone,
   snapshotBindingProbability,
@@ -199,6 +203,8 @@ export function useProjectResultDisplay({
             snapshotPlddtTone,
             preferredInterfaceMetric,
             snapshotIc50Um,
+            snapshotPic50,
+            snapshotPic50Mw,
             snapshotIc50Error,
             snapshotIc50Tone,
             snapshotBindingProbability,
@@ -217,6 +223,8 @@ export function useProjectResultDisplay({
       snapshotPlddtTone,
       preferredInterfaceMetric,
       snapshotIc50Um,
+      snapshotPic50,
+      snapshotPic50Mw,
       snapshotIc50Error,
       snapshotIc50Tone,
       snapshotBindingProbability,

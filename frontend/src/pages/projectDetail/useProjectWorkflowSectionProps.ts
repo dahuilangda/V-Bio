@@ -1,5 +1,6 @@
 import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
 import type {
+  AffinityDockPocket,
   AffinityScoringMode,
   CustomCcdMoleculeInput,
   InputComponent,
@@ -9,12 +10,7 @@ import type {
 } from '../../types/models';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
-import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
 import type { LeadOptPersistedUploads } from '../../components/project/leadopt/hooks/useLeadOptReferenceFragment';
-import type {
-  LeadOptMmpPersistedSnapshot,
-  LeadOptPredictionRecord
-} from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
 import {
   buildAffinityWorkflowSectionProps,
   buildLeadOptimizationWorkflowSectionProps,
@@ -25,6 +21,9 @@ import {
 } from './workflowSectionProps';
 import { handleLeadOptimizationLigandSmilesChangeAction } from './editorActions';
 import { withLeadOptimizationLigandSmiles } from '../../utils/leadOptimization';
+import type { LeadOptHaloSnapshot } from '../../components/project/LeadOptimizationWorkspace';
+import type { LeadOptHaloCandidate } from '../../components/project/leadopt/hooks/useLeadOptHaloRun';
+import type { PredictionOptions } from '../../types/models';
 import type { ProjectWorkspaceDraft, WorkspaceTab } from './workspaceTypes';
 
 interface UseProjectWorkflowSectionPropsInput {
@@ -79,7 +78,7 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityLigandSmiles: string;
   affinityPreviewLigandSmiles: string;
   affinityMode: AffinityScoringMode;
-  affinityUseMsa: boolean;
+  affinityDockPocket: import('../../types/models').AffinityDockPocket | null;
   affinityConfidenceOnlyUiValue: boolean;
   affinityConfidenceOnlyUiLocked: boolean;
   affinityPreviewStructureText: string;
@@ -88,9 +87,9 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityPreviewLigandOverlayFormat: 'pdb' | 'cif';
   onAffinityTargetFileChange: (file: File | null) => void;
   onAffinityLigandFileChange: (file: File | null) => void;
-  onAffinityUseMsaChange: (checked: boolean) => void;
   onAffinityConfidenceOnlyChange: (checked: boolean) => void;
   onAffinityModeChange: (mode: AffinityScoringMode) => void;
+  onAffinityDockPocketChange: (pocket: import('../../types/models').AffinityDockPocket | null) => void;
   setAffinityLigandSmiles: (value: string) => void;
   leadOptProteinSequence: string;
   leadOptLigandSmiles: string;
@@ -99,40 +98,28 @@ interface UseProjectWorkflowSectionPropsInput {
   leadOptReferenceScopeKey?: string;
   leadOptPersistedReferenceUploads?: LeadOptPersistedUploads;
   onLeadOptReferenceUploadsChange?: (uploads: LeadOptPersistedUploads) => void;
-  onLeadOptMmpTaskQueued?: (payload: {
+  onLeadOptHaloTaskQueued: (payload: { taskId: string; requestPayload: Record<string, unknown> }) => void | Promise<void>;
+  onLeadOptHaloTaskCompleted: (payload: {
     taskId: string;
-    requestPayload: Record<string, unknown>;
-    querySmiles: string;
-    referenceUploads: LeadOptPersistedUploads;
+    candidates: LeadOptHaloCandidate[];
+    roundsLog: Array<Record<string, unknown>>;
+    roundsCompleted: number | null;
+    totalRounds: number | null;
+    mode: string;
+    backend: string;
   }) => void | Promise<void>;
-  onLeadOptMmpTaskCompleted?: (payload: {
-    taskId: string;
-    queryId: string;
-    transformCount: number;
-    candidateCount: number;
-    elapsedSeconds: number;
-    resultSnapshot?: Record<string, unknown>;
-  }) => void | Promise<void>;
-  onLeadOptMmpTaskFailed?: (payload: { taskId: string; error: string }) => void | Promise<void>;
-  onLeadOptUiStateChange?: (payload: { uiState: LeadOptCandidatesUiState }) => void | Promise<void>;
-  onLeadOptPredictionQueued?: (payload: { taskId: string; backend: string; candidateSmiles: string }) => void | Promise<void>;
-  onLeadOptPredictionStateChange?: (payload: {
-    records: Record<string, LeadOptPredictionRecord>;
-    referenceRecords: Record<string, LeadOptPredictionRecord>;
-    summary: {
-      total: number;
-      queued: number;
-      running: number;
-      success: number;
-      failure: number;
-      latestTaskId: string;
-    };
-  }) => void | Promise<void>;
+  onLeadOptHaloTaskFailed: (payload: { taskId: string; error: string }) => void | Promise<void>;
   onLeadOptNavigateToResults?: () => void;
-  leadOptInitialMmpSnapshot?: LeadOptMmpPersistedSnapshot | null;
+  leadOptHaloSnapshot?: LeadOptHaloSnapshot | null;
+  leadOptOptions: PredictionOptions;
+  onLeadOptOptionChange: (
+    key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
+      | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices',
+    value: string | number | null
+  ) => void;
+  onLeadOptDockPocketChange?: (pocket: import('../../types/models').AffinityDockPocket | null) => void;
   setDraft: Dispatch<SetStateAction<ProjectWorkspaceDraft | null>>;
   setWorkspaceTab: Dispatch<SetStateAction<WorkspaceTab>>;
-  onRegisterLeadOptHeaderRunAction?: (action: (() => void | Promise<void>) | null) => void;
   workspaceTab: WorkspaceTab;
   componentsWorkspaceRef: RefObject<HTMLDivElement>;
   isComponentsResizing: boolean;
@@ -161,14 +148,39 @@ interface UseProjectWorkflowSectionPropsInput {
   seed: number | null;
   lowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
+  peptideChirality: 'l' | 'd';
   peptideBinderLength: number;
+  peptideLengthMin: number;
+  peptideLengthMax: number;
   peptideUseInitialSequence: boolean;
   peptideInitialSequence: string;
+  /** Initial peptide structure for D-peptide mode anchoring (optional). */
+  peptideStructureUpload?: {
+    fileName: string;
+    format: 'pdb' | 'cif';
+    content: string;
+    chainId: string;
+  } | null;
+  onPeptideStructureUploadChange?: (upload: {
+    fileName: string;
+    format: 'pdb' | 'cif';
+    content: string;
+    chainId: string;
+  } | null) => void;
   peptideSequenceMask: string;
   peptideIterations: number;
+  /** Peptide design: the Binding target component hosting the pocket picker. */
+  peptideTargetComponentId?: string | null;
+  /** YAML chain id of the target component (pocket token chain prefix). */
+  peptideTargetChainId?: string | null;
+  peptideTargetSequence?: string;
+  peptidePocketCenter?: string;
+  peptidePocketResidues?: string;
+  peptidePocketBox?: number;
+  peptideDockPocket?: AffinityDockPocket | null;
+  onPeptideDockPocketChange?: (pocket: AffinityDockPocket | null) => void;
   peptidePopulationSize: number;
   peptideEliteSize: number;
-  peptideMutationRate: number;
   peptideResiduePool: PeptideResiduePoolSelection[];
   peptideResiduePoolAvailable?: boolean;
   peptideNonNaturalMin: number;
@@ -184,14 +196,15 @@ interface UseProjectWorkflowSectionPropsInput {
   onSeedChange: (seed: number | null) => void;
   onLowVramChange: (lowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
-  onPeptideBinderLengthChange: (value: number) => void;
+  onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
+  onPeptideLengthRange: (min: number, max: number) => void;
   onPeptideUseInitialSequenceChange: (value: boolean) => void;
   onPeptideInitialSequenceChange: (value: string) => void;
   onPeptideSequenceMaskChange: (value: string) => void;
   onPeptideIterationsChange: (value: number) => void;
+  onPeptidePocketFieldChange: (field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox', value: string | number | null) => void;
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
-  onPeptideMutationRateChange: (value: number) => void;
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
   onPeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
@@ -275,7 +288,7 @@ export function useProjectWorkflowSectionProps({
   affinityLigandSmiles,
   affinityPreviewLigandSmiles,
   affinityMode,
-  affinityUseMsa,
+  affinityDockPocket,
   affinityConfidenceOnlyUiValue,
   affinityConfidenceOnlyUiLocked,
   affinityPreviewStructureText,
@@ -284,9 +297,9 @@ export function useProjectWorkflowSectionProps({
   affinityPreviewLigandOverlayFormat,
   onAffinityTargetFileChange,
   onAffinityLigandFileChange,
-  onAffinityUseMsaChange,
   onAffinityConfidenceOnlyChange,
   onAffinityModeChange,
+  onAffinityDockPocketChange,
   setAffinityLigandSmiles,
   leadOptProteinSequence,
   leadOptLigandSmiles,
@@ -294,18 +307,21 @@ export function useProjectWorkflowSectionProps({
   leadOptLigandChain,
   leadOptReferenceScopeKey,
   leadOptPersistedReferenceUploads,
+  leadOptOptions,
+  onLeadOptOptionChange = (() => {}) as (
+    key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
+      | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices',
+    value: string | number | null
+  ) => void,
+  onLeadOptDockPocketChange = (() => {}) as (pocket: import('../../types/models').AffinityDockPocket | null) => void,
   onLeadOptReferenceUploadsChange,
-  onLeadOptMmpTaskQueued,
-  onLeadOptMmpTaskCompleted,
-  onLeadOptMmpTaskFailed,
-  onLeadOptUiStateChange,
-  onLeadOptPredictionQueued,
-  onLeadOptPredictionStateChange,
+  onLeadOptHaloTaskQueued,
+  onLeadOptHaloTaskCompleted,
+  onLeadOptHaloTaskFailed,
   onLeadOptNavigateToResults,
-  leadOptInitialMmpSnapshot,
+  leadOptHaloSnapshot = null,
   setDraft,
   setWorkspaceTab,
-  onRegisterLeadOptHeaderRunAction,
   workspaceTab,
   componentsWorkspaceRef,
   isComponentsResizing,
@@ -335,14 +351,26 @@ export function useProjectWorkflowSectionProps({
   onSeedChange,
   onLowVramChange,
   peptideDesignMode,
+  peptideChirality,
   peptideBinderLength,
+  peptideLengthMin,
+  peptideLengthMax,
   peptideUseInitialSequence,
   peptideInitialSequence,
+  peptideStructureUpload = null,
+  onPeptideStructureUploadChange = () => {},
   peptideSequenceMask,
   peptideIterations,
+  peptideTargetComponentId,
+  peptideTargetChainId,
+  peptideTargetSequence,
+  peptidePocketCenter,
+  peptidePocketResidues,
+  peptidePocketBox,
+  peptideDockPocket,
+  onPeptideDockPocketChange,
   peptidePopulationSize,
   peptideEliteSize,
-  peptideMutationRate,
   peptideResiduePool,
   peptideResiduePoolAvailable = true,
   peptideNonNaturalMin,
@@ -355,14 +383,15 @@ export function useProjectWorkflowSectionProps({
   peptideBicyclicCys2Pos,
   peptideBicyclicCys3Pos,
   onPeptideDesignModeChange,
-  onPeptideBinderLengthChange,
+  onPeptideChiralityChange,
+  onPeptideLengthRange,
   onPeptideUseInitialSequenceChange,
   onPeptideInitialSequenceChange,
   onPeptideSequenceMaskChange,
   onPeptideIterationsChange,
+  onPeptidePocketFieldChange,
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
-  onPeptideMutationRateChange,
   onPeptideResiduePoolChange,
   onPeptideNonNaturalRangeChange,
   onPeptideBicyclicLinkerCcdChange,
@@ -457,8 +486,8 @@ export function useProjectWorkflowSectionProps({
         ligandSmiles: affinityEffectiveLigandSmiles,
         ligandEditorInput: affinityEffectiveLigandSmiles,
         mode: affinityMode,
+        dockPocket: affinityDockPocket,
         seed: seed ?? null,
-        useMsa: affinityUseMsa,
         confidenceOnly: affinityConfidenceOnlyUiValue,
         confidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
         previewTargetStructureText: affinityPreviewStructureText,
@@ -471,10 +500,10 @@ export function useProjectWorkflowSectionProps({
         resultsGridStyle,
         onTargetFileChange: onAffinityTargetFileChange,
         onLigandFileChange: onAffinityLigandFileChange,
-        onUseMsaChange: onAffinityUseMsaChange,
         onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
         onBackendChange,
         onModeChange: onAffinityModeChange,
+        onDockPocketChange: onAffinityDockPocketChange,
         onSeedChange,
         onLigandSmilesChange: setAffinityLigandSmiles,
         onResizerPointerDown: onResultsResizerPointerDown,
@@ -486,9 +515,7 @@ export function useProjectWorkflowSectionProps({
         workspaceTab,
         canEdit,
         submitting,
-        backend,
         onNavigateToResults: onLeadOptNavigateToResults || (() => setWorkspaceTab('results')),
-        onRegisterHeaderRunAction: onRegisterLeadOptHeaderRunAction,
         proteinSequence: leadOptProteinSequence,
         ligandSmiles: leadOptLigandSmiles,
         targetChain: leadOptTargetChain,
@@ -497,13 +524,13 @@ export function useProjectWorkflowSectionProps({
         referenceScopeKey: leadOptReferenceScopeKey,
         persistedReferenceUploads: leadOptPersistedReferenceUploads,
         onReferenceUploadsChange: onLeadOptReferenceUploadsChange,
-        onMmpTaskQueued: onLeadOptMmpTaskQueued,
-        onMmpTaskCompleted: onLeadOptMmpTaskCompleted,
-        onMmpTaskFailed: onLeadOptMmpTaskFailed,
-        onMmpUiStateChange: onLeadOptUiStateChange,
-        onPredictionQueued: onLeadOptPredictionQueued,
-        onPredictionStateChange: onLeadOptPredictionStateChange,
-        initialMmpSnapshot: leadOptInitialMmpSnapshot
+        onHaloTaskQueued: onLeadOptHaloTaskQueued,
+        onHaloTaskCompleted: onLeadOptHaloTaskCompleted,
+        onHaloTaskFailed: onLeadOptHaloTaskFailed,
+        haloSnapshot: leadOptHaloSnapshot,
+        options: leadOptOptions,
+        onOptionChange: onLeadOptOptionChange,
+        onDockPocketChange: onLeadOptDockPocketChange
       })
     : EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS;
   const predictionWorkflowSectionProps = shouldBuildPredictionWorkflowSection
@@ -526,6 +553,24 @@ export function useProjectWorkflowSectionProps({
         activeComponentId,
         onActiveComponentIdChange: (id: string | null) => setActiveComponentId(id),
         onProteinTemplateResiduePick,
+        peptideTargetPocket:
+          isPeptideDesignWorkflow && peptideTargetComponentId
+            ? {
+                componentId: peptideTargetComponentId,
+                chainId: peptideTargetChainId ?? null,
+                sequence: peptideTargetSequence ?? '',
+                pocketCenter: peptidePocketCenter ?? '',
+                pocketResidues: peptidePocketResidues ?? '',
+                pocketBox: peptidePocketBox ?? 6,
+                dockPocket: peptideDockPocket ?? null,
+                onPocketFieldChange: onPeptidePocketFieldChange,
+                onDockPocketChange:
+                  onPeptideDockPocketChange ||
+                  (() => {
+                    /* pocket persistence is optional */
+                  })
+              }
+            : null,
         constraintsWorkspaceProps: predictionConstraintsWorkspaceProps,
         componentsSidebarProps: predictionComponentsSidebarProps
       })
@@ -574,14 +619,18 @@ export function useProjectWorkflowSectionProps({
         seed: seed ?? null,
         lowVram,
         peptideDesignMode,
+        peptideChirality,
         peptideBinderLength,
+    peptideLengthMin,
+    peptideLengthMax,
         peptideUseInitialSequence,
         peptideInitialSequence,
+        peptideStructureUpload,
+        onPeptideStructureUploadChange,
         peptideSequenceMask,
         peptideIterations,
         peptidePopulationSize,
         peptideEliteSize,
-        peptideMutationRate,
         peptideResiduePool,
         peptideResiduePoolAvailable,
         peptideNonNaturalMin,
@@ -599,15 +648,15 @@ export function useProjectWorkflowSectionProps({
         onSeedChange,
         onLowVramChange,
         onPeptideDesignModeChange,
-        onPeptideBinderLengthChange,
+        onPeptideChiralityChange,
+        onPeptideLengthRange,
         onPeptideUseInitialSequenceChange,
         onPeptideInitialSequenceChange,
         onPeptideSequenceMaskChange,
         onPeptideIterationsChange,
         onPeptidePopulationSizeChange,
         onPeptideEliteSizeChange,
-        onPeptideMutationRateChange,
-        onPeptideResiduePoolChange,
+              onPeptideResiduePoolChange,
         onPeptideNonNaturalRangeChange,
         onPeptideBicyclicLinkerCcdChange,
         onPeptideBicyclicCysPositionModeChange,

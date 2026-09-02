@@ -129,9 +129,11 @@
 }
 
 
-/* Small screens: switch task table to card list (same breakpoint as project cards). */
+/* Small screens: switch task table to card list (same breakpoint as project cards).
+   Scoped via :has(.task-card-list) — other pages reuse .task-table-wrap (e.g. the MMP
+   lifecycle batch table) and must keep their scrollable table instead of vanishing. */
 @media (max-width: 900px) {
-  .task-table-wrap {
+  .panel:has(.task-card-list) .task-table-wrap {
     display: none;
   }
   .task-card-list {
@@ -146,26 +148,3 @@
 
 /* Mobile: aggressively hide secondary columns so the task table fits without horizontal scroll.
    Keep Name, State, Backend, and Actions visible — the essentials for managing tasks on a phone. */
-@media (max-width: 767px) {
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
-    min-width: 0;
-  }
-
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-backend,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-backend,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-plddt,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-plddt,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-iptm,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-iptm,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-ipsae,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-ipsae,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-pae,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-pae {
-    display: none;
-  }
-
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-name,
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-name {
-    min-width: 120px;
-  }
-}

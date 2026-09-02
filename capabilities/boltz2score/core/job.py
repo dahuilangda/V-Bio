@@ -11,6 +11,8 @@ from core.affinity import inspect_affinity_eligibility, prepare_affinity_record,
 from core.cli import ExecutionPlan, JobSpec
 from core.inference import run_scoring
 from core.results import compute_and_write_ipsae, rerank_diffusion_samples, write_chain_map
+from utils.interactions import compute_and_write_interactions
+from utils.cif_chemcomp import inject_chem_comp_into_record, snapshot_custom_ligand_bonds
 from core.prepare_inputs import prepare_inputs
 from utils.ligand_utils import build_combined_input_from_parts, slugify_identifier
 from utils.score_diagnostics import write_atom_coverage_diagnostics
@@ -29,6 +31,8 @@ def run_single_job(
     args: argparse.Namespace,
     plan: ExecutionPlan,
     job: JobSpec,
+    model_module=None,
+    affinity_model=None,
 ) -> None:
     record_id = job.record_id
     input_path = job.input_path
@@ -150,7 +154,7 @@ def run_single_job(
             requested_ligand_chain_id=resolved_ligand_chain_id,
             requested_target_chains=plan.target_chains,
             contact_cutoff=args.anchor_contact_cutoff,
-            max_distance=args.anchor_max_distance,
+            max_distance=(args.anchor_max_distance if args.anchor_max_distance is not None else 8.0),
             max_residues=args.anchor_max_residues,
             pose_anchor_atoms=args.pose_anchor_atoms,
             pose_anchor_slack=args.pose_anchor_slack,
@@ -164,7 +168,7 @@ def run_single_job(
             f"(asym_id={anchored_summary['ligand_asym_id']}), "
             f"contacts={anchored_summary['contact_residue_count']}, "
             f"cutoff={args.anchor_contact_cutoff:.1f}A, "
-            f"max_distance={args.anchor_max_distance:.1f}A."
+            f"max_distance={(args.anchor_max_distance if args.anchor_max_distance is not None else 8.0):.1f}A."
         )
         if args.self_template and args.template_exclude_pocket_margin >= 0:
             template_summary = configure_distal_self_templates(
@@ -196,7 +200,7 @@ def run_single_job(
         max_parallel_samples=args.max_parallel_samples,
         structure_refine=plan.structure_refine,
         write_full_pae=args.compute_ipsae,
-        step_scale=args.step_scale,
+        step_scale=(args.step_scale if args.step_scale is not None else 1.5),
         no_kernels=args.no_kernels,
         contact_guidance=anchored_guidance_enabled,
         use_potentials=bool(plan.structure_refine and args.use_potentials),
@@ -209,17 +213,8 @@ def run_single_job(
         gamma_min=args.gamma_min,
         seed=args.seed,
         trainer_precision=args.trainer_precision,
+        model_module=model_module,
     )
-
-    # Release the scoring model from GPU before affinity runs so the affinity
-    # head (~2.2 GB checkpoint + forward activations) does not hit OOM on the
-    # shared GPU.  This is essential for per-request web-service inference.
-    if run_affinity:
-        import gc
-        import torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     write_chain_map(
         processed_dir=work_dir / "processed",
@@ -253,7 +248,40 @@ def run_single_job(
             f"{rerank_summary['selected_model']} over {rerank_summary['default_writer_model']}."
         )
 
+    ligand_bond_table = snapshot_custom_ligand_bonds(
+        processed_dir=work_dir / "processed",
+        record_id=record_id,
+    )
+    if ligand_bond_table:
+        injected = inject_chem_comp_into_record(plan.output_dir / record_id, ligand_bond_table)
+        if injected:
+            print(f"[Info] Injected ligand chem_comp bonds into {injected} output structure(s).")
+
+    if getattr(args, "compute_interactions", False):
+        # Interaction analysis is enrichment on top of an already-completed scoring run; a PLIP /
+        # OpenBabel / gemmi failure on exotic chemistry must degrade to a skip note, not fail the
+        # whole task after the GPU work succeeded and the primary outputs were written.
+        try:
+            interactions_report = compute_and_write_interactions(
+                output_dir=plan.output_dir,
+                record_id=record_id,
+                ligand_chain_name=ligand_alignment.get("ligand_chain")
+                if isinstance(ligand_alignment, dict)
+                else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warning] Interaction analysis failed and was skipped: {exc}")
+            interactions_report = None
+        if interactions_report is None:
+            print("[Warning] Interaction analysis skipped: no output structure found.")
+        else:
+            print(
+                "[Info] Interactions analyzed: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(interactions_report.get("counts", {}).items()))
+            )
+
     if run_affinity:
+        affinity_recycling = int(getattr(args, "affinity_recycling_steps", None) or 1)
         run_affinity_prediction(
             processed_dir=work_dir / "processed",
             output_dir=plan.output_dir,
@@ -268,4 +296,8 @@ def run_single_job(
             trainer_precision=args.trainer_precision,
             ligand_alignment=ligand_alignment,
             no_kernels=args.no_kernels,
+            model_module=affinity_model,
+            recycling_steps=affinity_recycling,
+            ligand_mw=affinity_summary.get("ligand_mw") if affinity_summary else None,
         )
+        # GPU cleanup is now handled inside run_affinity_prediction.

@@ -1,10 +1,9 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { RefreshCcw, ShieldCheck, ShieldX, Trash2 } from 'lucide-react';
 import type { AppUser } from '../types/models';
-import { hashPassword } from '../utils/crypto';
 import { formatDateTime } from '../utils/date';
 import { isSuperAdminIdentity } from '../api/authApi';
-import { insertUser, listUsers, updateUser } from '../api/supabaseLite';
+import { adminCreateUser, adminListUsers, adminUpdateUser, toAppUser } from '../api/authServerApi';
 
 export function UsersPage() {
   const [users, setUsers] = useState<AppUser[]>([]);
@@ -17,7 +16,7 @@ export function UsersPage() {
     setLoading(true);
     setError(null);
     try {
-      setUsers(await listUsers());
+      setUsers((await adminListUsers()).map(toAppUser));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users.');
     } finally {
@@ -47,16 +46,14 @@ export function UsersPage() {
 
     setCreating(true);
     try {
-      const password_hash = await hashPassword(username, password);
-      const created = await insertUser({
+      const created = await adminCreateUser({
         username,
         name,
-        email: email || null,
-        password_hash,
-        is_admin,
-        last_login_at: null
+        email: email || undefined,
+        password,
+        is_admin
       });
-      setUsers((prev) => [created, ...prev]);
+      setUsers((prev) => [toAppUser(created), ...prev]);
       (e.currentTarget as HTMLFormElement).reset();
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create user.');
@@ -67,22 +64,21 @@ export function UsersPage() {
 
   const toggleAdmin = async (user: AppUser) => {
     if (isSuperAdminIdentity(user.username, user.email)) return;
-    const next = await updateUser(user.id, { is_admin: !user.is_admin });
-    setUsers((prev) => prev.map((u) => (u.id === user.id ? next : u)));
+    const next = await adminUpdateUser(user.id, { is_admin: !user.is_admin });
+    setUsers((prev) => prev.map((u) => (u.id === user.id ? toAppUser(next) : u)));
   };
 
   const resetPassword = async (user: AppUser) => {
     const value = window.prompt(`Enter a new password for ${user.username}`);
     if (!value) return;
-    const password_hash = await hashPassword(user.username, value);
-    const next = await updateUser(user.id, { password_hash });
-    setUsers((prev) => prev.map((u) => (u.id === user.id ? next : u)));
+    const next = await adminUpdateUser(user.id, { password: value });
+    setUsers((prev) => prev.map((u) => (u.id === user.id ? toAppUser(next) : u)));
   };
 
   const removeUser = async (user: AppUser) => {
     if (isSuperAdminIdentity(user.username, user.email)) return;
     if (!window.confirm(`Delete user "${user.username}"?`)) return;
-    const next = await updateUser(user.id, { deleted_at: new Date().toISOString() });
+    const next = await adminUpdateUser(user.id, { deleted_at: new Date().toISOString() });
     setUsers((prev) => prev.filter((u) => u.id !== next.id));
   };
 

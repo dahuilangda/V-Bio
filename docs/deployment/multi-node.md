@@ -14,7 +14,7 @@ docker compose -f deploy/docker/DOCKER_STACK_REDIS.compose.yml   --env-file depl
 
 ```bash
 cp deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.env.example deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.env
-# 修改 BOLTZ_API_TOKEN, REDIS_URL, LEAD_OPT_MMP_DB_URL, MSA_SERVER_URL
+# 修改 BOLTZ_API_TOKEN, REDIS_URL, MSA_SERVER_URL
 docker compose -f deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.compose.yml   --env-file deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.env up -d --build
 ```
 
@@ -26,13 +26,13 @@ cp deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env.example deploy/docker/DOCKER_S
 docker compose -f deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.compose.yml   --env-file deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env   --profile boltz2 --profile alphafold3   up -d --build
 ```
 
-可用 profile：`boltz2`, `boltz2score`, `affinity`, `alphafold3`, `protenix`, `nesso`, `pocketxmol`。
+可用 profile：`boltz2`, `boltz2score`, `affinity`, `alphafold3`, `protenix`, `nesso`。
 
 ## CPU worker
 
 ```bash
 cp deploy/docker/DOCKER_STACK_WORKER_CPU.env.example deploy/docker/DOCKER_STACK_WORKER_CPU.env
-# 修改 BOLTZ_API_TOKEN, REDIS_URL, CENTRAL_API_URL, CPU_WORKER_CAPABILITIES, LEAD_OPT_MMP_DB_URL
+# 修改 BOLTZ_API_TOKEN, REDIS_URL, CENTRAL_API_URL, CPU_WORKER_CAPABILITIES
 docker compose -f deploy/docker/DOCKER_STACK_WORKER_CPU.compose.yml   --env-file deploy/docker/DOCKER_STACK_WORKER_CPU.env up -d --build
 ```
 

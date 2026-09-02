@@ -147,14 +147,22 @@ export interface WorkflowRuntimeSettingsSectionProps {
   seed: number | null;
   lowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
+  peptideChirality: 'l' | 'd';
   peptideBinderLength: number;
+  peptideLengthMin: number;
+  peptideLengthMax: number;
   peptideUseInitialSequence: boolean;
   peptideInitialSequence: string;
+  peptideStructureUpload: {
+    fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
+  } | null;
+  onPeptideStructureUploadChange: (upload: {
+    fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
+  } | null) => void;
   peptideSequenceMask: string;
   peptideIterations: number;
   peptidePopulationSize: number;
   peptideEliteSize: number;
-  peptideMutationRate: number;
   peptideResiduePool: PeptideResiduePoolSelection[];
   peptideResiduePoolAvailable?: boolean;
   peptideNonNaturalMin: number;
@@ -172,14 +180,14 @@ export interface WorkflowRuntimeSettingsSectionProps {
   onSeedChange: (seed: number | null) => void;
   onLowVramChange: (lowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
-  onPeptideBinderLengthChange: (value: number) => void;
+  onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
+  onPeptideLengthRange: (min: number, max: number) => void;
   onPeptideUseInitialSequenceChange: (value: boolean) => void;
   onPeptideInitialSequenceChange: (value: string) => void;
   onPeptideSequenceMaskChange: (value: string) => void;
   onPeptideIterationsChange: (value: number) => void;
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
-  onPeptideMutationRateChange: (value: number) => void;
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
   onPeptideBicyclicLinkerCcdChange: (value: BicyclicLinkerType) => void;
@@ -202,14 +210,18 @@ export function WorkflowRuntimeSettingsSection({
   seed,
   lowVram,
   peptideDesignMode,
+  peptideChirality,
   peptideBinderLength,
+  peptideLengthMin,
+  peptideLengthMax,
   peptideUseInitialSequence,
   peptideInitialSequence,
+  peptideStructureUpload,
+  onPeptideStructureUploadChange,
   peptideSequenceMask,
   peptideIterations,
   peptidePopulationSize,
   peptideEliteSize,
-  peptideMutationRate,
   peptideResiduePool,
   peptideResiduePoolAvailable = true,
   peptideNonNaturalMin,
@@ -227,14 +239,14 @@ export function WorkflowRuntimeSettingsSection({
   onSeedChange,
   onLowVramChange,
   onPeptideDesignModeChange,
-  onPeptideBinderLengthChange,
+  onPeptideChiralityChange,
+  onPeptideLengthRange,
   onPeptideUseInitialSequenceChange,
   onPeptideInitialSequenceChange,
   onPeptideSequenceMaskChange,
   onPeptideIterationsChange,
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
-  onPeptideMutationRateChange,
   onPeptideResiduePoolChange,
   onPeptideNonNaturalRangeChange,
   onPeptideBicyclicLinkerCcdChange,
@@ -273,8 +285,43 @@ export function WorkflowRuntimeSettingsSection({
   const manualOverrideBackboneRef = useRef(false);
   const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
+  // Peptide design only offers the docking engines (+ AlphaFold3): migrate a
+  // legacy default ('boltz') so the select never shows an unmatched value —
+  // otherwise the browser displays "Boltz2Dock" while the state stays 'boltz'
+  // and the D-peptide option stays disabled despite appearances.
+  const peptideBackendAllowed =
+    normalizedBackend === 'boltz2dock' || normalizedBackend === 'protenix2dock' || normalizedBackend === 'alphafold3';
+  useEffect(() => {
+    if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
+      onBackendChange('protenix2dock');
+    }
+  }, [isPeptideDesignWorkflow, peptideBackendAllowed, onBackendChange]);
+  // Local mirror so a click is reflected instantly even when an upstream
+  // normalizer round-trips the draft; external value changes win.
+  const [backendMirror, setBackendMirror] = useState<string>(normalizedBackend);
+  useEffect(() => {
+    setBackendMirror(normalizedBackend);
+  }, [normalizedBackend]);
+  const displayedBackend = isPeptideDesignWorkflow ? backendMirror : normalizedBackend;
+
+  const handlePeptideBackendSelect = (value: string) => {
+    setBackendMirror(value);
+    onBackendChange(value);
+  };
   const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
   const isBicyclicMode = isPeptideDesignWorkflow && peptideDesignMode === 'bicyclic';
+  // Constrained rings are Protenix-only (hard TFG bond enforcement); migrate
+  // a stale non-protenix selection so the form never submits an invalid pair.
+  useEffect(() => {
+    if (
+      isPeptideDesignWorkflow &&
+      peptideDesignMode !== 'linear' &&
+      normalizedBackend !== 'protenix' &&
+      canEditRuntimeIdentity
+    ) {
+      onBackendChange('protenix2dock');
+    }
+  }, [isPeptideDesignWorkflow, peptideDesignMode, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
   const cys2Max = peptideBicyclicFixTerminalCys
     ? Math.max(1, peptideBinderLength - 2)
     : Math.max(1, peptideBinderLength - 1);
@@ -327,7 +374,6 @@ export function WorkflowRuntimeSettingsSection({
     return normalized.padEnd(Math.max(1, peptideBinderLength), 'X');
   }, [peptideSequenceMask, peptideBinderLength]);
   const maskChars = useMemo(() => normalizedSequenceMask.split(''), [normalizedSequenceMask]);
-  const canToggleMask = canEdit;
 
   useEffect(() => {
     let cancelled = false;
@@ -760,7 +806,7 @@ export function WorkflowRuntimeSettingsSection({
   };
 
   const toggleMaskPosition = (position: number) => {
-    if (!canToggleMask) return;
+    if (!canEdit) return;
     const index = position - 1;
     if (index < 0 || index >= maskChars.length) return;
     const sequenceChar = normalizedInitialSequence[index] || '';
@@ -782,21 +828,35 @@ export function WorkflowRuntimeSettingsSection({
             </span>
             <select
               required
-              value={normalizedBackend}
-              onChange={(e) => onBackendChange(e.target.value)}
+              value={displayedBackend}
+              onChange={(e) =>
+                isPeptideDesignWorkflow
+                  ? handlePeptideBackendSelect(e.target.value)
+                  : onBackendChange(e.target.value)
+              }
               disabled={!canEditRuntimeIdentity}
             >
               {(isAffinityWorkflow
                 ? [
                     { value: 'boltz', label: 'Boltz-2' }
                   ]
-                : [
-                    { value: 'boltz', label: 'Boltz-2' },
-                    { value: 'alphafold3', label: 'AlphaFold3' },
-                    { value: 'protenix', label: 'Protenix' }
-                  ]
+                : isPeptideDesignWorkflow
+                  ? (peptideDesignMode !== 'linear'
+                      ? [
+                          { value: 'protenix2dock', label: 'Protenix2Dock' }
+                        ]
+                      : [
+                          { value: 'protenix2dock', label: 'Protenix2Dock' },
+                          { value: 'boltz2dock', label: 'Boltz2Dock' },
+                          { value: 'alphafold3', label: 'AlphaFold3' }
+                        ])
+                  : [
+                      { value: 'protenix', label: 'Protenix' },
+                      { value: 'boltz', label: 'Boltz-2' },
+                      { value: 'alphafold3', label: 'AlphaFold3' }
+                    ]
               ).map((option) => (
-                <option key={option.value} value={option.value} disabled={Boolean((option as { disabled?: boolean }).disabled)}>
+                <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
@@ -849,23 +909,92 @@ export function WorkflowRuntimeSettingsSection({
                     disabled={!canEdit}
                   >
                     <option value="linear">Linear</option>
-                    <option value="cyclic">Cyclic</option>
-                    <option value="bicyclic">Bicyclic</option>
+                    <option value="cyclic" disabled={normalizedBackend === 'alphafold3'}>
+                      Cyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
+                    </option>
+                    <option value="bicyclic" disabled={normalizedBackend === 'alphafold3'}>
+                      Bicyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
+                    </option>
                   </select>
                 </label>
                 <label className="field">
-                  <span>Peptide Length</span>
-                  <CommitNumberInput
-                    min={peptideDesignMode === 'bicyclic' ? 8 : 5}
-                    max={80}
-                    value={peptideBinderLength}
-                    onCommit={onPeptideBinderLengthChange}
+                  <span>Peptide Chirality</span>
+                  <select
+                    value={peptideChirality}
+                    onChange={(e) =>
+                      onPeptideChiralityChange((e.target.value as 'l' | 'd') || 'l')
+                    }
                     disabled={!canEdit}
-                  />
+                  >
+                    <option value="l">L-peptide (standard)</option>
+                    <option value="d" disabled={normalizedBackend !== 'boltz2dock' && normalizedBackend !== 'protenix2dock'}>
+                      D-peptide{displayedBackend !== 'boltz2dock' && displayedBackend !== 'protenix2dock' ? '' : ''}
+                    </option>
+                  </select>
                 </label>
-                <div className="muted small peptide-runtime-backend-hint">
-                  Cyclic uses a head-to-tail bond; bicyclic uses 3 Cys + a linker (SEZ/29N/BS3). All three backends support every mode.
-                </div>
+                <label className="field">
+                  <span>Initial peptide structure (optional)</span>
+                  <div className="peptide-structure-upload">
+                    <input
+                      type="file"
+                      accept=".pdb,.cif,.mmcif"
+                      disabled={!canEdit || peptideChirality !== 'd'}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        const format = file.name.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
+                        file.text().then((content) => {
+                          onPeptideStructureUploadChange({
+                            fileName: file.name, format, content, chainId: '',
+                          });
+                        });
+                      }}
+                    />
+                    {peptideStructureUpload ? (
+                      <div className="peptide-structure-upload-meta">
+                        <span title={peptideStructureUpload.fileName}>
+                          {peptideStructureUpload.fileName}
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost small"
+                          disabled={!canEdit}
+                          onClick={() => onPeptideStructureUploadChange(null)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="muted small">
+                    上传后启用模式锚定：设计产物保持该参考肽的结合方式（需与靶标结构同一坐标系，
+                    仅 D-peptide 模式）。不传则按口袋自由设计。
+                  </div>
+                </label>
+                <label className="field peptide-length-range">
+                  <span>Peptide Length (min–max)</span>
+                  <div className="peptide-length-range-inputs">
+                    <CommitNumberInput
+                      min={peptideDesignMode === 'bicyclic' ? 8 : 5}
+                      max={peptideLengthMax}
+                      value={peptideLengthMin}
+                      onCommit={(v) => onPeptideLengthRange(v, peptideLengthMax)}
+                      disabled={!canEdit}
+                    />
+                    <span className="peptide-length-range-dash">–</span>
+                    <CommitNumberInput
+                      min={peptideLengthMin}
+                      max={80}
+                      value={peptideLengthMax}
+                      onCommit={(v) => onPeptideLengthRange(peptideLengthMin, v)}
+                      disabled={!canEdit}
+                    />
+                  </div>
+                  <div className="muted small">
+                    min = max 时为固定长度；min &lt; max 时引擎在区间内自适应。
+                  </div>
+                </label>
                 <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
                   <input
                     type="checkbox"
@@ -925,7 +1054,7 @@ export function WorkflowRuntimeSettingsSection({
                   </div>
                   {!peptideResiduePoolAvailable ? (
                     <div className="muted small peptide-runtime-backend-hint">
-                      The completed task does not contain the original residue-pool snapshot; edits here configure the next submitted task.
+                      Edits apply to the next submission.
                     </div>
                   ) : null}
                   <div className="peptide-residue-pool" aria-label="Design residues">
@@ -1210,17 +1339,6 @@ export function WorkflowRuntimeSettingsSection({
                     disabled={!canEdit}
                   />
                 </label>
-                <label className="field">
-                  <span>Mutation Rate</span>
-                  <CommitNumberInput
-                    min={0.01}
-                    max={1}
-                    step={0.01}
-                    value={peptideMutationRate}
-                    onCommit={onPeptideMutationRateChange}
-                    disabled={!canEdit}
-                  />
-                </label>
                 <label className="field peptide-mask-field">
                   <span>Fixed positions</span>
                   <input
@@ -1245,7 +1363,7 @@ export function WorkflowRuntimeSettingsSection({
                           role="listitem"
                           className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''}`}
                           onClick={() => toggleMaskPosition(position)}
-                          disabled={!canToggleMask || !canFixPosition}
+                          disabled={!canEdit || !canFixPosition}
                           title={
                             fixed
                               ? `Position ${position} fixed at ${residue}`

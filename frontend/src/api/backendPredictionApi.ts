@@ -129,6 +129,11 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   }
 
   const form = new FormData();
+  const projectId = String(input.projectId || '').trim();
+  if (!projectId) {
+    throw new Error('Prediction requires the project id — the gateway rejects submits without it.');
+  }
+  form.append('project_id', projectId);
   const yamlFile = new File([yaml], 'config.yaml', { type: 'application/x-yaml' });
   form.append('yaml_file', yamlFile);
   form.append('backend', backend || 'boltz');
@@ -142,6 +147,17 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   }
   if (workflow === 'peptide_design' && input.peptideDesignOptions) {
     form.append('peptide_design_options', JSON.stringify(input.peptideDesignOptions));
+  }
+  if (workflow === 'peptide_design' && input.peptideStructureUpload) {
+    const up = input.peptideStructureUpload;
+    form.append(
+      'peptide_structure_file',
+      new File([up.content], up.fileName, { type: 'application/octet-stream' })
+    );
+    form.append(
+      'peptide_structure_meta',
+      JSON.stringify({ format: up.format, chain_id: up.chainId || '' })
+    );
   }
   const peptideTargetChainId = String(input.peptideDesignTargetChainId || '').trim();
   if (workflow === 'peptide_design' && peptideTargetChainId) {

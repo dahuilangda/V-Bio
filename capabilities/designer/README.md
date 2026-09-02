@@ -72,7 +72,7 @@ python run_design.py \
   - **并行评估**: 在每个演化代数中，通过多线程并行提交和评估多个候选序列，显著加快设计周期。
   - **🎯 序列掩码约束**: **(新增)** 支持指定序列中固定位置的氨基酸，允许保持已知的活性位点或结构motif，同时优化其他可变位置。
 
-### 🚀 增强版功能
+### 🚀 进阶功能
 
   - **自适应突变策略**: 5种智能突变策略自动选择和学习
       - 保守突变：基于BLOSUM62矩阵的高分替换
@@ -239,7 +239,7 @@ python run_design.py \
     --output_csv "aggressive_design_run.csv"
 ```
 
-#### **命令示例 4: 糖肽设计（增强版）**
+#### **命令示例 4: 糖肽设计**
 
 此示例设计一个长度为15个残基的肽，并在其第3个位置连接一个甘露糖（通过`MANS`修饰）：
 
@@ -361,9 +361,9 @@ python run_design.py \
   - `--num_elites`: 保留到下一代的顶级候选（精英）数量。必须小于`population_size`。 (默认: `2`)
   - `--weight-iptm` / `--weight-plddt`: 分别是复合评分函数中 `ipTM` 和 `pLDDT` 的权重。 (默认: `0.7` / `0.3`)
 
-#### 增强功能选项 🚀
+#### 进阶功能选项 🚀
 
-  - `--enable-enhanced` / `--disable-enhanced`: 启用/禁用增强版功能。(默认: 启用)
+  - `--enable-enhanced` / `--disable-enhanced`: 启用/禁用进阶功能（自适应突变、Pareto 优化、收敛检测）。(默认: 启用)
   - `--convergence-window`: 收敛检测的滑动窗口大小。较小值更敏感。 (默认: `5`)
   - `--convergence-threshold`: 收敛检测的分数方差阈值。较小值更严格。 (默认: `0.001`)
   - `--max-stagnation`: 触发早停的最大停滞周期数。较小值更激进。 (默认: `3`)
@@ -456,7 +456,7 @@ python designer/glycopeptide_generator.py --list-only
 
 ### 📈 性能监控
 
-增强版提供更丰富的运行状态信息：
+运行状态信息：
 
 ```
 [INFO] Generation 5 complete. Best score: 0.8542 (ipTM: 0.8901, pLDDT: 78.43)

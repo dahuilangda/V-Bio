@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -53,7 +54,17 @@ def load_saved_settings() -> Dict[str, Any]:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
             return data if isinstance(data, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        # A corrupt settings file silently reverted proxy/API-key/model to env defaults
+        # with zero trace — the operator had no way to know why the config "stopped
+        # working". Degrade the same way, but say so on stderr.
+        print(
+            f"[copilot_settings] failed to load {SETTINGS_FILE} ({exc}); "
+            "falling back to environment defaults",
+            file=sys.stderr,
+        )
         return {}
 
 
@@ -290,7 +301,7 @@ def _test_llm(
     api_url: str,
     api_key: str,
     model: str,
-    proxies: Optional[Dict[str, str]],
+    proxies: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     # Only test what is actually configured: an empty URL / key / model is reported
     # as "skipped" (neutral) instead of firing a request that is guaranteed to fail —
@@ -315,7 +326,8 @@ def _test_llm(
     }
     start = time.monotonic()
     try:
-        resp = session.post(api_url, headers=headers, json=body, timeout=_TEST_TIMEOUT_SECONDS, proxies=proxies)
+        # Direct call — mirrors production: the chat endpoint never rides the database proxy.
+        resp = session.post(api_url, headers=headers, json=body, timeout=_TEST_TIMEOUT_SECONDS)
         ms = int((time.monotonic() - start) * 1000)
         if resp.ok:
             return {"ok": True, "detail": f"LLM responded OK ({ms} ms)", "ms": ms}

@@ -123,8 +123,11 @@ def _write_op(op_id: str = "w1", arguments: Dict[str, Any] | None = None) -> Dic
     return {"id": op_id, "skill": _WRITE_SKILL, "arguments": arguments or {"value": "declared"}, "depends_on": []}
 
 
-def _turn(message: str, operations=None, questions=None) -> Dict[str, Any]:
-    return {"message": message, "questions": questions if questions is not None else [], "operations": operations or []}
+def _turn(message: str, operations=None, questions=None, goal_steps=None) -> Dict[str, Any]:
+    turn: Dict[str, Any] = {"message": message, "questions": questions if questions is not None else [], "operations": operations or []}
+    if goal_steps is not None:
+        turn["goal_steps"] = goal_steps
+    return turn
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,7 @@ class EvalCase:
     expect_skills: Tuple[str, ...] = ()
     expect_operation_count: int = -1
     active_outline: Tuple[Dict[str, Any], ...] = ()
+    context_row_ids: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -306,6 +310,94 @@ def score_trajectory(case: TrajectoryCase) -> EvalCaseResult:
 # The registry: archetypal planner behaviors. Each is a structural situation, never a specific
 # compound/protein, so the suite exercises the contract itself rather than memorized answers.
 ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
+    # ── Round-3/4 hardening behaviors: the gate must catch their deletion. ──────────────
+    EvalCase(
+        "deferred_reference_same_round_read",
+        "A write consuming a SAME-ROUND read via $fromObservation is deferred (pending_refs), not rejected.",
+        candidate=_turn(
+            "Fetch then apply.",
+            [
+                _read_op("rr"),
+                {
+                    "id": "ww",
+                    "skill": _WRITE_SKILL,
+                    "arguments": {"value": {"$fromObservation": "rr", "field": "value", "index": 0}},
+                    "depends_on": ["rr"],
+                },
+            ],
+        ),
+        expect_state="continue",
+        expect_operation_count=2,
+    ),
+    EvalCase(
+        "reference_shorthand_string_normalizes",
+        'The compact string form "$fromObservation:<id>.<field>" resolves like the object form.',
+        candidate=_turn(
+            "Apply via shorthand.",
+            [{"id": "w9", "skill": _WRITE_SKILL, "arguments": {"value": "$fromObservation:obs1.value"}, "depends_on": []}],
+        ),
+        observations={"obs1": {"ok": True, "values": [{"value": "resolved"}]}},
+        expect_state="await_confirmation",
+        expect_operation_count=1,
+    ),
+    EvalCase(
+        "duplicate_question_options_dedup",
+        "Duplicate option values are normalized away — the question still reaches the user.",
+        candidate=_turn(
+            "Pick one.",
+            questions=[{
+                "text": "Which?",
+                "kind": "choice",
+                "options": [
+                    {"label": "A", "value": "x"},
+                    {"label": "A2", "value": "x"},
+                    {"label": "B", "value": "y"},
+                ],
+            }],
+        ),
+        expect_state="needs_input",
+    ),
+    EvalCase(
+        "questions_with_write_only_are_held",
+        "A confirmation-only round carrying a question surfaces the actions; the question is "
+        "held visibly on the audit (never shown with the actions, never silently dropped) and "
+        "resurfaces via the post-confirmation continuation.",
+        candidate=_turn(
+            "Submit now?",
+            [_write_op()],
+            questions=[{"text": "Sure?", "kind": "confirm"}],
+        ),
+        expect_state="await_confirmation",
+        expect_operation_count=1,
+    ),
+    EvalCase(
+        "identical_outline_reemission_is_idempotent",
+        "Re-emitting the SAME goal_steps outline is accepted (idempotent), not rejected; the "
+        "outline state itself only derives on first registration, so an identical re-emission "
+        "with no operations completes.",
+        candidate=_turn("Outline again.", goal_steps=[{"description": "a"}]),
+        active_outline=({"description": "a"},),
+        expect_state="complete",
+    ),
+    EvalCase(
+        "ungrounded_task_row_reference_rejected",
+        "A taskRowId not in the visible context rows is rejected at plan time.",
+        candidate=_turn(
+            "Delete it.",
+            [{"id": "d1", "skill": _WRITE_SKILL, "arguments": {"value": "x", "taskRowId": "ghost-row"}, "depends_on": []}],
+        ),
+        context_row_ids=("row-1",),
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "non_english_read_query_rejected",
+        "A non-English query to an English-indexed read skill is rejected with the translate remedy.",
+        candidate=_turn(
+            "查一下。",
+            [{"id": "q1", "skill": _READ_SKILL, "arguments": {"query": "布洛芬"}, "depends_on": []}],
+        ),
+        expect_rejected=True,
+    ),
     EvalCase(
         "read_lookup_continues",
         "A read-only operation yields the continue state for a follow-up observation round.",
@@ -346,10 +438,10 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         expect_rejected=True,
     ),
     EvalCase(
-        "mixed_read_and_write_rejected",
-        "A turn may not mix read-only and confirmation operations (boundary violation).",
+        "mixed_read_and_write_holds_writes",
+        "A turn mixing read-only and confirmation operations executes the reads (state=continue) and holds the writes.",
         candidate=_turn("Mix.", [_read_op(), _write_op()]),
-        expect_rejected=True,
+        expect_state="continue",
     ),
     EvalCase(
         "duplicate_operation_id_rejected",
@@ -429,40 +521,45 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         expect_skills=("compute.aggregate",),
     ),
     EvalCase(
-        "re_emitted_operation_is_rejected",
-        "Re-emitting an operation id that already produced an observation is a contract violation.",
+        "re_emitted_successful_read_is_idempotent",
+        "Re-emitting a SUCCESSFUL read's id is idempotent: the repeat is dropped (no re-execution, "
+        "no rejection — its observation stays addressable). A FAILED observation still requires "
+        "the NEW-id retry path.",
         candidate=_turn("Again.", [_read_op("existing")]),
-        observations={"existing": {"ok": True, "values": [{"value": "resolved"}]}},
-        expect_rejected=True,
+        observations={"existing": {"ok": True, "skill": _READ_SKILL,
+                                   "items": [{"index": 0, "arguments": {}}],
+                                   "values": [{"value": "resolved"}]}},
+        expect_state="complete",
     ),
     EvalCase(
-        "mixed_read_write_rejected_even_with_observations",
-        "Read and confirmation operations mixed in one round are rejected even when observations already exist.",
+        "mixed_read_write_holds_writes_with_observations",
+        "A turn mixing reads and writes executes the reads and holds the writes even when observations already exist.",
         candidate=_turn("Mix.", [_read_op(), _write_op()]),
         observations={"existing": {"ok": True, "values": [{"value": "resolved"}]}},
-        expect_rejected=True,
+        expect_state="continue",
     ),
     EvalCase(
-        "goal_steps_with_operations_rejected",
-        "An outline cannot accompany operations in the same round.",
+        "goal_steps_with_operations_holds_ops",
+        "An outline emitted with operations registers the outline and holds the operations (state=outline).",
         candidate={
             "message": "Outlining.",
             "questions": [],
             "operations": [_read_op()],
             "goal_steps": [{"description": "Do it."}],
         },
-        expect_rejected=True,
+        expect_state="outline",
     ),
     EvalCase(
-        "goal_steps_with_questions_rejected",
-        "An outline cannot accompany questions in the same round.",
+        "goal_steps_with_questions_normalized",
+        "Questions win over an accompanying outline: the outline is dropped (it cannot persist "
+        "across turns; the next turn re-outlines with the answer) and the turn asks.",
         candidate={
             "message": "Asking.",
             "questions": [{"text": "Which one?", "kind": "freeform"}],
             "operations": [],
             "goal_steps": [{"description": "Do it."}],
         },
-        expect_rejected=True,
+        expect_state="needs_input",
     ),
     EvalCase(
         "malformed_question_is_rejected",
@@ -501,6 +598,181 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         "A greeting on a context-rich page is accepted — the harness does not audit message content.",
         candidate=_turn("你好！我是 V-Bio Copilot，有什么可以帮你的吗？"),
         expect_state="complete",
+    ),
+    EvalCase(
+        "small_multirecord_ungrounded_answer_rejected",
+        "With 2–3 retrieved records the final answer must name at least one of them.",
+        candidate=_turn("找到了两个强效抑制剂靶点。"),
+        observations={
+            "find": {
+                "ok": True,
+                "values": [{"results": [{"target": "COX1"}, {"target": "COX2"}]}],
+            }
+        },
+        expect_state="complete",
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "small_multirecord_grounded_answer_accepted",
+        "Naming one retrieved record grounds a small multi-record answer.",
+        candidate=_turn("找到 COX1 与 COX2 两个靶点。"),
+        observations={
+            "find": {
+                "ok": True,
+                "values": [{"results": [{"target": "COX1"}, {"target": "COX2"}]}],
+            }
+        },
+        expect_state="complete",
+        expect_rejected=False,
+    ),
+    EvalCase(
+        "large_record_set_answer_exempt_from_grounding",
+        "A large result set may be summarized in aggregate without quoting one identifier.",
+        candidate=_turn("There were several candidates."),
+        observations={
+            "find": {
+                "ok": True,
+                "values": [{"results": [{"pdbId": f"1XY{i}"} for i in range(6)]}],
+            }
+        },
+        expect_state="complete",
+        expect_rejected=False,
+    ),
+    EvalCase(
+        "outline_intermediate_round_skips_grounding",
+        "Mid-outline transition messages are harness-facing, not user answers — grounding is not "
+        "enforced while an outline is active (the final message is verified at outline completion).",
+        candidate=_turn("数据已返回，继续下一步。"),
+        observations={"find": {"ok": True, "values": [{"results": [dict(_GROUNDED_RECORD)]}]}},
+        active_outline=({"description": "Locked direction."},),
+        expect_state="complete",
+        expect_rejected=False,
+    ),
+    EvalCase(
+        "duplicate_successful_call_is_rejected",
+        "Repeating the exact (skill, arguments) of a succeeded lookup is redundant work — rejected.",
+        candidate=_turn(
+            "Again.",
+            [{"id": "again", "skill": _PATTERNED_SKILL, "arguments": {"code": "EVAL1"}, "depends_on": []}],
+        ),
+        observations={
+            "done": {
+                "ok": True,
+                "skill": _PATTERNED_SKILL,
+                "items": [{"arguments": {"code": "EVAL1"}, "ok": True}],
+                "values": [{"results": [dict(_GROUNDED_RECORD)]}],
+            }
+        },
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "repeat_consuming_prior_observation_is_accepted",
+        "The same effective arguments are fine when the operation consumes the prior observation "
+        "via $fromObservation and declares depends_on it.",
+        candidate=_turn(
+            "Consuming.",
+            [
+                {
+                    "id": "next",
+                    "skill": _PATTERNED_SKILL,
+                    "arguments": {"code": {"$fromObservation": "done", "field": "accession", "index": 0}},
+                    "depends_on": ["done"],
+                }
+            ],
+        ),
+        observations={
+            "done": {
+                "ok": True,
+                "skill": _READ_SKILL,
+                "items": [{"arguments": {"code": "EVAL1"}, "ok": True}],
+                "values": [{"results": [{"accession": "EVAL1", "sequence": "MTESTSEQUENCE"}]}],
+            }
+        },
+        expect_state="continue",
+    ),
+    EvalCase(
+        "retry_of_failed_call_is_accepted",
+        "Repeating the arguments of a FAILED lookup under a new id is a legitimate retry.",
+        candidate=_turn(
+            "Retrying.",
+            [{"id": "retry", "skill": _PATTERNED_SKILL, "arguments": {"code": "EVAL1"}, "depends_on": []}],
+        ),
+        observations={
+            "failed": {
+                "ok": False,
+                "skill": _PATTERNED_SKILL,
+                "items": [{"arguments": {"code": "EVAL1"}, "ok": False, "error": "HTTP 503"}],
+                "values": [],
+                "errors": [{"index": 0, "error": "HTTP 503"}],
+            }
+        },
+        expect_state="continue",
+    ),
+    EvalCase(
+        "unit_conversion_skill_is_routable",
+        "compute.convert_units validates its concentration-unit contract.",
+        candidate=_turn(
+            "Converting.",
+            [
+                {
+                    "id": "conv",
+                    "skill": "compute.convert_units",
+                    "arguments": {"value": 5.0, "from": "nM", "to": "µM"},
+                    "depends_on": [],
+                }
+            ],
+        ),
+        expect_state="continue",
+        expect_skills=("compute.convert_units",),
+    ),
+    EvalCase(
+        "unit_conversion_rejects_unknown_unit",
+        "compute.convert_units rejects a unit outside the declared enum.",
+        candidate=_turn(
+            "Converting.",
+            [
+                {
+                    "id": "conv",
+                    "skill": "compute.convert_units",
+                    "arguments": {"value": 5.0, "from": "nM", "to": "mol/L"},
+                    "depends_on": [],
+                }
+            ],
+        ),
+        expect_rejected=True,
+    ),
+    EvalCase(
+        "sequence_stats_skill_is_routable",
+        "compute.sequence_stats validates its sequence contract (min 10 residues).",
+        candidate=_turn(
+            "Analyzing.",
+            [
+                {
+                    "id": "stats",
+                    "skill": "compute.sequence_stats",
+                    "arguments": {"sequence": "MTESTSEQUENCELONGER"},
+                    "depends_on": [],
+                }
+            ],
+        ),
+        expect_state="continue",
+        expect_skills=("compute.sequence_stats",),
+    ),
+    EvalCase(
+        "sequence_stats_rejects_short_sequence",
+        "compute.sequence_stats rejects a sequence shorter than the declared minimum.",
+        candidate=_turn(
+            "Analyzing.",
+            [
+                {
+                    "id": "stats",
+                    "skill": "compute.sequence_stats",
+                    "arguments": {"sequence": "MSEQ"},
+                    "depends_on": [],
+                }
+            ],
+        ),
+        expect_rejected=True,
     ),
 )
 
@@ -563,6 +835,7 @@ def run_eval() -> EvalReport:
             definitions,
             observations=case.observations,
             active_outline=case.active_outline or None,
+            context_row_ids=case.context_row_ids or None,
         )
         results.append(score_audit(audit, case))
     return EvalReport(tuple(results))

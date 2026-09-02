@@ -1,5 +1,7 @@
 import { Suspense, lazy } from 'react';
 import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
+import { CommandPalette } from './components/palette/CommandPalette';
+import './components/palette/CommandPalette.css';
 import { AppShell } from './components/layout/AppShell';
 import { AdminRoute, ProtectedRoute, SuperAdminRoute } from './components/layout/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
@@ -14,7 +16,6 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ de
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
 const JwtClientsPage = lazy(() => import('./pages/JwtClientsPage').then((m) => ({ default: m.JwtClientsPage })));
 const AdminMonitorPage = lazy(() => import('./pages/AdminMonitorPage').then((m) => ({ default: m.AdminMonitorPage })));
-const MmpLifecycleAdminPage = lazy(() => import('./pages/MmpLifecycleAdminPage').then((m) => ({ default: m.MmpLifecycleAdminPage })));
 
 function ShellPage({ children }: { children: JSX.Element }) {
   return <AppShell>{children}</AppShell>;
@@ -35,7 +36,11 @@ function ProjectApiAccessRedirect() {
 
 export default function App() {
   return (
-    <Routes>
+    <>
+      {/* Global ⌘K palette: lives inside the Router (navigation commands need it) and
+          above the routes so it overlays every page. */}
+      <CommandPalette />
+      <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/auth/jwt" element={<JwtCallbackPage />} />
       <Route path="/register" element={<RegisterPage />} />
@@ -153,20 +158,9 @@ export default function App() {
           </AdminRoute>
         }
       />
-      <Route
-        path="/admin/mmp-lifecycle"
-        element={
-          <AdminRoute>
-            <ShellPage>
-              <Suspense fallback={<PageLoading />}>
-                <MmpLifecycleAdminPage />
-              </Suspense>
-            </ShellPage>
-          </AdminRoute>
-        }
-      />
       <Route path="/" element={<Navigate to="/projects" replace />} />
       <Route path="*" element={<Navigate to="/projects" replace />} />
     </Routes>
+    </>
   );
 }

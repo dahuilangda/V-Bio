@@ -107,11 +107,15 @@ class ProjectTaskStore:
         if isinstance(extra_payload, dict) and extra_payload:
             payload.update(extra_payload)
 
+        # Idempotent insert: the unique partial index on task_id makes a runtime task exactly
+        # one row. When the frontend's own task row already claimed this task_id (it creates a
+        # DRAFT row before submit and patches the task_id in afterwards), this insert silently
+        # yields instead of creating the "Task <id>" duplicate row users saw as doubled tasks.
         self.postgrest.request(
             "POST",
             "project_tasks",
             payload=payload,
-            headers={"Prefer": "return=minimal"},
+            headers={"Prefer": "return=minimal, resolution=ignore-duplicates"},
             expect_json=False,
         )
 
@@ -147,6 +151,28 @@ class ProjectTaskStore:
                 "project_id": normalized_project_id,
                 "task_id": normalized_task_id,
             }
+
+    def list_project_task_ids(self, project_id: str) -> List[str]:
+        """Every runtime task id recorded for the project (used to filter global runtime
+        indexes down to the caller's own project at the gateway)."""
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return []
+        rows = self.postgrest.request(
+            "GET",
+            "project_tasks",
+            query={
+                "select": "task_id",
+                "project_id": f"eq.{normalized_project_id}",
+                "task_id": "neq.",
+                "limit": "10000",
+            },
+        )
+        return [
+            str(row.get("task_id") or "").strip()
+            for row in rows or []
+            if str(row.get("task_id") or "").strip()
+        ]
 
     def find_project_tasks(self, task_ids: List[str], project_id: str) -> Dict[str, Dict[str, Any]]:
         normalized_project_id = str(project_id or "").strip()

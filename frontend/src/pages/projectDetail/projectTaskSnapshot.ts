@@ -31,15 +31,18 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'virtualScreeningInputFileName',
   'virtualScreeningPredictions',
   'affinityMode',
+  'affinityDockPocket',
   'peptideDesignMode',
+  'peptideChirality',
   'peptideBinderLength',
+  'peptideLengthMin',
+  'peptideLengthMax',
   'peptideUseInitialSequence',
   'peptideInitialSequence',
   'peptideSequenceMask',
   'peptideIterations',
   'peptidePopulationSize',
   'peptideEliteSize',
-  'peptideMutationRate',
   'peptideResiduePool',
   'peptideCustomResidueDefinitions',
   'peptideNonNaturalMin',
@@ -51,6 +54,20 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'peptideBicyclicCys1Pos',
   'peptideBicyclicCys2Pos',
   'peptideBicyclicCys3Pos',
+  'peptidePocketCenter',
+  'peptidePocketResidues',
+  'peptidePocketBox',
+  'peptideDockPocket',
+  'leadOptDockPocket',
+  'leadOptPocketCenter',
+  'leadOptMode',
+  'leadOptBackend',
+  'leadOptRounds',
+  'leadOptBudgetPerRound',
+  'leadOptScaffoldHopRatio',
+  'leadOptReferenceSmiles',
+  'leadOptKeepFragmentSmiles',
+  'leadOptEditAtomIndices',
   'lowVram'
 ];
 
@@ -107,15 +124,12 @@ function readTaskOptionsFromConfidence(task: ProjectTask): Partial<PredictionOpt
   if (mergedRaw.peptideEliteSize === undefined && peptide.elite_size !== undefined) {
     mergedRaw.peptideEliteSize = peptide.elite_size;
   }
-  if (mergedRaw.peptideMutationRate === undefined && peptide.mutation_rate !== undefined) {
-    mergedRaw.peptideMutationRate = peptide.mutation_rate;
-  }
   return normalizeTaskInputOptions(mergedRaw);
 }
 
 export function mergeTaskInputOptionsIntoProperties(
   properties: ProjectInputConfig['properties'] | null | undefined,
-  options: ProjectInputConfig['options']
+  options: Partial<ProjectInputConfig['options']>
 ): ProjectInputConfig['properties'] {
   const base = asRecord(properties);
   return {

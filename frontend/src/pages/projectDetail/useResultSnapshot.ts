@@ -92,6 +92,8 @@ export interface UseResultSnapshotResult {
   snapshotBindingStd: number | null;
   snapshotLogIc50Values: number[] | null;
   snapshotIc50Um: number | null;
+  snapshotPic50: number | null;
+  snapshotPic50Mw: number | null;
   snapshotIc50Error: { plus: number; minus: number } | null;
   snapshotPlddtTone: MetricTone;
   snapshotIptmTone: MetricTone;
@@ -785,6 +787,26 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     return 10 ** mean(snapshotLogIc50Values);
   }, [shouldComputeResultMetrics, snapshotLogIc50Values]);
 
+  const snapshotPic50 = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
+    if (!snapshotAffinity) return null;
+    const values = readFiniteMetricSeries(snapshotAffinity, [
+      'affinity_pic50',
+      'affinity_pic501',
+      'affinity_pic502'
+    ]);
+    if (values.length > 0) return mean(values);
+    if (!snapshotLogIc50Values?.length) return null;
+    return 6 - mean(snapshotLogIc50Values);
+  }, [shouldComputeResultMetrics, snapshotAffinity, snapshotLogIc50Values]);
+
+  const snapshotPic50Mw = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
+    if (!snapshotAffinity) return null;
+    const values = readFiniteMetricSeries(snapshotAffinity, ['affinity_pic50_mw']);
+    return values.length > 0 ? mean(values) : null;
+  }, [shouldComputeResultMetrics, snapshotAffinity]);
+
   const snapshotIc50Error = useMemo(() => {
     if (!shouldComputeResultMetrics) return null;
     if (!snapshotLogIc50Values?.length || snapshotLogIc50Values.length <= 1) return null;
@@ -837,6 +859,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     snapshotBindingStd,
     snapshotLogIc50Values,
     snapshotIc50Um,
+    snapshotPic50,
+    snapshotPic50Mw,
     snapshotIc50Error,
     snapshotPlddtTone,
     snapshotIptmTone,

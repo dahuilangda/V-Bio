@@ -5,6 +5,8 @@ import math
 import shutil
 from pathlib import Path
 
+from boltz.data.types import StructureV2
+
 from metrics.ligand_ipsae import compute_ligand_ipsae_from_files
 from utils.result_utils import BEST_CONFIDENCE_NAME, BEST_IPSAE_NAME, BEST_STRUCTURE_NAMES, confidence_model_stem
 
@@ -24,22 +26,17 @@ def _write_json(path: Path, payload) -> None:
 
 
 def write_chain_map(processed_dir: Path, output_dir: Path, record_id: str) -> None:
-    try:
-        from boltz.data.types import StructureV2
-
-        structure = StructureV2.load(
-            processed_dir / "structures" / f"{record_id}.npz"
-        )
-        structure = structure.remove_invalid_chains()
-        chain_map = {
-            str(idx): str(chain["name"])
-            for idx, chain in enumerate(structure.chains)
-        }
-        chain_map_path = output_dir / record_id / "chain_map.json"
-        chain_map_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(chain_map_path, chain_map)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[Warning] Failed to write chain map: {exc}")
+    """Persist the token-index to chain-name map the ipSAE postprocessor keys on."""
+    structure = StructureV2.load(
+        processed_dir / "structures" / f"{record_id}.npz"
+    ).remove_invalid_chains()
+    chain_map = {
+        str(idx): str(chain["name"])
+        for idx, chain in enumerate(structure.chains)
+    }
+    chain_map_path = output_dir / record_id / "chain_map.json"
+    chain_map_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(chain_map_path, chain_map)
 
 
 def compute_and_write_ipsae(
@@ -82,6 +79,48 @@ def compute_and_write_ipsae(
         payload = json.loads(conf_path.read_text())
         payload.update(result)
         _write_json(conf_path, payload)
+
+
+def _metric(payload: dict[str, object], key: str, default: float = 0.0) -> float:
+    return float(payload.get(key, default))
+
+
+def interface_row_metrics(payload: dict[str, object]) -> dict[str, float]:
+    """Normalized per-model metrics used by the interface pose ranking."""
+    return {
+        "confidence_score": _metric(payload, "confidence_score"),
+        "iptm": _metric(payload, "iptm"),
+        "ligand_iptm": _metric(payload, "ligand_iptm"),
+        "ligand_plddt_mean": _metric(payload, "ligand_plddt_mean") / 100.0,
+        "ligand_atom_plddt_p10": _metric(payload, "ligand_atom_plddt_p10") / 100.0,
+        "ligand_atom_plddt_min": _metric(payload, "ligand_atom_plddt_min") / 100.0,
+        "ligand_atom_plddt_fraction_ge_50": _metric(payload, "ligand_atom_plddt_fraction_ge_50"),
+        "ligand_atom_plddt_fraction_ge_70": _metric(payload, "ligand_atom_plddt_fraction_ge_70"),
+        "ipsae_dom": _metric(payload, "ipsae_dom"),
+        "ligand_ipsae_max": _metric(payload, "ligand_ipsae_max"),
+        "mean_interface_pae": _metric(payload, "mean_interface_pae", default=32.0),
+        "mean_interface_distance": _metric(payload, "mean_interface_distance", default=8.0),
+    }
+
+
+def interface_rank_score_from_payload(payload: dict[str, object]) -> float:
+    """Interface-aware pose ranking, shared by per-record reranking and
+    cross-record dock-ensemble selection (higher is better)."""
+    row = interface_row_metrics(payload)
+    return (
+        0.30 * row["ligand_ipsae_max"]
+        + 0.25 * row["ipsae_dom"]
+        + 0.17 * row["iptm"]
+        + 0.10 * row["ligand_iptm"]
+        + 0.06 * row["ligand_plddt_mean"]
+        + 0.05 * row["ligand_atom_plddt_p10"]
+        + 0.04 * row["ligand_atom_plddt_min"]
+        + 0.02 * row["ligand_atom_plddt_fraction_ge_50"]
+        + 0.01 * row["ligand_atom_plddt_fraction_ge_70"]
+        + 0.05 * row["confidence_score"]
+        - 0.05 * min(row["mean_interface_pae"] / 8.0, 1.0)
+        - 0.03 * min(row["mean_interface_distance"] / 8.0, 1.0)
+    )
 
 
 def rerank_diffusion_samples(
@@ -127,13 +166,6 @@ def rerank_diffusion_samples(
         )
         return None
 
-    def _metric(payload: dict[str, object], key: str, default: float = 0.0) -> float:
-        value = payload.get(key, default)
-        try:
-            return float(value)
-        except Exception:
-            return float(default)
-
     scored_rows: list[dict[str, object]] = []
     for conf_path in conf_files:
         payload = json.loads(conf_path.read_text())
@@ -147,33 +179,9 @@ def rerank_diffusion_samples(
             "confidence_path": str(conf_path),
             "structure_path": str(cif_path if cif_path.exists() else mmcif_path),
             "ipsae_path": str(ipsae_path) if ipsae_path.exists() else "",
-            "confidence_score": _metric(payload, "confidence_score"),
-            "iptm": _metric(payload, "iptm"),
-            "ligand_iptm": _metric(payload, "ligand_iptm"),
-            "ligand_plddt_mean": _metric(payload, "ligand_plddt_mean") / 100.0,
-            "ligand_atom_plddt_p10": _metric(payload, "ligand_atom_plddt_p10") / 100.0,
-            "ligand_atom_plddt_min": _metric(payload, "ligand_atom_plddt_min") / 100.0,
-            "ligand_atom_plddt_fraction_ge_50": _metric(payload, "ligand_atom_plddt_fraction_ge_50"),
-            "ligand_atom_plddt_fraction_ge_70": _metric(payload, "ligand_atom_plddt_fraction_ge_70"),
-            "ipsae_dom": _metric(payload, "ipsae_dom"),
-            "ligand_ipsae_max": _metric(payload, "ligand_ipsae_max"),
-            "mean_interface_pae": _metric(payload, "mean_interface_pae", default=32.0),
-            "mean_interface_distance": _metric(payload, "mean_interface_distance", default=8.0),
+            **interface_row_metrics(payload),
         }
-        row["interface_rank_score"] = (
-            0.30 * row["ligand_ipsae_max"]
-            + 0.25 * row["ipsae_dom"]
-            + 0.17 * row["iptm"]
-            + 0.10 * row["ligand_iptm"]
-            + 0.06 * row["ligand_plddt_mean"]
-            + 0.05 * row["ligand_atom_plddt_p10"]
-            + 0.04 * row["ligand_atom_plddt_min"]
-            + 0.02 * row["ligand_atom_plddt_fraction_ge_50"]
-            + 0.01 * row["ligand_atom_plddt_fraction_ge_70"]
-            + 0.05 * row["confidence_score"]
-            - 0.05 * min(row["mean_interface_pae"] / 8.0, 1.0)
-            - 0.03 * min(row["mean_interface_distance"] / 8.0, 1.0)
-        )
+        row["interface_rank_score"] = interface_rank_score_from_payload(payload)
         scored_rows.append(row)
 
     scored_rows.sort(

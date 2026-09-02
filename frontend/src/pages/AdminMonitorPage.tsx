@@ -59,10 +59,10 @@ const CAPABILITY_LABELS: Record<string, string> = {
   alphafold3: 'AlphaFold 3',
   protenix: 'Protenix',
   nesso: 'Nesso-1',
-  pocketxmol: 'PocketXMol',
   boltz2score: 'Boltz2 Score',
   lead_opt: 'Lead Optimization',
-  peptide_design: 'Peptide Design'
+  peptide_design: 'Peptide Design',
+  export: 'Excel Export'
 };
 
 function capabilityLabel(value: string | null | undefined): string {

@@ -12,7 +12,6 @@ interface UseProjectWorkspaceRuntimeUiOptions {
   backend: string;
   workspaceTab: WorkspaceTab;
   setWorkspaceTab: Dispatch<SetStateAction<WorkspaceTab>>;
-  setNowTs: Dispatch<SetStateAction<number>>;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   customResidueLibrary: CustomCcdMoleculeInput[];
   taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>>;
@@ -26,7 +25,6 @@ export function useProjectWorkspaceRuntimeUi({
   backend,
   workspaceTab,
   setWorkspaceTab,
-  setNowTs,
   proteinTemplates,
   customResidueLibrary,
   taskProteinTemplates,
@@ -63,16 +61,10 @@ export function useProjectWorkspaceRuntimeUi({
     prevTaskStateRef.current = next;
   }, [project, setWorkspaceTab]);
 
-  useEffect(() => {
-    if (!project) return;
-    if (!['QUEUED', 'RUNNING'].includes(project.task_state)) return;
-
-    const timer = setInterval(() => {
-      setNowTs(Date.now());
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [project, setNowTs]);
+  // NOTE: a former 1s `setNowTs` interval lived here, ticking a top-level state that
+  // re-rendered the entire 2700-line workspace tree every second while a task ran —
+  // its only consumer was the header's elapsed-seconds chip, which now owns its own
+  // tick inside ProjectHeaderMeta's <ElapsedSeconds>.
 
   useEffect(() => {
     if (!project) return;

@@ -41,13 +41,36 @@ ION_RESNAMES = {
 }
 PROTEIN_CHAIN_TYPE = const.chain_type_ids["PROTEIN"]
 DEFAULT_MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "https://api.colabfold.com")
-DEFAULT_MSA_CACHE_DIR = Path("/tmp/boltz_msa_cache")
+DEFAULT_MSA_CACHE_DIR = Path(os.environ.get("BOLTZ_MSA_CACHE_DIR", "/data/boltz_msa_cache"))
 MSA_ALLOWED_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 
 def _sequence_cache_path(sequence: str, cache_dir: Path) -> Path:
+    """Shared cache key — the prediction runtime and protenix2dock read and
+    write the same ``msa_<md5>`` entries."""
     digest = hashlib.md5(sequence.encode("utf-8")).hexdigest()
     return cache_dir / f"msa_{digest}.a3m"
+
+
+def _cached_msa_matches_query(path: Path, sequence: str) -> bool:
+    """First aligned row (inserts stripped) must match the query length.
+
+    Guards against truncated or wrong-sequence cache entries; a mismatch is
+    treated as a cache miss so the MSA is regenerated, never trusted.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.startswith(">"):
+                    continue
+                aligned = "".join(ch for ch in stripped if not ch.islower())
+                return len(aligned) == len(sequence)
+    except OSError:
+        return False
+    return False
 
 
 def _sanitize_sequence_for_msa(sequence: str) -> tuple[str, int]:
@@ -125,7 +148,9 @@ def _write_raw_msas(
         if msa_cache_dir is not None:
             cache_path = _sequence_cache_path(sequences[idx], msa_cache_dir)
             if not cache_path.exists():
-                cache_path.write_text(unpaired_msas[idx], encoding="utf-8")
+                tmp = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+                tmp.write_text(unpaired_msas[idx], encoding="utf-8")
+                os.replace(tmp, cache_path)
 
 
 def _attach_msa_to_record(
@@ -171,8 +196,13 @@ def _attach_msa_to_record(
     for entity_id, sequence in protein_entity_to_seq.items():
         cache_path = _sequence_cache_path(sequence, msa_cache_dir) if msa_cache_dir is not None else None
         if cache_path is not None and cache_path.exists():
-            entity_to_source[entity_id] = cache_path
-            continue
+            if _cached_msa_matches_query(cache_path, sequence):
+                entity_to_source[entity_id] = cache_path
+                continue
+            print(
+                f"[Warning] cached MSA {cache_path.name} does not match the query sequence; "
+                "regenerating from the MSA server."
+            )
         msa_name = f"{target_id}_{entity_id}"
         to_generate[msa_name] = sequence
         generated_name_to_entity[msa_name] = entity_id

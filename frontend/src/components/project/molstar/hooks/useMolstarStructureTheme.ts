@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import { getStructureSignature, loadStructure } from '../bootstrap';
+import { getStructureSignature, loadStructure, snapshotPrimaryLoaded, beginOverlayLoad, endOverlayLoad, removeOverlayOnly } from '../bootstrap';
 import { applyStructureAppearancePipeline } from './structureAppearancePipeline';
 
 interface UseMolstarStructureThemeArgs {
@@ -94,26 +94,41 @@ export function useMolstarStructureTheme({
           await loadStructure(viewer, primaryText, format, { clearBefore: true });
           loadedPrimarySignatureRef.current = nextPrimarySignature;
           loadedOverlaySignatureRef.current = '';
+          snapshotPrimaryLoaded(viewer);
           if (requestId !== structureRequestIdRef.current) return;
           if (overlayText) {
+            beginOverlayLoad(viewer);
             await loadStructure(viewer, overlayText, resolvedOverlayFormat, { clearBefore: false });
+            endOverlayLoad(viewer);
             loadedOverlaySignatureRef.current = nextOverlaySignature;
             if (requestId !== structureRequestIdRef.current) return;
           }
         } else if (overlayChanged) {
           if (!overlayText) {
-            await loadStructure(viewer, primaryText, format, { clearBefore: true });
+            // Overlay removed — delete only the overlay component
+            await removeOverlayOnly(viewer);
             loadedOverlaySignatureRef.current = '';
           } else if (!previousOverlaySignature) {
+            // First overlay — add on top of existing primary
+            beginOverlayLoad(viewer);
             await loadStructure(viewer, overlayText, resolvedOverlayFormat, { clearBefore: false });
+            endOverlayLoad(viewer);
             loadedOverlaySignatureRef.current = nextOverlaySignature;
           } else {
-            await loadStructure(viewer, primaryText, format, { clearBefore: true });
+            // Overlay swap — remove ONLY the old overlay component, keep primary.
+            // This preserves the protein's representations and camera orientation.
+            await removeOverlayOnly(viewer);
             if (requestId !== structureRequestIdRef.current) return;
+            beginOverlayLoad(viewer);
             await loadStructure(viewer, overlayText, resolvedOverlayFormat, { clearBefore: false });
+            endOverlayLoad(viewer);
             loadedOverlaySignatureRef.current = nextOverlaySignature;
           }
           if (requestId !== structureRequestIdRef.current) return;
+          // Overlay-only changes do NOT bump structureContentVersion —
+          // the appearance pipeline (camera, colors, representations) is not
+          // rebuilt, so user zoom/pan/orientation is preserved.
+          return;
         }
 
         if (requestId === structureRequestIdRef.current) {

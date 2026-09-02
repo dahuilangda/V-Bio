@@ -214,12 +214,3 @@ export function resolveVariableSelection(
     variableSmilesList: uniqueSmiles(normalizedSelected)
   };
 }
-
-export function inferQueryModeFromSelection(
-  selectedItems: LigandFragmentItem[],
-  allFragments: LigandFragmentItem[],
-  atomBonds?: LigandAtomBond[]
-): 'one-to-many' | 'many-to-many' {
-  const selection = resolveVariableSelection(selectedItems, allFragments, atomBonds);
-  return selection.effectiveItems.length > 1 ? 'many-to-many' : 'one-to-many';
-}

@@ -17,8 +17,7 @@ import shlex
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional, List
-import importlib.util
+from typing import Any, Optional
 
 from werkzeug.utils import secure_filename
 
@@ -40,12 +39,8 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = BASE_DIR / "capabilities"
 
 
-def _resolve_capability_dir(name: str) -> Path:
-    return CAPABILITIES_DIR / name
 
 
-LEAD_OPTIMIZATION_DIR = _resolve_capability_dir("lead_optimization")
-DESIGNER_DIR = _resolve_capability_dir("designer")
 
 def _ensure_repo_root_on_path() -> Path | None:
     """Ensure the repo root (containing capabilities/) is on sys.path."""
@@ -57,23 +52,6 @@ def _ensure_repo_root_on_path() -> Path | None:
 
 _ensure_repo_root_on_path()
 
-
-@lru_cache(maxsize=1)
-def _load_local_mmp_query_runner():
-    """Load mmp_query_service from current workspace path, avoiding site-packages shadowing."""
-    module_path = LEAD_OPTIMIZATION_DIR / "mmp_query_service.py"
-    if not module_path.exists():
-        raise RuntimeError(f"Local mmp_query_service.py not found at: {module_path}")
-    spec = importlib.util.spec_from_file_location("lead_optimization_local_mmp_query_service", str(module_path))
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to load module spec from: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    runner = getattr(module, "run_mmp_query", None)
-    if not callable(runner):
-        raise RuntimeError("run_mmp_query callable not found in local mmp_query_service.py")
-    logger.info("Lead-opt MMP query runner loaded from local path: %s", module_path)
-    return runner
 
 try:
     import psutil
@@ -103,7 +81,6 @@ HEARTBEAT_INTERVAL = 60  # 心跳间隔（秒）
 PROGRESS_TTL_SECONDS = 3600
 TASK_STATUS_TTL_SECONDS = 24 * 3600
 PROGRESS_UPDATE_INTERVAL = 20
-OPTIMIZATION_TASK_TIMEOUT = 12 * 3600
 MAX_STATUS_DETAILS_CHARS = 4_000
 MAX_EXCEPTION_MESSAGE_CHARS = 20_000
 MAX_TRACEBACK_CHARS = 40_000
@@ -402,10 +379,8 @@ def _build_gpu_docker_python_command(
     command.extend(["--env", "PYTHONPATH=/workspace/vbio"])
     command.extend(["--env", f"BOLTZ_TASK_ID={task_id}"])
     msa_server_url = str(getattr(config, "MSA_SERVER_URL", "") or "").strip()
-    msa_server_mode = str(getattr(config, "MSA_SERVER_MODE", "colabfold") or "colabfold").strip() or "colabfold"
     if msa_server_url:
         command.extend(["--env", f"MSA_SERVER_URL={msa_server_url}"])
-    command.extend(["--env", f"MSA_SERVER_MODE={msa_server_mode}"])
 
     host_cache_dir = str(getattr(config, "BOLTZ2_HOST_CACHE_DIR", "") or "").strip()
     container_cache_dir = str(getattr(config, "BOLTZ2_CONTAINER_CACHE_DIR", "/root/.boltz") or "/root/.boltz").strip() or "/root/.boltz"
@@ -413,6 +388,18 @@ def _build_gpu_docker_python_command(
         os.makedirs(host_cache_dir, exist_ok=True)
         command.extend(["--volume", f"{host_cache_dir}:{container_cache_dir}"])
         command.extend(["--env", f"BOLTZ_CACHE={container_cache_dir}"])
+
+    # MSA sequence cache: mount a host directory from the big /data partition so
+    # task containers stop growing their writable layers with ~MB-sized .a3m
+    # files (the old default /tmp/boltz_msa_cache accumulated 7+ GB per host).
+    msa_cache_host = str(getattr(config, "BOLTZ_MSA_CACHE_DIR", "") or "").strip()
+    if msa_cache_host:
+        try:
+            os.makedirs(msa_cache_host, exist_ok=True)
+            command.extend(["--volume", f"{msa_cache_host}:{msa_cache_host}"])
+            command.extend(["--env", f"BOLTZ_MSA_CACHE_DIR={msa_cache_host}"])
+        except OSError:
+            logger.warning("Task %s: could not prepare MSA cache dir %s; using container default.", task_id, msa_cache_host)
 
     command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
     for gid in _collect_gpu_device_group_ids():
@@ -425,12 +412,24 @@ def _build_gpu_docker_python_command(
 
 
 def _should_skip_large_result_file(file_name: str) -> bool:
-    """Filter heavy intermediate confidence arrays not needed by the UI."""
+    """Filter heavy intermediate confidence arrays not needed by the UI.
+
+    The Boltz writer emits full PAE/PDE matrices per diffusion sample as
+    ``pae_<record>_model_<n>.npz`` / ``pde_...npz`` (~4 MB per sample, ~2/3 of
+    the archive). Every consumer downstream (frontend bundle parser, /view
+    archive builder, excel export) reads PAE/PDE summaries from the confidence
+    JSON, never from these arrays — skipping them cuts a 16-sample dock archive
+    from ~78 MB to ~10 MB. ``plddt_*.npz`` stay: they are a few KB each.
+    Historical ``*_data_`` prefixes are kept for archives produced by older
+    writers.
+    """
     lower = file_name.lower()
     if not lower.endswith(".npz"):
         return False
     return (
-        lower.startswith("pae_data_")
+        lower.startswith("pae_")
+        or lower.startswith("pde_")
+        or lower.startswith("pae_data_")
         or lower.startswith("pde_data_")
         or lower.startswith("plddt_data_")
     )
@@ -469,6 +468,13 @@ class TaskProgressTracker:
     def start_heartbeat(self):
         """启动心跳线程"""
         self._stop_heartbeat = False
+        # TaskMonitor._analyze_task reads task_start/task_update to detect stuck tasks
+        # (max duration / no-progress); nothing wrote them, so both checks were dead.
+        try:
+            self.redis_client.setex(f"task_start:{self.task_id}", 86400, datetime.now().isoformat())
+            self.redis_client.setex(f"task_update:{self.task_id}", 86400, datetime.now().isoformat())
+        except Exception as e:
+            logger.warning(f"Task {self.task_id}: Failed to record task start timestamps: {e}")
         self._heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
         self._heartbeat_thread.start()
         logger.info(f"Task {self.task_id}: Started heartbeat monitoring")
@@ -482,7 +488,6 @@ class TaskProgressTracker:
         self._stop_heartbeat = True
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=5)
-        # 清理Redis键
         try:
             self.redis_client.delete(self.heartbeat_key)
             self.redis_client.delete(self.process_key)
@@ -492,16 +497,29 @@ class TaskProgressTracker:
             logger.warning(f"Failed to cleanup Redis keys for task {self.task_id}: {e}")
     
     def _heartbeat_worker(self):
-        """心跳工作线程"""
+        """心跳工作线程。
+
+        Resilient loop: a single Redis blip used to kill the heartbeat permanently while
+        the task kept running for hours — every liveness check (monitor, /status) then
+        saw a live task as dead. Retry with capped backoff; only a stop signal or a
+        sustained outage (consecutive failures) ends the thread.
+        """
+        consecutive_failures = 0
         while not self._stop_heartbeat:
             try:
                 current_time = datetime.now().isoformat()
                 self.redis_client.setex(self.heartbeat_key, HEARTBEAT_INTERVAL * 2, current_time)
                 publish_task_heartbeat(self.redis_client, task_id=self.task_id)
+                consecutive_failures = 0
                 time.sleep(HEARTBEAT_INTERVAL)
             except Exception as e:
-                logger.error(f"Heartbeat error for task {self.task_id}: {e}")
-                break
+                consecutive_failures += 1
+                logger.error(
+                    f"Heartbeat error for task {self.task_id} (consecutive failures: {consecutive_failures}): {e}"
+                )
+                if self._stop_heartbeat or consecutive_failures >= 30:
+                    break
+                time.sleep(min(HEARTBEAT_INTERVAL, 5 * consecutive_failures))
     
     def update_status(self, status, details=None, payload: Optional[dict] = None):
         """更新任务状态"""
@@ -514,6 +532,8 @@ class TaskProgressTracker:
             if isinstance(payload, dict) and payload:
                 status_data["payload"] = payload
             self.redis_client.setex(self.status_key, TASK_STATUS_TTL_SECONDS, json.dumps(status_data))
+            # Refresh the no-progress clock TaskMonitor uses for stuck detection.
+            self.redis_client.setex(f"task_update:{self.task_id}", 86400, status_data["timestamp"])
             publish_task_status(
                 self.redis_client,
                 task_id=self.task_id,
@@ -543,12 +563,6 @@ class TaskProgressTracker:
         except Exception as e:
             logger.error(f"Failed to register process for task {self.task_id}: {e}")
 
-def _store_progress(redis_client, key: str, payload: dict, ttl: int = PROGRESS_TTL_SECONDS) -> None:
-    """Persist task progress payload to Redis."""
-    try:
-        redis_client.setex(key, ttl, json.dumps(payload))
-    except Exception as e:
-        logger.warning(f"Failed to store progress for {key}: {e}")
 
 
 def _read_json_record(path: str) -> dict:
@@ -863,15 +877,6 @@ def _communicate_with_optional_timeout(process: subprocess.Popen, timeout_second
     return process.communicate(timeout=timeout_seconds)
 
 
-def _write_base64_file(encoded_content: str, path: str, text_mode: bool = False) -> None:
-    """Write base64 encoded content to disk."""
-    raw = base64.b64decode(encoded_content)
-    if text_mode:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(raw.decode('utf-8'))
-    else:
-        with open(path, 'wb') as f:
-            f.write(raw)
 
 
 def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
@@ -947,95 +952,6 @@ def _trim_sdf_to_first_valid_molecule(path: str) -> bool:
     return True
 
 
-def _read_lead_optimization_progress(output_dir: str,
-                                     elapsed: float,
-                                     expected_candidates: Optional[int] = None,
-                                     expected_compounds: Optional[int] = None) -> dict:
-    """Read lead optimization progress based on output files."""
-    progress = {}
-
-    if expected_compounds:
-        summary_paths = glob.glob(os.path.join(output_dir, "compound_*", "optimization_summary.json"))
-        completed = len(summary_paths)
-        progress_percent = (completed / expected_compounds * 100) if expected_compounds > 0 else 0.0
-        estimated_remaining = 0.0
-        if completed > 0 and expected_compounds > completed:
-            avg_time = elapsed / completed
-            estimated_remaining = avg_time * (expected_compounds - completed)
-        eta_time = None
-        if estimated_remaining:
-            eta_time = (datetime.now() + timedelta(seconds=estimated_remaining)).isoformat()
-
-        progress.update({
-            "completed_compounds": completed,
-            "total_compounds": expected_compounds,
-            "progress_percent": progress_percent,
-            "estimated_remaining_seconds": estimated_remaining,
-            "estimated_completion_time": eta_time
-        })
-        return progress
-
-    hint_path = os.path.join(output_dir, "optimization_progress.json")
-    if os.path.exists(hint_path):
-        try:
-            with open(hint_path, 'r', encoding='utf-8') as f:
-                hint = json.load(f)
-            hint_expected = hint.get("expected_candidates")
-            if isinstance(hint_expected, int) and hint_expected > 0:
-                expected_candidates = hint_expected
-        except Exception:
-            pass
-
-    csv_path = os.path.join(output_dir, "optimization_results.csv")
-    if not os.path.exists(csv_path):
-        return progress
-
-    try:
-        with open(csv_path, 'r', encoding='utf-8') as f:
-            rows = f.readlines()
-    except Exception as e:
-        logger.warning(f"Failed to read optimization progress CSV: {e}")
-        return progress
-
-    processed = max(0, len(rows) - 1)
-    progress_percent = 0.0
-    estimated_remaining = 0.0
-
-    if expected_candidates:
-        progress_percent = (processed / expected_candidates * 100) if expected_candidates > 0 else 0.0
-        if processed > 0 and expected_candidates > processed:
-            avg_time = elapsed / processed
-            estimated_remaining = avg_time * (expected_candidates - processed)
-
-    eta_time = None
-    if estimated_remaining:
-        eta_time = (datetime.now() + timedelta(seconds=estimated_remaining)).isoformat()
-
-    progress.update({
-        "processed_candidates": processed,
-        "expected_candidates": expected_candidates,
-        "progress_percent": progress_percent,
-        "estimated_remaining_seconds": estimated_remaining,
-        "estimated_completion_time": eta_time
-    })
-    return progress
-
-def _mmpdb_available() -> bool:
-    """Check if mmpdb CLI is available in current environment."""
-    if shutil.which('mmpdb'):
-        return True
-    try:
-        result = subprocess.run(
-            [sys.executable, '-m', 'mmpdb', '--help'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def _extract_protein_chain_ids_from_pdb(pdb_path: str) -> list[str]:
     """Extract unique protein chain IDs from ATOM records in a PDB file."""
     chain_ids: set[str] = set()
@@ -1082,35 +998,69 @@ def _extract_protein_chain_ids_from_structure(structure_path: str) -> list[str]:
         return []
 
 
-def _load_lead_optimization_config():
-    """Load lead_optimization config without relying on package import."""
-    config_path = LEAD_OPTIMIZATION_DIR / "config.py"
-    spec = importlib.util.spec_from_file_location("capabilities.lead_optimization.config", config_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load lead_optimization config from {config_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.load_config()
+RESULT_UPLOAD_ATTEMPTS = 3
+RESULT_UPLOAD_BACKOFF_SECONDS = 5.0
+
+
+class ResultUploadError(RuntimeError):
+    """All result-upload attempts failed. The local archive is then the ONLY copy of a
+    finished GPU run's output — callers must let the task fail loudly, never silently."""
+
 
 def upload_result_to_central_api(task_id: str, local_file_path: str, filename: str) -> dict:
     """
     Uploads a local file to the centralized API server.
+
+    This upload is the only delivery path for a finished GPU run's results: a single
+    transient 5xx or network blip used to convert hours of compute into a FAILURE with
+    the local temp dir wiped. Transient failures (5xx, connection/read errors) retry
+    with exponential backoff; 4xx responses are permanent and fail immediately. A 2xx
+    with a non-JSON body counts as success (the response text is only bookkeeping).
     """
     upload_url = f"{config.CENTRAL_API_URL}/upload_result/{task_id}"
+    headers = {'X-API-Token': config.BOLTZ_API_TOKEN}
     logger.info(f"Task {task_id}: Starting upload from '{local_file_path}' to '{upload_url}'.")
 
-    with open(local_file_path, 'rb') as f:
-        files = {'file': (filename, f)}
-        
-        response = requests.post(
-            upload_url,
-            files=files,
-            timeout=(10, 300)  # (connection timeout, read timeout)
-        )
-        
-        response.raise_for_status()
-        logger.info(f"Task {task_id}: Results uploaded successfully. Server response: {response.json()}")
-        return response.json()
+    last_error: Optional[Exception] = None
+    for attempt in range(1, RESULT_UPLOAD_ATTEMPTS + 1):
+        try:
+            with open(local_file_path, 'rb') as f:
+                files = {'file': (filename, f)}
+                response = requests.post(
+                    upload_url,
+                    files=files,
+                    headers=headers,
+                    timeout=(10, 300)  # (connection timeout, read timeout)
+                )
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {'status_code': response.status_code, 'text': (response.text or '')[:200]}
+            logger.info(
+                f"Task {task_id}: Results uploaded successfully (attempt {attempt}). Server response: {payload}"
+            )
+            return payload
+        except requests.exceptions.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 0
+            if 400 <= status_code < 500:
+                # Client-side rejection (bad request/auth) — retrying cannot fix it.
+                raise ResultUploadError(
+                    f"Upload rejected with HTTP {status_code} for task {task_id}: {exc}"
+                ) from exc
+            last_error = exc
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+        if attempt < RESULT_UPLOAD_ATTEMPTS:
+            delay = RESULT_UPLOAD_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                f"Task {task_id}: Upload attempt {attempt}/{RESULT_UPLOAD_ATTEMPTS} failed "
+                f"({last_error}); retrying in {delay:.0f}s."
+            )
+            time.sleep(delay)
+    raise ResultUploadError(
+        f"All {RESULT_UPLOAD_ATTEMPTS} upload attempts failed for task {task_id}: {last_error}"
+    ) from last_error
 
 @celery_app.task(bind=True)
 def predict_task(self, predict_args: dict):
@@ -1184,7 +1134,7 @@ def predict_task(self, predict_args: dict):
         else:
             proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
             # Expose the scheduler-assigned host GPU index for nested docker runtimes
-            # (e.g. PocketXMol shell wrapper) so they do not fall back to GPU 0.
+            # so they do not fall back to GPU 0.
             proc_env["BOLTZ_ASSIGNED_GPU_ID"] = str(gpu_id)
         proc_env["BOLTZ_TASK_ID"] = task_id
         _raise_if_task_cancelled(self, redis_client, task_id)
@@ -1245,7 +1195,12 @@ def predict_task(self, predict_args: dict):
                         if status_text:
                             tracker.update_status("running", status_text, payload=runtime_meta)
                         try:
-                            self.update_state(state='PROGRESS', meta=runtime_meta)
+                            # the progress thread runs outside the task
+                            # request context, so update_state cannot infer
+                            # the task id — pass it explicitly
+                            self.update_state(
+                                state='PROGRESS', meta=runtime_meta,
+                                task_id=task_id)
                         except Exception as state_exc:
                             logger.warning(
                                 "Task %s: Failed to update Celery peptide progress state: %s",
@@ -1382,8 +1337,7 @@ def predict_task(self, predict_args: dict):
         if task_temp_dir and os.path.exists(task_temp_dir):
             shutil.rmtree(task_temp_dir)
             logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
-        
-        # 停止心跳监控
+
         if tracker:
             tracker.stop_heartbeat()
             logger.info(f"Task {task_id}: Cleanup completed")
@@ -1469,105 +1423,13 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     }
 
 
-@celery_app.task(bind=True)
-def get_task_status_info(self, task_id):
-    """获取任务状态信息"""
-    try:
-        redis_client = get_redis_client()
-        
-        # 获取心跳信息
-        heartbeat = redis_client.get(f"task_heartbeat:{task_id}")
-        status = redis_client.get(f"task_status:{task_id}")
-        process = redis_client.get(f"task_process:{task_id}")
-        
-        result = {
-            "task_id": task_id,
-            "heartbeat": json.loads(heartbeat.decode()) if heartbeat else None,
-            "status": json.loads(status.decode()) if status else None,
-            "process": json.loads(process.decode()) if process else None
-        }
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Failed to get status info for task {task_id}: {e}")
-        raise
-
-
-@celery_app.task(bind=True)
-def cleanup_stuck_task(self, task_id):
-    """清理卡住的任务"""
-    try:
-        _terminate_task_containers_by_task_id(str(task_id))
-
-        redis_client = get_redis_client()
-        
-        # 获取进程信息
-        process_key = f"task_process:{task_id}"
-        process_data = redis_client.get(process_key)
-        
-        if process_data:
-            process_info = json.loads(process_data.decode())
-            pid = process_info.get("pid")
-            
-            if pid:
-                try:
-                    # 尝试终止进程
-                    if psutil:
-                        if psutil.pid_exists(pid):
-                            p = psutil.Process(pid)
-                            p.terminate()
-                            logger.info(f"Terminated process {pid} for task {task_id}")
-                            
-                            # 等待进程结束
-                            try:
-                                p.wait(timeout=10)
-                            except psutil.TimeoutExpired:
-                                # 强制杀死
-                                p.kill()
-                                logger.info(f"Killed process {pid} for task {task_id}")
-                    else:
-                        # 使用系统调用
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                            logger.info(f"Sent SIGTERM to process {pid} for task {task_id}")
-                            time.sleep(5)
-                            # 检查进程是否还存在，如果存在则强制杀死
-                            try:
-                                os.kill(pid, 0)  # 检查进程是否存在
-                                os.kill(pid, signal.SIGKILL)
-                                logger.info(f"Killed process {pid} for task {task_id}")
-                            except ProcessLookupError:
-                                # 进程已经结束
-                                pass
-                        except ProcessLookupError:
-                            logger.info(f"Process {pid} not found for task {task_id}")
-                except Exception as e:
-                    logger.error(f"Failed to terminate process {pid}: {e}")
-        
-        # 清理Redis键
-        keys_to_delete = [
-            f"task_heartbeat:{task_id}",
-            f"task_status:{task_id}", 
-            f"task_process:{task_id}"
-        ]
-        
-        for key in keys_to_delete:
-            redis_client.delete(key)
-        
-        # 撤销Celery任务
-        from backend.core.celery_app import celery_app
-        celery_app.control.revoke(task_id, terminate=True)
-        
-        logger.info(f"Cleaned up stuck task {task_id}")
-        return {"status": "success", "message": f"Task {task_id} cleaned up successfully"}
-        
-    except Exception as e:
-        logger.error(f"Failed to cleanup task {task_id}: {e}")
-        raise
     
 
-@celery_app.task(bind=True)
+@celery_app.task(
+    bind=True,
+    soft_time_limit=config.BOLTZ2SCORE_TASK_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=config.BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS,
+)
 def boltz2score_task(self, score_args: dict):
     """
     Celery task for running Boltz2Score (confidence; optional affinity).
@@ -1584,11 +1446,19 @@ def boltz2score_task(self, score_args: dict):
         tracker.start_heartbeat()
         tracker.update_status("starting", "Initializing Boltz2Score task")
 
+        # Fail before GPU allocation for a dock request that could never run: dock builds the
+        # ligand from SMILES, and an empty SMILES would only fail deep inside the container
+        # after the GPU has been reserved.
+        if str(score_args.get('mode') or 'dock').strip().lower() == 'dock' and not str(score_args.get('ligand_smiles') or '').strip():
+            raise RuntimeError("dock mode requires a non-empty ligand_smiles.")
+
         logger.info(f"Task {task_id}: Attempting to acquire GPU for Boltz2Score.")
+        _raise_if_task_cancelled(self, redis_client, task_id)
         tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
 
         gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
         reported_gpu_id = gpu_id
+        _raise_if_task_cancelled(self, redis_client, task_id)
         self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting Boltz2Score.'})
         logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
         tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
@@ -1603,10 +1473,11 @@ def boltz2score_task(self, score_args: dict):
         has_protein_input = 'protein_file_content' in score_args
         has_ligand_file_input = 'ligand_file_content' in score_args
         has_ligand_smiles_input = bool((score_args.get('ligand_smiles') or '').strip())
+        staging_mode = str(score_args.get('mode') or 'dock').strip().lower()
 
         if has_protein_input and (has_ligand_file_input or has_ligand_smiles_input):
             using_separate_inputs = True
-            protein_filename = secure_filename(score_args['protein_filename'])
+            protein_filename = secure_filename(score_args['protein_filename']) or 'protein.pdb'
             ligand_filename = secure_filename(score_args.get('ligand_filename') or "ligand.sdf")
 
             protein_file_path = os.path.join(task_temp_dir, protein_filename)
@@ -1614,7 +1485,11 @@ def boltz2score_task(self, score_args: dict):
                 f.write(score_args['protein_file_content'])
 
             ligand_file_path = os.path.join(task_temp_dir, ligand_filename)
-            if has_ligand_file_input:
+            if staging_mode == 'dock':
+                # dock mode: the capability generates the 3-D conformer from
+                # SMILES itself; no ligand file is staged.
+                ligand_file_path = None
+            elif has_ligand_file_input:
                 with open(ligand_file_path, 'w', encoding='utf-8') as f:
                     f.write(score_args['ligand_file_content'])
                 if _trim_sdf_to_first_valid_molecule(ligand_file_path):
@@ -1644,14 +1519,17 @@ def boltz2score_task(self, score_args: dict):
             inputs_dir = os.path.join(task_temp_dir, "inputs")
             os.makedirs(inputs_dir, exist_ok=True)
             shutil.copyfile(protein_file_path, os.path.join(inputs_dir, protein_filename))
-            shutil.copyfile(ligand_file_path, os.path.join(inputs_dir, ligand_filename))
-            extra_archive_files.extend([
-                os.path.join(inputs_dir, protein_filename),
-                os.path.join(inputs_dir, ligand_filename),
-            ])
+            if ligand_file_path:
+                shutil.copyfile(ligand_file_path, os.path.join(inputs_dir, ligand_filename))
+                extra_archive_files.extend([
+                    os.path.join(inputs_dir, protein_filename),
+                    os.path.join(inputs_dir, ligand_filename),
+                ])
+            else:
+                extra_archive_files.append(os.path.join(inputs_dir, protein_filename))
 
         else:
-            input_filename = secure_filename(score_args['input_filename'])
+            input_filename = secure_filename(score_args['input_filename']) or 'input.cif'
             input_file_path = os.path.join(task_temp_dir, input_filename)
             with open(input_file_path, 'w', encoding='utf-8') as f:
                 f.write(score_args['input_file_content'])
@@ -1665,10 +1543,15 @@ def boltz2score_task(self, score_args: dict):
             score_args.get('structure_refine'),
             BOLTZ2SCORE_DEFAULT_STRUCTURE_REFINE,
         )
-        requested_mode = str(score_args.get('mode') or 'score').strip().lower()
-        if requested_mode not in {'score', 'pose', 'refine', 'interface'}:
-            logger.info("Task %s: unsupported mode %r, defaulting to 'score'.", task_id, requested_mode)
-            requested_mode = 'score'
+        requested_mode = str(score_args.get('mode') or 'dock').strip().lower()
+        if requested_mode not in {'score', 'pose', 'refine', 'interface', 'dock'}:
+            # The route validates modes at submission; an unknown mode here means route/worker
+            # drift or a task enqueued outside the API. Running it as 'score' would silently
+            # change the requested computation, so fail the task with the reason instead.
+            raise ValueError(
+                f"Unsupported boltz2score mode {requested_mode!r}; "
+                "expected one of score/pose/refine/interface/dock."
+            )
         compute_ipsae = coerce_bool(score_args.get('compute_ipsae'), False)
         use_msa_server = coerce_bool(
             score_args.get('use_msa_server'),
@@ -1696,18 +1579,22 @@ def boltz2score_task(self, score_args: dict):
             else BOLTZ2SCORE_DEFAULT_DIFFUSION_SAMPLES
         )
 
-        recycling_steps = _coerce_positive_int(
-            score_args.get('recycling_steps'),
-            default_recycling_steps,
-        )
-        sampling_steps = _coerce_positive_int(
-            score_args.get('sampling_steps'),
-            default_sampling_steps,
-        )
-        diffusion_samples = _coerce_positive_int(
-            score_args.get('diffusion_samples'),
-            default_diffusion_samples,
-        )
+        # 非 score 模式（pose/refine/interface/dock）的扩散参数由 capabilities
+        # 内部的 MODE_CONFIGS 提供（上游 benchmark 验证配置，见
+        # capabilities/boltz2score/core/flexible_optimization.py）。这里的
+        # score-only 默认 sampling_steps=1 一旦透传，会覆盖各模式默认并触发
+        # Karras sigma 调度除零（steps/(N-1)=0/0 → sigma 表全 NaN → SVD
+        # error code 3）；因此这些模式只在用户显式指定时才覆盖这三个参数。
+        defer_diffusion_defaults = requested_mode != 'score'
+
+        def _resolve_diffusion_arg(key: str, default: Any) -> Any:
+            if defer_diffusion_defaults and score_args.get(key) is None:
+                return None
+            return _coerce_positive_int(score_args.get(key), default)
+
+        recycling_steps = _resolve_diffusion_arg('recycling_steps', default_recycling_steps)
+        sampling_steps = _resolve_diffusion_arg('sampling_steps', default_sampling_steps)
+        diffusion_samples = _resolve_diffusion_arg('diffusion_samples', default_diffusion_samples)
         max_parallel_samples = _coerce_positive_int(
             score_args.get('max_parallel_samples'),
             BOLTZ2SCORE_DEFAULT_MAX_PARALLEL_SAMPLES,
@@ -1738,25 +1625,59 @@ def boltz2score_task(self, score_args: dict):
             "--devices", "1",
             "--num_workers", "0",
             "--mode", requested_mode,
-            "--recycling_steps", str(recycling_steps),
-            "--sampling_steps", str(sampling_steps),
-            "--diffusion_samples", str(diffusion_samples),
-            "--max_parallel_samples", str(max_parallel_samples),
         ]
+        # 扩散参数为 None（dock 未显式指定）时不传，让 capabilities 落到
+        # dock_default 的验证配置，而不是被 CLI 的 score-only 默认覆盖。
+        if recycling_steps is not None:
+            boltz2score_entry.extend(["--recycling_steps", str(recycling_steps)])
+        if sampling_steps is not None:
+            boltz2score_entry.extend(["--sampling_steps", str(sampling_steps)])
+        if diffusion_samples is not None:
+            boltz2score_entry.extend(["--diffusion_samples", str(diffusion_samples)])
+        boltz2score_entry.extend([
+            "--max_parallel_samples", str(max_parallel_samples),
+        ])
         if structure_refine:
             boltz2score_entry.append("--structure_refine")
         if use_msa_server:
             boltz2score_entry.extend(["--use_msa_server", "--msa_server_url", msa_server_url])
         if using_separate_inputs:
-            boltz2score_entry.extend([
-                "--protein_file", protein_file_path,
-                "--ligand_file", ligand_file_path,
-            ])
+            boltz2score_entry.extend(["--protein_file", protein_file_path])
+            if requested_mode == 'dock':
+                ligand_smiles_arg = str(score_args.get('ligand_smiles') or '').strip()
+                boltz2score_entry.extend(["--ligand_smiles", ligand_smiles_arg])
+                if 'center_x' in score_args:
+                    boltz2score_entry.extend([
+                        "--center_x", str(float(score_args['center_x'])),
+                        "--center_y", str(float(score_args['center_y'])),
+                        "--center_z", str(float(score_args['center_z'])),
+                    ])
+                if 'size_x' in score_args:
+                    boltz2score_entry.extend([
+                        "--size_x", str(float(score_args['size_x'])),
+                        "--size_y", str(float(score_args['size_y'])),
+                        "--size_z", str(float(score_args['size_z'])),
+                    ])
+                if score_args.get('pocket_residues'):
+                    boltz2score_entry.extend(["--pocket_residues", str(score_args['pocket_residues'])])
+                if score_args.get('pocket_ligand_content'):
+                    pocket_ligand_filename = secure_filename(
+                        score_args.get('pocket_ligand_filename') or 'pocket_ligand.pdb'
+                    )
+                    pocket_ligand_path = os.path.join(task_temp_dir, pocket_ligand_filename)
+                    with open(pocket_ligand_path, 'w', encoding='utf-8') as f:
+                        f.write(score_args['pocket_ligand_content'])
+                    boltz2score_entry.extend(["--pocket_ligand", pocket_ligand_path])
+                    extra_archive_files.append(pocket_ligand_path)
+            else:
+                boltz2score_entry.extend(["--ligand_file", ligand_file_path])
         else:
             boltz2score_entry.extend(["--input", input_file_path])
         boltz2score_entry.extend(["--seed", str(seed)])
         if compute_ipsae:
             boltz2score_entry.append("--compute_ipsae")
+        if coerce_bool(score_args.get('compute_interactions'), True):
+            boltz2score_entry.append("--compute_interactions")
 
         target_chain = score_args.get('target_chain') or (detected_target_chain if using_separate_inputs else None)
         ligand_chain = score_args.get('ligand_chain')
@@ -1809,6 +1730,7 @@ def boltz2score_task(self, score_args: dict):
             task_id,
             " ".join(shlex.quote(part) for part in command),
         )
+        _raise_if_task_cancelled(self, redis_client, task_id)
 
         process = subprocess.Popen(
             command,
@@ -1893,6 +1815,11 @@ def boltz2score_task(self, score_args: dict):
         logger.info(f"Task {task_id}: Boltz2Score completed and results uploaded successfully.")
         return final_meta
 
+    except Ignore:
+        # Cancellation checkpoints raise Ignore — it must propagate untouched, else the task
+        # reads as FAILURE in Redis and the /status API shows a cancelled task as failed.
+        raise
+
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:
@@ -1916,306 +1843,10 @@ def boltz2score_task(self, score_args: dict):
             logger.info(f"Task {task_id}: Cleanup completed")
 
 
-@celery_app.task(bind=True)
-def lead_optimization_task(self, optimization_args: dict):
-    """
-    Celery task for running lead optimization pipeline.
-    """
-    task_id = self.request.id
-    task_temp_dir = None
-    tracker = None
-    redis_client = get_redis_client()
-    progress_key = f"lead_optimization:progress:{task_id}"
-    start_time = time.time()
 
-    def _count_compounds(path: str) -> int:
-        if not path or not os.path.exists(path):
-            return 0
-        if path.endswith('.csv'):
-            import csv
-            with open(path, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                return sum(1 for _ in reader)
-        count = 0
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    count += 1
-        return count
-
-    try:
-        tracker = TaskProgressTracker(task_id, redis_client)
-        tracker.start_heartbeat()
-        tracker.update_status("starting", "Initializing lead optimization task")
-
-        task_temp_dir = _mk_task_temp_dir(prefix=f"boltz_optimization_{task_id}_")
-        input_dir = os.path.join(task_temp_dir, "inputs")
-        output_dir = os.path.join(config.LEAD_OPTIMIZATION_OUTPUT_DIR, task_id)
-        os.makedirs(input_dir, exist_ok=True)
-        os.makedirs(output_dir, exist_ok=True)
-
-        opt_config = _load_lead_optimization_config()
-        db_url = str(getattr(opt_config.mmp_database, "database_url", "") or "").strip()
-        if not db_url:
-            raise RuntimeError("MMP PostgreSQL database_url is required (LEAD_OPT_MMP_DB_URL).")
-        if not (db_url.lower().startswith("postgresql://") or db_url.lower().startswith("postgres://")):
-            raise RuntimeError("MMP database must be PostgreSQL DSN (postgresql://...).")
-        if not _mmpdb_available():
-            raise RuntimeError("mmpdb CLI not available. Install mmpdb or ensure it is in PATH.")
-
-        target_filename = optimization_args['target_filename']
-        target_path = os.path.join(input_dir, target_filename)
-        with open(target_path, 'w', encoding='utf-8') as f:
-            f.write(optimization_args['target_content'])
-
-        input_compound = optimization_args.get('input_compound')
-        input_file_path = None
-        expected_compounds = None
-        reference_target_path = None
-        reference_ligand_path = None
-
-        if optimization_args.get('input_file_base64'):
-            input_filename = optimization_args.get('input_filename', 'input_compounds.csv')
-            input_file_path = os.path.join(input_dir, input_filename)
-            _write_base64_file(optimization_args['input_file_base64'], input_file_path, text_mode=False)
-            expected_compounds = _count_compounds(input_file_path)
-
-        if optimization_args.get('reference_target_file_base64'):
-            reference_target_name = optimization_args.get('reference_target_filename', 'reference_target.pdb')
-            reference_target_path = os.path.join(input_dir, reference_target_name)
-            _write_base64_file(optimization_args['reference_target_file_base64'], reference_target_path, text_mode=False)
-        if optimization_args.get('reference_ligand_file_base64'):
-            reference_ligand_name = optimization_args.get('reference_ligand_filename', 'reference_ligand.sdf')
-            reference_ligand_path = os.path.join(input_dir, reference_ligand_name)
-            _write_base64_file(optimization_args['reference_ligand_file_base64'], reference_ligand_path, text_mode=False)
-
-        options = optimization_args.get('options', {})
-
-        command = [
-            sys.executable,
-            str(LEAD_OPTIMIZATION_DIR / "run_optimization.py"),
-            "--target_config", target_path,
-            "--output_dir", output_dir
-        ]
-
-        if input_compound:
-            command.extend(["--input_compound", input_compound])
-        elif input_file_path:
-            command.extend(["--input_file", input_file_path])
-        else:
-            raise ValueError("Either input_compound or input_file must be provided for lead optimization.")
-
-        if options.get('optimization_strategy'):
-            command.extend(["--optimization_strategy", str(options['optimization_strategy'])])
-        if options.get('max_candidates') is not None:
-            command.extend(["--max_candidates", str(options['max_candidates'])])
-        if options.get('iterations') is not None:
-            command.extend(["--iterations", str(options['iterations'])])
-        if options.get('batch_size') is not None:
-            command.extend(["--batch_size", str(options['batch_size'])])
-        if options.get('top_k_per_iteration') is not None:
-            command.extend(["--top_k_per_iteration", str(options['top_k_per_iteration'])])
-        if options.get('diversity_weight') is not None:
-            command.extend(["--diversity_weight", str(options['diversity_weight'])])
-        if options.get('similarity_threshold') is not None:
-            command.extend(["--similarity_threshold", str(options['similarity_threshold'])])
-        if options.get('max_similarity_threshold') is not None:
-            command.extend(["--max_similarity_threshold", str(options['max_similarity_threshold'])])
-        if options.get('diversity_selection_strategy'):
-            command.extend(["--diversity_selection_strategy", str(options['diversity_selection_strategy'])])
-        if options.get('max_chiral_centers') is not None:
-            command.extend(["--max_chiral_centers", str(options['max_chiral_centers'])])
-        if options.get('generate_report'):
-            command.append("--generate_report")
-        if options.get('core_smarts'):
-            command.extend(["--core_smarts", str(options['core_smarts'])])
-        if options.get('exclude_smarts'):
-            command.extend(["--exclude_smarts", str(options['exclude_smarts'])])
-        if options.get('rgroup_smarts'):
-            command.extend(["--rgroup_smarts", str(options['rgroup_smarts'])])
-        if options.get('variable_smarts'):
-            command.extend(["--variable_smarts", str(options['variable_smarts'])])
-        if options.get('variable_const_smarts'):
-            command.extend(["--variable_const_smarts", str(options['variable_const_smarts'])])
-        if options.get('objective_profile'):
-            command.extend(["--objective_profile", str(options['objective_profile'])])
-        for json_option in ("property_constraints", "property_objectives", "fragment_policies", "workflow_context"):
-            option_value = options.get(json_option)
-            if isinstance(option_value, dict):
-                command.extend([f"--{json_option}", json.dumps(option_value, ensure_ascii=False)])
-        if options.get('target_chain'):
-            command.extend(["--target_chain", str(options['target_chain'])])
-        if options.get('ligand_chain'):
-            command.extend(["--ligand_chain", str(options['ligand_chain'])])
-        if options.get('enable_affinity'):
-            command.append("--enable_affinity")
-        ligand_smiles_map = options.get('ligand_smiles_map')
-        if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
-            command.extend(["--ligand_smiles_map", json.dumps(ligand_smiles_map, ensure_ascii=False)])
-        if options.get('verbosity') is not None:
-            command.extend(["--verbosity", str(options['verbosity'])])
-        if options.get('backend'):
-            command.extend(["--backend", str(options['backend'])])
-        if reference_target_path:
-            command.extend(["--reference_target_file", reference_target_path])
-        if reference_ligand_path:
-            command.extend(["--reference_ligand_file", reference_ligand_path])
-
-        env = os.environ.copy()
-        env["BOLTZ_API_TOKEN"] = config.BOLTZ_API_TOKEN
-        env["BOLTZ_TASK_ID"] = task_id
-        env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PYTHONPATH', '')}"
-
-        log_path = os.path.join(output_dir, "lead_optimization.log")
-        logger.info(f"Task {task_id}: Running lead optimization. Command: {' '.join(command)}")
-        tracker.update_status("running", "Lead optimization subprocess started")
-
-        expected_candidates = None
-        if input_compound and options.get('max_candidates') is not None and options.get('iterations') is not None:
-            expected_candidates = int(options['max_candidates']) * int(options['iterations'])
-
-        with open(log_path, 'w', encoding='utf-8') as log_file:
-            process = subprocess.Popen(
-                command,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env=env,
-                cwd=str(BASE_DIR),
-                start_new_session=True
-            )
-
-            tracker.register_process(process.pid)
-
-            last_progress_update = 0.0
-            task_timeout = options.get('task_timeout') or OPTIMIZATION_TASK_TIMEOUT
-
-            while True:
-                now = time.time()
-                if now - last_progress_update >= PROGRESS_UPDATE_INTERVAL:
-                    elapsed = now - start_time
-                    progress_payload = _read_lead_optimization_progress(
-                        output_dir,
-                        elapsed,
-                        expected_candidates=expected_candidates,
-                        expected_compounds=expected_compounds
-                    )
-                    progress_payload.update({
-                        "task_id": task_id,
-                        "status": "running",
-                        "start_time": datetime.fromtimestamp(start_time).isoformat(),
-                        "elapsed_seconds": elapsed,
-                        "expected_compounds": expected_compounds
-                    })
-                    _store_progress(redis_client, progress_key, progress_payload)
-                    self.update_state(state='PROGRESS', meta=progress_payload)
-                    last_progress_update = now
-
-                if now - start_time > task_timeout:
-                    process.kill()
-                    raise TimeoutError(f"Lead optimization task {task_id} timed out after {task_timeout} seconds.")
-
-                if process.poll() is not None:
-                    break
-
-                time.sleep(5)
-
-        if process.returncode != 0:
-            raise RuntimeError(f"Lead optimization task {task_id} failed. See log: {log_path}")
-
-        tracker.update_status("packaging", "Packaging optimization results")
-        output_archive_path = os.path.join(task_temp_dir, f"{task_id}_lead_optimization_results.zip")
-        shutil.make_archive(output_archive_path[:-4], 'zip', output_dir)
-
-        upload_response = upload_result_to_central_api(
-            task_id,
-            output_archive_path,
-            os.path.basename(output_archive_path)
-        )
-
-        final_meta = {
-            'status': 'Complete',
-            'upload_info': upload_response,
-            'result_file': os.path.basename(output_archive_path)
-        }
-        self.update_state(state='SUCCESS', meta=final_meta)
-        tracker.update_status("completed", "Lead optimization completed successfully")
-
-        completed_payload = {
-            "task_id": task_id,
-            "status": "completed",
-            "completed_at": datetime.now().isoformat()
-        }
-        _store_progress(redis_client, progress_key, completed_payload)
-        return final_meta
-
-    except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        if tracker:
-            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
-        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
-        failed_payload = {
-            "task_id": task_id,
-            "status": "failed",
-            "error": _truncate_text(e, MAX_EXCEPTION_MESSAGE_CHARS),
-            "failed_at": datetime.now().isoformat()
-        }
-        _store_progress(redis_client, progress_key, failed_payload)
-        raise e
-
-    finally:
-        if task_temp_dir and os.path.exists(task_temp_dir):
-            shutil.rmtree(task_temp_dir)
-            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
-
-        if tracker:
-            tracker.stop_heartbeat()
-            logger.info(f"Task {task_id}: Cleanup completed")
-
-
-@celery_app.task(bind=True)
-def lead_optimization_mmp_query_task(self, payload: dict):
-    """Run Lead Opt MMP query asynchronously for responsive API UX."""
-    task_id = self.request.id
-    redis_client = get_redis_client()
-    progress_key = f"lead_optimization:mmp_query:progress:{task_id}"
-    started_at = time.time()
-    try:
-        _store_progress(
-            redis_client,
-            progress_key,
-            {
-                "task_id": task_id,
-                "status": "running",
-                "started_at": datetime.now().isoformat(),
-            },
-        )
-        self.update_state(state="PROGRESS", meta={"status": "running"})
-        payload_obj = payload if isinstance(payload, dict) else {}
-        logger.info(
-            "Lead-opt MMP task payload: db_id=%s schema=%s has_runtime=%s",
-            str(payload_obj.get("mmp_database_id") or "").strip() or "<empty>",
-            str(payload_obj.get("mmp_database_schema") or "").strip() or "<empty>",
-            bool(str(payload_obj.get("mmp_database_runtime") or "").strip()),
-        )
-        run_mmp_query_runner = _load_local_mmp_query_runner()
-        result = run_mmp_query_runner(payload_obj)
-        result_payload = {
-            "status": "completed",
-            "task_id": task_id,
-            "elapsed_seconds": max(0.0, time.time() - started_at),
-            **result,
-        }
-        _store_progress(redis_client, progress_key, result_payload)
-        return result_payload
-    except Exception as exc:
-        failed_payload = {
-            "task_id": task_id,
-            "status": "failed",
-            "error": _truncate_text(exc, MAX_EXCEPTION_MESSAGE_CHARS),
-            "failed_at": datetime.now().isoformat(),
-        }
-        _store_progress(redis_client, progress_key, failed_payload)
-        self.update_state(state="FAILURE", meta=_build_failure_meta(exc))
-        raise
+# Register sibling task modules so Celery workers (whose include list is this
+# module only) know every task defined outside tasks.py.
+from backend.worker.export_tasks_excel import export_tasks_excel_task  # noqa: E402,F401
+from backend.worker import protenix2dock_task  # noqa: E402,F401
+from backend.worker import affinity_train_task  # noqa: E402,F401
+from backend.worker import lead_opt_halo_task  # noqa: E402,F401

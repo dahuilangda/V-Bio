@@ -87,6 +87,8 @@ interface UsePredictionWorkspacePropsInput {
   setAffinityComponentFromWorkspace: (role: 'target' | 'ligand', componentId: string | null) => void;
   affinityEnableDisabledReason: string;
   showAffinityComputeToggle?: boolean;
+  /** Peptide design: pocket state shown under Binding's Target select. */
+  peptidePocket?: BuildPredictionComponentsSidebarParams['peptidePocket'];
 
 }
 
@@ -158,7 +160,8 @@ export function usePredictionWorkspaceProps({
   workspaceLigandSelectableOptions,
   setAffinityComponentFromWorkspace,
   affinityEnableDisabledReason,
-  showAffinityComputeToggle
+  showAffinityComputeToggle,
+  peptidePocket
 }: UsePredictionWorkspacePropsInput): UsePredictionWorkspacePropsResult {
   const predictionConstraintsWorkspaceProps = workspaceTab === 'constraints'
     ? buildPredictionConstraintsWorkspaceProps({
@@ -256,7 +259,8 @@ export function usePredictionWorkspaceProps({
         workspaceLigandSelectableOptions,
         setAffinityComponentFromWorkspace,
         affinityEnableDisabledReason,
-        showAffinityComputeToggle
+        showAffinityComputeToggle,
+        peptidePocket
       })
     : EMPTY_PREDICTION_COMPONENTS_SIDEBAR_PROPS;
 

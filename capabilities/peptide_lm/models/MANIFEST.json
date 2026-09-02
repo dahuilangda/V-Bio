@@ -1,0 +1,27 @@
+{
+ "model": "ModernPrior (Llama-style decoder: RoPE/SwiGLU/RMSNorm + property aux heads)",
+ "checkpoint": "models/prior.pt",
+ "arch": "modern",
+ "size": 104160460,
+ "vocab": "70 tokens (natural 20 + NCAA 18 + modality/conditioning + FIM)",
+ "training_corpus": "runs/data (UniRef90 chopped 12M + PDB binder 2257 x6 + PeptideGPT 10.4k + FIM 50% + modality 8/8 + NCAA aug 10%)",
+ "main_training_metrics": {
+  "epochs": 2,
+  "val_loss": 2.4132
+ },
+ "evaluation": {
+  "mean_dev_hi": 0.8448531910291359,
+  "n_hi": 300,
+  "median_len_hi": 17,
+  "max_len_hi": 19,
+  "unique_hi": 300,
+  "mean_dev_lo": 0.5817091074709106,
+  "n_lo": 300,
+  "median_len_lo": 17,
+  "max_len_lo": 19,
+  "unique_lo": 300,
+  "tag_separation": 0.2631440835582253,
+  "fim_token_acc": 0.21833333333333332
+ },
+ "computed_at": "2026-08-23"
+}

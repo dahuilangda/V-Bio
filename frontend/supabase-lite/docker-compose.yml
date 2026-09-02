@@ -35,6 +35,10 @@ services:
       PGRST_SERVER_HOST: 0.0.0.0
       PGRST_SERVER_PORT: 3000
       PGRST_DB_USE_LEGACY_GUCS: 'false'
+      # Server-side callers sign a service-role JWT with this secret (F2): the management
+      # API becomes distinguishable from anonymous browser traffic, so app_users/api_tokens
+      # policies can drop anon access entirely.
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-}
     ports:
       - '54321:3000'
     networks:

@@ -198,6 +198,11 @@ class JwtUserService:
 
         existing = self._find_existing_user(email=email, username=username)
         if existing:
+            # A soft-deleted (deactivated) user must not be resurrected by a JWT login —
+            # local login refuses them; this path used to clear deleted_at and revive the
+            # account (admin flag included) with a fresh session.
+            if str(existing.get("deleted_at") or "").strip():
+                raise JwtTokenError("user is deactivated")
             payload = {
                 "username": existing.get("username") or username,
                 "name": name,

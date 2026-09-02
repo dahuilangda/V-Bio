@@ -6,18 +6,20 @@ x-gpu-worker-base: &gpu_worker_base
     dockerfile: deploy/docker/DOCKER_BACKEND_RUNTIME.Dockerfile
   restart: unless-stopped
   gpus: all
-  working_dir: ${BOLTZ_HOST_ROOT}
+  working_dir: ${BOLTZ_HOST_ROOT:-/data/V-Bio}
   env_file:
     - ./DOCKER_STACK_WORKER_GPU_CAPS.env
   volumes:
     - /usr/bin/docker:/usr/bin/docker:ro
     - /var/run/docker.sock:/var/run/docker.sock
-    - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+    - ${BOLTZ_HOST_ROOT:-/data/V-Bio}:${BOLTZ_HOST_ROOT:-/data/V-Bio}
     - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
     - ${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}:${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}
     - ${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}:${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}
     - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
     - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
+    - ${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}:${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}
+    - /data/Boltz2Score:/data/Boltz2Score:ro
   command: >-
     bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint gpu-worker"
 
@@ -75,12 +77,3 @@ services:
       GPU_WORKER_CAPABILITIES: "nesso"
       MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_NESSO:--1}"
       GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_NESSO:-}"
-
-  gpu-worker-pocketxmol:
-    <<: *gpu_worker_base
-    profiles: ["pocketxmol"]
-    container_name: vbio-gpu-worker-pocketxmol
-    environment:
-      GPU_WORKER_CAPABILITIES: "pocketxmol"
-      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_POCKETXMOL:--1}"
-      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_POCKETXMOL:-}"

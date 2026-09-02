@@ -6,5 +6,10 @@ rdkit
 numpy
 
 # Analysis
+# analysis-scripts-only (data/plot_*.py); not needed at runtime
 matplotlib
 seaborn
+
+# Interaction analysis (PLIP + OpenBabel)
+plip
+openbabel-wheel

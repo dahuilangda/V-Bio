@@ -89,8 +89,8 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["protein", "ligand", "dna", "rna"],
-                                "description": "Use ligand for a fixed context molecule (not the screened library).",
+                                "enum": ["protein", "ligand"],
+                                "description": "Use ligand for a fixed context molecule (not the screened library). Virtual screening rejects DNA/RNA components.",
                             },
                             "sequence": {"type": "string", "description": "Protein/DNA/RNA sequence or ligand SMILES/CCD ID."},
                             "numCopies": {"type": "integer", "minimum": 1},
@@ -118,6 +118,57 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
             },
             "required": ["create", "components", "screeningCompounds"],
+            "additionalProperties": False,
+        },
+    },
+    "tasks:create_docking": {
+        "label": "New docking task (with target structure)",
+        "description": (
+            "Create a new docking task in the current project. A docking run consumes a protein "
+            "target structure and a ligand SMILES — the target is a 3D STRUCTURE FILE, never an "
+            "amino-acid sequence. Pass the chosen RCSB entry's pdbId as targetPdbId — the host "
+            "fetches the entry's mmCIF file itself; never paste a URL from the record (sourceUrl "
+            "is the human entry page, not a file). Only use targetStructureUrl for a cifUrl a "
+            "skill observation explicitly returned. Pass the ligand SMILES when it is known. "
+            "Docking projects only."
+        ),
+        "target_context": "task_detail",
+        "payload_keys": [
+            "create",
+            "targetPdbId",
+            "targetStructureUrl",
+            "targetStructureName",
+            "ligandSmiles",
+            "taskName",
+            "taskSummary",
+        ],
+        "requires_workflow": ["affinity"],
+        "payload_defaults": {"create": True},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "create": {"type": "boolean", "const": True},
+                "targetPdbId": {
+                    "type": "string",
+                    "pattern": "^[0-9A-Za-z]{4}$",
+                    "description": "The chosen RCSB entry's 4-character pdbId. The host downloads its mmCIF file.",
+                },
+                "targetStructureUrl": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Only for a non-RCSB source: a cifUrl explicitly returned by a skill observation.",
+                },
+                "targetStructureName": {"type": "string", "maxLength": 128},
+                "ligandSmiles": {"type": "string", "maxLength": 2048},
+                "taskName": {"type": "string", "maxLength": 128},
+                "taskSummary": {"type": "string", "maxLength": 512},
+            },
+            "required": ["create"],
+            "anyOf": [
+                {"required": ["targetPdbId"]},
+                {"required": ["targetStructureUrl"]},
+            ],
             "additionalProperties": False,
         },
     },
@@ -156,14 +207,17 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": "Change a task's name or description. Requires the task ID.",
         "payload_keys": ["taskRowId", "taskName", "taskSummary"],
         "requires_payload": ["taskRowId"],
+        "requires_any_payload": ["taskName", "taskSummary"],
     },
     "tasks:cancel": {
         "label": "Cancel task",
         "description": "Stop a running or queued task. Requires the task ID.",
         "payload_keys": ["taskRowId", "taskName"],
         "requires_payload": ["taskRowId"],
+        # Cancelling stops a run; it does not delete the task record — "execute" is the honest
+        # effect (the default synthesis would mislabel destructive actions as "delete").
+        "effect": "execute",
         "destructive": True,
-        "requires_active_task": True,
     },
     "tasks:clear_filters": {
         "label": "Show all tasks",

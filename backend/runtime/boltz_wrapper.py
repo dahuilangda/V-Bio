@@ -37,6 +37,59 @@ from boltz.data.write.writer import BoltzAffinityWriter, BoltzWriter
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
 
+
+def _load_module_cache_helpers():
+    """Load Boltz2Score's whole-module pickle cache by file path.
+
+    Resolved explicitly (no `capabilities` package __init__ exists), guarded
+    so the wrapper keeps working with the standard checkpoint load if the
+    cache helper is unavailable.
+    """
+    try:
+        import importlib.util
+
+        cache_py = Path(__file__).resolve().parents[2] / "capabilities" / "boltz2score" / "core" / "model_cache.py"
+        if not cache_py.exists():
+            return None
+        spec = importlib.util.spec_from_file_location("boltz2score_model_cache", cache_py)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:  # noqa: BLE001 — be conservative, fall back to stock load
+        return None
+
+
+MODULE_CACHE = _load_module_cache_helpers()
+_BOLTZ_WRAPPER_CACHE_DIR = (os.environ.get("BOLTZ_WRAPPER_CACHE_DIR", "") or "").strip()
+MODULE_CACHE_DIR = Path(_BOLTZ_WRAPPER_CACHE_DIR) if _BOLTZ_WRAPPER_CACHE_DIR else None
+
+
+def _cached_model_load(builder, *, cache, checkpoint, config, prefix, log_tag):
+    """Load a model via the whole-module pickle cache when available.
+
+    Boltz2's load_from_checkpoint wastes ~30 s per run constructing and
+    randomly initialising the full model before overwriting it with the
+    checkpoint weights — the same cost Boltz2Score's module cache removes.
+    The cache is stored under its own subdirectory (isolated from the
+    boltz2score entries so the two workflows do not evict each other), with
+    `prefix` separating structure and affinity modules.
+    """
+    if MODULE_CACHE is None or not MODULE_CACHE.module_cache_enabled():
+        return builder()
+    cache_base = MODULE_CACHE_DIR or (Path(cache) / "boltz_wrapper_cache")
+    try:
+        return MODULE_CACHE.load_or_build_model(
+            builder,
+            cache_dir=cache_base,
+            checkpoint=Path(checkpoint),
+            config=config,
+            prefix=prefix,
+            log_tag=log_tag,
+        )
+    except Exception as exc:  # noqa: BLE001 — never let the cache break prediction
+        print(f"[Warning] Module cache disabled for {log_tag} ({exc}); using standard load.", file=sys.stderr)
+        return builder()
+
 CCD_URL = "https://huggingface.co/boltz-community/boltz-1/resolve/main/ccd.pkl"
 MOL_URL = "https://huggingface.co/boltz-community/boltz-2/resolve/main/mols.tar"
 
@@ -1591,19 +1644,37 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args.physical_guidance_update = use_potentials
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
-        model_module = model_cls.load_from_checkpoint(
-            checkpoint,
-            strict=True,
-            predict_args=predict_args,
-            map_location="cpu",
-            diffusion_process_args=asdict(diffusion_params),
-            ema=False,
-            use_kernels=not no_kernels,
-            pairformer_args=asdict(pairformer_args),
-            msa_args=asdict(msa_args),
-            steering_args=asdict(steering_args),
+
+        def build_structure_model():
+            return model_cls.load_from_checkpoint(
+                checkpoint,
+                strict=True,
+                predict_args=predict_args,
+                map_location="cpu",
+                diffusion_process_args=asdict(diffusion_params),
+                ema=False,
+                use_kernels=not no_kernels,
+                pairformer_args=asdict(pairformer_args),
+                msa_args=asdict(msa_args),
+                steering_args=asdict(steering_args),
+            ).eval()
+
+        model_module = _cached_model_load(
+            build_structure_model,
+            cache=cache,
+            checkpoint=Path(checkpoint),
+            config={
+                "model": model,
+                "predict_args": predict_args,
+                "diffusion_process_args": asdict(diffusion_params),
+                "steering_args": asdict(steering_args),
+                "no_kernels": no_kernels,
+                "pairformer_args": asdict(pairformer_args),
+                "msa_args": asdict(msa_args),
+            },
+            prefix="wrap",
+            log_tag="Boltz2 wrapper structure model",
         )
-        model_module.eval()
 
         # Compute structure predictions
         trainer.predict(
@@ -1667,20 +1738,36 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args.fk_steering = False
         steering_args.physical_guidance_update = False
         steering_args.contact_guidance_update = False
-        
-        model_module = Boltz2.load_from_checkpoint(
-            affinity_checkpoint,
-            strict=True,
-            predict_args=predict_affinity_args,
-            map_location="cpu",
-            diffusion_process_args=asdict(diffusion_params),
-            ema=False,
-            pairformer_args=asdict(pairformer_args),
-            msa_args=asdict(msa_args),
-            steering_args=asdict(steering_args),
-            affinity_mw_correction=affinity_mw_correction,
+
+        def build_affinity_model():
+            return Boltz2.load_from_checkpoint(
+                affinity_checkpoint,
+                strict=True,
+                predict_args=predict_affinity_args,
+                map_location="cpu",
+                diffusion_process_args=asdict(diffusion_params),
+                ema=False,
+                pairformer_args=asdict(pairformer_args),
+                msa_args=asdict(msa_args),
+                steering_args=asdict(steering_args),
+                affinity_mw_correction=affinity_mw_correction,
+            ).eval()
+
+        model_module = _cached_model_load(
+            build_affinity_model,
+            cache=cache,
+            checkpoint=Path(affinity_checkpoint),
+            config={
+                "predict_args": predict_affinity_args,
+                "diffusion_process_args": asdict(diffusion_params),
+                "steering_args": asdict(steering_args),
+                "pairformer_args": asdict(pairformer_args),
+                "msa_args": asdict(msa_args),
+                "affinity_mw_correction": affinity_mw_correction,
+            },
+            prefix="wrapaff",
+            log_tag="Boltz2 wrapper affinity model",
         )
-        model_module.eval()
 
         trainer.callbacks[0] = pred_writer
         trainer.predict(

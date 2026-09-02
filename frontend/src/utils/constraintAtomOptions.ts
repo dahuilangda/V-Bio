@@ -654,12 +654,13 @@ export function buildComponentAtomOptionsByChain(components: InputComponent[], r
 
     if (chain.type === 'ligand') {
       const inputMethod = component.inputMethod || 'smiles';
-      const atoms = inputMethod === 'ccd' ? [] : ligandAtomNamesFromSmilesByElementOrder(component.sequence);
+      const effectiveCcd = inputMethod === 'ccd' ? sequence : null;
+      const atoms = effectiveCcd ? [] : ligandAtomNamesFromSmilesByElementOrder(component.sequence);
       result[chain.id] = [
         {
           chainId: chain.id,
           residue: 1,
-          residueName: inputMethod === 'ccd' ? sequence : 'LIG',
+          residueName: effectiveCcd || 'LIG',
           atoms
         }
       ];

@@ -3,7 +3,6 @@ celery
 redis
 gunicorn
 requests
-mmpdb==3.1.3
 pyyaml
 biopython
 py3dmol
@@ -14,3 +13,13 @@ psycopg[binary]
 psycopg2-binary
 gemmi
 rdkit
+openpyxl
+pillow
+
+# HALO lead-optimization module (capabilities/halo)
+torch
+transformers
+tokenizers
+safe-mol
+datamol
+pandas

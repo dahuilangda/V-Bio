@@ -31,6 +31,7 @@ Internally we compute values and Jacobians for basic geometric primitives
 """
 
 import math
+import os
 from typing import Any, Optional
 
 import torch
@@ -517,11 +518,32 @@ def _solve_constraint_projection(
         gf = grad_flat.to(work_dtype)
         vv = v.to(work_dtype)
         denom = gf @ gf.transpose(-1, -2)
-        denom = denom + (
-            float(eps) * torch.eye(n_active, device=device, dtype=work_dtype)
-        )
-        lam = torch.linalg.solve(denom, vv)  # [m]
+        # Scale-aware Tikhonov regularization: constraints that share free
+        # atoms (bond pairs + pocket contacts on one linker) make J J^T
+        # near-singular, and a flat eps*I is not enough — the solve then
+        # returns huge lambda and the projection delta goes non-finite,
+        # poisoning the linker atoms for the rest of sampling (measured: 9
+        # linker atoms NaN at diffusion step 1). Regularize relative to the
+        # row scale and fall back to least squares if the solve still
+        # degenerates.
+        row_scale = denom.diagonal(dim1=-2, dim2=-1).clamp(min=1.0)
+        denom = (denom + float(eps) * torch.diag_embed(row_scale)).float()
+        vv_f = vv.float()
+        lam = torch.linalg.solve(denom, vv_f)  # [m]
+        if (not bool(torch.isfinite(lam).all())) or bool(lam.abs().max() > 1e6):
+            lam = torch.linalg.lstsq(denom, vv_f).solution
         dx_flat = -(gf.transpose(-1, -2) @ lam)  # [N*3]
+        # Bound the displacement: a near-singular (yet finite) solve can emit
+        # a bounded-looking lambda whose dx is tens of A — measured: a Cys SG
+        # pushed 32 A from its CA, snapping the bicyclic ring. A linearized
+        # projection is only valid for step-sized violations anyway; clamp
+        # per-atom movement so larger violations converge over successive
+        # steps instead of teleporting atoms.
+        # A/B switch for the confidence non-regression study (default on).
+        if os.environ.get("PROTENIX_DISABLE_TFG_CLAMP", "").strip() not in {"1", "true", "yes"}:
+            dx_flat = dx_flat.clamp(-3.0, 3.0)
+        if not bool(torch.isfinite(dx_flat).all()):
+            dx_flat = torch.nan_to_num(dx_flat, nan=0.0, posinf=0.0, neginf=0.0)
         delta[bi] = dx_flat.to(dtype).reshape(n_atom, 3)
 
     return delta.reshape(*coords.shape)

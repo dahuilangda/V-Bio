@@ -1,231 +1,189 @@
-import { listProjectTasks } from '../../api/supabaseLite';
-import type { Project } from '../../types/models';
+import type { Project, ProjectTask } from '../../types/models';
 import { formatDateTime, formatDuration } from '../../utils/date';
-import { renderLigand2DSvg } from '../../utils/ligand2d';
-import { loadRDKitModule } from '../../utils/rdkit';
 import {
-  readTaskLigandAtomPlddts,
-  readTaskLigandRenderSmiles,
-  resolveTaskSelectionContext,
-  sanitizeFileName,
-  toBase64FromBytes
-} from './taskDataUtils';
-import type { TaskListRow, WorkspacePairPreference } from './taskListTypes';
-import { backendLabel, formatMetric, taskStateLabel } from './taskPresentation';
+  createTasksExcelExport,
+  downloadTasksExcelExport,
+  getTasksExcelExportStatus,
+  triggerBrowserDownload,
+  type TasksExcelExportRowPayload
+} from '../../api/backendExportApi';
+import type { TaskListRow, ExportProgressPhase } from './taskListTypes';
+import { backendLabel } from './taskPresentation';
 
 interface ExportTaskRowsToExcelInput {
   project: Project;
   filteredRows: TaskListRow[];
-  workspacePairPreference: WorkspacePairPreference;
+  onProgress?: (info: { phase: Exclude<ExportProgressPhase, 'collecting'>; done: number; total: number }) => void;
+  /** Receives the server-side degradation notice (e.g. ligand images skipped). */
+  onWarning?: (warning: string) => void;
+  /** Receives the export id once the server job exists (enables cancellation). */
+  onSubmitted?: (exportId: string) => void;
+  /** Return true to abandon the export (component unmounted / project switched). */
+  isCancelled?: () => boolean;
 }
 
-const EXPORT_TASK_FETCH_CHUNK_SIZE = 80;
+// Base 30 min, plus a per-row allowance — a 13k-row export with ligand images
+// legitimately takes tens of minutes on the worker.
+const EXPORT_POLL_BASE_MAX_MS = 30 * 60 * 1000;
+const EXPORT_POLL_MS_PER_ROW = 400;
+const EXPORT_POLL_MIN_INTERVAL_MS = 1500;
+const EXPORT_POLL_MAX_INTERVAL_MS = 10000;
+// success reported but the file is not readable: give the server this many
+// polls to catch up (volume lag), then fail loudly instead of spinning.
+const EXPORT_POLL_FILE_GRACE_POLLS = 10;
+const EXPORT_POLL_MAX_CONSECUTIVE_ERRORS = 5;
+const AFFINITY_EXPORT_FIELDS = [
+  'affinity_pred_value',
+  'affinity_pic50',
+  'affinity_pred_value_mw',
+  'affinity_pic50_mw',
+  'affinity_pic501',
+  'affinity_pic502',
+  'affinity_probability_binary',
+  'ligand_mw'
+] as const;
 
-async function loadAuthoritativeTasksForExport(
-  project: Project,
-  filteredRows: TaskListRow[]
-) {
-  const taskRowIds = Array.from(
-    new Set(
-      filteredRows
-        .map((row) => String(row.task.id || '').trim())
-        .filter(Boolean)
-    )
-  );
-  if (taskRowIds.length === 0) return [];
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-  const sharedAccess = {
-    accessScope: project.access_scope || 'owner',
-    accessLevel: project.access_level || 'owner',
-    editableTaskIds: project.editable_task_ids || []
-  } as const;
+function readAffinityExportPayload(task: ProjectTask): Record<string, number | null> {
+  const affinity =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : {};
+  const result: Record<string, number | null> = {};
+  for (const field of AFFINITY_EXPORT_FIELDS) {
+    const value = affinity[field];
+    result[field] = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+  return result;
+}
 
-  const taskIdChunks = Array.from(
-    { length: Math.ceil(taskRowIds.length / EXPORT_TASK_FETCH_CHUNK_SIZE) },
-    (_, index) => taskRowIds.slice(index * EXPORT_TASK_FETCH_CHUNK_SIZE, (index + 1) * EXPORT_TASK_FETCH_CHUNK_SIZE)
-  );
-  const taskChunks = await Promise.all(
-    taskIdChunks.map((taskRowIdsChunk) =>
-      listProjectTasks(project.id, {
-        taskRowIds: taskRowIdsChunk,
-        ...sharedAccess
-      })
-    )
-  );
-  return taskChunks.flat();
+function normalizeAtomPlddts(values: number[] | null): number[] {
+  if (!values || values.length === 0) return [];
+  // Filtering element-by-element would shift indices and misalign per-atom
+  // colors; if any entry is unusable, drop the whole series instead.
+  if (values.some((value) => !Number.isFinite(value))) return [];
+  return values.slice(0, 500).map((value) => Math.round(value * 10) / 10);
+}
+
+/**
+ * Build the server-export payload purely from the (fully loaded) workspace
+ * rows. ligandRenderSmiles / ligandRenderAtomPlddts / metrics are the exact
+ * values the task table displays — no second data path, no re-fetch. The
+ * server re-verifies runtime state and re-reads affinity from the result
+ * archives, so the client never needs "fresher" copies of those.
+ */
+function buildExportRowPayload(row: TaskListRow): TasksExcelExportRowPayload {
+  const task = row.task;
+  return {
+    row_id: String(task.id || '').trim(),
+    task_id: String(task.task_id || '').trim(),
+    name: String(task.name || '').trim(),
+    summary: String(task.summary || '').trim(),
+    backend_label: backendLabel(String(task.backend || '')),
+    submitted_text: formatDateTime(task.submitted_at || task.created_at),
+    duration_text: formatDuration(task.duration_seconds),
+    // Parity with the old client-side export: the SMILES/identifier column was
+    // always filled; only image rendering is gated on ligandIsSmiles.
+    smiles: row.ligandRenderSmiles || row.ligandSmiles || '',
+    atom_plddts: normalizeAtomPlddts(row.ligandRenderAtomPlddts),
+    interface_label: row.metrics.interfaceMetricLabel || '',
+    metrics: {
+      plddt: row.metrics.plddt,
+      interface_value: row.metrics.interfaceMetricValue,
+      pae: row.metrics.pae
+    },
+    affinity: readAffinityExportPayload(task)
+  };
+}
+
+async function pollUntilExportComplete(
+  exportId: string,
+  total: number,
+  onProgress?: ExportTaskRowsToExcelInput['onProgress'],
+  onWarning?: (warning: string) => void,
+  isCancelled?: () => boolean
+): Promise<void> {
+  const startedAt = Date.now();
+  const maxWaitMs = Math.max(EXPORT_POLL_BASE_MAX_MS, total * EXPORT_POLL_MS_PER_ROW);
+  let consecutiveErrors = 0;
+  // Adaptive cadence: while `done` advances keep the UI snappy; when the job
+  // is quietly grinding, back off to keep request volume low on long exports.
+  let intervalMs = EXPORT_POLL_MIN_INTERVAL_MS;
+  let lastDone = -1;
+  let fileGraceLeft = EXPORT_POLL_FILE_GRACE_POLLS;
+  let pendingWarning = '';
+  for (;;) {
+    if (isCancelled?.()) return;
+    if (Date.now() - startedAt > maxWaitMs) {
+      throw new Error('Excel export timed out waiting for the server job to finish.');
+    }
+    let status;
+    try {
+      status = await getTasksExcelExportStatus(exportId);
+      consecutiveErrors = 0;
+    } catch (err) {
+      consecutiveErrors += 1;
+      if (consecutiveErrors >= EXPORT_POLL_MAX_CONSECUTIVE_ERRORS) {
+        throw err;
+      }
+      await sleep(intervalMs);
+      continue;
+    }
+    if (status.status === 'failure') {
+      throw new Error(
+        status.error
+          ? `Excel export failed on the server: ${status.error}`
+          : 'Excel export failed on the server.'
+      );
+    }
+    pendingWarning = status.warning || pendingWarning;
+    if (status.status === 'success' && status.file_ready) {
+      onWarning?.(pendingWarning);
+      onProgress?.({ phase: 'downloading', done: status.total || total, total: status.total || total });
+      return;
+    }
+    if (status.status === 'success' && !status.file_ready) {
+      fileGraceLeft -= 1;
+      if (fileGraceLeft <= 0) {
+        throw new Error('The export finished on the server but its file is not readable; please retry.');
+      }
+    }
+    onProgress?.({ phase: 'exporting', done: status.done, total: status.total || total });
+    intervalMs = status.done !== lastDone
+      ? EXPORT_POLL_MIN_INTERVAL_MS
+      : Math.min(intervalMs * 2, EXPORT_POLL_MAX_INTERVAL_MS);
+    lastDone = status.done;
+    await sleep(intervalMs);
+  }
 }
 
 export async function exportTaskRowsToExcel({
   project,
   filteredRows,
-  workspacePairPreference
+  onProgress,
+  onWarning,
+  onSubmitted,
+  isCancelled
 }: ExportTaskRowsToExcelInput): Promise<void> {
   if (filteredRows.length === 0) return;
+  onProgress?.({ phase: 'submitting', done: 0, total: filteredRows.length });
 
-  const [{ default: ExcelJS }, rdkit] = await Promise.all([import('exceljs'), loadRDKitModule()]);
-  const authoritativeTasks = await loadAuthoritativeTasksForExport(project, filteredRows);
-  const authoritativeTaskMap = new Map(authoritativeTasks.map((task) => [task.id, task] as const));
-  const imageWidthPx = 220;
-  const imageHeightPx = 132;
-  const rowHeightPt = Math.round((imageHeightPx * 72) / 96);
-  const sheetName = (() => {
-    const normalized = String(project.name || 'Tasks')
-      .replace(/[\\/*?:[\]]/g, ' ')
-      .trim();
-    const truncated = normalized.slice(0, 31);
-    return truncated || 'Tasks';
-  })();
+  // Zero re-fetching: the caller passes the COMPLETE filtered set (the page
+  // awaits the full list load first); submitting is the only network traffic.
+  const payloadTasks = filteredRows.map((row) => buildExportRowPayload(row));
 
-  const toPngBytesFromSvg = async (svg: string): Promise<Uint8Array> => {
-    const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-    const imageUrl = URL.createObjectURL(svgBlob);
-    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('Failed to decode SVG image.'));
-      img.src = imageUrl;
-    });
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = imageWidthPx;
-      canvas.height = imageHeightPx;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        throw new Error('Canvas 2D context is unavailable.');
-      }
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, imageWidthPx, imageHeightPx);
-      ctx.drawImage(image, 0, 0, imageWidthPx, imageHeightPx);
-      const pngBlob = await new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob((blob) => {
-          if (!blob) {
-            reject(new Error('Failed to encode PNG image.'));
-            return;
-          }
-          resolve(blob);
-        }, 'image/png');
-      });
-      return new Uint8Array(await pngBlob.arrayBuffer());
-    } finally {
-      URL.revokeObjectURL(imageUrl);
-    }
-  };
-
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet(sheetName);
-  worksheet.columns = [
-    { header: '#', key: 'index', width: 6 },
-    { header: 'Task Name', key: 'taskName', width: 24 },
-    { header: 'Task Summary', key: 'taskSummary', width: 36 },
-    { header: 'Task Row ID', key: 'taskRowId', width: 38 },
-    { header: 'Runtime Task ID', key: 'runtimeTaskId', width: 24 },
-    { header: 'State', key: 'state', width: 12 },
-    { header: 'Backend', key: 'backend', width: 12 },
-    { header: 'Submitted', key: 'submitted', width: 22 },
-    { header: 'Duration', key: 'duration', width: 12 },
-    { header: 'pLDDT', key: 'plddt', width: 10 },
-    { header: 'Interface', key: 'interfaceMetric', width: 12 },
-    { header: 'PAE', key: 'pae', width: 10 },
-    { header: 'SMILES', key: 'smiles', width: 42 },
-    { header: 'Ligand 2D (Confidence Color)', key: 'ligand2d', width: 36 }
-  ];
-  worksheet.getRow(1).font = { bold: true };
-
-  let ligandSmilesRowCount = 0;
-  let renderedImageCount = 0;
-  let firstRenderError: string | null = null;
-
-  for (let i = 0; i < filteredRows.length; i += 1) {
-    const row = filteredRows[i];
-    const { metrics } = row;
-    const task = authoritativeTaskMap.get(row.task.id) || row.task;
-    const selection = resolveTaskSelectionContext(task, workspacePairPreference, row.workflowKey);
-    const ligandSmiles = readTaskLigandRenderSmiles(task, selection.ligandChainId) || selection.ligandSmiles;
-    const ligandIsSmiles = selection.ligandIsSmiles;
-    const ligandAtomPlddts =
-      readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1) ??
-      row.ligandRenderAtomPlddts;
-    const submittedText = formatDateTime(task.submitted_at || task.created_at);
-    const runtimeTaskId = String(task.task_id || '').trim();
-    let imageBytes: Uint8Array | null = null;
-    if (ligandSmiles && ligandIsSmiles) {
-      ligandSmilesRowCount += 1;
-      try {
-        const svg = renderLigand2DSvg(rdkit, {
-          smiles: ligandSmiles,
-          width: imageWidthPx,
-          height: imageHeightPx,
-          atomConfidences: ligandAtomPlddts,
-          confidenceHint: metrics.plddt
-        });
-        imageBytes = await toPngBytesFromSvg(svg);
-        renderedImageCount += 1;
-      } catch (err) {
-        imageBytes = null;
-        if (!firstRenderError) {
-          const reason = err instanceof Error && err.message ? err.message : 'unknown error';
-          firstRenderError = `task ${task.id} (${reason})`;
-        }
-      }
-    }
-    const excelRow = worksheet.addRow({
-      index: i + 1,
-      taskName: String(task.name || '').trim(),
-      taskSummary: String(task.summary || '').trim(),
-      taskRowId: task.id,
-      runtimeTaskId,
-      state: taskStateLabel(task.task_state),
-      backend: backendLabel(task.backend || ''),
-      submitted: submittedText,
-      duration: formatDuration(task.duration_seconds),
-      plddt: formatMetric(metrics.plddt, 1),
-      interfaceMetric: formatMetric(metrics.interfaceMetricValue, 3),
-      pae: formatMetric(metrics.pae, 2),
-      smiles: ligandSmiles || '',
-      ligand2d: imageBytes ? '' : '-'
-    });
-    if (imageBytes) {
-      excelRow.height = rowHeightPt;
-      const imageId = workbook.addImage({
-        base64: `data:image/png;base64,${toBase64FromBytes(imageBytes)}`,
-        extension: 'png'
-      });
-      worksheet.addImage(imageId, {
-        tl: { col: 13, row: excelRow.number - 1 },
-        ext: { width: imageWidthPx, height: imageHeightPx },
-        editAs: 'oneCell'
-      });
-    }
-  }
-  if (ligandSmilesRowCount > 0 && renderedImageCount === 0) {
-    throw new Error(
-      firstRenderError
-        ? `Ligand 2D rendering failed for all SMILES rows (${ligandSmilesRowCount}). First failure: ${firstRenderError}.`
-        : `Ligand 2D rendering failed for all SMILES rows (${ligandSmilesRowCount}).`
-    );
-  }
-
-  const workbookBuffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([workbookBuffer], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  const created = await createTasksExcelExport({
+    projectName: project.name || 'Tasks',
+    tasks: payloadTasks
   });
-  const now = new Date();
-  const timestamp = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, '0'),
-    String(now.getDate()).padStart(2, '0'),
-    '_',
-    String(now.getHours()).padStart(2, '0'),
-    String(now.getMinutes()).padStart(2, '0'),
-    String(now.getSeconds()).padStart(2, '0')
-  ].join('');
-  const fileName = `${sanitizeFileName(project.name)}_tasks_${timestamp}.xlsx`;
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+  onSubmitted?.(created.exportId);
+  onProgress?.({ phase: 'exporting', done: 0, total: created.total });
+
+  await pollUntilExportComplete(created.exportId, created.total, onProgress, onWarning, isCancelled);
+  if (isCancelled?.()) return;
+
+  const { blob, fileName } = await downloadTasksExcelExport(created.exportId);
+  if (isCancelled?.()) return;
+  triggerBrowserDownload(blob, fileName);
 }

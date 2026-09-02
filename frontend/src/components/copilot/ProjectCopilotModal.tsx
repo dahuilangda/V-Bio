@@ -11,7 +11,7 @@ import {
   listProjectCopilotMessages,
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
-import { getCopilotConfig, getCopilotSettings, parseCopilotQuestions, requestCopilotCompletion, saveCopilotSettings, streamCopilotTurn, testCopilotSettings } from '../../api/copilotApi';
+import { getCopilotConfig, getCopilotSettings, parseCopilotQuestions, requestCopilotCompletions, saveCopilotSettings, streamCopilotTurn, submitCopilotSteering, testCopilotSettings } from '../../api/copilotApi';
 import type { CopilotTestResult, CopilotTestSubResult } from '../../api/copilotApi';
 import type { CopilotContextType, CopilotPlanAction, CopilotPlannerQuestion, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
@@ -27,6 +27,7 @@ import {
   type InputHistoryNav
 } from './copilotInputHistory';
 import './ProjectCopilotModal.css';
+import { fuzzyRank } from '../../utils/fuzzyScore';
 
 interface ProjectCopilotModalProps {
   open: boolean;
@@ -210,7 +211,8 @@ function CopilotObservationCard({ records }: { records: ObservationRecord[] }) {
 
 // Renders the planner's structured questions as clickable chips so the user resolves an ambiguity
 // (task type, modeling backend, ...) with one click instead of typing. A choice question lists its
-// options as chips; confirm is yes/no; freeform just highlights the prompt above the composer.
+// options as chips plus an "Other ___" free-text answer (unless the planner set allowOther=false);
+// confirm is yes/no; freeform just highlights the prompt above the composer.
 function CopilotQuestionCard({
   questions,
   disabled,
@@ -225,12 +227,25 @@ function CopilotQuestionCard({
   // avoids answering one question disabling the rest mid-stream.
   const isSingle = questions.length === 1;
   const [answers, setAnswers] = useState<Record<number, string>>({});
+  // "Other ___" free-text state per choice question: which question has its input open, and the
+  // draft text. The user's answer may fall outside the planner's options — the free-text escape
+  // guarantees a choice question can always be answered, and the planner treats the reply as the
+  // user's own resolution.
+  const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({});
+  const [otherText, setOtherText] = useState<Record<number, string>>({});
   const recordAnswer = (index: number, text: string) => {
     if (isSingle) {
       onAnswer(text);
       return;
     }
     setAnswers((prev) => ({ ...prev, [index]: text }));
+  };
+  const submitOther = (index: number, questionText: string) => {
+    const text = String(otherText[index] || '').trim();
+    if (!text) return;
+    setOtherOpen((prev) => ({ ...prev, [index]: false }));
+    setOtherText((prev) => ({ ...prev, [index]: '' }));
+    recordAnswer(index, `${questionText} ${text}`);
   };
   const allAnswered = isSingle || questions.every((_, i) => answers[i]);
   const submit = () => {
@@ -243,6 +258,7 @@ function CopilotQuestionCard({
       {questions.map((question, questionIndex) => {
         const answeredValue = answers[questionIndex];
         const isAnswered = Boolean(answeredValue);
+        const showOther = question.kind === 'choice' && question.allowOther !== false;
         return (
           <div className={`copilot-question${isAnswered ? ' is-answered' : ''}`} key={`q-${questionIndex}`}>
             <p className="copilot-question-text">{question.text}</p>
@@ -263,6 +279,43 @@ function CopilotQuestionCard({
                     </button>
                   );
                 })}
+                {showOther ? (
+                  <button
+                    type="button"
+                    className={`copilot-question-chip copilot-question-other-chip${otherOpen[questionIndex] ? ' is-open' : ''}`}
+                    key={`q-${questionIndex}-other`}
+                    disabled={disabled}
+                    onClick={() => setOtherOpen((prev) => ({ ...prev, [questionIndex]: !prev[questionIndex] }))}
+                  >
+                    其他…
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {showOther && otherOpen[questionIndex] ? (
+              <div className="copilot-question-other">
+                <input
+                  className="copilot-question-other-input"
+                  type="text"
+                  value={otherText[questionIndex] || ''}
+                  disabled={disabled}
+                  placeholder="输入你的回答…"
+                  onChange={(e) => setOtherText((prev) => ({ ...prev, [questionIndex]: e.target.value }))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      submitOther(questionIndex, question.text);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="copilot-question-other-submit"
+                  disabled={disabled || !String(otherText[questionIndex] || '').trim()}
+                  onClick={() => submitOther(questionIndex, question.text)}
+                >
+                  提交
+                </button>
               </div>
             ) : null}
             {question.kind === 'confirm' ? (
@@ -378,8 +431,14 @@ interface CopilotActionResolution {
   plan_id: string;
   operation_id: string;
   status: CopilotActionResolutionStatus;
+  /** The action skill id (e.g. the page operation that was confirmed). */
+  skill?: string;
+  /** The human-facing label shown on the confirmation chip. */
+  label?: string;
   detail?: string;
   error?: string;
+  /** The action's own arguments — what a recovery/summary turn may cite as actually applied. */
+  arguments?: Record<string, unknown>;
 }
 
 function planActionKey(action: CopilotPlanAction): string {
@@ -411,8 +470,13 @@ function readActionResolutions(message: ProjectCopilotMessage): CopilotActionRes
       plan_id: planId,
       operation_id: operationId,
       status,
+      ...(typeof resolution.skill === 'string' && resolution.skill ? { skill: resolution.skill } : {}),
+      ...(typeof resolution.label === 'string' && resolution.label ? { label: resolution.label } : {}),
       ...(typeof resolution.detail === 'string' && resolution.detail ? { detail: resolution.detail } : {}),
       ...(typeof resolution.error === 'string' && resolution.error ? { error: resolution.error } : {}),
+      ...(resolution.arguments && typeof resolution.arguments === 'object' && !Array.isArray(resolution.arguments)
+        ? { arguments: resolution.arguments as Record<string, unknown> }
+        : {}),
     }];
   });
 }
@@ -482,9 +546,6 @@ function copilotActiveSessionStorageKey(userId: string): string {
 }
 
 
-function copilotTaskPrefillStorageKey(userId: string, projectId?: string | null): string {
-  return `vbio:copilot-task-prefill:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}:${String(projectId || 'project-null')}`;
-}
 
 function copilotDraftStorageKey(input: {
   userId: string;
@@ -590,7 +651,7 @@ function writeStoredCopilotActiveSession(userId: string, sessionId: string): voi
   if (typeof window !== 'undefined') {
     window.localStorage.setItem(copilotActiveSessionStorageKey(userId), normalizedSessionId);
   }
-  void upsertProjectCopilotState(userId, copilotActiveSessionStateDbKey(), { session_id: normalizedSessionId });
+  void upsertProjectCopilotState(userId, copilotActiveSessionStateDbKey(), { session_id: normalizedSessionId }).catch(() => {});
 }
 
 function clearStoredCopilotActiveSession(userId: string): void {
@@ -600,6 +661,99 @@ function clearStoredCopilotActiveSession(userId: string): void {
   void deleteProjectCopilotState(userId, copilotActiveSessionStateDbKey());
 }
 
+// --- Auto-continuation handoff across page navigation ---
+// The modal is mounted per host page; an apply that navigates (tasks:create_docking and
+// friends) unmounts this component before the continuation effect can fire. The armed
+// continuation is therefore ALSO written to sessionStorage: the next page's modal picks it
+// up on mount and resumes the loop there (the agent loop must survive its own actions'
+// navigation). sessionStorage (not localStorage) so it dies with the tab, never leaks
+// across sessions, and the TTL bounds it further.
+
+interface CopilotContinuation {
+  planId: string;
+  /** The arming action's operation id — the receipt the continuation continues from. */
+  operationId: string;
+  sessionId: string;
+  outcome: 'applied' | 'failed';
+  at: number;
+}
+
+const COPILOT_CONTINUATION_STORAGE_PREFIX = 'vbio:copilot-continuation:';
+const COPILOT_CONTINUATION_TTL_MS = 120_000;
+// Hard cap on auto-continuations per mounted panel (per page / session switch) — a runaway
+// planner loop must eventually hand control back to the user.
+const AUTO_CONTINUATION_CAP = 5;
+
+// Outcome-aware continuation prompts — the synthetic user turn that resumes the agent loop
+// after a plan's actions resolved. Applied and failed receipts carry very different duties:
+// continue vs. diagnose-and-recover, and NEVER claim completion on failed receipts.
+const COPILOT_CONTINUATION_MESSAGE_APPLIED =
+  '已应用刚才确认的操作（见回执），无需重复；请继续完成计划。若目标已达成，请基于回执如实总结后停止。';
+const COPILOT_CONTINUATION_MESSAGE_FAILED =
+  '刚才确认的部分操作执行失败（见回执中的 error 字段）。请先诊断失败原因，修复前提或修正参数后重新提议对应操作；无法修复时改用合法的替代路径；确实无路可走才向用户如实说明阻塞点。不要原样重复已失败的操作，也不要在回执为 failed 时宣称任务已完成。';
+
+function copilotContinuationStorageKey(userId: string): string {
+  return `${COPILOT_CONTINUATION_STORAGE_PREFIX}${userId}`;
+}
+
+function readStoredCopilotContinuation(userId: string): CopilotContinuation | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(copilotContinuationStorageKey(userId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CopilotContinuation>;
+    const planId = String(parsed.planId || '').trim();
+    const operationId = String(parsed.operationId || '').trim();
+    const sessionId = String(parsed.sessionId || '').trim();
+    const outcome = parsed.outcome === 'failed' ? 'failed' : 'applied';
+    const at = Number(parsed.at);
+    if (!planId || !operationId || !sessionId || !Number.isFinite(at)) return null;
+    if (Date.now() - at > COPILOT_CONTINUATION_TTL_MS) {
+      window.sessionStorage.removeItem(copilotContinuationStorageKey(userId));
+      return null;
+    }
+    return { planId, operationId, sessionId, outcome, at };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredCopilotContinuation(userId: string, continuation: CopilotContinuation): void {
+  if (typeof window === 'undefined' || !continuation.planId || !continuation.operationId || !continuation.sessionId) return;
+  try {
+    window.sessionStorage.setItem(copilotContinuationStorageKey(userId), JSON.stringify(continuation));
+  } catch {
+    // quota errors lose only the cross-page handoff, never the current page's continuation
+  }
+}
+
+function clearStoredCopilotContinuation(userId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(copilotContinuationStorageKey(userId));
+  } catch {
+    // ignore
+  }
+}
+
+
+function readStoredCopilotPanelState(userId: string): CopilotPanelState {
+  if (typeof window === 'undefined') return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(copilotPanelStateStorageKey(userId)) || '{}') as CopilotPanelState;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredCopilotPanelState(userId: string, patch: CopilotPanelState): void {
+  if (typeof window === 'undefined') return;
+  const prev = readStoredCopilotPanelState(userId);
+  const next = { ...prev, ...patch };
+  window.localStorage.setItem(copilotPanelStateStorageKey(userId), JSON.stringify(next));
+  void upsertProjectCopilotState(userId, copilotPanelStateDbKey(), next as Record<string, unknown>).catch(() => {});
+}
 
 type CopilotTaskPrefillState = {
   sessionId: string;
@@ -609,6 +763,9 @@ type CopilotTaskPrefillState = {
   createdAt: number;
 };
 
+function copilotTaskPrefillStorageKey(userId: string, projectId?: string | null): string {
+  return `vbio:copilot-task-prefill:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}:${String(projectId || 'project-null')}`;
+}
 
 function parseCopilotTaskPrefill(value: unknown, projectId?: string | null): CopilotTaskPrefillState | null {
   const parsed = value && typeof value === 'object' ? (value as {
@@ -648,25 +805,6 @@ export function clearStoredCopilotTaskPrefill(userId: string, projectId?: string
   window.localStorage.removeItem(copilotTaskPrefillStorageKey(userId, projectId));
 }
 
-
-function readStoredCopilotPanelState(userId: string): CopilotPanelState {
-  if (typeof window === 'undefined') return {};
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(copilotPanelStateStorageKey(userId)) || '{}') as CopilotPanelState;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeStoredCopilotPanelState(userId: string, patch: CopilotPanelState): void {
-  if (typeof window === 'undefined') return;
-  const prev = readStoredCopilotPanelState(userId);
-  const next = { ...prev, ...patch };
-  window.localStorage.setItem(copilotPanelStateStorageKey(userId), JSON.stringify(next));
-  void upsertProjectCopilotState(userId, copilotPanelStateDbKey(), next as Record<string, unknown>);
-}
-
 export function readStoredCopilotOpen(input: {
   contextType: CopilotContextType;
   projectId?: string | null;
@@ -701,10 +839,23 @@ export function writeStoredCopilotOpen(
   }
 }
 
+function clampPanelPosition(pos: { x: number; y: number }): { x: number; y: number } {
+  // Keep the panel reachable on ANY viewport: a position persisted on a large screen (or
+  // synced from another device) can otherwise land entirely off-screen on a smaller one,
+  // with the close button unreachable and no way to dismiss the open panel.
+  if (typeof window === 'undefined') return pos;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  return {
+    x: Math.min(Math.max(8, pos.x), Math.max(8, vw - 280)),
+    y: Math.min(Math.max(8, pos.y), Math.max(8, vh - 180))
+  };
+}
+
 function getInitialPanelPosition(stored: CopilotPanelState): { x: number; y: number } | null {
   const x = Number(stored.x);
   const y = Number(stored.y);
-  if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  if (Number.isFinite(x) && Number.isFinite(y)) return clampPanelPosition({ x, y });
   if (typeof window === 'undefined') return null;
   return {
     x: Math.max(12, window.innerWidth - 560 - 24),
@@ -810,9 +961,28 @@ function formatActionSummary(action: CopilotPlanAction): ActionSummaryEntry[] {
     } else if (Array.isArray(value)) {
       text = `${value.length} item${value.length === 1 ? '' : 's'}`;
     } else if (value && typeof value === 'object') {
-      // For nested objects (e.g. parameterPatch), summarize the keys so the user sees what changes.
-      const keys = Object.keys(value);
-      text = keys.length > 0 ? keys.join(', ') : '{}';
+      // For nested objects (e.g. parameterPatch), render friendly key=value
+      // pairs with display labels so engine/chirality choices are readable.
+      const FRIENDLY: Record<string, string> = {
+        backend: '',
+        boltz2dock: 'Boltz2Dock',
+        protenix2dock: 'Protenix2Dock',
+        peptideChirality: 'Chirality',
+        d: 'D-peptide',
+        l: 'L-peptide',
+        peptideDesignMode: 'Mode',
+        linear: 'Linear', cyclic: 'Cyclic', bicyclic: 'Bicyclic',
+      };
+      const parts = Object.entries(value as Record<string, unknown>).map(([k, v]) => {
+        const kl = k.replace(/_/g, '');
+        const labelEntry = Object.prototype.hasOwnProperty.call(FRIENDLY, k) ? FRIENDLY[k]
+          : Object.prototype.hasOwnProperty.call(FRIENDLY, kl) ? FRIENDLY[kl] : k;
+        const vl = typeof v === 'string' && Object.prototype.hasOwnProperty.call(FRIENDLY, v)
+          ? FRIENDLY[v]
+          : String(v);
+        return labelEntry === '' || labelEntry === undefined ? vl : `${labelEntry}: ${vl}`;
+      });
+      text = parts.filter(Boolean).join(', ') || '{}';
     } else {
       continue;
     }
@@ -832,9 +1002,15 @@ function compactCopilotText(value: unknown, limit: number): string {
   return `${text.slice(0, limit)}...`;
 }
 
-function buildCopilotConversationContext(messages: ProjectCopilotMessage[]): Record<string, unknown> {
+export function buildCopilotConversationContext(messages: ProjectCopilotMessage[]): Record<string, unknown> {
   const visibleMessages = messages.filter((message) => message.role === 'user' || message.role === 'assistant');
-  if (visibleMessages.length === 0) {
+  // Confirmation receipts (system role) never enter the visible transcript, but their OUTCOME is
+  // what the next planner turn needs: a failed apply means the plan must be recovered (diagnose
+  // the error, fix the precondition, re-propose), an applied one means the step is done and the
+  // plan should advance. Without this the planner cannot tell whether its last confirmed action
+  // succeeded, so it either repeats it or abandons the goal mid-flight.
+  const actionResolutions = collectRecentActionResolutions(messages);
+  if (visibleMessages.length === 0 && actionResolutions.length === 0) {
     return { compression: 'empty', recent_messages: [] };
   }
   const recent = visibleMessages.slice(-COPILOT_RECENT_CONTEXT_MESSAGES).map((message) => ({
@@ -853,8 +1029,26 @@ function buildCopilotConversationContext(messages: ProjectCopilotMessage[]): Rec
     summarized_messages: older.length,
     summary_source_messages: summarySource.length,
     summary: older.length > 0 ? compactCopilotText(olderSummary, COPILOT_CONTEXT_SUMMARY_CHARS) : '',
-    recent_messages: recent
+    recent_messages: recent,
+    ...(actionResolutions.length > 0 ? { recent_action_resolutions: actionResolutions } : {})
   };
+}
+
+// How many confirmation receipts ride along as recent_action_resolutions — enough to cover a
+// multi-step plan's confirmed operations, bounded so the context stays small.
+const COPILOT_RECENT_ACTION_RESOLUTIONS = 12;
+
+function collectRecentActionResolutions(messages: ProjectCopilotMessage[]): CopilotActionResolution[] {
+  const collected: CopilotActionResolution[] = [];
+  for (let index = messages.length - 1; index >= 0 && collected.length < COPILOT_RECENT_ACTION_RESOLUTIONS; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'system') continue;
+    const resolutions = readActionResolutions(message);
+    for (let inner = resolutions.length - 1; inner >= 0 && collected.length < COPILOT_RECENT_ACTION_RESOLUTIONS; inner -= 1) {
+      collected.unshift(resolutions[inner]);
+    }
+  }
+  return collected;
 }
 
 export function ProjectCopilotModal({
@@ -1001,7 +1195,11 @@ export function ProjectCopilotModal({
   const inputHistoryRef = useRef<string[]>([]);
   const historyNavRef = useRef<InputHistoryNav | null>(null);
   // Inline LLM auto-complete: the current ghost suffix + its fetch orchestration.
-  const [completion, setCompletion] = useState('');
+  const [completions, setCompletions] = useState<string[]>([]);
+  const [completionPickerIndex, setCompletionPickerIndex] = useState<number | null>(null);
+  // In-flight turn identity + steering texts (pi alignment: interject, don't cancel).
+  const activeTurnKeyRef = useRef<string | null>(null);
+  const [steeredTurnTexts, setSteeredTurnTexts] = useState<string[]>([]);
   const [completionEnabled, setCompletionEnabled] = useState(false);
   const completionTimerRef = useRef<number | null>(null);
   const completionAbortRef = useRef<AbortController | null>(null);
@@ -1075,6 +1273,10 @@ export function ProjectCopilotModal({
   // Track whether the user intentionally switched sessions (via startNewChat/selectSession). When
   // true, loadMessages must NOT override the active session — the user's choice wins.
   const sessionSwitchRef = useRef(false);
+  // Why an in-flight send was aborted: 'user' (Stop button) restores the composer draft, while
+  // 'session-switch' / 'close' / 'unmount' must NOT — the async catch otherwise resurrects the
+  // old session's draft into the newly selected session's composer and storage.
+  const abortReasonRef = useRef<'user' | 'session-switch' | 'close' | 'unmount'>('user');
 
   const loadMessages = useCallback(async () => {
     if (!open) return;
@@ -1142,8 +1344,9 @@ export function ProjectCopilotModal({
         const nextWidth = Number(state.width);
         const nextHeight = Number(state.height);
         if (Number.isFinite(nextX) && Number.isFinite(nextY)) {
-          latestPositionRef.current = { x: nextX, y: nextY };
-          setPosition({ x: nextX, y: nextY });
+          const clamped = clampPanelPosition({ x: nextX, y: nextY });
+          latestPositionRef.current = clamped;
+          setPosition(clamped);
         }
         if (Number.isFinite(nextWidth) && Number.isFinite(nextHeight) && nextWidth >= 300 && nextHeight >= 300) {
           setPanelSize({ width: nextWidth, height: nextHeight });
@@ -1284,12 +1487,11 @@ export function ProjectCopilotModal({
     if (/[\r\n\t]/.test(query)) return null;
     if (query.includes('  ')) return null;
     const normalizedQuery = query.trim().toLowerCase();
-    const options = uploadedAttachments
-      .filter((attachment) => {
-        if (!normalizedQuery) return true;
-        return attachment.name.toLowerCase().includes(normalizedQuery);
-      })
-      .slice(0, 6);
+    // cmdk-style fuzzy ranking (absorbed command-score): word-boundary jumps beat character
+    // jumps, non-matching attachments drop out; a bare @ with no query keeps upload order.
+    const options = normalizedQuery
+      ? fuzzyRank(uploadedAttachments, normalizedQuery, (attachment) => attachment.name).slice(0, 6)
+      : uploadedAttachments.slice(0, 6);
     if (options.length === 0) return null;
     return { start: atIndex, end: caret, query, options };
   }, [draft, mentionCaret, mentionDismissedDraft, uploadedAttachments]);
@@ -1299,6 +1501,28 @@ export function ProjectCopilotModal({
   // or aborted result is dropped, and any failure leaves the ghost empty. ``contextPayload`` is read
   // via a ref because parents pass an inline object (new identity each render); depending on it would
   // re-run this effect — and clear the ghost — on every unrelated parent re-render.
+  // The ghost suffix is the top-ranked prediction; the picker exposes the rest (top-10).
+  const completion = completions[0] || '';
+  const acceptCompletion = (suffix: string) => {
+    if (!suffix) return;
+    const next = `${draft}${suffix}`;
+    setCompletions([]);
+    setCompletionPickerIndex(null);
+    historyNavRef.current = null;
+    setDraft(next);
+    setMentionCaret(next.length);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true });
+      textareaRef.current?.setSelectionRange(next.length, next.length);
+    });
+  };
+
+  // Conversation read via ref: an unrelated message-list change (receipt landing, session
+  // restore finishing) must NOT clear the ghost and re-fire the fetch — the ghost is a
+  // per-keystroke prediction and survives until the draft actually changes (the historical
+  // flicker/drop bug: any sessionMessages identity change wiped the prediction mid-typing).
+  const completionConversationRef = useRef(sessionMessages);
+  completionConversationRef.current = sessionMessages;
   useEffect(() => {
     if (completionTimerRef.current !== null) {
       window.clearTimeout(completionTimerRef.current);
@@ -1306,7 +1530,8 @@ export function ProjectCopilotModal({
     }
     completionAbortRef.current?.abort();
     completionAbortRef.current = null;
-    setCompletion('');
+    setCompletions([]);
+    setCompletionPickerIndex(null);
 
     if (!completionEnabled || !open || sending || applyingActionKey || bulkAction || attachmentMentionState) {
       return;
@@ -1322,14 +1547,14 @@ export function ProjectCopilotModal({
       // intent (e.g. after "aspirin SMILES" the user typing "它的靶点" should complete toward
       // targets). The planner already gets this via copilot_conversation; the completer needs the
       // same recency window to anticipate what the user is most likely to say next.
-      const conversationContext = buildCopilotConversationContext(sessionMessages);
+      const conversationContext = buildCopilotConversationContext(completionConversationRef.current);
       const enrichedPayload = { ...contextPayloadRef.current, copilot_conversation: conversationContext };
-      void requestCopilotCompletion(
+      void requestCopilotCompletions(
         { contextType, contextPayload: enrichedPayload, userId: currentUserId, username: currentUsername, content: snapshot },
         controller.signal
-      ).then((suffix) => {
+      ).then((ranked) => {
         if (token !== completionTokenRef.current || controller.signal.aborted) return;
-        if (suffix && draftRef.current === snapshot) setCompletion(suffix);
+        if (ranked.length > 0 && draftRef.current === snapshot) setCompletions(ranked);
       });
     }, 400);
     return () => {
@@ -1340,7 +1565,7 @@ export function ProjectCopilotModal({
       completionAbortRef.current?.abort();
       completionAbortRef.current = null;
     };
-  }, [attachmentMentionState, applyingActionKey, bulkAction, completionEnabled, contextType, currentUserId, currentUsername, draft, open, sending, sessionMessages]);
+  }, [attachmentMentionState, applyingActionKey, bulkAction, completionEnabled, contextType, currentUserId, currentUsername, draft, open, sending]);
 
   // Keep the contextPayload ref current (parents pass an inline object, so this is frequent + cheap).
   useEffect(() => {
@@ -1363,6 +1588,15 @@ export function ProjectCopilotModal({
     if (!open) return;
     writeStoredCopilotPanelState(currentUserId, { historyOpen });
   }, [currentUserId, historyOpen, open]);
+
+  // Global ⌘K palette handoff: the palette dispatches a window event; every mounted panel
+  // instance calls its onOpen — only the page the user is on has a visible launcher, so
+  // this opens the panel right where they are.
+  useEffect(() => {
+    const onPaletteOpen = () => onOpen();
+    window.addEventListener('vbio:open-copilot', onPaletteOpen);
+    return () => window.removeEventListener('vbio:open-copilot', onPaletteOpen);
+  }, [onOpen]);
 
   useEffect(() => {
     if (!open || !panelRef.current || typeof ResizeObserver === 'undefined') return;
@@ -1455,9 +1689,33 @@ export function ProjectCopilotModal({
     // (its AbortController gets clobbered) and double-insert messages. Treat a send while sending as
     // a cancel of the in-flight turn, not a new one — matching the Stop button's behavior.
     if (!content || applyingActionKey || bulkAction) return;
+    // A user-typed turn supersedes any armed auto-continuation — both the in-memory arm and
+    // the cross-page storage entry, or the effect would fire the stale continuation after
+    // this turn ends.
+    if (!isChipAnswer) {
+      continuationArmedRef.current = null;
+      clearStoredCopilotContinuation(currentUserId);
+    }
     if (sending) {
-      cancelSending();
-      return;
+      // STEERING (pi agent-loop alignment): an interjection while a turn runs is queued to
+      // the in-flight stream and drained between planner rounds — the turn adapts instead of
+      // being killed and retyped. Chip answers still cancel (they answer a pending question
+      // of a PREVIOUS turn's UI, not this stream). If the steer POST fails (turn just
+      // finished), fall back to sending a fresh turn with the same text.
+      if (!isChipAnswer && activeTurnKeyRef.current) {
+        const steered = content;
+        setDraft('');
+        writeStoredCopilotDraftLocal(draftScope, '');
+        setSteeredTurnTexts((prev) => [...prev, steered]);
+        const queued = await submitCopilotSteering({ turnKey: activeTurnKeyRef.current, text: steered });
+        if (queued) return;
+        setSteeredTurnTexts((prev) => prev.filter((item) => item !== steered));
+        setDraft(steered);
+        // fall through: the turn ended between the check and the POST — send as a new turn.
+      } else {
+        cancelSending();
+        return;
+      }
     }
     const attachmentMetadata = uploadedAttachments.map((attachment) => ({
       id: attachment.id,
@@ -1470,7 +1728,12 @@ export function ProjectCopilotModal({
     const conversationContext = buildCopilotConversationContext(sessionMessages);
     const copilotMemory = collectCopilotMemory(sessionMessages, activeSessionId);
     setSending(true);
-    abortRef.current = new AbortController();
+    // LOCAL controller for the whole turn: session-switch/close/unmount handlers null out
+    // abortRef during the DB-await window below, and re-reading abortRef.current?.signal after
+    // the await would start an UNCANCELLABLE orphan stream. The local reference survives.
+    const controller = new AbortController();
+    abortRef.current = controller;
+    abortReasonRef.current = 'user';
     setStreamStartedAt(new Date().toISOString());
     setError(null);
     setLiveTrace([]);
@@ -1489,14 +1752,32 @@ export function ProjectCopilotModal({
       if (pendingActions.length > 0) {
         await persistActionResolutions([...pendingActions].sort(comparePlanActions), 'cancelled');
       }
-      const userMessage = await insertProjectCopilotMessage({
-        ...messageScope,
-        userId: currentUserId,
-        role: 'user',
-        content,
-        metadata: { ...sourceContext, session_id: activeSessionId, attachments: attachmentMetadata }
-      });
-      setMessages((prev) => [...prev, { ...userMessage, username: currentUsername }]);
+      if (controller.signal.aborted) return; // session switched mid-await — drop this turn
+      // Synthetic-turn dedupe: an auto-continuation whose send was aborted by a page
+      // navigation already inserted its user row (the stream died, no assistant reply). The
+      // cross-page retry must REUSE that orphan instead of stacking a second identical row —
+      // only programmatic (chip) turns dedupe; a user re-typing the same text is their own
+      // message and always inserts.
+      const orphanedSynthetic = isChipAnswer
+        ? sessionMessages[sessionMessages.length - 1]
+        : undefined;
+      const reusesOrphanedTurn =
+        Boolean(orphanedSynthetic) &&
+        orphanedSynthetic!.role === 'user' &&
+        String(orphanedSynthetic!.content || '').trim() === content;
+      let userMessage: ProjectCopilotMessage;
+      if (reusesOrphanedTurn) {
+        userMessage = orphanedSynthetic!;
+      } else {
+        userMessage = await insertProjectCopilotMessage({
+          ...messageScope,
+          userId: currentUserId,
+          role: 'user',
+          content,
+          metadata: { ...sourceContext, session_id: activeSessionId, attachments: attachmentMetadata }
+        });
+        setMessages((prev) => [...prev, { ...userMessage, username: currentUsername }]);
+      }
 
       const turn = await streamCopilotTurn(
         {
@@ -1512,35 +1793,75 @@ export function ProjectCopilotModal({
           content
         },
         (step) => setLiveTrace((prev) => [...prev, step]),
-        abortRef.current?.signal
+        controller.signal
       );
+      if (controller.signal.aborted) return; // switched mid-stream — do not touch the new session
       const planActions = turn.actions;
-      const assistantMessage = await insertProjectCopilotMessage({
-        ...messageScope,
-        userId: null,
-        role: 'assistant',
-        content: turn.content,
-        metadata: {
-          ...sourceContext,
-          session_id: activeSessionId,
-          owner_user_id: currentUserId,
-          candidate_plan_actions: planActions,
-          plan_id: turn.planId,
-          planner_state: turn.state,
-          planner_questions: turn.questions,
-          planner_trace: turn.trace,
-          planner_observations: turn.observations
-        }
-      });
+      let assistantMessage: ProjectCopilotMessage;
+      try {
+        assistantMessage = await insertProjectCopilotMessage({
+          ...messageScope,
+          userId: null,
+          role: 'assistant',
+          content: turn.content,
+          metadata: {
+            ...sourceContext,
+            session_id: activeSessionId,
+            owner_user_id: currentUserId,
+            candidate_plan_actions: planActions,
+            plan_id: turn.planId,
+            planner_state: turn.state,
+            planner_questions: turn.questions,
+            planner_trace: turn.trace,
+            planner_observations: turn.observations
+          }
+        });
+      } catch {
+        // The turn already streamed (possibly minutes of LLM work): a receipt-DB failure must
+        // not discard it. Fall back to a local-only row — shown now, persisted on the next
+        // successful insert path (session restore will drop it, but the user has the answer
+        // and can act on the confirmation cards immediately).
+        const nowIso = new Date().toISOString();
+        assistantMessage = {
+          id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          created_at: nowIso,
+          updated_at: nowIso,
+          context_type: contextType,
+          project_id: null,
+          project_task_id: null,
+          user_id: null,
+          role: 'assistant',
+          content: turn.content,
+          metadata: {
+            session_id: activeSessionId,
+            owner_user_id: currentUserId,
+            candidate_plan_actions: planActions,
+            plan_id: turn.planId,
+            planner_state: turn.state,
+            planner_questions: turn.questions,
+            planner_trace: turn.trace,
+            planner_observations: turn.observations
+          }
+        };
+      }
       setMessages((prev) => [...prev, assistantMessage]);
-      setPendingActions(planActions);
+      // Same context filter as the restore path: a cross-page action landing here would render
+      // an Apply button whose host branch throws on this page and files a bogus failed receipt.
+      // A turn that proposes NOTHING for this page must not wipe actions a mid-stream session
+      // load restored (page remount during the turn) — those still await the user's decision.
+      setPendingActions((prev) => {
+        const next = planActions.filter((action) => actionMatchesContext(action, contextType));
+        return next.length > 0 ? next : prev;
+      });
       // Desktop-only re-focus after a turn: on mobile this would re-open the soft keyboard the user
       // just dismissed by sending, causing the keyboard to flicker back up.
       if (!isMobileViewport) focusComposer();
     } catch (err) {
-      // User-initiated cancel — don't show an error, just restore the draft.
+      // Canceled send — restore the composer draft ONLY when the user pressed Stop. Session
+      // switches, panel close, and unmount abort the stream for navigation reasons; restoring
+      // the draft there would leak the old session's text into the new one.
       if (err instanceof DOMException && err.name === 'AbortError') {
-        if (!isChipAnswer) setDraft(content);
+        if (abortReasonRef.current === 'user' && !isChipAnswer) setDraft(content);
         if (!isMobileViewport) focusComposer();
         return;
       }
@@ -1550,10 +1871,18 @@ export function ProjectCopilotModal({
       }
       if (!isMobileViewport) focusComposer();
     } finally {
-      abortRef.current = null;
-      setSending(false);
-      setLiveTrace([]);
-      setStreamStartedAt('');
+      // Identity-guarded cleanup: if a NEW turn already started (its controller replaced
+      // abortRef), clearing the shared state here would kill the new turn's Stop button/trace.
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
+      if (!controller.signal.aborted || abortReasonRef.current === 'user') {
+        activeTurnKeyRef.current = null;
+        setSteeredTurnTexts([]);
+        setSending(false);
+        setLiveTrace([]);
+        setStreamStartedAt('');
+      }
     }
   };
   // Keep a ref to the latest sendMessage so the memoized answerQuestion callback (passed into the
@@ -1565,22 +1894,168 @@ export function ProjectCopilotModal({
     void sendMessageRef.current(answer);
   }, []);
 
+  // AUTO-CONTINUATION (pi loop alignment): confirming an action IS the "tool result" of a write
+  // operation — the agent loop must resume on its own instead of stalling until the user thinks
+  // to type again. Armed with the APPLIED ACTION'S OWN plan id (never a remembered ref — a
+  // stale plan id from an earlier turn/session must not fire here); fires once per plan id
+  // with a hard cap. Guards: panel open (no phantom turns behind a closed launcher), no
+  // bulk cancel in flight, no step still awaiting confirmation, and none of the busy states
+  // sendMessage itself guards on (applyingActionKey / sending).
+  // The armed entry survives PAGE NAVIGATION via sessionStorage: an apply that navigates
+  // (tasks:create_*) unmounts this page before the continuation effect can fire, so the next
+  // page's modal consumes the stored entry on mount and resumes the loop there — multi-page
+  // plans advance page by page instead of stalling at the first navigation.
+  // FAILED receipts arm the loop too, with the recovery prompt: a failed apply is a tool
+  // error the planner must diagnose and recover from, never a dead end after which the
+  // transcript's last word is an untruthful pre-written success claim.
+  const continuationArmedRef = useRef<CopilotContinuation | null>(null);
+  const continuedPlansRef = useRef<Set<string>>(new Set());
+  // A continuation send still in flight when this page unmounts (or the panel closes) must
+  // be handed to the next mount instead of dying with the aborted request.
+  const continuationInFlightRef = useRef<CopilotContinuation | null>(null);
+  // Plans with at least one failed receipt — arming speaks the failed outcome even when the
+  // plan's LAST action applied cleanly.
+  const failedPlansRef = useRef<Set<string>>(new Set());
+  // While waiting for the arming receipt to become visible (cross-page mount raced the
+  // receipt POST), a timer nudges this effect back to life — sessionStorage writes and a
+  // completed POST notify React about nothing.
+  const continuationPollTimerRef = useRef<number | null>(null);
+  const [continuationNudge, setContinuationNudge] = useState(0);
+  useEffect(() => {
+    if (!open || bulkAction || pendingActions.length > 0 || applyingActionKey || sending) return;
+    const armed =
+      continuationArmedRef.current ??
+      (() => {
+        const stored = readStoredCopilotContinuation(currentUserId);
+        return stored && stored.sessionId === activeSessionId ? stored : null;
+      })();
+    if (!armed) return;
+    continuationArmedRef.current = null;
+    // Session and TTL checks apply to BOTH arms (a ref entry was never TTL-checked before it
+    // reached storage): a session switch between the arm and now must not fire a turn into
+    // the wrong session, and a stale arm must not resurrect a long-dead plan.
+    if (armed.sessionId !== activeSessionId || Date.now() - armed.at > COPILOT_CONTINUATION_TTL_MS) {
+      clearStoredCopilotContinuation(currentUserId);
+      return;
+    }
+    // The continuation turn must SEE the receipt it continues from. On a freshly mounted
+    // page the storage entry can be consumed before the session's messages (including the
+    // receipt) have loaded; firing then would resume the loop blind. Wait for the arming
+    // operation's receipt to become visible; the TTL bounds the wait.
+    const receiptVisible = sessionMessages.some((message) =>
+      readActionResolutions(message).some((row) => row.plan_id === armed.planId && row.operation_id === armed.operationId)
+    );
+    if (!receiptVisible) {
+      // Re-arm in memory (storage keeps its copy) so a later effect run — typically when the
+      // message load lands — picks this up; the ref path and the storage path stay identical.
+      continuationArmedRef.current = armed;
+      // The load may already have completed BEFORE the receipt POST committed (a page remount
+      // races it), and nothing will re-run this effect on its own — poll briefly.
+      if (continuationPollTimerRef.current === null) {
+        continuationPollTimerRef.current = window.setTimeout(() => {
+          continuationPollTimerRef.current = null;
+          setContinuationNudge((n) => n + 1);
+        }, 1500);
+      }
+      return;
+    }
+    if (continuationPollTimerRef.current !== null) {
+      window.clearTimeout(continuationPollTimerRef.current);
+      continuationPollTimerRef.current = null;
+    }
+    clearStoredCopilotContinuation(currentUserId);
+    if (continuedPlansRef.current.has(armed.planId)) return;
+    if (continuedPlansRef.current.size >= AUTO_CONTINUATION_CAP) return;
+    continuedPlansRef.current.add(armed.planId);
+    continuationInFlightRef.current = armed;
+    void Promise.resolve(
+      sendMessageRef.current(
+        armed.outcome === 'failed' ? COPILOT_CONTINUATION_MESSAGE_FAILED : COPILOT_CONTINUATION_MESSAGE_APPLIED
+      )
+    ).finally(() => {
+      if (continuationInFlightRef.current?.planId === armed.planId) {
+        continuationInFlightRef.current = null;
+      }
+    });
+  }, [open, activeSessionId, bulkAction, pendingActions.length, applyingActionKey, sending, currentUserId, sessionMessages, continuationNudge]);
+
   const cancelSending = useCallback(() => {
+    abortReasonRef.current = 'user';
     abortRef.current?.abort();
   }, []);
+
+  // Hand an in-flight continuation to the NEXT mount: the send is being aborted, but the
+  // plan it belongs to was user-confirmed and its loop must not die with the request. The
+  // timestamp is refreshed — a long streamed turn must not hand off an entry that is
+  // already older than the TTL.
+  const rearmInFlightContinuation = () => {
+    const inFlight = continuationInFlightRef.current;
+    if (!inFlight) return;
+    continuationInFlightRef.current = null;
+    writeStoredCopilotContinuation(currentUserId, { ...inFlight, at: Date.now() });
+  };
 
   // Abort any in-flight turn when the modal closes or the component unmounts. Without this, closing
   // the panel mid-turn leaves the fetch running up to the server timeout, and its resolution path
   // can insert a message against a stale session after the user has moved on. The inline-completion
   // path already does this (completionAbortRef); the main send path needs the same treatment.
+  // Closing the panel is not cancelling the plan: an aborted auto-continuation is re-armed so
+  // reopening the panel (on this or the next page) resumes it.
   useEffect(() => {
     if (open) return;
+    abortReasonRef.current = 'close';
     abortRef.current?.abort();
     abortRef.current = null;
     setSending(false);
     setLiveTrace([]);
     setStreamStartedAt('');
+    rearmInFlightContinuation();
   }, [open]);
+
+  // Viewport shrink (window resize, monitor change, tablet rotation): re-clamp the floating
+  // panel so a position persisted on a larger screen never strands it off-viewport.
+  useEffect(() => {
+    if (!open || isMobileViewport) return;
+    const onResize = () => {
+      setPosition((prev) => {
+        if (!prev) return prev;
+        const clamped = clampPanelPosition(prev);
+        return clamped.x === prev.x && clamped.y === prev.y ? prev : clamped;
+      });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [open, isMobileViewport]);
+
+  // Escape closes the panel — the last-resort exit when the close button is hard to reach.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) {
+        return; // let composers handle Escape first
+      }
+      onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
+  // Unmount abort: this panel is mounted per host page (projects / tasks / task detail), so page
+  // navigation unmounts it mid-stream — the fetch must be canceled, not left running in the
+  // background with its setState/insert callbacks firing against a gone component. A
+  // continuation send aborted by this unmount is re-armed into sessionStorage so the next
+  // page's modal resumes the loop instead of the continuation dying with the request.
+  useEffect(() => () => {
+    abortReasonRef.current = 'unmount';
+    abortRef.current?.abort();
+    if (continuationPollTimerRef.current !== null) {
+      window.clearTimeout(continuationPollTimerRef.current);
+      continuationPollTimerRef.current = null;
+    }
+    rearmInFlightContinuation();
+  }, [currentUserId]);
 
   useEffect(() => {
     if (!plusMenuOpen) return;
@@ -1700,8 +2175,13 @@ export function ProjectCopilotModal({
   }, [draft, resizeComposer]);
 
   const startNewChat = () => {
+      continuationArmedRef.current = null;
+      continuedPlansRef.current = new Set();
+      failedPlansRef.current = new Set();
+      clearStoredCopilotContinuation(currentUserId);
     // Abort any in-flight turn before swapping sessions: otherwise the stream's onTrace/onResult
     // callbacks keep running and land their assistant message + trace in the NEW session.
+    abortReasonRef.current = 'session-switch';
     abortRef.current?.abort();
     abortRef.current = null;
     sessionSwitchRef.current = true;
@@ -1721,8 +2201,13 @@ export function ProjectCopilotModal({
   };
 
   const selectSession = (sessionId: string) => {
+      continuationArmedRef.current = null;
+      continuedPlansRef.current = new Set();
+      failedPlansRef.current = new Set();
+      clearStoredCopilotContinuation(currentUserId);
     // Same stream-abort as startNewChat: a turn streaming in session A must not resolve into
     // session B. Aborting cancels the fetch; clearing sending/trace stops the live UI.
+    abortReasonRef.current = 'session-switch';
     abortRef.current?.abort();
     abortRef.current = null;
     sessionSwitchRef.current = true;
@@ -1861,16 +2346,27 @@ export function ProjectCopilotModal({
       return {
         plan_id: planId,
         operation_id: operationId,
+        skill: String(action.id || '').trim(),
+        label: String(action.label || '').trim(),
         status,
         ...(detailMessage ? { detail: detailMessage } : {}),
         ...(errorMessage ? { error: errorMessage } : {}),
+        // The action's arguments ride along so a later recovery/summary turn can cite WHAT
+        // was applied (pdbId, SMILES, …) — receipts are the only place those values stay
+        // verifiable for the grounding audit after the proposing turn scrolls away.
+        arguments:
+          action.arguments && typeof action.arguments === 'object' && !Array.isArray(action.arguments)
+            ? (action.arguments as Record<string, unknown>)
+            : {},
       };
     });
     const actionLabels = actions.map((a) => a.label).filter(Boolean);
     const defaultContent = status === 'applied'
       ? (actionLabels.length > 0 ? `${actionLabels.join(', ')} applied.` : `Applied ${actions.length} confirmed operation${actions.length === 1 ? '' : 's'}.`)
       : status === 'failed'
-        ? `Failed: ${errorMessage || 'Unknown error'}`
+        ? (actionLabels.length > 0
+            ? `Failed to apply "${actionLabels.join('", "')}": ${errorMessage || 'Unknown error'}`
+            : `Failed: ${errorMessage || 'Unknown error'}`)
         : `Cancelled ${actions.length} pending operation${actions.length === 1 ? '' : 's'}.`;
     const receipt = await insertProjectCopilotMessage({
       ...messageScope,
@@ -1884,6 +2380,16 @@ export function ProjectCopilotModal({
         action_resolutions: resolutions
       }
     });
+    // A failed receipt is a blocker the plan must recover from, and every later action of
+    // the SAME plan resolves against that knowledge: record the plan as failed so the
+    // continuation arming speaks the failed outcome even when the LAST action applies.
+    // Recorded only AFTER the receipt persisted — an insert that throws must not poison the
+    // plan (the retry that succeeds would then arm a false 'failed' continuation).
+    if (status === 'failed') {
+      for (const resolution of resolutions) {
+        if (resolution.plan_id) failedPlansRef.current.add(resolution.plan_id);
+      }
+    }
     const resolvedKeys = new Set(actions.map(planActionKey));
     setMessages((prev) => [...prev, receipt]);
     setPendingActions((prev) => prev.filter((item) => !resolvedKeys.has(planActionKey(item))));
@@ -1926,23 +2432,76 @@ export function ProjectCopilotModal({
   };
 
   const applyAction = async (action: CopilotPlanAction): Promise<boolean> => {
+    // Entry mutex: never start an apply while another apply, a bulk cancel, or a streaming
+    // turn is in flight — sendMessage auto-cancels pendingActions mid-turn, and a concurrent
+    // apply here can write an `applied` receipt for the same key the turn is cancelling.
+    if (applyingActionKey || bulkAction || sending) return false;
     const actionKey = planActionKey(action);
     setApplyingActionKey(actionKey);
     setError(null);
+    const armedPlanId = String(action.plan_id || '').trim() || null;
+    const armedOperationId = String(action.operation_id || '').trim();
+    const isTerminalEffect = action.effect === 'execute' || action.payload?.destructive === true;
+    // Arm the auto-continuation when this was the LAST action of the plan: the loop resumes
+    // by itself (see the continuation effect). A cleanly applied TERMINAL effect
+    // (execute/destructive: submit, cancel, delete) ends the goal — the receipt speaks, no
+    // follow-up turn. ANY failure — terminal or not — arms the loop with the failed
+    // outcome instead: the failed receipt is the tool result the planner must diagnose and
+    // recover from, and leaving it un-armed is exactly the failure where the transcript's
+    // last word is a pre-written success claim over two failed receipts.
+    // NOTE 1: computed from the closure's pendingActions, never inside a setPendingActions
+    // updater — a NAVIGATING apply (tasks:create_*) unmounts this page during the receipt
+    // await, and React silently drops an unmounted component's state updater. The entry
+    // mutex above (no concurrent apply / bulk cancel / streaming turn) keeps this closure
+    // authoritative; a session switch mid-apply is contained by the sessionId check in the
+    // continuation effect.
+    // NOTE 2: arming runs BEFORE the receipt insert is awaited, deliberately. The navigating
+    // apply unmounts this page within a frame; the arm (ref + sessionStorage) must already
+    // be on disk when the next page's modal mounts, or the continuation is silently lost —
+    // the receipt insert's network round-trip must not sit in front of it. The consuming
+    // effect waits for the receipt to become visible before it actually fires.
+    const armPlanContinuation = (appliedCleanly: boolean) => {
+      if (!armedPlanId || !armedOperationId) return;
+      const remaining = pendingActions.filter((item) => planActionKey(item) !== actionKey);
+      if (remaining.length > 0) return;
+      const planFailed = !appliedCleanly || failedPlansRef.current.has(armedPlanId);
+      if (!planFailed && isTerminalEffect) return;
+      const armed: CopilotContinuation = {
+        planId: armedPlanId,
+        operationId: armedOperationId,
+        sessionId: activeSessionId,
+        outcome: planFailed ? 'failed' : 'applied',
+        at: Date.now()
+      };
+      continuationArmedRef.current = armed;
+      // The arming apply may navigate (tasks:create_*) and unmount this page before the
+      // continuation effect fires — sessionStorage carries the handoff to the next page.
+      writeStoredCopilotContinuation(currentUserId, armed);
+    };
     try {
       const detailMessage = await executeAction(action);
-      await persistActionResolutions([action], 'applied', detailMessage);
+      armPlanContinuation(true);
+      try {
+        await persistActionResolutions([action], 'applied', detailMessage);
+      } catch (persistErr) {
+        // The HOST change already happened — a receipt-persistence failure must NOT be
+        // reported as a failed action (the planner would re-apply an applied operation).
+        // Keep the action pending so the user can retry, and surface the persist error.
+        setError(persistErr instanceof Error ? persistErr.message : 'Applied, but saving the receipt failed. The operation stays listed — you can retry to record it.');
+        return false;
+      }
       return true;
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to apply Copilot action.';
-      setError(errorMsg);
-      // Write a failed receipt so the audit trail is complete — the Copilot chat shows the failure
-      // reason, the action is removed from pending, and the next planner turn can see the failure
-      // in conversation context and attempt to recover.
+      armPlanContinuation(false);
+      // The failure surfaces ONCE, in the failed-action receipt at the bottom of the chat (the
+      // transcript is the single source of truth — same place the action was proposed). No
+      // duplicate banner above: only if the receipt itself cannot be persisted (the action
+      // stays pending with no other signal) does the banner carry the reason.
       try {
         await persistActionResolutions([action], 'failed', null, errorMsg);
       } catch {
-        // If persisting the failure receipt itself fails, the action stays pending — the user can retry.
+        setError(errorMsg);
       }
       return false;
     } finally {
@@ -1954,6 +2513,10 @@ export function ProjectCopilotModal({
     if (pendingActions.length === 0 || applyingActionKey || bulkAction) return;
     setBulkAction('cancel');
     setError(null);
+    // The user killed the plan: any armed continuation for it must not fire afterwards and
+    // instruct the model to keep executing what was just cancelled.
+    continuationArmedRef.current = null;
+    clearStoredCopilotContinuation(currentUserId);
     try {
       await persistActionResolutions([...pendingActions].sort(comparePlanActions), 'cancelled');
     } catch (err) {
@@ -2199,6 +2762,16 @@ export function ProjectCopilotModal({
               {/* Same shape as a finished assistant message (meta + body + reasoning sibling) so
                   completion only fills the body instead of restructuring the bubble — no jitter. */}
               <div className="copilot-message-body copilot-thinking" />
+              {steeredTurnTexts.length > 0 ? (
+                <div className="copilot-steered-list" aria-label="已插入的转向消息">
+                  {steeredTurnTexts.map((text, index) => (
+                    <div className="copilot-steered-item" key={`${index}-${text.slice(0, 24)}`}>
+                      <span className="copilot-steered-badge">已插入</span>
+                      <span className="copilot-steered-text">{text}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <CopilotThinkingCard steps={liveTrace} live />
             </article>
           ) : null}
@@ -2214,9 +2787,17 @@ export function ProjectCopilotModal({
           const isApplying = applyingActionKey === actionKey;
           const summary = formatActionSummary(action);
           const isDestructive = action.payload?.destructive === true;
-          const blocked = Boolean(applyingActionKey || bulkAction);
+          // Include `sending`: a streaming turn auto-cancels pendingActions mid-flight, so an
+          // Apply clicked during the stream races the cancel and can double-write receipts.
+          const blocked = Boolean(applyingActionKey || bulkAction || sending);
           return (
             <div className="copilot-action-stack" aria-label="Pending confirmation step">
+              {/* Deterministic honesty guard: whatever the assistant message above says, the
+                  pending step has NOT executed. This line is the UI's own statement of fact —
+                  it neutralizes a model that narrates proposed operations as completed. */}
+              <div className="copilot-plan-pending-hint">
+                此操作尚未执行——点击「应用」后才会生效；实际结果以确认后的回执为准。
+              </div>
               <div className="copilot-plan-actions">
                 <div
                   className={`copilot-plan-action${isDestructive ? ' is-destructive' : ''}${isApplying ? ' is-applying' : ''}`}
@@ -2302,10 +2883,16 @@ export function ProjectCopilotModal({
               </div>
             ) : null}
             {attachmentMentionState ? (
-              <div className="copilot-mention-menu" role="listbox" aria-label="File mentions">
+              <div
+                className="copilot-mention-menu"
+                role="listbox"
+                id="copilot-mention-listbox"
+                aria-label="File mentions"
+              >
                 {attachmentMentionState.options.map((attachment, index) => (
                   <button
                     key={attachment.id}
+                    id={`copilot-mention-option-${index}`}
                     className={`copilot-mention-option${index === mentionActiveIndex ? ' active' : ''}`}
                     type="button"
                     role="option"
@@ -2346,7 +2933,7 @@ export function ProjectCopilotModal({
                   type="button"
                   onClick={() => setPlusMenuOpen((prev) => !prev)}
                   disabled={Boolean(sending || applyingActionKey || bulkAction)}
-                  aria-label="Add attachment or voice"
+                  aria-label="Add attachment"
                   title="Add"
                 >
                   <Plus size={16} />
@@ -2364,6 +2951,30 @@ export function ProjectCopilotModal({
                 }}
               />
               <div className="copilot-input-wrap">
+                {completionPickerIndex !== null && completions.length > 0 ? (
+                  <div className="copilot-mention-menu copilot-completion-menu" role="listbox" id="copilot-completion-listbox" aria-label="候选续写">
+                    {completions.map((suffix, index) => (
+                      <button
+                        key={`${index}-${suffix}`}
+                        id={`copilot-completion-option-${index}`}
+                        type="button"
+                        role="option"
+                        aria-selected={index === completionPickerIndex}
+                        className={`copilot-mention-option${index === completionPickerIndex ? ' active' : ''}`}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          acceptCompletion(suffix);
+                        }}
+                      >
+                        <span className="copilot-mention-file-icon">↵</span>
+                        <span className="copilot-mention-file-text">
+                          <strong>{draft}</strong>
+                          <small>{suffix}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 {completion ? (
                   <div className="copilot-ghost-overlay" aria-hidden="true">
                     <div className="copilot-ghost-overlay-inner" ref={ghostOverlayInnerRef}>
@@ -2376,6 +2987,17 @@ export function ProjectCopilotModal({
                   ref={textareaRef}
                 value={draft}
                 rows={1}
+                  role="combobox"
+                  aria-controls={attachmentMentionState ? 'copilot-mention-listbox' : 'copilot-completion-listbox'}
+                  aria-expanded={Boolean(attachmentMentionState) || completionPickerIndex !== null}
+                  aria-autocomplete="list"
+                  aria-activedescendant={
+                    attachmentMentionState && attachmentMentionState.options[mentionActiveIndex]
+                      ? `copilot-mention-option-${mentionActiveIndex}`
+                      : completionPickerIndex !== null
+                        ? `copilot-completion-option-${completionPickerIndex}`
+                        : undefined
+                  }
                 onChange={(event) => {
                   setDraft(event.target.value);
                   // Any manual edit exits history-recall mode so the next ↑ starts from the newest.
@@ -2388,16 +3010,39 @@ export function ProjectCopilotModal({
                 }}
                 onKeyDown={(event) => {
                   if (attachmentMentionState) {
+                    // cmdk-absorbed navigation: ArrowUp/Down loop (kept), Home/End jump to the
+                    // first/last option, PageUp/PageDown move in pages of 6 — the exact key
+                    // set cmdk's list handles (it has no Tab completion built in; our
+                    // Enter+Tab insert stays, it predates and exceeds it).
+                    const mentionCount = attachmentMentionState.options.length;
                     if (event.key === 'ArrowDown') {
                       event.preventDefault();
-                      setMentionActiveIndex((index) => (index + 1) % attachmentMentionState.options.length);
+                      setMentionActiveIndex((index) => (index + 1) % mentionCount);
                       return;
                     }
                     if (event.key === 'ArrowUp') {
                       event.preventDefault();
-                      setMentionActiveIndex((index) =>
-                        (index - 1 + attachmentMentionState.options.length) % attachmentMentionState.options.length
-                      );
+                      setMentionActiveIndex((index) => (index - 1 + mentionCount) % mentionCount);
+                      return;
+                    }
+                    if (event.key === 'Home') {
+                      event.preventDefault();
+                      setMentionActiveIndex(0);
+                      return;
+                    }
+                    if (event.key === 'End') {
+                      event.preventDefault();
+                      setMentionActiveIndex(mentionCount - 1);
+                      return;
+                    }
+                    if (event.key === 'PageDown') {
+                      event.preventDefault();
+                      setMentionActiveIndex((index) => Math.min(mentionCount - 1, index + 6));
+                      return;
+                    }
+                    if (event.key === 'PageUp') {
+                      event.preventDefault();
+                      setMentionActiveIndex((index) => Math.max(0, index - 6));
                       return;
                     }
                     if (event.key === 'Enter' || event.key === 'Tab') {
@@ -2412,26 +3057,49 @@ export function ProjectCopilotModal({
                       return;
                     }
                   }
-                  // Inline-completion accept/dismiss (only with the @mention menu closed and not composing).
-                  if (!event.nativeEvent.isComposing && completion) {
-                    if (event.key === 'Tab') {
-                      event.preventDefault();
-                      const accepted = completion;
-                      const next = `${draft}${accepted}`;
-                      setCompletion('');
-                      historyNavRef.current = null;
-                      setDraft(next);
-                      setMentionCaret(next.length);
-                      window.requestAnimationFrame(() => {
-                        textareaRef.current?.focus({ preventScroll: true });
-                        textareaRef.current?.setSelectionRange(next.length, next.length);
-                      });
-                      return;
-                    }
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      setCompletion('');
-                      return;
+                  // Inline-completion ghost + top-10 picker (mention menu closed, not composing).
+                  if (!event.nativeEvent.isComposing && (completion || completions.length > 0)) {
+                    if (completionPickerIndex !== null) {
+                      // Picker open: ↑/↓ move (loop), Enter/Tab accept the highlighted
+                      // candidate, Esc closes ONLY the picker (the ghost survives).
+                      if (event.key === 'ArrowDown') {
+                        event.preventDefault();
+                        setCompletionPickerIndex((index) => ((index ?? 0) + 1) % completions.length);
+                        return;
+                      }
+                      if (event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        setCompletionPickerIndex((index) => ((index ?? 0) - 1 + completions.length) % completions.length);
+                        return;
+                      }
+                      if (event.key === 'Enter' || event.key === 'Tab') {
+                        event.preventDefault();
+                        acceptCompletion(completions[completionPickerIndex] ?? completion);
+                        return;
+                      }
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setCompletionPickerIndex(null);
+                        return;
+                      }
+                    } else if (completion) {
+                      if (event.key === 'Tab') {
+                        event.preventDefault();
+                        acceptCompletion(completion);
+                        return;
+                      }
+                      if (event.key === 'ArrowDown') {
+                        // Ghost showing: ↓ opens the ranked candidates (fish-shell style);
+                        // ↑ stays with input-history recall.
+                        event.preventDefault();
+                        setCompletionPickerIndex(0);
+                        return;
+                      }
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setCompletions([]);
+                        return;
+                      }
                     }
                   }
                   // ↑/↓ sent-input history (caret on first/last line, not composing).

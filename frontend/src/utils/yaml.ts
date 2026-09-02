@@ -18,33 +18,6 @@ function customLigandCcdForComponent(componentId: string, smiles: string): strin
   return `L${hashTextForCode(`${componentId}:${smiles}`).slice(0, 4)}`;
 }
 
-export function buildPredictionYaml(proteinSequence: string, ligandSmiles: string): string {
-  const payload = {
-    version: 1,
-    sequences: [
-      {
-        protein: {
-          id: 'A',
-          sequence: proteinSequence.replace(/\s+/g, '')
-        }
-      },
-      {
-        ligand: {
-          id: 'B',
-          smiles: ligandSmiles.trim()
-        }
-      }
-    ]
-  };
-
-  return yaml.dump(payload, {
-    // Keep long sequences as plain one-line scalars instead of folded `>-` blocks.
-    lineWidth: YAML_NO_WRAP,
-    noRefs: true,
-    sortKeys: false
-  });
-}
-
 function normalizeId(chainIds: string[]): string | string[] {
   return chainIds.length === 1 ? chainIds[0] : chainIds;
 }
@@ -283,7 +256,7 @@ function buildProteinModificationPayload(modifications: ProteinModification[] | 
   const seen = new Set<number>();
   return modifications.reduce<Array<Record<string, unknown>>>((acc, mod) => {
     const position = Math.max(1, Math.floor(Number(mod.position || 1)));
-    if (!Number.isFinite(position) || position < 1 || (sequenceLength > 0 && position > sequenceLength)) return acc;
+    if (!Number.isFinite(position) || (sequenceLength > 0 && position > sequenceLength)) return acc;
     if (seen.has(position)) return acc;
     const ccd = String(mod.ccd || '').trim().toUpperCase();
     if (!ccd) return acc;
@@ -345,6 +318,19 @@ function ligandFirstAtomNameForYaml(component: InputComponent): string {
   return ligandAtomNamesFromSmilesByElementOrder(component.sequence)[0] || '';
 }
 
+// A single bracketed atom like [Fe] or [Zn] is a bare ion: RDKit gives it no
+// bonds, so conformer generation and featurization both fail downstream.  The
+// CCD component table carries the same ions with their formal definitions, so
+// the YAML emits the element's CCD code instead of the SMILES.
+const BARE_ION_SMILES = /^\[([A-Za-z]{1,2})(?:[+-]\d*|[0-9]*)?\]$/;
+
+export function bareIonCcdFromSmiles(smiles: string): string | null {
+  const match = BARE_ION_SMILES.exec(smiles.trim());
+  if (!match) return null;
+  const symbol = match[1][0].toUpperCase() + match[1].slice(1).toLowerCase();
+  return symbol;
+}
+
 function ligandCcdForYaml(component: InputComponent): string {
   if (component.inputMethod === 'ccd') return component.sequence.trim().toUpperCase();
   return customLigandCcdForComponent(component.id, component.sequence.trim());
@@ -367,8 +353,8 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
   });
 
   const sequences = components.map((comp, idx) => {
-    const chainIds = assignments[idx];
-    const idValue = normalizeId(chainIds);
+    const ids = assignments[idx];
+    const idValue = normalizeId(ids);
 
     if (comp.type === 'ligand') {
       if (options.preserveLigandSmiles && comp.inputMethod !== 'ccd') {

@@ -1,12 +1,6 @@
-import type { AppUser, AuthLoginInput, AuthRegisterInput, Session } from '../types/models';
-import { hashPassword } from '../utils/crypto';
-import { ENV } from '../utils/env';
+import type { AuthLoginInput, AuthRegisterInput, Session } from '../types/models';
 import { requestManagement } from './backendClient';
-import {
-  findUserByEmail,
-  findUserByUsername,
-  insertUser
-} from './supabaseLite';
+import { ENV } from '../utils/env';
 
 const SESSION_KEY = 'vbio_session';
 
@@ -30,20 +24,6 @@ export function isSuperAdminIdentity(username?: string | null, email?: string | 
   );
 }
 
-function toSession(user: AppUser): Session {
-  const isSuperAdmin = isSuperAdminIdentity(user.username, user.email);
-  return {
-    userId: user.id,
-    username: user.username,
-    name: user.name,
-    email: user.email || null,
-    avatarUrl: user.avatar_url || null,
-    isAdmin: user.is_admin || isSuperAdmin,
-    isSuperAdmin,
-    loginAt: new Date().toISOString(),
-    authProvider: 'local'
-  };
-}
 
 export function saveSession(session: Session): void {
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
@@ -130,35 +110,24 @@ function validateRegistration(input: AuthRegisterInput): void {
 export async function register(input: AuthRegisterInput): Promise<Session> {
   validateRegistration(input);
 
-  const username = input.username.trim().toLowerCase();
-  const email = input.email?.trim().toLowerCase() || null;
-
-  const userByName = await findUserByUsername(username);
-  if (userByName) {
-    throw new Error('Username already exists.');
-  }
-
-  if (email) {
-    const userByEmail = await findUserByEmail(email);
-    if (userByEmail) {
-      throw new Error('Email already exists.');
-    }
-  }
-
-  const password_hash = await hashPassword(username, input.password);
-  const isSuperAdmin = isSuperAdminIdentity(username, email);
-  const created = await insertUser({
-    username,
-    name: input.name.trim(),
-    email,
-    password_hash,
-    is_admin: isSuperAdmin,
-    last_login_at: new Date().toISOString()
+  // Server-side registration (F2): the hash is scrypt on the server and `is_admin` is
+  // determined from the SERVER's super-admin env — the browser no longer writes app_users.
+  const res = await requestManagement('/vbio-api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      username: input.username.trim().toLowerCase(),
+      name: input.name.trim(),
+      email: input.email?.trim().toLowerCase() || undefined,
+      password: input.password
+    })
   });
-
-  const session = toSession(created);
-  saveSession(session);
-  return session;
+  const payload = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) {
+    throw new Error(payload.error || `Registration failed with HTTP ${res.status}.`);
+  }
+  // Log in immediately (the server issued no session at registration).
+  return login({ identifier: input.username.trim().toLowerCase(), password: input.password });
 }
 
 export async function login(input: AuthLoginInput): Promise<Session> {

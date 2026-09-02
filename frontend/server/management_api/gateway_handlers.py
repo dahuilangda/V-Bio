@@ -91,6 +91,13 @@ class GatewayHandlers:
     def _read_project_id_from_query() -> str:
         project_id = (request.args.get("project_id") or "").strip()
         if not project_id:
+            # The platform (shared runtime) token is not project-bound; every other token
+            # MUST name the project it is bound to.
+            token_plain = (request.headers.get("X-API-Token") or "").strip()
+            from management_api.auth_service import _is_platform_token
+
+            if _is_platform_token(token_plain):
+                return ""
             raise PermissionError("project_id query is required")
         return project_id
 
@@ -161,8 +168,15 @@ class GatewayHandlers:
     def forward_quick_get(self, upstream_path: str, action: str) -> Tuple[Response, int]:
         return forward_quick_get(self, upstream_path, action)
 
-    def forward_task_read(self, task_id: str, upstream_prefix: str, action: str) -> Tuple[Response, int]:
-        return forward_task_read(self, task_id, upstream_prefix, action)
+    def forward_task_read(
+        self,
+        task_id: str,
+        upstream_prefix: str,
+        action: str,
+        *,
+        upstream_suffix: str = "",
+    ) -> Tuple[Response, int]:
+        return forward_task_read(self, task_id, upstream_prefix, action, upstream_suffix=upstream_suffix)
 
     def forward_task_status_batch(self) -> Tuple[Response, int]:
         return forward_task_status_batch(self)

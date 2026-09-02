@@ -50,6 +50,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+      - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
+      - ${LEAD_OPTIMIZATION_OUTPUT_DIR:-/data/boltz_lead_optimization_results}:${LEAD_OPTIMIZATION_OUTPUT_DIR:-/data/boltz_lead_optimization_results}
+      - ${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}:${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}
     command: >-
       bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint monitor"
     depends_on:

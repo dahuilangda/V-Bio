@@ -112,22 +112,6 @@ function hasSubstructureMatchPayload(value: unknown): boolean {
   return Boolean(value);
 }
 
-function sanitizeFileName(value: string): string {
-  const trimmed = value.trim();
-  const safe = trimmed.replace(/[\\/:*?"<>|]/g, '_');
-  return safe || 'project';
-}
-
-function toBase64FromBytes(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
 interface LoadTaskDataOptions {
   silent?: boolean;
   showRefreshing?: boolean;
@@ -135,10 +119,7 @@ interface LoadTaskDataOptions {
   forceRefetch?: boolean;
 }
 
-const SILENT_CACHE_SYNC_WINDOW_MS = 30000;
-
 export {
-  SILENT_CACHE_SYNC_WINDOW_MS,
   compareNullableNumber,
   defaultSortDirection,
   nextSortDirection,
@@ -151,9 +132,7 @@ export {
   normalizePlddtThreshold,
   normalizeIptmThreshold,
   normalizeSmilesForSearch,
-  hasSubstructureMatchPayload,
-  sanitizeFileName,
-  toBase64FromBytes
+  hasSubstructureMatchPayload
 };
 
 export type { LoadTaskDataOptions };

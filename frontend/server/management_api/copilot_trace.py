@@ -32,6 +32,7 @@ TRACE_NO_CONVERGENCE = "no_convergence"
 # step-by-step concretization with progress tracking.
 TRACE_OUTLINE = "outline"
 TRACE_STEP_DONE = "step_done"
+TRACE_WRITES_MATERIALIZED = "writes_materialized"
 
 
 @dataclass
@@ -68,9 +69,6 @@ class PlannerTrace:
     def steps(self) -> List[Dict[str, Any]]:
         return [step.to_dict() for step in self._steps]
 
-    def has_event(self, event: str) -> bool:
-        return any(step.event == event for step in self._steps)
-
     def summary(self) -> str:
         """One-line condensation for server logs (counts only, no payload)."""
         rounds = {step.round for step in self._steps}
@@ -78,6 +76,7 @@ class PlannerTrace:
             TRACE_SKILL_OBSERVATIONS: 0,
             TRACE_AUDIT_REJECTED: 0,
             TRACE_MALFORMED_OUTPUT: 0,
+            TRACE_WRITES_MATERIALIZED: 0,
         }
         terminal_state: str | None = None
         for step in self._steps:
@@ -91,6 +90,8 @@ class PlannerTrace:
             f"audit_rejected={counts[TRACE_AUDIT_REJECTED]}",
             f"malformed={counts[TRACE_MALFORMED_OUTPUT]}",
         ]
+        if counts[TRACE_WRITES_MATERIALIZED]:
+            parts.append(f"writes_materialized={counts[TRACE_WRITES_MATERIALIZED]}")
         if terminal_state:
             parts.append(f"terminal={terminal_state}")
         return "copilot_trace: " + ", ".join(parts)

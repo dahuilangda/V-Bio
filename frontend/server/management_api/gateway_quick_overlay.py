@@ -25,7 +25,11 @@ def handle_lead_optimization_pocket_overlay(gateway: Any) -> Tuple[Response, int
         backend_token = str(os.environ.get("BOLTZ_API_TOKEN", "") or "").strip()
         runtime_env_token = str(os.environ.get("VBIO_RUNTIME_API_TOKEN", "") or "").strip()
         trusted_tokens = {token for token in (runtime_token, backend_token, runtime_env_token) if token}
-        using_runtime_token = bool(token_plain and token_plain in trusted_tokens)
+        using_runtime_token = bool(
+            token_plain
+            and token_plain in trusted_tokens
+            and request.remote_addr in {"127.0.0.1", "::1"}
+        )
         if using_runtime_token:
             # Allow trusted runtime token for local UI utility routes (no project DB auth dependency).
             effective_project_id = project_id

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { formatDuration } from '../../utils/date';
 
 interface ProjectHeaderMetaProps {
@@ -6,8 +7,32 @@ interface ProjectHeaderMetaProps {
   workflowShortTitle: string;
   isActiveRuntime: boolean;
   progressPercent: number;
-  waitingSeconds: number | null;
+  submittedAt: string | null;
   totalRuntimeSeconds: number | null;
+}
+
+function ElapsedSecondsChip({ submittedAt, taskState }: { submittedAt: string; taskState: string }) {
+  // Self-held 1s tick. The historical implementation ticked a top-level nowTs state that
+  // re-rendered the ENTIRE workspace tree every second while a task ran; this chip was its
+  // only consumer, so the clock lives here now and nothing above re-renders.
+  const active = taskState === 'QUEUED' || taskState === 'RUNNING';
+  const [nowTs, setNowTs] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNowTs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  if (!active) return null;
+  const elapsedSeconds = Math.max(0, Math.floor((nowTs - new Date(submittedAt).getTime()) / 1000));
+  return (
+    <span
+      className={`meta-chip meta-chip-live meta-chip-live-elapsed ${
+        taskState === 'RUNNING' ? 'meta-chip-live-running' : 'meta-chip-live-queued'
+      }`}
+    >
+      {formatDuration(elapsedSeconds)} elapsed
+    </span>
+  );
 }
 
 export function ProjectHeaderMeta({
@@ -16,7 +41,7 @@ export function ProjectHeaderMeta({
   workflowShortTitle,
   isActiveRuntime,
   progressPercent,
-  waitingSeconds,
+  submittedAt,
   totalRuntimeSeconds
 }: ProjectHeaderMetaProps) {
   return (
@@ -34,15 +59,7 @@ export function ProjectHeaderMeta({
             >
               {Math.round(progressPercent)}%
             </span>
-            {waitingSeconds !== null && (
-              <span
-                className={`meta-chip meta-chip-live meta-chip-live-elapsed ${
-                  displayTaskState === 'RUNNING' ? 'meta-chip-live-running' : 'meta-chip-live-queued'
-                }`}
-              >
-                {formatDuration(waitingSeconds)} elapsed
-              </span>
-            )}
+            {submittedAt !== null && <ElapsedSecondsChip submittedAt={submittedAt} taskState={displayTaskState} />}
           </>
         ) : (
           displayTaskState === 'SUCCESS' &&

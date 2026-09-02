@@ -276,6 +276,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
     return (
       <AffinityResultsWorkspace
         hasStructure={hasAffinityDisplayStructure}
+        snapshotAffinity={snapshotAffinity || null}
         structureText={affinityDisplayStructureText}
         structureFormat={affinityDisplayStructureFormat}
         colorMode={displayStructureColorMode}

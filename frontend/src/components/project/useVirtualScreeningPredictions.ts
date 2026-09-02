@@ -316,7 +316,11 @@ export function useVirtualScreeningPredictions({
       }
       if (cancelled) return;
       const hasRunning = pending.some(([, record]) => record.state === 'RUNNING');
-      timer = window.setTimeout(() => void poll(), hasRunning ? 4000 : 6500);
+      // A hidden tab doubles the delay instead of stopping entirely — progress resumes
+      // promptly on return while a backgrounded tab halves its request rate.
+      const hidden = document.visibilityState === 'hidden';
+      const delay = hasRunning ? 4000 : 6500;
+      timer = window.setTimeout(() => void poll(), hidden ? delay * 2 : delay);
     };
 
     void poll();

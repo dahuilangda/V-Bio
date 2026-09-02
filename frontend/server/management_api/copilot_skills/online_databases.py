@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import email.utils
 import json
+from concurrent.futures import ThreadPoolExecutor
+import os
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -11,15 +15,34 @@ from urllib.parse import quote, urlparse
 import requests
 
 
-# Per-host minimum spacing between requests, to respect documented upstream rate limits. ChEMBL
-# enforces "no more than 1 request/second without an API key" (official ChEMBL/Beaker docs); the
-# official chembl_webresource_client throttles automatically, but raw calls must do so explicitly
-# or the source returns 5xx / drops connections under sustained load. The reservation is keyed by
-# host so unrelated sources are not serialized.
+# Per-host minimum spacing between requests, to respect documented upstream rate limits.
+# The reservation is keyed by host so unrelated sources are not serialized. Values come from the
+# services' own usage policies (researched 2026-08 against the official docs):
+#   www.ebi.ac.uk          ChEMBL data API — no more than 1 req/s without an API key (official docs).
+#   eutils.ncbi.nlm.nih.gov NCBI E-utilities — more than 3 req/s without an API key receives an
+#                          error message (NBK25497); with api_key the limit is 10 req/s.
+#   pubchem.ncbi.nlm.nih.gov PubChem PUG REST — "not make more than 5 requests per second"
+#                          (official programmatic-access policy); exceeding returns HTTP 503.
+#   rest.uniprot.org        UniProt — no numeric limit published; spaced for politeness.
+#   alphafold.ebi.ac.uk     AlphaFold DB — no documented limit; EBI fair-use spacing.
+#   data/search.rcsb.org    RCSB — "a handful of requests per second" recommended (official docs).
+#   clinicaltrials.gov      ClinicalTrials.gov v2 — no documented limit; polite spacing.
 _HOST_RATE_SECONDS: Dict[str, float] = {
-    "www.ebi.ac.uk": 1.0,  # ChEMBL data API (+ other EBI services on this host)
+    "www.ebi.ac.uk": 1.0,
+    "eutils.ncbi.nlm.nih.gov": 0.34,
+    # Spacings re-derived from each source's published policy with safety margin:
+    # PubChem hard-asks ≤5 req/s → 0.25s (≤4 req/s); RCSB "a handful per second" → 0.25s;
+    # UniProt publishes no fixed figure but restricts parallelism → 0.25s serial.
+    "pubchem.ncbi.nlm.nih.gov": 0.25,
+    "rest.uniprot.org": 0.25,
+    "alphafold.ebi.ac.uk": 0.34,
+    "data.rcsb.org": 0.25,
+    "search.rcsb.org": 0.25,
+    "clinicaltrials.gov": 0.25,
 }
 _DEFAULT_RATE_SECONDS = 0.0
+# NCBI with an API key: 10 req/s allowed, so the spacing relaxes below the no-key interval.
+_NCBI_KEYED_RATE_SECONDS = 0.11
 
 
 @dataclass(frozen=True)
@@ -27,6 +50,10 @@ class OnlineSkillDefinition:
     name: str
     description: str
     input_schema: Dict[str, Any]
+    # Input-language boundary: the online databases are English-indexed, so a read skill rejects
+    # non-English query text by default (the harness audits it before execution). A skill whose
+    # purpose is handling non-English input — terminology conversion — declares this True.
+    accepts_non_english_input: bool = False
 
 
 def _required_string(arguments: Dict[str, Any], key: str, *, label: str) -> str:
@@ -81,6 +108,9 @@ class OnlineDatabaseSkills:
         session: requests.Session,
         timeout_seconds: float = 8.0,
         cache_ttl_seconds: float = 600.0,
+        contact_email: str = "",
+        ncbi_email: str = "",
+        ncbi_api_key: str = "",
     ) -> None:
         self._session = session
         self._timeout_seconds = max(1.0, min(30.0, float(timeout_seconds)))
@@ -93,6 +123,23 @@ class OnlineDatabaseSkills:
         self._handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
         # Per-call outbound proxy (from runtime settings). None means direct connection.
         self._proxies: Optional[Dict[str, str]] = None
+        # Identification the upstreams themselves ask for. UniProt's programmatic-access help
+        # asks for a contact email inside the User-Agent so they can reach the operator before
+        # blocking; NCBI's E-utilities guidelines (NBK25497) ask for `tool` and `email` on every
+        # request for exactly the same reason, and `api_key` lifts the 3 req/s cap to 10 req/s.
+        self._contact_email = (
+            contact_email.strip()
+            or os.environ.get("VBIO_COPILOT_CONTACT_EMAIL", "").strip()
+        )
+        self._ncbi_email = (
+            ncbi_email.strip()
+            or os.environ.get("VBIO_COPILOT_NCBI_EMAIL", "").strip()
+            or self._contact_email
+        )
+        self._ncbi_api_key = (
+            ncbi_api_key.strip()
+            or os.environ.get("VBIO_COPILOT_NCBI_API_KEY", "").strip()
+        )
         self._register_builtin_skills()
 
     @property
@@ -140,7 +187,7 @@ class OnlineDatabaseSkills:
     def _register_builtin_skills(self) -> None:
         identifier_schema = {
             "type": "object",
-            "properties": {"identifier": {"type": "string", "minLength": 1, "maxLength": 256}},
+            "properties": {"identifier": {"type": "string", "minLength": 1, "maxLength": 512}},
             "required": ["identifier"],
             "additionalProperties": False,
         }
@@ -149,16 +196,25 @@ class OnlineDatabaseSkills:
                 name="uniprot.search",
                 description=(
                     "Search UniProtKB and return ranked candidate entries with accession, gene name, protein name, "
-                    "organism, and sequence. Use UniProt field syntax for precision: a gene-name field for a gene "
-                    "symbol, a protein-name field for a protein name, and an accession field for a known accession; "
-                    "combine fields with AND. Add an explicit organism filter when the entity exists in multiple "
-                    "species, and request reviewed entries when curated data is required. Never send a bare gene "
-                    "name or protein name without field syntax — it returns irrelevant matches across all organisms."
+                    "organism, and sequence. Use UniProt field syntax for precision — the valid field names are "
+                    "gene, protein_name, organism_name, organism_id (a numeric taxonomy id), accession, and "
+                    "reviewed; combine fields with AND. Any other field name makes the source reject the whole "
+                    "query with an error. Add an explicit organism filter when the entity exists in multiple "
+                    "species, and request reviewed entries when curated data is required. An unstated organism "
+                    "is an unresolved choice, never a default: query without the organism filter and resolve "
+                    "the organism — and the isoform, when the gene names a family — through the user's choice; "
+                    "every candidate you present must state its organism and isoform from the record. Never send a bare gene "
+                    "name or protein name without field syntax — it returns irrelevant matches across all organisms. "
+                    "BOUNDARY: UniProt returns SEQUENCES and protein metadata. Choose it when the consuming field "
+                    "needs an amino-acid sequence; when the consuming field needs a 3D structure, use rcsb.search "
+                    "(experimental) or alphafold.resolve (predicted) instead. The query must be in English — a "
+                    "query in another language returns irrelevant or no matches; convert it with translate.to_english "
+                    "first."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "query": {"type": "string", "minLength": 1, "maxLength": 512},
                         "size": {"type": "integer", "minimum": 1, "maximum": 10},
                     },
                     "required": ["query"],
@@ -170,7 +226,15 @@ class OnlineDatabaseSkills:
         self.register(
             OnlineSkillDefinition(
                 name="uniprot.resolve",
-                description="Resolve one UniProt accession or entry name to its authoritative protein sequence and metadata.",
+                description=(
+                    "Resolve one UniProt accession or entry name to its authoritative protein sequence and "
+                    "metadata, with the record's organism and gene name stated. The accession must already be "
+                    "pinned to one organism and isoform — resolve an ambiguous gene with uniprot.search first "
+                    "and let the user choose. Verify the returned organism against the user's intent before "
+                    "consuming the sequence. Returns no results when the record does not exist. BOUNDARY: "
+                    "returns SEQUENCES and protein metadata; a consuming field that needs a 3D structure wants "
+                    "rcsb.search (experimental) or alphafold.resolve (predicted) instead."
+                ),
                 input_schema=identifier_schema,
             ),
             self._resolve_uniprot,
@@ -180,10 +244,21 @@ class OnlineDatabaseSkills:
                 name="pubchem.search",
                 description=(
                     "Look up one PubChem compound and return its SMILES, molecular formula, InChIKey, and InChI. "
-                    "Choose the namespace that matches the identifier: 'name' for a compound name, synonym, or "
-                    "vendor / internal compound code; 'cid' for a numeric PubChem CID; 'smiles' for a SMILES "
-                    "string; 'inchi' for an InChI string; 'inchikey' for an InChIKey. Defaults to 'name'. Returns "
-                    "no results when there is no authoritative match."
+                    "Choose the namespace that matches the identifier: 'name' for a compound name, trade name, "
+                    "synonym, or registry number (vendor / CAS / internal compound codes resolve as names); 'cid' "
+                    "for a numeric PubChem CID; 'smiles' for a SMILES string; 'inchi' for an InChI string; "
+                    "'inchikey' for an InChIKey. Defaults to 'name'. Returns no results when there is no "
+                    "authoritative match. BOUNDARY: use this to resolve a molecule the user referred to by "
+                    "anything other than a SMILES string. When the user already provides a SMILES, no lookup is "
+                    "needed — pass the SMILES to the consuming field directly. Never read a compound's identity, "
+                    "correctness, or properties out of a SMILES string — inference from SMILES is unreliable; a "
+                    "SMILES is an authoritative key only when this lookup (or the user) produced it, so never "
+                    "state or imply one is 'ready to use' before the lookup has run. A compound's SMILES is a "
+                    "retrieved value, never recalled from memory: writing one from model knowledge — in a "
+                    "message, a question, or an operation — is fabrication; resolve the compound here first. "
+                    "The identifier must be in "
+                    "English (or a registry number): a name in another language returns no match — convert it "
+                    "with translate.to_english first."
                 ),
                 input_schema={
                     "type": "object",
@@ -203,7 +278,13 @@ class OnlineDatabaseSkills:
         self.register(
             OnlineSkillDefinition(
                 name="rcsb.resolve",
-                description="Resolve one RCSB PDB identifier to authoritative entry metadata and structure file links.",
+                description=(
+                    "Resolve one RCSB PDB identifier to authoritative entry metadata (title with organism, "
+                    "method, resolution) and structure file links. The entry's title states its organism and "
+                    "the protein it contains — verify both against the user's intent before consuming the "
+                    "structure. Returns no results when the id does not exist. BOUNDARY: resolves an EXACT id "
+                    "only; find structures by name with rcsb.search."
+                ),
                 input_schema=identifier_schema,
             ),
             self._resolve_rcsb,
@@ -214,13 +295,23 @@ class OnlineDatabaseSkills:
                 description=(
                     "Search RCSB PDB by free text (protein or gene name, organism, complex description) and return "
                     "ranked matching structure entries with title, experimental method, resolution, and download "
-                    "links. Use this to FIND structures by name; use rcsb.resolve only for an exact PDB id. Returns "
-                    "no results when there is no match."
+                    "links. Use this to FIND structures by name; use rcsb.resolve only for an exact PDB id. Put "
+                    "the organism into the search text alongside the protein name so the correct species' entries "
+                    "rank first; an unstated organism is an unresolved choice, never a default: search without "
+                    "it and resolve the organism — and the isoform, when the name is a gene family — through "
+                    "the user's choice among the returned entries: every entry you offer must state its "
+                    "organism and isoform from its title. Never assume an unstated organism. Returns no results when there is no match. BOUNDARY: RCSB returns experimental "
+                    "3D STRUCTURE entries — choose it when the consuming field needs a structure file (a "
+                    "receptor / target structure, a template); when the consuming field needs only an amino-acid "
+                    "sequence, use uniprot instead. When several entries match, never select one silently: ask "
+                    "the user a choice question listing the entries (pdb id, title, method, resolution) and use "
+                    "only the entry the user picks. The search text must be in English; convert a non-English "
+                    "name with translate.to_english first."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "text": {"type": "string", "minLength": 1, "maxLength": 512},
                         "size": {"type": "integer", "minimum": 1, "maximum": 10},
                     },
                     "required": ["text"],
@@ -234,8 +325,13 @@ class OnlineDatabaseSkills:
                 name="alphafold.resolve",
                 description=(
                     "Resolve one UniProt accession to its AlphaFold DB predicted structure: model confidence "
-                    "(pLDDT), and PDB / mmCIF download links. Complements rcsb (experimental) and uniprot "
-                    "(sequence). Use a UniProt accession, not a gene name."
+                    "(pLDDT), organism and gene, and PDB / mmCIF download links. Use a UniProt accession, not "
+                    "a gene name — the accession must already be pinned to one organism and isoform (resolve "
+                    "an ambiguous gene with uniprot.search first and let the user choose), and the returned "
+                    "record's organism must be verified against the user's intent before the model is used. "
+                    "BOUNDARY: this returns a PREDICTED monomer model, not an experimental structure — choose it "
+                    "when the user accepts a predicted model, or when no experimental structure exists for the "
+                    "protein; prefer rcsb.search when an experimental structure is required."
                 ),
                 input_schema=identifier_schema,
             ),
@@ -246,15 +342,18 @@ class OnlineDatabaseSkills:
                 name="chembl.bioactivity",
                 description=(
                     "Compound-directed bioactivity: given a COMPOUND (drug name / ChEMBL molecule), return the "
-                    "TARGETS it hits ranked by measured potency (IC50 / Ki / Kd / EC50). Answers 'what does drug X "
-                    "target?' or 'how potent is X against Y?'. For the inverse question — 'find compounds / "
-                    "inhibitors for target Y' — use chembl.target_activity instead. Returns no results when the "
-                    "compound or its activity is unknown."
+                    "TARGETS it hits ranked by measured potency (IC50 / Ki / Kd / EC50). The resolver matches "
+                    "the name to ChEMBL's best-ranked molecule and echoes its identity in 'compound' — verify "
+                    "that identity (name, ChEMBL id) against the user's intent before using the activities; "
+                    "when it differs, resolve the compound with pubchem.search or restate the query. For the "
+                    "inverse direction — find compounds for a target — use chembl.target_activity instead. "
+                    "Returns no results when the compound or its activity is unknown. The query must be in "
+                    "English — convert a non-English name with translate.to_english first."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "query": {"type": "string", "minLength": 1, "maxLength": 512},
                         "size": {"type": "integer", "minimum": 1, "maximum": 10},
                     },
                     "required": ["query"],
@@ -269,13 +368,18 @@ class OnlineDatabaseSkills:
                 description=(
                     "Target-directed bioactivity: find known active compounds (inhibitors / ligands) for a "
                     "biological TARGET and return them ranked by measured potency (IC50 / Ki / Kd / EC50), each "
-                    "with name and canonical SMILES. Answers 'what inhibits / binds / hits target X?' or 'find me "
-                    "inhibitors of X'. Resolve the target one of three ways, most precise first: (1) a UniProt "
-                    "accession in 'accession' — resolve a gene symbol to its accession with uniprot.search first, "
-                    "then pass that accession here; (2) a ChEMBL target id in 'target_chembl_id'; (3) a free-text "
-                    "protein name in 'query' alone, matched on ChEMBL's preferred name (gene symbols rarely match "
-                    "— prefer the accession path). Defaults to Homo sapiens. Returns no results when the target or "
-                    "its activity is unknown."
+                    "with name and canonical SMILES. Resolve the target one of three ways, most precise first: "
+                    "(1) a UniProt accession in 'accession' — resolve a gene symbol to its accession with "
+                    "uniprot.search first, then pass that accession here; (2) a ChEMBL target id in "
+                    "'target_chembl_id'; (3) a free-text protein name in 'query' alone, matched on ChEMBL's "
+                    "preferred name (gene symbols rarely match — prefer the accession path). An unstated "
+                    "organism is an unresolved choice, never a default: the resolver ranks candidates by the "
+                    "'organism' you pass and returns its best match with the target's organism stated — verify "
+                    "the returned organism (and isoform, when the gene names a family) against the user's "
+                    "intent before using the activities. Returns no results when the target or its activity "
+                    "is unknown. The "
+                    "query and organism must be in English — convert a non-English name with "
+                    "translate.to_english first."
                 ),
                 input_schema={
                     "type": "object",
@@ -283,7 +387,7 @@ class OnlineDatabaseSkills:
                         "query": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 256,
+                            "maxLength": 512,
                             "description": "The user-facing target label (name or gene symbol). Echoed in the result.",
                         },
                         "accession": {
@@ -302,7 +406,7 @@ class OnlineDatabaseSkills:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 128,
-                            "description": "Preferred organism scientific name to disambiguate targets; defaults to Homo sapiens.",
+                            "description": "Organism scientific name used to rank matching targets; unstated is allowed — the best match is returned with its organism stated, for verification against the user's intent.",
                         },
                         "activity_type": {
                             "type": "string",
@@ -323,13 +427,14 @@ class OnlineDatabaseSkills:
                 name="pubmed.search",
                 description=(
                     "Search PubMed for biomedical literature by free text and return matching articles with title, "
-                    "authors, journal, year, and a PubMed link. Use this to find papers or evidence on a drug, "
-                    "target, disease, or method. Returns no results when there is no match."
+                    "first author, journal, year, and a PubMed link. Use this to find papers or evidence on a drug, "
+                    "target, disease, or method. Returns no results when there is no match. The query "
+                    "must be in English — convert a non-English term with translate.to_english first."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "query": {"type": "string", "minLength": 1, "maxLength": 512},
                         "size": {"type": "integer", "minimum": 1, "maximum": 10},
                     },
                     "required": ["query"],
@@ -344,12 +449,13 @@ class OnlineDatabaseSkills:
                 description=(
                     "Search ClinicalTrials.gov for clinical trials by free text (drug name, disease, "
                     "intervention, sponsor) and return matching trials with NCT ID, title, phase, status, "
-                    "conditions, and a link. Use this to find clinical evidence or trial status."
+                    "conditions (first three listed), and a link. Use this to find clinical evidence or trial status. The "
+                    "query must be in English — convert a non-English term with translate.to_english first."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "query": {"type": "string", "minLength": 1, "maxLength": 512},
                         "size": {"type": "integer", "minimum": 1, "maximum": 10},
                     },
                     "required": ["query"],
@@ -360,28 +466,59 @@ class OnlineDatabaseSkills:
         )
 
     # A descriptive User-Agent is requested by EBI/NCBI for programmatic traffic and helps
-    # their fair-use throttling distinguish legitimate research clients.
-    _HTTP_USER_AGENT = "V-Bio-Copilot/1.0 (read-only research lookups)"
-    # Transient-failure retry, mirroring the official chembl_webresource_client guidance: EBI,
-    # NCBI, and RCSB read APIs intermittently return HTTP 5xx or drop connections mid-request
-    # (a long-standing ChEMBL condition — see chembl_webresource_client issues #134/#120, whose
-    # recommended workaround is bounded retry with exponential backoff). 4xx is deterministic
-    # (404 = no authoritative match) and must NOT be retried, so per-skill honest-empty handling
-    # stays intact.
-    _RETRY_MAX_ATTEMPTS = 3
+    # their fair-use throttling distinguish legitimate research clients. UniProt's help pages
+    # additionally ask for a contact email INSIDE the User-Agent so they can reach the operator
+    # before blocking, so the email is appended when configured.
+    def _http_user_agent(self) -> str:
+        agent = "V-Bio-Copilot/1.1 (read-only research lookups"
+        if self._contact_email:
+            agent += f"; contact: {self._contact_email}"
+        return agent + ")"
+
+    # Transient-failure retry, mirroring the reliability patterns the upstreams themselves
+    # publish: UniProt's official examples use urllib3 Retry over [500, 502, 503, 504]; the
+    # official chembl_webresource_client retries 400–420 and 500–504 (three total retries,
+    # backoff factor 2) because ChEMBL's Apache proxy intermittently 502s (chembl issues
+    # #28/#29/#31); RCSB documents HTTP 429 for rate limiting and recommends exponential
+    # backoff. Retry-After (RFC 9110: delta-seconds or HTTP-date) is honored on 429/503 the
+    # way urllib3's RETRY_AFTER_STATUS_CODES does, capped so a copilot turn never hangs on a
+    # server-demanded wait. 4xx other than 408/429 is deterministic (404 = no authoritative
+    # match) and must NOT be retried, so per-skill honest-empty handling stays intact.
+    _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+    _RETRY_MAX_ATTEMPTS = 4
     _RETRY_BACKOFF_SECONDS = 0.4
     _RETRY_BACKOFF_FACTOR = 2.5
+    _RETRY_BACKOFF_CAP_SECONDS = 8.0
+    _RETRY_AFTER_CAP_SECONDS = 8.0
+    # NCBI E-utilities identification (NBK25497): `tool` must uniquely identify the software
+    # with no spaces; `email` must be the developer's address; `api_key` lifts 3 req/s → 10 req/s.
+    _NCBI_TOOL = "vbio-copilot"
+
+    def _ncbi_ident_params(self) -> str:
+        """URL fragment carrying NCBI's requested tool/email/api_key identification."""
+        parts = [f"tool={quote(self._NCBI_TOOL, safe='')}"]
+        if self._ncbi_email:
+            parts.append(f"email={quote(self._ncbi_email, safe='')}")
+        if self._ncbi_api_key:
+            parts.append(f"api_key={quote(self._ncbi_api_key, safe='')}")
+        return "&".join(parts)
+
+    def _host_rate_interval(self, host: str) -> float:
+        if host == "eutils.ncbi.nlm.nih.gov" and self._ncbi_api_key:
+            return _NCBI_KEYED_RATE_SECONDS
+        return _HOST_RATE_SECONDS.get(host, _DEFAULT_RATE_SECONDS)
 
     def _wait_for_host_rate(self, url: str) -> None:
         """Space requests to a host per its documented rate limit (reservation pattern).
 
-        ChEMBL allows <=1 req/s without an API key. Under the lock we reserve the next allowed
-        slot for this host (slot = max(now, previous_slot) + interval), release the lock, then
-        sleep until the slot. Concurrent requests to the SAME host therefore queue at the rate
-        limit, while requests to a different host are not blocked by this one.
+        ChEMBL allows <=1 req/s without an API key; NCBI errors above 3 req/s without a key;
+        PubChem asks for <=5 req/s. Under the lock we reserve the next allowed slot for this
+        host (slot = max(now, previous_slot) + interval), release the lock, then sleep until
+        the slot. Concurrent requests to the SAME host therefore queue at the rate limit,
+        while requests to a different host are not blocked by this one.
         """
         host = (urlparse(url).hostname or "").lower()
-        interval = _HOST_RATE_SECONDS.get(host, _DEFAULT_RATE_SECONDS)
+        interval = self._host_rate_interval(host)
         if interval <= 0:
             return
         with self._rate_lock:
@@ -393,36 +530,82 @@ class OnlineDatabaseSkills:
         if sleep_for > 0:
             time.sleep(sleep_for)
 
-    def _request_with_retry(self, method: str, url: str, *, data: str | None = None) -> Any:
-        """Issue one HTTP request, retrying transient failures with bounded exponential backoff.
+    @staticmethod
+    def _parse_retry_after(value: Any) -> Optional[float]:
+        """Parse a Retry-After header (delta-seconds or HTTP-date) to a non-negative delay."""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return max(0.0, float(text))
+        except ValueError:
+            pass
+        try:
+            parsed = email.utils.parsedate_tz(text)
+            if parsed is None:
+                return None
+            when = email.utils.mktime_tz(parsed)
+            return max(0.0, when - time.time())
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
 
-        Retries HTTP 5xx, timeouts, and connection errors up to ``_RETRY_MAX_ATTEMPTS`` and
-        returns the final response (success or the last 4xx). Raises ``RuntimeError`` only when
-        the source stays unreachable after every attempt, so the caller can surface an honest
-        "source unavailable" signal instead of a raw transport exception.
+    def _retry_after_seconds(self, response: Any) -> Optional[float]:
+        """The server-demanded wait for this response, capped to the turn's patience."""
+        headers = getattr(response, "headers", None)
+        if not hasattr(headers, "get"):
+            return None
+        delay = self._parse_retry_after(headers.get("Retry-After"))
+        if delay is None:
+            return None
+        return min(delay, self._RETRY_AFTER_CAP_SECONDS)
+
+    def _sleep_backoff(self, backoff: float) -> None:
+        """Equal-jitter exponential backoff (AWS "Exponential Backoff and Jitter").
+
+        Half the computed delay fixed, half random — sleeps grow exponentially while avoiding
+        the synchronized retry bursts that plain exponential backoff produces.
         """
-        headers = {"Accept": "application/json", "User-Agent": self._HTTP_USER_AGENT}
+        time.sleep(backoff * 0.5 + random.uniform(0.0, backoff * 0.5))
+
+    def _request_with_retry(self, method: str, url: str, *, data: str | None = None) -> Any:
+        """Issue one HTTP request, retrying transient failures with bounded jittered backoff.
+
+        Retries connection errors, timeouts, and the retryable statuses (408/429/5xx) up to
+        ``_RETRY_MAX_ATTEMPTS``, honoring a capped Retry-After when the server sends one, and
+        returns the final response (success or the last failure). Raises ``RuntimeError`` only
+        when the source stays unreachable after every attempt, so the caller can surface an
+        honest "source unavailable" signal instead of a raw transport exception.
+        """
+        headers = {"Accept": "application/json", "User-Agent": self._http_user_agent()}
         if method != "GET":
             headers["Content-Type"] = "application/json"
+        # Separate connect/read timeouts: a 5s connect window sits just above the TCP
+        # retransmission multiple requests recommends; the read window is the configured one.
+        timeout = (5.0, self._timeout_seconds)
         backoff = self._RETRY_BACKOFF_SECONDS
         response: Any = None
         for attempt in range(self._RETRY_MAX_ATTEMPTS):
             self._wait_for_host_rate(url)
             try:
                 if method == "GET":
-                    response = self._session.get(url, headers=headers, timeout=self._timeout_seconds, proxies=self._proxies)
+                    response = self._session.get(url, headers=headers, timeout=timeout, proxies=self._proxies)
                 else:
-                    response = self._session.post(url, headers=headers, data=data, timeout=self._timeout_seconds, proxies=self._proxies)
+                    response = self._session.post(url, headers=headers, data=data, timeout=timeout, proxies=self._proxies)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
                 if attempt + 1 == self._RETRY_MAX_ATTEMPTS:
                     raise RuntimeError(f"online source unreachable: {exc}") from exc
-                time.sleep(backoff)
-                backoff *= self._RETRY_BACKOFF_FACTOR
+                self._sleep_backoff(backoff)
+                backoff = min(backoff * self._RETRY_BACKOFF_FACTOR, self._RETRY_BACKOFF_CAP_SECONDS)
                 continue
-            # Retry only transient server errors; 4xx is deterministic and returned as-is.
-            if 500 <= getattr(response, "status_code", 0) < 600 and attempt + 1 < self._RETRY_MAX_ATTEMPTS:
-                time.sleep(backoff)
-                backoff *= self._RETRY_BACKOFF_FACTOR
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status in self._RETRYABLE_STATUS and attempt + 1 < self._RETRY_MAX_ATTEMPTS:
+                # A server-demanded wait (Retry-After on 429/503) overrides computed backoff.
+                wait = self._retry_after_seconds(response) if status in (429, 503) else None
+                if wait is not None:
+                    time.sleep(wait)
+                else:
+                    self._sleep_backoff(backoff)
+                backoff = min(backoff * self._RETRY_BACKOFF_FACTOR, self._RETRY_BACKOFF_CAP_SECONDS)
                 continue
             return response
         return response
@@ -437,7 +620,27 @@ class OnlineDatabaseSkills:
         response = self._request_with_retry(method, url, data=data)
         if not response.ok:
             detail = " ".join(str(getattr(response, "text", "") or "").split())[:240]
-            raise RuntimeError(f"HTTP {response.status_code}{': ' + detail if detail else ''}")
+            suffix = f": {detail}" if detail else ""
+            status = int(getattr(response, "status_code", 0) or 0)
+            # 4xx (except 408 request-timeout and 429 rate-limit, both retryable) is a DETERMINISTIC
+            # rejection: the source evaluated the request and refused it as invalid. The error text
+            # must say so — the planner reads it and must fix the arguments (query syntax, field
+            # names, identifier format) and retry. Labeling this class "source unavailable" would
+            # send the user down a retry-later path that can never succeed while the request is
+            # malformed. 404 stays a plain status so call-site _is_http_status(404) no-match
+            # handling keeps working.
+            if 400 <= status < 500 and status not in (404, 408, 429):
+                raise RuntimeError(
+                    f"HTTP {status}{suffix} — the source rejected the request as invalid. This is not an "
+                    "outage: correct the request arguments (query syntax, field names, identifier format) "
+                    "and retry under a new operation id."
+                )
+            raise RuntimeError(f"HTTP {status}{suffix}")
+        if int(getattr(response, "status_code", 0) or 0) == 204:
+            # 204 No Content is an authoritative empty answer (RCSB's search API returns it for a
+            # query with zero hits). Map it to the empty-object shape so search handlers report
+            # NO_MATCH instead of tripping the non-JSON guard below as a source failure.
+            return {}
         try:
             payload = response.json()
         except ValueError as exc:
@@ -545,11 +748,14 @@ class OnlineDatabaseSkills:
             ("recommendedName", "fullName", "value"),
         )
         accession = str(payload.get("primaryAccession") or identifier).strip().upper()
+        organism_payload = payload.get("organism") if isinstance(payload.get("organism"), dict) else {}
+        organism = self._nested_text(organism_payload, ("scientificName",))
         return {
             "source": "uniprot",
             "identifier": accession,
             "sourceUrl": f"https://www.uniprot.org/uniprotkb/{quote(accession, safe='-')}/entry",
             "accession": accession,
+            "organism": organism,
             "label": gene_name or accession,
             "entryName": str(payload.get("uniProtkbId") or accession).strip(),
             "proteinName": protein_name or gene_name or accession,
@@ -620,23 +826,81 @@ class OnlineDatabaseSkills:
             "results": results,
         }
 
-    def _rcsb_entry_summary(self, pdb_id: str) -> Dict[str, Any]:
-        payload = self._get_json(
-            f"https://data.rcsb.org/rest/v1/core/entry/{quote(pdb_id, safe='')}"
-        )
+    @staticmethod
+    def _format_rcsb_entry(payload: Dict[str, Any], pdb_id: str) -> Dict[str, Any]:
         struct = payload.get("struct") if isinstance(payload.get("struct"), dict) else {}
         info = payload.get("rcsb_entry_info") if isinstance(payload.get("rcsb_entry_info"), dict) else {}
+        # The Data API reports the method as the singular string "experimental_method"; older
+        # payloads carried a plural list. Accept both so the method never silently disappears
+        # from an entry the user must choose between.
         methods = info.get("experimental_methods")
+        if not isinstance(methods, list) or not methods:
+            singular = str(info.get("experimental_method") or "").strip()
+            methods = [singular] if singular else []
         resolution = info.get("resolution_combined")
         return {
             "pdbId": pdb_id,
             "title": str(struct.get("title") or pdb_id).strip(),
-            "method": ", ".join(str(item) for item in methods) if isinstance(methods, list) else str(methods or ""),
+            "method": ", ".join(str(item) for item in methods if str(item or "").strip()),
             "resolution": (resolution[0] if isinstance(resolution, list) and resolution else None),
             "sourceUrl": f"https://www.rcsb.org/structure/{quote(pdb_id, safe='')}",
-            "pdbUrl": f"https://files.rcsb.org/download/{quote(pdb_id, safe='')}.pdb",
+            # Advertise ONLY the mmCIF link: mmCIF is RCSB's master archive format and exists
+            # for EVERY entry, while the legacy PDB-format file exists only for some (large or
+            # complex entries answer 404 on .pdb). A record field is a contract — handing the
+            # planner a link that may not exist is the root cause of dead downloads, so the
+            # dead one is simply not exposed.
             "cifUrl": f"https://files.rcsb.org/download/{quote(pdb_id, safe='')}.cif",
         }
+
+    def _rcsb_entry_summary(self, pdb_id: str) -> Dict[str, Any]:
+        payload = self._get_json(
+            f"https://data.rcsb.org/rest/v1/core/entry/{quote(pdb_id, safe='')}"
+        )
+        return self._format_rcsb_entry(payload, pdb_id)
+
+    def _rcsb_entry_summaries(self, pdb_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch per-entry summaries for the hit ids.
+
+        Entries are independent GETs to data.rcsb.org — fetched through a small bounded pool
+        instead of a serial loop (a size-10 search paid 10 sequential round trips, the largest
+        single-skill stall on the lookup path). The per-host rate limiter still bounds the
+        outbound rate; failures mark the entry dropped exactly as the serial path did.
+        """
+        """Fetch entry summaries one id at a time.
+
+        The core/entry endpoint accepts exactly ONE entry id (comma-separated ids 404 —
+        batching is documented only for holdings endpoints), so a search with N hits costs N
+        summary requests. Kept as a method for the per-entry failure tolerance the caller
+        relies on.
+        """
+        unique_ids: List[str] = []
+        seen: set[str] = set()
+        for pdb_id in pdb_ids:
+            normalized = str(pdb_id or "").strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique_ids.append(normalized)
+        if not unique_ids:
+            return {}
+        def _fetch_one(one_id: str) -> tuple[str, Dict[str, Any] | None]:
+            # Per-entry tolerance: retries that exhaust raise here — drop that one hit,
+            # never the whole search (the caller marks the result incomplete).
+            try:
+                response = self._request_with_retry(
+                    "GET", f"https://data.rcsb.org/rest/v1/core/entry/{quote(one_id, safe='')}"
+                )
+                if not response.ok:
+                    return one_id, None
+                return one_id, self._format_rcsb_entry(response.json(), one_id)
+            except (RuntimeError, TypeError, ValueError):
+                return one_id, None
+
+        summaries: Dict[str, Dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for one_id, formatted in pool.map(_fetch_one, unique_ids):
+                if formatted is not None:
+                    summaries[one_id] = formatted
+        return summaries
 
     def _resolve_rcsb(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         identifier = str(arguments.get("identifier") or "").strip().upper()
@@ -665,20 +929,35 @@ class OnlineDatabaseSkills:
             "https://search.rcsb.org/rcsbsearch/v2/query", search_body
         )
         result_set = payload.get("result_set") if isinstance(payload.get("result_set"), list) else []
+        pdb_ids = [
+            str(hit.get("identifier") or "").strip().upper()
+            for hit in result_set
+            if isinstance(hit, dict) and str(hit.get("identifier") or "").strip()
+        ]
+        # Per-entry summary fetch with tolerance (see _rcsb_entry_summaries): a hit whose
+        # summary exhausts its retries is dropped and REPORTED, never fetched twice.
+        summaries = self._rcsb_entry_summaries(pdb_ids)
         results: List[Dict[str, Any]] = []
+        dropped: List[str] = []
         for hit in result_set:
             if not isinstance(hit, dict):
                 continue
             pdb_id = str(hit.get("identifier") or "").strip().upper()
             if not pdb_id:
                 continue
-            try:
-                entry = self._rcsb_entry_summary(pdb_id)
-            except RuntimeError:
+            entry = summaries.get(pdb_id)
+            if entry is None:
+                dropped.append(pdb_id)
                 continue
             entry["score"] = hit.get("score")
             results.append(entry)
-        return {"source": "rcsb", "query": text, "count": len(results), "results": results}
+        payload = {"source": "rcsb", "query": text, "count": len(results), "results": results}
+        if dropped:
+            # A hit whose entry summary could not be fetched is data the planner must know
+            # vanished — report it instead of a silently shorter result set.
+            payload["incomplete"] = True
+            payload["droppedIds"] = dropped
+        return payload
 
     def _resolve_alphafold(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         accession = _required_string(arguments, "identifier", label="AlphaFold resolve").upper()
@@ -754,16 +1033,21 @@ class OnlineDatabaseSkills:
                 value = float(item.get("standard_value"))
             except (TypeError, ValueError):
                 continue
+            units = str(item.get("standard_units") or "nM").strip()
+            rank = self._potency_rank_nm(value, units)
             existing = best_by_target.get(target)
-            if existing is None or value < existing["value"]:
+            if existing is None or rank < existing["_rank"]:
                 best_by_target[target] = {
                     "target": target,
                     "activityType": str(item.get("standard_type") or "").strip(),
                     "value": value,
-                    "units": str(item.get("standard_units") or "nM").strip(),
+                    "units": units,
                     "organism": str(item.get("organism") or "").strip(),
+                    "_rank": rank,
                 }
-        results = list(best_by_target.values())[:size]
+        results = sorted(best_by_target.values(), key=lambda row: row["_rank"])[:size]
+        for row in results:
+            row.pop("_rank", None)
         return {
             "source": "chembl",
             "query": query,
@@ -782,13 +1066,29 @@ class OnlineDatabaseSkills:
 
     _CHEMBL_DATA_API = "https://www.ebi.ac.uk/chembl/api/data"
 
+    @staticmethod
+    def _potency_rank_nm(value: float, units: str) -> float:
+        """Normalize a measured potency to nanomolar for RANKING only (the record keeps the
+        original value+units). Non-molar units (ug.mL-1, %, ratio) rank last — comparing their
+        raw number against nM values is meaningless, which is exactly the bug this fixes."""
+        unit = (units or "").strip().lower()
+        if unit in ("nm", "nanomolar"):
+            return value
+        if unit in ("um", "µm", "micromolar"):
+            return value * 1000.0
+        if unit in ("pm", "picomolar"):
+            return value / 1000.0
+        if unit in ("mm", "millimolar"):
+            return value * 1_000_000.0
+        return float("inf")
+
     def _resolve_chembl_target(
         self,
         *,
         query: str,
         accession: str | None,
         target_chembl_id: str | None,
-        organism: str,
+        organism: str | None,
     ) -> Dict[str, Any] | None:
         """Resolve a target to one ChEMBL target record.
 
@@ -798,17 +1098,25 @@ class OnlineDatabaseSkills:
         requested organism and the most specific (single-protein) record — a general ranking
         principle, not a per-query rule.
         """
-        if target_chembl_id:
-            payload = self._get_json(
-                f"{self._CHEMBL_DATA_API}/target/{quote(target_chembl_id, safe='')}.json"
-            )
-            raw_targets = [payload] if isinstance(payload, dict) and payload.get("target_chembl_id") else []
-        elif accession:
+        if accession:
             payload = self._get_json(
                 f"{self._CHEMBL_DATA_API}/target.json?"
                 f"target_components__accession={quote(accession, safe='')}&limit=25"
             )
             raw_targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
+        elif target_chembl_id:
+            # A direct id lookup that 404s is ChEMBL answering "no such target id" — an
+            # authoritative NO_MATCH, not a source failure (every other resolve path does the
+            # same); surface it as an empty result instead of letting HTTP 404 become FAILED.
+            try:
+                payload = self._get_json(
+                    f"{self._CHEMBL_DATA_API}/target/{quote(target_chembl_id, safe='')}.json"
+                )
+            except RuntimeError as exc:
+                if "HTTP 404" in str(exc):
+                    return []
+                raise
+            raw_targets = [payload] if isinstance(payload, dict) and payload.get("target_chembl_id") else []
         else:
             payload = self._get_json(
                 f"{self._CHEMBL_DATA_API}/target.json?"
@@ -841,7 +1149,12 @@ class OnlineDatabaseSkills:
             return None
         candidates.sort(key=lambda item: (item["_organism_mismatch"], item["_not_single_protein"]))
         chosen = candidates[0]
-        return {key: value for key, value in chosen.items() if not key.startswith("_")}
+        # The resolver picks its best-ranked match: surface HOW MANY candidates existed so
+        # the choice is visible to the planner (it must verify organism/isoform per the
+        # contract) instead of a silent single-result illusion.
+        return {
+            key: value for key, value in chosen.items() if not key.startswith("_")
+        } | {"matchedTargets": len(candidates)}
 
     def _hydrate_chembl_molecules(self, molecule_ids: List[str]) -> Dict[str, Dict[str, str]]:
         """Fetch canonical SMILES + preferred name for a batch of ChEMBL molecule ids."""
@@ -872,7 +1185,7 @@ class OnlineDatabaseSkills:
         size = _resolve_size(arguments, 5)
         accession = str(arguments.get("accession") or "").strip().upper() or None
         target_chembl_id = str(arguments.get("target_chembl_id") or "").strip().upper() or None
-        organism = str(arguments.get("organism") or "Homo sapiens").strip() or "Homo sapiens"
+        organism = str(arguments.get("organism") or "").strip() or None
         activity_type = str(arguments.get("activity_type") or "IC50,Ki,Kd,EC50,AC50").strip() or "IC50,Ki,Kd,EC50,AC50"
 
         target = self._resolve_chembl_target(
@@ -903,16 +1216,23 @@ class OnlineDatabaseSkills:
                 continue
             if not molecule_id:
                 continue
+            units = str(item.get("standard_units") or "nM").strip()
+            rank = self._potency_rank_nm(value, units)
             existing = best_by_molecule.get(molecule_id)
-            if existing is None or value < existing["value"]:
+            if existing is None or rank < existing["_rank"]:
                 best_by_molecule[molecule_id] = {
                     "molecule_chembl_id": molecule_id,
                     "type": str(item.get("standard_type") or "").strip(),
                     "value": value,
-                    "units": str(item.get("standard_units") or "nM").strip(),
+                    "units": units,
                     "name_hint": str(item.get("molecule_pref_name") or "").strip(),
+                    "_rank": rank,
                 }
-        ranked = list(best_by_molecule.values())[:size]
+        # Rank on the nM-normalized potency — raw ordering mixed units (0.2 ug.mL-1 outranked
+        # sub-nM rows, live-verified). Non-molar rows keep their value, ranked last.
+        ranked = sorted(best_by_molecule.values(), key=lambda row: row["_rank"])[:size]
+        for row in ranked:
+            row.pop("_rank", None)
         if not ranked:
             return {"source": "chembl", "query": query, "target": target, "count": 0, "results": []}
 
@@ -944,9 +1264,12 @@ class OnlineDatabaseSkills:
     def _search_pubmed(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         query = _required_string(arguments, "query", label="PubMed search")
         size = _resolve_size(arguments, 5)
+        # NCBI asks every E-utility request to carry tool/email (+ api_key when one exists)
+        # so they can contact the operator instead of blocking the IP (NBK25497).
+        ident = self._ncbi_ident_params()
         esearch = self._get_json(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
-            f"db=pubmed&term={quote(query)}&retmode=json&retmax={size}"
+            f"db=pubmed&term={quote(query)}&retmode=json&retmax={size}&{ident}"
         )
         esearch_result = esearch.get("esearchresult") if isinstance(esearch.get("esearchresult"), dict) else {}
         ids = [str(item) for item in (esearch_result.get("idlist") or []) if str(item).isdigit()]
@@ -954,7 +1277,7 @@ class OnlineDatabaseSkills:
             return {"source": "pubmed", "query": query, "count": 0, "results": []}
         esummary = self._get_json(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?"
-            f"db=pubmed&id={quote(','.join(ids), safe=',')}&retmode=json"
+            f"db=pubmed&id={quote(','.join(ids), safe=',')}&retmode=json&{ident}"
         )
         summary = esummary.get("result") if isinstance(esummary.get("result"), dict) else {}
         uids = [str(item) for item in (summary.get("uids") or []) if str(item) in ids]

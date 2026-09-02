@@ -11,7 +11,7 @@ import {
   renewManagementSession,
   saveSession
 } from '../api/authApi';
-import { findUserByUsername } from '../api/supabaseLite';
+import { fetchMe } from '../api/authServerApi';
 
 interface AuthContextValue {
   session: Session | null;
@@ -38,7 +38,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshSession = async () => {
     if (!session) return;
-    const user = await findUserByUsername(session.username);
+    // Server-side revalidation (F2): the browser no longer reads app_users directly.
+    let user;
+    try {
+      user = await fetchMe();
+    } catch {
+      clearSession();
+      setSession(null);
+      return;
+    }
     if (!user || user.deleted_at) {
       clearSession();
       setSession(null);
@@ -48,8 +56,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const refreshed: Session = {
       userId: user.id,
       username: user.username,
-      name: user.name,
-      email: user.email || null,
+      name: user.name || user.username,
+      email: user.email ?? session.email ?? null,
       avatarUrl: user.avatar_url || session.avatarUrl || null,
       isAdmin: user.is_admin || isSuperAdmin,
       isSuperAdmin,

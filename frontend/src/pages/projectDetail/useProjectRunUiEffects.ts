@@ -22,9 +22,6 @@ interface UseProjectRunUiEffectsInput {
 }
 
 export function useProjectRunUiEffects({
-  runRedirectTaskId,
-  projectId,
-  navigate,
   runRedirectTimerRef,
   runSuccessNoticeTimerRef,
   runMenuOpen,
@@ -54,24 +51,10 @@ export function useProjectRunUiEffects({
     };
   }, [runRedirectTimerRef, runSuccessNoticeTimerRef]);
 
-  useEffect(() => {
-    if (!runRedirectTaskId || !projectId) return;
-    const taskPagePath = `/projects/${projectId}/tasks`;
-    if (runRedirectTimerRef.current !== null) {
-      window.clearTimeout(runRedirectTimerRef.current);
-      runRedirectTimerRef.current = null;
-    }
-    runRedirectTimerRef.current = window.setTimeout(() => {
-      runRedirectTimerRef.current = null;
-      navigate(taskPagePath);
-    }, 420);
-    return () => {
-      if (runRedirectTimerRef.current !== null) {
-        window.clearTimeout(runRedirectTimerRef.current);
-        runRedirectTimerRef.current = null;
-      }
-    };
-  }, [runRedirectTaskId, projectId, navigate, runRedirectTimerRef]);
+  // Post-submit navigation was removed: jumping to the task list unmounted the whole
+  // workspace and remounted it (the "flash" on every submit). The inline queued toast
+  // (with its Tasks link) reports success in place; the workspace's runtime state updates
+  // in place via syncWorkspaceTaskRow/polling.
 
   useEffect(() => {
     if (!runMenuOpen) return;

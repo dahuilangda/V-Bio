@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useAffinityWorkflow } from '../../hooks/useAffinityWorkflow';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
-import type { AffinityScoringMode, InputComponent, ProjectTask } from '../../types/models';
+import type { AffinityDockPocket, AffinityScoringMode, InputComponent, ProjectTask } from '../../types/models';
 import { applyAffinityChainsToDraftState, applyUseMsaToProteinComponents } from './projectAffinityDraft';
 import { readTaskAffinityUploads, resolveAffinityUploadStorageTaskRowId } from './projectTaskSnapshot';
 
@@ -49,6 +49,26 @@ export function useProjectAffinityWorkspace({
             options: {
               ...(prev.inputConfig?.options || {}),
               affinityMode: mode
+            }
+          }
+        };
+      });
+    },
+    [setDraft]
+  );
+
+  const onAffinityDockPocketChange = useCallback(
+    (pocket: AffinityDockPocket | null) => {
+      setDraft((prev: any) => {
+        if (!prev) return prev;
+        if (prev.inputConfig?.options?.affinityDockPocket === pocket) return prev;
+        return {
+          ...prev,
+          inputConfig: {
+            ...prev.inputConfig,
+            options: {
+              ...(prev.inputConfig?.options || {}),
+              affinityDockPocket: pocket
             }
           }
         };
@@ -107,7 +127,7 @@ export function useProjectAffinityWorkspace({
   const affinityWorkflow = useAffinityWorkflow({
     enabled: isAffinityWorkflow && workspaceTab === 'components',
     scopeKey: `${projectId || ''}:${affinityUploadScopeTaskRowId}`,
-    preferredConfidenceOnly: !Boolean(draft?.inputConfig.properties.affinity),
+    preferredConfidenceOnly: !Boolean(draft?.inputConfig?.properties?.affinity),
     persistedLigandSmiles:
       requestedStatusTaskRow?.ligand_smiles || activeResultTask?.ligand_smiles || statusContextTaskRow?.ligand_smiles || '',
     persistedUploads: affinityPersistedUploads,
@@ -117,6 +137,11 @@ export function useProjectAffinityWorkspace({
   useEffect(() => {
     if (!isAffinityWorkflow || workspaceTab !== 'components') return;
     if (affinityWorkflow.uploadsHydrating) return;
+    // A freshly applied/selected file whose content is still being read
+    // (persistedTargetUpload not yet populated) must not be remembered as
+    // "no upload" — that would DELETE the previously saved snapshot.
+    if (affinityWorkflow.targetFile && !affinityWorkflow.persistedUploads.target) return;
+    if (affinityWorkflow.ligandFile && !affinityWorkflow.persistedUploads.ligand) return;
     const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(affinityUploadScopeTaskRowId);
     if (!storageTaskRowId) return;
     rememberAffinityUploadsForTaskRow(storageTaskRowId, affinityWorkflow.persistedUploads);
@@ -126,6 +151,8 @@ export function useProjectAffinityWorkspace({
     affinityUploadScopeTaskRowId,
     rememberAffinityUploadsForTaskRow,
     affinityWorkflow.persistedUploads,
+    affinityWorkflow.targetFile,
+    affinityWorkflow.ligandFile,
     affinityWorkflow.uploadsHydrating
   ]);
 
@@ -133,6 +160,8 @@ export function useProjectAffinityWorkspace({
     ...affinityWorkflow,
     affinityMode,
     onAffinityModeChange,
+    affinityDockPocket: (draft?.inputConfig?.options?.affinityDockPocket ?? null) as AffinityDockPocket | null,
+    onAffinityDockPocketChange,
     onAffinityUseMsaChange
   };
 }

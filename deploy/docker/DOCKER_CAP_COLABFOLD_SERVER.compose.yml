@@ -21,6 +21,9 @@ services:
     container_name: ${COLABFOLD_SERVER_CONTAINER_NAME:-vbio-colabfold-server}
     restart: unless-stopped
     init: true
+    # 本机默认 runtime 是 runc：仅用 gpus: 键时 nvidia hook 不会放开设备 cgroup
+    # （容器内 open /dev/nvidia0 → EPERM）。与 GPU 任务容器一致改用命名 nvidia runtime。
+    runtime: nvidia
     gpus: ${COLABFOLD_DOCKER_GPUS:-all}
     user: "${COLABFOLD_UID:-1000}:${COLABFOLD_GID:-1000}"
     environment:
@@ -28,7 +31,15 @@ services:
       GID: ${COLABFOLD_GID:-1000}
       DB_DIR: /app/databases
       MMSEQS_LOAD_MODE: ${COLABFOLD_MMSEQS_LOAD_MODE:-2}
+      # Upstream MMseqs2-App scales by worker count with THREADS_PER_WORKER=1;
+      # local-mode workers share this per-job thread budget (8 workers x 8 threads
+      # stays well inside the host's 128 cores).
+      MMSEQS_NUM_THREADS: ${COLABFOLD_MMSEQS_THREADS:-8}
       COLABFOLD_ENABLE_GPU: ${COLABFOLD_ENABLE_GPU:-0}
+      # GPU 租约：与 celery worker 共享的 redis GPU 池（gpu_manager 协议）。
+      MSA_GPU_REDIS_HOST: ${MSA_GPU_REDIS_HOST:-172.17.3.200}
+      MSA_GPU_REDIS_PORT: ${MSA_GPU_REDIS_PORT:-6379}
+      MSA_GPU_WAIT_SECONDS: ${MSA_GPU_WAIT_SECONDS:-1800}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}

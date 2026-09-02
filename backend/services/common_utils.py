@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -55,30 +57,8 @@ def parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[i
         return default
 
 
-def parse_float(value: Optional[str], default: Optional[float] = None) -> Optional[float]:
-    if value is None or value == '':
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
 
 
-def parse_json_field(value: Optional[str], field_name: str) -> Dict:
-    if value is None:
-        return {}
-    text = str(value).strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid '{field_name}' JSON format: {exc}")
-    if parsed is None:
-        return {}
-    if not isinstance(parsed, dict):
-        raise ValueError(f"'{field_name}' must be a JSON object.")
-    return parsed
 
 
 def normalize_chain_id_list(value: Any) -> list[str]:
@@ -195,7 +175,19 @@ def load_progress(redis_key: str, *, get_redis_client_fn, logger) -> Optional[Di
         return None
 
 
+# The Celery inspect broadcast costs ~1s round-trip; on the submit path that was a fixed
+# latency tax on every /predict and /api/boltz2score. Cache probe results briefly — queue
+# topology changes on the scale of minutes, not seconds.
+_WORKER_QUEUE_CACHE_SECONDS = 5.0
+_worker_queue_probe_cache: Dict[str, Tuple[float, bool]] = {}
+_worker_queue_cache_lock = threading.Lock()
+
+
 def has_worker_for_queue(queue_name: str, *, celery_app, logger) -> bool:
+    with _worker_queue_cache_lock:
+        cached = _worker_queue_probe_cache.get(queue_name)
+    if cached and (time.monotonic() - cached[0]) < _WORKER_QUEUE_CACHE_SECONDS:
+        return cached[1]
     try:
         inspector = celery_app.control.inspect(timeout=1.0)
         active_queues = inspector.active_queues() or {}
@@ -205,10 +197,24 @@ def has_worker_for_queue(queue_name: str, *, celery_app, logger) -> bool:
             for queue in queues:
                 queue_token = str((queue or {}).get('name') or '').strip()
                 if queue_token == queue_name:
-                    return True
+                    result = True
+                    with _worker_queue_cache_lock:
+                        _worker_queue_probe_cache[queue_name] = (time.monotonic(), result)
+                    return result
         if active_queues:
-            return False
-    except Exception as exc:
-        logger.warning('Failed to inspect Celery worker queues: %s', exc)
+            # Workers answered; none of them serves this queue — a confirmed absence.
+            result = False
+            with _worker_queue_cache_lock:
+                _worker_queue_probe_cache[queue_name] = (time.monotonic(), result)
+            return result
+        # No worker answered at all: confirmed empty cluster, keep the honest False.
+        with _worker_queue_cache_lock:
+            _worker_queue_probe_cache[queue_name] = (time.monotonic(), False)
         return False
-    return False
+    except Exception as exc:
+        # A probe FAILURE (broker/Celery blip) is not evidence of "no worker" — returning
+        # False here misreported healthy clusters as offline and 503-rejected legitimate
+        # submits. Be permissive: the task queues in Redis and runs when a worker picks
+        # it up. Not cached, so the next submit re-probes.
+        logger.warning('Failed to inspect Celery worker queues (allowing enqueue): %s', exc)
+        return True

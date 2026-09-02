@@ -26,8 +26,8 @@ def register_lead_opt_routes(
         return jsonify({
             'error': (
                 'Legacy /api/lead_optimization/submit pipeline is disabled. '
-                'Use Lead Optimization MMP workflow APIs instead '
-                '(/fragment_preview, /reference_preview, /mmp_query, /mmp_enumerate, /predict_candidate).'
+                'Use the HALO generative workflow instead: '
+                '/api/lead_optimization/halo_optimize (plus /fragment_preview, /reference_preview).'
             )
         }), 410
 

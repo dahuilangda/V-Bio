@@ -73,7 +73,6 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "destructive": True,
-        "requires_active_project": True,
         "input_schema": {
             "type": "object",
             "properties": {

@@ -128,6 +128,24 @@ describe('validateCopilotTurnPayload', () => {
     expect(result.questions[0].options?.[0].value).toBe('affinity');
   });
 
+  it('carries the allowOther flag through and drops non-boolean values', () => {
+    // allowOther toggles the free-text "Other ___" answer on choice questions: an explicit false
+    // disables it, absence keeps the default (enabled), and a non-boolean is dropped defensively.
+    const result = validateCopilotTurnPayload(
+      validPayload({
+        questions: [
+          { text: 'A?', kind: 'choice', allowOther: false, options: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }] },
+          { text: 'B?', kind: 'choice', options: [{ label: 'C', value: 'c' }, { label: 'D', value: 'd' }] },
+          { text: 'C?', kind: 'choice', allowOther: 'yes', options: [{ label: 'E', value: 'e' }, { label: 'F', value: 'f' }] },
+        ],
+      })
+    );
+    expect(result.questions).toHaveLength(3);
+    expect(result.questions[0].allowOther).toBe(false);
+    expect(result.questions[1].allowOther).toBeUndefined();
+    expect(result.questions[2].allowOther).toBeUndefined();
+  });
+
   it('drops a choice question with fewer than two options', () => {
     const result = validateCopilotTurnPayload(
       validPayload({

@@ -9,7 +9,14 @@ from flask import Response, jsonify, request
 from management_api.runtime_proxy import RuntimeProxyBusyError
 
 
-def forward_task_read(gateway: Any, task_id: str, upstream_prefix: str, action: str) -> Tuple[Response, int]:
+def forward_task_read(
+    gateway: Any,
+    task_id: str,
+    upstream_prefix: str,
+    action: str,
+    *,
+    upstream_suffix: str = "",
+) -> Tuple[Response, int]:
     started = time.perf_counter()
     project_id: Optional[str] = None
     token = None
@@ -19,12 +26,13 @@ def forward_task_read(gateway: Any, task_id: str, upstream_prefix: str, action: 
         token_plain = (request.headers.get("X-API-Token") or "").strip()
         token = gateway._authorize_project_read(project_id, token_plain)
 
-        task_row = gateway.task_store.find_project_task(task_id, project_id)
-        if not task_row:
-            raise PermissionError("Task not found in this project")
+        if not token.is_platform:
+            task_row = gateway.task_store.find_project_task(task_id, project_id)
+            if not task_row:
+                raise PermissionError("Task not found in this project")
 
         passthrough_query = {key: value for key, value in request.args.items() if key != "project_id"}
-        upstream = gateway._proxy_get(f"{upstream_prefix}/{quote(task_id, safe='')}", passthrough_query)
+        upstream = gateway._proxy_get(f"{upstream_prefix}/{quote(task_id, safe='')}{upstream_suffix}", passthrough_query)
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 300
 
@@ -94,10 +102,11 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
         if not task_ids:
             return jsonify({"statuses": []}), 200
 
-        found_by_task_id: Dict[str, Dict[str, Any]] = gateway.task_store.find_project_tasks(task_ids, project_id)
-        missing = [task_id for task_id in task_ids if task_id not in found_by_task_id]
-        if missing:
-            raise PermissionError("One or more tasks were not found in this project")
+        if not token.is_platform:
+            found_by_task_id: Dict[str, Dict[str, Any]] = gateway.task_store.find_project_tasks(task_ids, project_id)
+            missing = [task_id for task_id in task_ids if task_id not in found_by_task_id]
+            if missing:
+                raise PermissionError("One or more tasks were not found in this project")
 
         upstream = gateway._proxy_post_json("/status/batch", {"task_ids": task_ids})
         response, status_code = gateway._build_flask_response(upstream)
@@ -163,9 +172,14 @@ def cancel_or_delete_task(gateway: Any, task_id: str) -> Tuple[Response, int]:
         token_plain = (request.headers.get("X-API-Token") or "").strip()
         token = gateway._authorize_task_action(project_id, token_plain, require_delete=require_delete)
 
-        task_row = gateway.task_store.find_project_task(task_id, project_id)
-        if not task_row:
-            raise PermissionError("Task not found in this project")
+        # Project tokens always carry a non-empty project_id; the platform token without one
+        # mirrors forward_task_read and skips the project-scoped lookup (the runtime task row
+        # is the authority) — previously this path 403'd "Task not found in this project".
+        task_row = None
+        if project_id:
+            task_row = gateway.task_store.find_project_task(task_id, project_id)
+            if not task_row:
+                raise PermissionError("Task not found in this project")
 
         passthrough_query = {
             key: value for key, value in request.args.items() if key not in {"project_id", "operation_mode"}
@@ -174,11 +188,22 @@ def cancel_or_delete_task(gateway: Any, task_id: str) -> Tuple[Response, int]:
         response, status_code = gateway._build_flask_response(upstream)
 
         succeeded = 200 <= status_code < 300
-        if succeeded:
-            if require_delete:
-                gateway.task_store.delete_task_row(task_row["id"])
-            else:
-                gateway.task_store.mark_task_cancelled(task_row["id"])
+        if succeeded and task_row is not None:
+            # The upstream action already happened — a transient store failure here must not
+            # report 500 (the client would retry a cancel that succeeded) or leave the row
+            # stuck at its old state silently; log it and still return the upstream outcome.
+            try:
+                if require_delete:
+                    gateway.task_store.delete_task_row(task_row["id"])
+                else:
+                    gateway.task_store.mark_task_cancelled(task_row["id"])
+            except Exception as exc:  # noqa: BLE001
+                gateway.logger.warning(
+                    "Upstream %s for task %s succeeded but the local task row update failed: %s",
+                    "delete" if require_delete else "cancel",
+                    task_id,
+                    exc,
+                )
 
         gateway._record_usage(
             token,

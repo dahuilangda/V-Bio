@@ -79,11 +79,6 @@ remove_container_matches() {
   done
 }
 
-recover_mmp_postgres_conflict() {
-  remove_container_if_exists "leadopt_mmp_db"
-  remove_container_matches '(^|_)leadopt_mmp_db$'
-}
-
 resolve_compose_pair() {
   local preferred_compose="$1"
   local preferred_env="$2"
@@ -116,8 +111,6 @@ REDIS_COMPOSE="${DOCKER_DIR}/DOCKER_STACK_REDIS.compose.yml"
 REDIS_ENV="${DOCKER_DIR}/DOCKER_STACK_REDIS.env"
 COLABFOLD_COMPOSE="${DOCKER_DIR}/DOCKER_CAP_COLABFOLD_SERVER.compose.yml"
 COLABFOLD_ENV="${DOCKER_DIR}/DOCKER_CAP_COLABFOLD_SERVER.env"
-MMP_COMPOSE="${DOCKER_DIR}/DOCKER_CAP_MMP_POSTGRES.compose.yml"
-MMP_ENV="${DOCKER_DIR}/DOCKER_CAP_MMP_POSTGRES.env"
 GPU_CAPS_COMPOSE="${DOCKER_DIR}/DOCKER_STACK_WORKER_GPU_CAPS.compose.yml"
 GPU_CAPS_ENV="${DOCKER_DIR}/DOCKER_STACK_WORKER_GPU_CAPS.env"
 GPU_COMPOSE="${DOCKER_DIR}/DOCKER_STACK_WORKER_GPU.compose.yml"
@@ -127,7 +120,6 @@ CPU_ENV="${DOCKER_DIR}/DOCKER_STACK_WORKER_CPU.env"
 
 require_env_file "${REDIS_ENV}"
 require_env_file "${COLABFOLD_ENV}"
-require_env_file "${MMP_ENV}"
 require_env_file "${CPU_ENV}"
 
 mapfile -t CENTRAL_PAIR < <(
@@ -154,10 +146,6 @@ compose_force_recreate "${REDIS_COMPOSE}" "${REDIS_ENV}"
 echo "==> ColabFold MSA"
 compose_force_recreate "${COLABFOLD_COMPOSE}" "${COLABFOLD_ENV}"
 
-echo "==> MMP PostgreSQL"
-recover_mmp_postgres_conflict
-compose_force_recreate "${MMP_COMPOSE}" "${MMP_ENV}"
-
 echo "==> Central API / Monitor"
 compose_force_recreate "${CENTRAL_COMPOSE}" "${CENTRAL_ENV}"
 
@@ -176,7 +164,6 @@ if [[ "${GPU_MODE}" == "caps" ]]; then
     --profile affinity \
     --profile alphafold3 \
     --profile protenix \
-    --profile pocketxmol \
     up -d --build --force-recreate
 else
   echo "==> Unified GPU worker"

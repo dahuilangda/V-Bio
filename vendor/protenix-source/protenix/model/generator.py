@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Any, Callable, Optional
 
 import torch
@@ -140,6 +141,15 @@ def sample_diffusion(
     attn_chunk_size: Optional[int] = None,
     enable_efficient_fusion: bool = False,
     guidance_configs: Optional[dict[str, Any]] = None,
+    init_coords: Optional[torch.Tensor] = None,
+    init_mask: Optional[torch.Tensor] = None,
+    init_noise_scale: float = 0.0,
+    pin_mask: Optional[torch.Tensor] = None,
+    anchor_index: Optional[torch.Tensor] = None,
+    anchor_upper: Optional[torch.Tensor] = None,
+    anchor_lower: Optional[torch.Tensor] = None,
+    chiral_quads: Optional[torch.Tensor] = None,
+    chiral_sign: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
     It performances denoising steps from time 0 to time T.
@@ -168,10 +178,26 @@ def sample_diffusion(
         noise_scale_lambda (float): params in Alg.18.
         step_scale_eta (float): params in Alg.18.
         diffusion_chunk_size (Optional[int]): Chunk size for diffusion operation. Defaults to None.
-        inplace_safe (bool): Whether to use inplace operations safely. Defaults to False.
-        attn_chunk_size (Optional[int]): Chunk size for attention operation. Defaults to None.
+        inplace_safe (bool): Whether to inplace operations safely. Defaults to False.
+        attn_chunk_size (Optional[int]): Chunk size for attention. Defaults to None.
         enable_efficient_fusion (bool): Whether to enable efficient fusion. Defaults to False.
         guidance_configs (Optional[dict[str, Any]]): training free guidance configs. Defaults to None.
+        init_coords (Optional[torch.Tensor]): reference coordinates for pose/refine
+            initialisation, aligned to the assembled atom order. [N_atom, 3].
+            Atoms whose init_mask is 0 keep the standard Gaussian noise start.
+        init_mask (Optional[torch.Tensor]): per-atom flag (1 = start from
+            init_coords, 0 = start from noise). [N_atom].
+        init_noise_scale (float): fraction of the schedule's initial noise level
+            mixed into the initialised coordinates (0.0 = pure init).
+        pin_mask (Optional[torch.Tensor]): per-atom flag for true inpainting
+            (1 = clamped to init_coords after every step, 0 = denoised). The
+            pinned atoms therefore stay bit-exact through the loop; use this
+            for receptor-fixed peptide design/refinement.
+        anchor_index (Optional[torch.Tensor]): [2, M] hard-anchor atom pairs.
+        anchor_upper (Optional[torch.Tensor]): [M] upper bounds (A).
+        anchor_lower (Optional[torch.Tensor]): [M] lower bounds (A); the band
+            [lower, upper] holds the free chains at the placed geometry —
+            neither drifting away nor penetrating the receptor wall.
 
     Returns:
         torch.Tensor: the denoised coordinates of x in inference stage
@@ -184,24 +210,223 @@ def sample_diffusion(
     tfg_cfg = parse_tfg_config(guidance_configs)
     if tfg_cfg.enable:
         logger.info("Guidance is enabled.")
-        tfg = TFGEngine(tfg_cfg, device=device, dtype=dtype)
+        # fp32: TFG math (projections, linalg) requires it; see TFGEngine.step.
+        tfg = TFGEngine(tfg_cfg, device=device, dtype=torch.float32)
 
-    def _chunk_sample_diffusion(chunk_n_sample, inplace_safe):
+    _anchor_state = None
+    if (
+        pin_mask is not None
+        and init_coords is not None
+        and anchor_index is not None
+        and anchor_upper is not None
+    ):
+        # Precomputed hard-anchor projector: damped Jacobi projection of the
+        # anchor distance pairs back inside their band [lower, upper], moving
+        # FREE atoms only (pinned atoms are constants). A direct minimum-norm
+        # linalg solve goes singular here when many pairs share free atoms
+        # (measured: coordinates blown up by hundreds of A); the damped
+        # per-pair form is unconditionally stable and converges in a few tens
+        # of sweeps on step-sized violations. Without the lower bound the
+        # projection drives the peptide INTO the receptor wall (measured 0.25
+        # A clashes); the band holds the placed geometry from both sides.
+        _pin_col = pin_mask.to(device=device, dtype=torch.float32)
+        _free_col = 1.0 - _pin_col
+        _a_idx = anchor_index.to(device=device, dtype=torch.long)
+        _a_up = anchor_upper.to(device=device, dtype=torch.float32)
+        _a_lo = (
+            anchor_lower.to(device=device, dtype=torch.float32)
+            if anchor_lower is not None
+            else torch.zeros_like(_a_up)
+        )
+        _active = (_free_col[_a_idx[0]] + _free_col[_a_idx[1]]) > 0
+        _a_idx = _a_idx[:, _active]
+        _a_up = _a_up[_active]
+        _a_lo = _a_lo[_active]
+        _wi = _free_col[_a_idx[0]]
+        _wj = _free_col[_a_idx[1]]
+
+        def _anchor_project(x_l: torch.Tensor, _iters: int = 30) -> None:
+            if _a_idx.numel() == 0:
+                return
+            shape = x_l.shape
+            xs = x_l.reshape(-1, shape[-2], 3).float()
+            for si in range(xs.shape[0]):
+                x = xs[si]
+                for _ in range(_iters):
+                    a = x[_a_idx[0]]
+                    b = x[_a_idx[1]]
+                    d = (a - b).norm(dim=-1)
+                    # signed violation: positive = too far (shrink), negative
+                    # = too close (expand)
+                    viol = torch.where(d > _a_up, d - _a_up, (d - _a_lo).clamp(max=0))
+                    if float(viol.abs().max()) < 1e-3:
+                        break
+                    u = (a - b) / d.clamp(min=1e-8).unsqueeze(-1)
+                    corr = torch.zeros_like(x)
+                    # Bound each sweep's displacement: a linearized projection
+                    # is only valid for step-sized violations; degenerate
+                    # upstream geometry would otherwise teleport atoms (the
+                    # TFG linalg solver had the same failure mode before its
+                    # clamp — measured a Cys SG pushed 32 A). Convergence
+                    # still takes a few extra sweeps.
+                    half = 0.5 * viol.clamp(-4.0, 4.0)
+                    corr.index_add_(0, _a_idx[0], (-half).unsqueeze(-1) * u * _wi.unsqueeze(-1))
+                    corr.index_add_(0, _a_idx[1], (+half).unsqueeze(-1) * u * _wj.unsqueeze(-1))
+                    # Per-ATOM cap: many anchor pairs share one atom (the
+                    # pocket pairs all touch the same SG/CB on the anchored
+                    # residues); index_add_ accumulates their corrections
+                    # without bound and one sweep can fling the atom tens of
+                    # A (measured: Cys1 CA-CB 17-32 A). Cap the per-atom step
+                    # to the sweep scale. (A/B switch for the confidence
+                    # non-regression study; default on.)
+                    corr_norm = corr.norm(dim=-1, keepdim=True)
+                    corr = corr * (corr_norm.clamp(max=0.5) / corr_norm.clamp(min=1e-8))
+                    x += corr
+                xs[si] = x
+            x_l.copy_(xs.to(dtype).reshape(shape))
+
+        _anchor_state = {"project": _anchor_project}
+        logger.info(
+            f"Hard anchor projection enabled: {int(_a_idx.shape[1])} band pairs."
+        )
+
+    _chiral_state = None
+    if chiral_quads is not None and chiral_sign is not None:
+        # Backbone chirality guard: the denoiser can locally flip a residue's
+        # stereochemistry while folding a free chain (measured: +2.54 CA volume
+        # on an L-designed peptide, product-gate rejected). The CA chirality is
+        # exactly the side of the N-CA-C plane the CB sits on, so reflecting CB
+        # across that plane restores the designed sign with ZERO backbone
+        # perturbation. Runs after the pin + anchor projections each step.
+        _q = chiral_quads.to(device=device, dtype=torch.long)  # [4, M]
+        _s = chiral_sign.to(device=device, dtype=torch.float32)  # [M]
+
+        def _chirality_project(x_l: torch.Tensor) -> int:
+            shape = x_l.shape
+            xs = x_l.reshape(-1, shape[-2], 3).float()
+            flipped = 0
+            for si in range(xs.shape[0]):
+                x = xs[si]
+                n = x[_q[0]] - x[_q[1]]          # N - CA
+                c = x[_q[2]] - x[_q[1]]          # C - CA
+                normal = torch.cross(n, c, dim=-1)
+                norm = normal.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                n_hat = normal / norm
+                cb = x[_q[3]] - x[_q[1]]         # CB - CA
+                signed = (cb * n_hat).sum(dim=-1)  # signed distance along normal
+                cb_len = cb.norm(dim=-1)
+                # Guard both defect classes: stereochemistry flips AND
+                # stretched CA-CB bonds (2.6-3.2 A with the sign intact).
+                # Any flagged residue gets CB rebuilt at the standard 1.53 A
+                # along a direction that keeps/repairs the designed sign.
+                bad = ((torch.sign(signed) != torch.sign(_s)) & (signed.abs() > 1e-6)) | \
+                      (cb_len > 1.8) | (cb_len < 1.2)
+                if bool(bad.any()):
+                    flipped += int(bad.sum().item())
+                    # REBUILD rather than reflect: a plain reflection keeps
+                    # whatever deformed CA-CB distance the earlier
+                    # projections left behind. Rebuilding at the standard
+                    # 1.53 A along the sign-corrected direction restores the
+                    # designed sign and a valid bond in one shot.
+                    idx_bad = _q[3][bad]
+                    direction = cb[bad] - 2.0 * (cb[bad] * n_hat[bad]).sum(
+                        dim=-1, keepdim=True) * n_hat[bad] * \
+                        (torch.sign(signed[bad]) != torch.sign(_s[bad])).float().unsqueeze(-1)
+                    direction = direction / direction.norm(
+                        dim=-1, keepdim=True).clamp(min=1e-8)
+                    x[idx_bad] = x[_q[1]][bad] + 1.53 * direction
+                xs[si] = x
+            x_l.copy_(xs.to(dtype).reshape(shape))
+            return flipped
+
+        _chiral_state = {"project": _chirality_project}
+        logger.info(
+            f"Backbone chirality guard enabled: {int(_q.shape[1])} residues."
+        )
+
+    def _chunk_sample_diffusion(chunk_n_sample, inplace_safe, chunk_offset=0):
         # init noise
         # [..., N_sample, N_atom, 3]
-        x_l = noise_schedule[0] * torch.randn(
-            size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype
-        )  # NOTE: set seed in distributed training
+        # init_coords may be [N_atom, 3] (broadcast to every sample) or
+        # [n_sample, N_atom, 3] (per-sample starts, e.g. a docking placement
+        # ensemble): under chunked sampling each chunk takes its own slice.
+        # The pinned geometry is identical across samples, so all
+        # pin/centering/chirality references use the first sample's rows.
+        init_base = None
+        chunk_init = None
+        if init_coords is not None:
+            init_base = (init_coords[0] if init_coords.dim() == 3
+                         else init_coords).to(device=device, dtype=dtype)
+            if (init_coords.dim() == 3
+                    and chunk_offset + chunk_n_sample <= init_coords.shape[0]):
+                chunk_init = init_coords[
+                    chunk_offset:chunk_offset + chunk_n_sample
+                ].to(device=device, dtype=dtype)
+        if init_coords is not None:
+            if chunk_init is not None and chunk_init.shape[0] == chunk_n_sample:
+                base = chunk_init.reshape(
+                    (1,) * len(batch_shape) + (chunk_n_sample, N_atom, 3)
+                )
+            else:
+                base = init_base.view(
+                    (1,) * (len(batch_shape) + 1) + (N_atom, 3)
+                )
+            noise_full = noise_schedule[0] * torch.randn(
+                size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype
+            )
+            if init_mask is not None:
+                keep = init_mask.to(device=device, dtype=dtype).view(
+                    (1,) * (len(batch_shape) + 1) + (N_atom, 1)
+                )
+            else:
+                keep = 1.0
+            x_l = keep * (base + init_noise_scale * noise_full) + (1.0 - keep) * noise_full
+        else:
+            x_l = noise_schedule[0] * torch.randn(
+                size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype
+            )  # NOTE: set seed in distributed training
 
+        _nan_dbg = bool(os.environ.get("PROTENIX_TFG_DEBUG_NAN", ""))
         for step_i, (c_tau_last, c_tau) in enumerate(
             zip(noise_schedule[:-1], noise_schedule[1:])
         ):
-            # [..., N_sample, N_atom, 3]
-            x_l = (
-                centre_random_augmentation(x_input_coords=x_l, N_sample=1)
-                .squeeze(dim=-3)
-                .to(dtype)
-            )
+            if _nan_dbg and not bool(torch.isfinite(x_l).all()):
+                logger.warning(
+                    f"SAMPLER-NAN entry step={step_i} nonfinite="
+                    f"{int((~torch.isfinite(x_l)).sum().item())}"
+                )
+            if pin_mask is not None and init_coords is not None:
+                # Inpainting: the pinned atoms define the frame. The stock
+                # random SE(3) augmentation would kick the free part in a
+                # random orientation every step while the pin snaps the
+                # receptor back — the free chains drift away and lose
+                # chirality (measured: 16 A displacement on 3LNJ). Recenter
+                # on the PINNED centroid only: the receptor stays at its
+                # absolute position (the pin below becomes a no-op) and the
+                # free part keeps its relative geometry. Recentering on the
+                # whole-complex centroid instead would translate the peptide
+                # by (pinned_center - complex_center) every step (measured
+                # ~9 A on 3LNJ) — the pin discards that shift for the
+                # receptor but leaves it on the free chains.
+                _pin_step = pin_mask.to(device=device, dtype=dtype).view(1, N_atom, 1)
+                _base_step = init_base.view(1, N_atom, 3)
+                _ref_center = (
+                    (_base_step * _pin_step).sum(dim=1, keepdim=True)
+                    / _pin_step.sum().clamp(min=1.0)
+                )
+                _cur_center = (
+                    (x_l * _pin_step).sum(dim=-2, keepdim=True)
+                    / _pin_step.sum().clamp(min=1.0)
+                )
+                x_l = x_l - _cur_center + _ref_center
+                x_l = x_l.to(dtype)
+            else:
+                # [..., N_sample, N_atom, 3]
+                x_l = (
+                    centre_random_augmentation(x_input_coords=x_l, N_sample=1)
+                    .squeeze(dim=-3)
+                    .to(dtype)
+                )
 
             # Denoise with a predictor-corrector sampler
             # 1. Add noise to move x_{c_tau_last} to x_{t_hat}
@@ -263,6 +488,48 @@ def sample_diffusion(
                 dt = c_tau - t_hat
                 x_l = x_noisy + step_scale_eta * dt[..., None, None] * delta
 
+            # True inpainting: clamp the pinned atoms to the input coordinates
+            # after every step (the step's recentering moved them; restore the
+            # absolute frame before the next iteration).
+            if pin_mask is not None and init_coords is not None:
+                _pin = pin_mask.to(device=device, dtype=dtype).view(
+                    (1,) * (len(batch_shape) + 1) + (N_atom, 1)
+                )
+                _base = init_base.view(
+                    (1,) * (len(batch_shape) + 1) + (N_atom, 3)
+                )
+                x_l = x_l * (1.0 - _pin) + _base * _pin
+                # Hard geometric anchor on the free part: the denoiser's x0
+                # prior pulls an unanchored peptide to its own pocket guess
+                # (measured 8 A off a crystal pose) and the TFG projection
+                # only fires on the x0 prediction, not on x_t. Project the
+                # anchor pairs back inside their bounds on x_t itself, with
+                # the pinned atoms held as constants (minimum-norm solution
+                # over the free columns only). Step-sized displacements keep
+                # the linearization exact.
+                if _anchor_state is not None:
+                    _anchor_state["project"](x_l)
+                if _chiral_state is not None:
+                    _chiral_state["project"](x_l)
+                if _nan_dbg and not bool(torch.isfinite(x_l).all()):
+                    logger.warning(
+                        f"SAMPLER-NAN post-pin step={step_i} nonfinite="
+                        f"{int((~torch.isfinite(x_l)).sum().item())}"
+                    )
+
+        if pin_mask is not None and init_coords is not None:
+            _pin = pin_mask.to(device=device, dtype=dtype).view(
+                (1,) * (len(batch_shape) + 1) + (N_atom, 1)
+            )
+            _base = init_base.view(
+                (1,) * (len(batch_shape) + 1) + (N_atom, 3)
+            )
+            x_l = x_l * (1.0 - _pin) + _base * _pin
+            if _anchor_state is not None:
+                _anchor_state["project"](x_l)
+            if _chiral_state is not None:
+                _chiral_state["project"](x_l)
+
         return x_l
 
     if diffusion_chunk_size is None:
@@ -279,7 +546,8 @@ def sample_diffusion(
                 else N_sample - i * diffusion_chunk_size
             )
             chunk_x_l = _chunk_sample_diffusion(
-                chunk_n_sample, inplace_safe=inplace_safe
+                chunk_n_sample, inplace_safe=inplace_safe,
+                chunk_offset=i * diffusion_chunk_size,
             )
             x_l.append(chunk_x_l)
         x_l = torch.cat(x_l, -3)  # [..., N_sample, N_atom, 3]

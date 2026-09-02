@@ -1708,10 +1708,16 @@ async function parsePeptideDesignCandidatesFromBundle(
       readFiniteNumberLoose(row.order) ??
       index + 1;
     const rank = Math.max(1, Math.floor(rankRaw));
+    // Preferred-structure archives contain only ONE candidate structure while
+    // design_results still lists every row. A positional fallback would then
+    // stamp that single file's name onto unrelated rows ("rank_01 candidate →
+    // rank_02.pdb"), so it is only safe when rows and files are 1:1 aligned.
+    const positionalStructureFile =
+      structureFiles.length === rows.length ? structureFiles[index]?.name || '' : '';
     const structurePath =
       resolveDesignStructurePathFromRow(row, structureByName, structurePathByBaseName) ||
       byRank.get(rank) ||
-      structureFiles[index]?.name ||
+      positionalStructureFile ||
       '';
     const structureFormat: 'cif' | 'pdb' = getBaseName(structurePath).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
     const residuePayload = extractPeptideCandidateResiduePayload(row);
@@ -1883,6 +1889,59 @@ function peptideCandidateStorageRichness(row: Record<string, unknown>): number {
   return score;
 }
 
+function hasMeaningfulCandidateValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+/**
+ * Merge persisted candidate rows into freshly parsed rows, field by field.
+ *
+ * Preferred-structure archives carry only the requested structure file, so a
+ * fresh parse legitimately knows FEWER structure names than the rows already
+ * persisted from a full parse. Replacing the persisted collection wholesale
+ * (the old copyMissingFields behavior — a non-empty parsed list always wins)
+ * erased those names and broke every subsequent candidate switch. The merged
+ * row is the incoming row with empty slots backfilled from its persisted twin;
+ * persisted rows with no incoming counterpart are kept.
+ */
+export function mergePeptideCandidateRowsPreferRicher(
+  incomingRows: Array<Record<string, unknown>>,
+  existingRows: Array<Record<string, unknown>>
+): Array<Record<string, unknown>> {
+  if (existingRows.length === 0) return incomingRows;
+  if (incomingRows.length === 0) return existingRows;
+  const existingByIdentity = new Map<string, Record<string, unknown>>();
+  existingRows.forEach((row, index) => {
+    existingByIdentity.set(peptideCandidateStorageIdentity(row, index), row);
+  });
+  const merged: Array<Record<string, unknown>> = [];
+  const consumed = new Set<string>();
+  incomingRows.forEach((row, index) => {
+    const identity = peptideCandidateStorageIdentity(row, index);
+    const existing = existingByIdentity.get(identity);
+    consumed.add(identity);
+    if (!existing) {
+      merged.push(row);
+      return;
+    }
+    const next = { ...existing };
+    for (const [key, value] of Object.entries(row)) {
+      if (hasMeaningfulCandidateValue(value) || !hasMeaningfulCandidateValue(next[key])) {
+        next[key] = value;
+      }
+    }
+    merged.push(next);
+  });
+  for (const [identity, row] of existingByIdentity) {
+    if (!consumed.has(identity)) merged.push(row);
+  }
+  return merged;
+}
+
 function collectPeptideCandidateRows(input: Record<string, unknown>): Array<Record<string, unknown>> {
   const byIdentity = new Map<string, { row: Record<string, unknown>; score: number; index: number }>();
   let index = 0;
@@ -1993,6 +2052,42 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
   const isProtenix = names.some((name) => name.toLowerCase().includes('protenix/output/'));
   const isNesso = names.some((name) => name.toLowerCase() === 'nesso/manifest.json');
+  // HALO lead-optimization bundles are structureless run artifacts keyed on a
+  // top-level halo_results.json (engine marker inside). The name deliberately
+  // avoids the peptide design_results scanner, and the early return keeps the
+  // peptide/af3/protenix branches from touching it.
+  const haloResultsFile = names.find((name) => getBaseName(name).toLowerCase() === 'halo_results.json');
+  if (haloResultsFile) {
+    const halo = await readZipJson(zip, haloResultsFile);
+    if (halo && typeof halo === 'object' && !Array.isArray(halo) && halo.engine === 'halo') {
+      const candidates = Array.isArray(halo.candidates)
+        ? (halo.candidates as unknown[]).filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
+        : [];
+      const roundsLog = Array.isArray(halo.rounds_log)
+        ? (halo.rounds_log as unknown[]).filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
+        : [];
+      const confidence: Record<string, unknown> = {
+        backend: 'halo',
+        engine: 'halo',
+        lead_opt_halo: {
+          mode: halo.mode,
+          backend: halo.backend,
+          rounds_completed: halo.rounds_completed,
+          total_rounds: halo.total_rounds,
+          rounds_log: roundsLog,
+          candidates,
+          candidate_count: candidates.length,
+        },
+      };
+      return {
+        structureText: '',
+        structureFormat: 'cif',
+        structureName: 'halo_results.json',
+        confidence,
+        affinity: {}
+      };
+    }
+  }
   if (isNesso) {
     if (preferredStructureName) {
       throw new Error('Nesso results do not contain a structure file.');
@@ -2341,6 +2436,16 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
     .sort((a, b) => a.length - b.length)[0];
   const parsedAffinity = await readZipJson(zip, affinityFile || null);
   if (parsedAffinity) affinity = parsedAffinity;
+
+  // Boltz2Score interaction analysis rides inside the affinity record so it
+  // flows through existing task/project persistence without schema changes.
+  const interactionsFile = names
+    .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().endsWith('best_interactions.json'))
+    .sort((a, b) => a.length - b.length)[0];
+  const parsedInteractions = await readZipJson(zip, interactionsFile || null);
+  if (parsedInteractions && typeof parsedInteractions === 'object' && !Array.isArray(parsedInteractions)) {
+    affinity = { ...affinity, interactions: parsedInteractions };
+  }
 
   const structureName = getBaseName(structureFile);
   return {

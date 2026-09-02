@@ -901,7 +901,8 @@ select
   completed_at,
   duration_seconds,
   created_at,
-  updated_at
+  updated_at,
+  affinity
 from public.project_tasks;
 
 drop view if exists public.project_task_counts;
@@ -1126,30 +1127,22 @@ drop policy if exists app_users_anon_insert on public.app_users;
 drop policy if exists app_users_anon_update on public.app_users;
 drop policy if exists app_users_anon_delete on public.app_users;
 
-create policy app_users_anon_select
+-- F2: anon gets a DISPLAY-only read (column grant below restricts to identity columns);
+-- every write and every sensitive column is service-role only (the management API).
+-- The policy itself hides deactivated users: anon has no SELECT grant on deleted_at, so
+-- the invariant cannot live in a client-side WHERE (permission denied on the column).
+create policy app_users_anon_display
 on public.app_users
 for select
 to anon
-using (true);
+using (deleted_at is null);
 
-create policy app_users_anon_insert
+create policy app_users_service_all
 on public.app_users
-for insert
-to anon
-with check (true);
-
-create policy app_users_anon_update
-on public.app_users
-for update
-to anon
+for all
+to service_role
 using (true)
 with check (true);
-
-create policy app_users_anon_delete
-on public.app_users
-for delete
-to anon
-using (true);
 
 drop policy if exists projects_anon_select on public.projects;
 drop policy if exists projects_anon_insert on public.projects;
@@ -1334,30 +1327,14 @@ for delete
 to anon
 using (true);
 
-create policy api_tokens_anon_select
+-- F2: api_tokens is service-role only (the management API mints/lists/revokes tokens);
+-- anonymous browsers never touch token rows.
+create policy api_tokens_service_all
 on public.api_tokens
-for select
-to anon
-using (true);
-
-create policy api_tokens_anon_insert
-on public.api_tokens
-for insert
-to anon
-with check (true);
-
-create policy api_tokens_anon_update
-on public.api_tokens
-for update
-to anon
+for all
+to service_role
 using (true)
 with check (true);
-
-create policy api_tokens_anon_delete
-on public.api_tokens
-for delete
-to anon
-using (true);
 
 create policy api_token_usage_anon_select
 on public.api_token_usage
@@ -1396,14 +1373,15 @@ from public.api_token_usage
 group by token_id, date_trunc('day', created_at)::date;
 
 grant usage on schema public to anon, authenticated, service_role;
-grant select, insert, update, delete on public.app_users to anon, authenticated, service_role;
+grant select, insert, update, delete on public.app_users to authenticated, service_role;
+grant select (id, username, name, avatar_url, created_at, last_login_at) on public.app_users to anon;
 grant select, insert, update, delete on public.projects to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_tasks to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_shares to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_task_shares to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_copilot_messages to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_copilot_states to anon, authenticated, service_role;
-grant select, insert, update, delete on public.api_tokens to anon, authenticated, service_role;
+grant select, insert, update, delete on public.api_tokens to authenticated, service_role;
 grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;
 grant select on public.project_task_counts to anon, authenticated, service_role;

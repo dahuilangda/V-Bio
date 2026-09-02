@@ -22,6 +22,9 @@ interface ComponentInputEditorProps {
   onCustomResidueLibraryChange?: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange?: (componentId: string, upload: ProteinTemplateUpload | null) => void;
   renderProteinTemplateViewer?: (args: { component: InputComponent; upload: ProteinTemplateUpload }) => ReactNode;
+  /** Peptide design: the component Binding's Target refers to gets the pocket panel. */
+  targetPocketComponentId?: string | null;
+  renderTargetPocketPanel?: (args: { component: InputComponent; upload: ProteinTemplateUpload | null }) => ReactNode;
   selectedComponentId?: string | null;
   onSelectedComponentIdChange?: (id: string) => void;
   showQuickAdd?: boolean;
@@ -507,6 +510,8 @@ export function ComponentInputEditor({
   onCustomResidueLibraryChange,
   onProteinTemplateChange,
   renderProteinTemplateViewer,
+  targetPocketComponentId = null,
+  renderTargetPocketPanel,
   selectedComponentId = null,
   onSelectedComponentIdChange,
   showQuickAdd = true,
@@ -1376,11 +1381,15 @@ export function ComponentInputEditor({
                     ) : null}
                   </div>
                 </div>
-                {allowProteinTemplates && templateUpload && renderProteinTemplateViewer && (
+                {comp.type === 'protein' && renderTargetPocketPanel && comp.id === targetPocketComponentId ? (
+                  <div className="component-template-full component-target-pocket">
+                    {renderTargetPocketPanel({ component: comp, upload: templateUpload })}
+                  </div>
+                ) : allowProteinTemplates && templateUpload && renderProteinTemplateViewer ? (
                   <div className="field component-template-full">
                     {renderProteinTemplateViewer({ component: comp, upload: templateUpload })}
                   </div>
-                )}
+                ) : null}
                 </>
               )}
 

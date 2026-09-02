@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { previewAffinityComplex } from '../api/backendApi';
 import type { AffinityPreviewPayload } from '../types/models';
-import { detectStructureFormat, extractProteinChainSequences, extractStructureChainIds } from '../utils/structureParser';
+import { normalizeStructureFileName, resolveStructureFormat, extractProteinChainSequences, extractStructureChainIds } from '../utils/structureParser';
 
 interface UseAffinityWorkflowOptions {
   enabled: boolean;
@@ -88,6 +88,11 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
   const hydratedPersistedSmilesKeyRef = useRef('');
   const targetUploadReadSeqRef = useRef(0);
   const ligandUploadReadSeqRef = useRef(0);
+  // True once a file lands in memory for the current scope (user upload or copilot
+  // apply). Persisted-upload hydration must never clobber it — without this, an
+  // apply done while the workflow is disabled (other tab) gets silently replaced
+  // by the previously saved snapshot the moment the Components tab enables.
+  const hasInMemoryUploadsRef = useRef(false);
 
   const currentPairKey = useMemo(() => buildPairKey(targetFile, ligandFile), [targetFile, ligandFile]);
   const isPreviewCurrent = Boolean(currentPairKey) && previewPairKey === currentPairKey;
@@ -122,6 +127,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     setPersistedTargetUpload(null);
     setPersistedLigandUpload(null);
     confidenceOnlyTouchedRef.current = false;
+    hasInMemoryUploadsRef.current = false;
   }, []);
 
   useEffect(() => {
@@ -145,6 +151,12 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
 
   useEffect(() => {
     if (!enabled) return;
+    if (hasInMemoryUploadsRef.current) {
+      // In-memory uploads (user or copilot applied during this scope) win over
+      // the persisted snapshot; hydration is only an initial restore.
+      setUploadsHydrating(false);
+      return;
+    }
     const targetName = String(persistedUploads?.target?.fileName || '').trim();
     const targetContent = String(persistedUploads?.target?.content || '').trim();
     if (!targetName || !targetContent) {
@@ -159,14 +171,18 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     targetUploadReadSeqRef.current += 1;
     ligandUploadReadSeqRef.current += 1;
     hydratedUploadKeyRef.current = persistedUploadKey;
-    const restoredTarget = new File([targetContent], targetName, { type: 'text/plain' });
+    // Self-heal legacy drafts: a snapshot saved before the name-extension policy may carry an
+    // extension-less fileName ("KLK1") whose content is a valid structure — restoring it
+    // verbatim would re-raise the target-format error on every page load, forever.
+    const restoredTargetName = normalizeStructureFileName(targetName, targetContent);
+    const restoredTarget = new File([targetContent], restoredTargetName, { type: 'text/plain' });
     const ligandName = String(persistedUploads?.ligand?.fileName || '').trim();
     const ligandContent = String(persistedUploads?.ligand?.content || '').trim();
     const restoredLigand = ligandName && ligandContent ? new File([ligandContent], ligandName, { type: 'text/plain' }) : null;
 
     setTargetFile(restoredTarget);
     setLigandFile(restoredLigand);
-    setPersistedTargetUpload({ fileName: targetName, content: targetContent });
+    setPersistedTargetUpload({ fileName: restoredTargetName, content: targetContent });
     setPersistedLigandUpload(restoredLigand ? { fileName: ligandName, content: ligandContent } : null);
     setPreviewError(null);
     setPreviewPairKey('');
@@ -183,6 +199,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
       const targetReadSeq = targetUploadReadSeqRef.current + 1;
       targetUploadReadSeqRef.current = targetReadSeq;
       ligandUploadReadSeqRef.current += 1;
+      hasInMemoryUploadsRef.current = true;
       setTargetFile(file);
       // Re-uploading target should reset ligand-dependent preview state.
       setLigandFile(null);
@@ -204,6 +221,16 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
         .text()
         .then((content) => {
           if (targetUploadReadSeqRef.current !== targetReadSeq) return;
+          // Same name-extension policy as the restore path: a file whose name carries no
+          // recognized extension gets the content-sniffed format stamped on BEFORE the
+          // preview gate sees it — whatever source produced the File.
+          const normalized = normalizeStructureFileName(file.name, content);
+          if (normalized !== file.name) {
+            const healed = new File([content], normalized, { type: file.type || 'text/plain' });
+            setTargetFile(healed);
+            setPersistedTargetUpload({ fileName: normalized, content });
+            return;
+          }
           setPersistedTargetUpload({ fileName: file.name, content });
         })
         .catch(() => {
@@ -218,6 +245,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     (file: File | null) => {
       const ligandReadSeq = ligandUploadReadSeqRef.current + 1;
       ligandUploadReadSeqRef.current = ligandReadSeq;
+      hasInMemoryUploadsRef.current = true;
       setLigandFile(file);
       setPreviewError(null);
       setPreviewPairKey('');
@@ -260,11 +288,14 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
       try {
         let nextPreview: AffinityPreviewPayload;
         if (!ligandFile) {
-          const targetFormat = detectStructureFormat(targetFile.name);
-          if (!targetFormat) {
-            throw new Error('Target file must be .pdb, .cif or .mmcif.');
-          }
+          // Name first, content sniff second (shared policy): a file applied without a
+          // recognizable extension (e.g. a copilot-applied "KLK1") must still parse
+          // instead of blocking the preview.
           const targetText = await targetFile.text();
+          const targetFormat = resolveStructureFormat(targetFile.name, targetText);
+          if (!targetFormat) {
+            throw new Error('Target file must be .pdb, .ent, .cif or .mmcif.');
+          }
           const chainIds = extractStructureChainIds(targetText, targetFormat);
           const proteinChainIds = Object.keys(extractProteinChainSequences(targetText, targetFormat));
           const targetChainIds = proteinChainIds.length > 0 ? proteinChainIds : chainIds;

@@ -1,4 +1,11 @@
 import {
+  createApiToken as createApiTokenServer,
+  deleteApiToken as deleteApiTokenServer,
+  listApiTokens as listApiTokensServer,
+  toApiToken,
+  updateApiToken as updateApiTokenServer
+} from '../api/authServerApi';
+import {
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
@@ -44,19 +51,12 @@ import { useAuth } from '../hooks/useAuth';
 import { ConstraintEditor } from '../components/project/ConstraintEditor';
 import { JSMEEditor } from '../components/project/JSMEEditor';
 import {
-  deleteApiToken,
   getProjectTaskById,
-  findApiTokenByHash,
-  insertApiToken,
   listApiTokenUsagePage,
   listApiTokenUsageDailyByTokenIds,
   listApiTokenUsageDaily,
-  listApiTokens,
   listProjects,
-  revokeApiToken,
-  updateApiToken
 } from '../api/supabaseLite';
-import { sha256Hex } from '../utils/crypto';
 import { ENV } from '../utils/env';
 import { componentTypeLabel, normalizeInputComponents } from '../utils/projectInputs';
 import { buildVirtualScreeningYaml, VIRTUAL_SCREENING_EXAMPLE } from '../utils/virtualScreening';
@@ -113,7 +113,6 @@ import {
   normalizeProjectStatsSort,
   normalizeProjectStatsWorkflowFilter,
   normalizeUsageWindow,
-  randomAlphaNum,
   readCommandHistoryFromStorage,
   shortUuidLike,
   usageSince
@@ -191,6 +190,7 @@ export function ApiAccessPage() {
   const [builderYamlPath, setBuilderYamlPath] = useState('./config.yaml');
   const [builderVirtualScreeningProtein, setBuilderVirtualScreeningProtein] = useState('');
   const [builderVirtualScreeningInput, setBuilderVirtualScreeningInput] = useState(VIRTUAL_SCREENING_EXAMPLE);
+  const [builderVsLibraryPath, setBuilderVsLibraryPath] = useState('');
   const [builderYamlComponents, setBuilderYamlComponents] = useState<InputComponent[]>([
     createYamlBuilderComponent('protein'),
     createYamlBuilderComponent('ligand')
@@ -206,13 +206,21 @@ export function ApiAccessPage() {
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
-  const [builderUseMsaAffinity, setBuilderUseMsaAffinity] = useState(true);
-  const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('score');
+  const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('dock');
   const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
   const [builderAffinityTargetChain, setBuilderAffinityTargetChain] = useState('A');
   const [builderAffinityLigandChain, setBuilderAffinityLigandChain] = useState('L');
   const [builderAffinityLigandSmiles, setBuilderAffinityLigandSmiles] = useState('');
+  const [builderDockCenterX, setBuilderDockCenterX] = useState('');
+  const [builderDockCenterY, setBuilderDockCenterY] = useState('');
+  const [builderDockCenterZ, setBuilderDockCenterZ] = useState('');
+  const [builderDockSizeX, setBuilderDockSizeX] = useState('');
+  const [builderDockSizeY, setBuilderDockSizeY] = useState('');
+  const [builderDockSizeZ, setBuilderDockSizeZ] = useState('');
+  const [builderPocketMethod, setBuilderPocketMethod] = useState<'center' | 'ligand' | 'residues'>('center');
+  const [builderPocketLigandPath, setBuilderPocketLigandPath] = useState('./reference_ligand.sdf');
+  const [builderPocketResidues, setBuilderPocketResidues] = useState('');
   const [builderLeadOptTargetConfigPath, setBuilderLeadOptTargetConfigPath] = useState('./target.yaml');
   const [builderLeadOptInputCompound, setBuilderLeadOptInputCompound] = useState('');
   const [builderLeadOptTargetChain, setBuilderLeadOptTargetChain] = useState('A');
@@ -252,12 +260,12 @@ export function ApiAccessPage() {
       setError(null);
       try {
         const [tokenRows, projectRows] = await Promise.all([
-          listApiTokens(session.userId),
+          listApiTokensServer(),
           listProjects({ userId: session.userId })
         ]);
         if (cancelled) return;
 
-        setTokens(tokenRows);
+        setTokens(tokenRows.map(toApiToken));
         setProjects(projectRows);
         const scopedProjectTokens = isProjectScoped
           ? tokenRows.filter((item) => String(item.project_id || '').trim() === scopedProjectId)
@@ -499,59 +507,21 @@ export function ApiAccessPage() {
         throw new Error('Please select a project.');
       }
       const label = newTokenName.trim() || shortUuidLike();
-      let plain = `vbio_${randomAlphaNum(36)}`;
-      let tokenHash = await sha256Hex(plain);
-
-      const expiresDays = Number(newTokenExpiresDays);
-      const expiresAt = Number.isFinite(expiresDays) && expiresDays > 0
-        ? new Date(Date.now() + expiresDays * 24 * 60 * 60 * 1000).toISOString()
-        : null;
-
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        const existing = await findApiTokenByHash(tokenHash);
-        if (!existing) break;
-        plain = `vbio_${randomAlphaNum(36)}`;
-        tokenHash = await sha256Hex(plain);
-      }
-
-      const existing = await findApiTokenByHash(tokenHash);
-      let saved: ApiToken;
-      if (existing) {
-        if (existing.user_id !== session.userId) {
-          throw new Error('This token value is already registered by another account.');
-        }
-        saved = await updateApiToken(existing.id, {
-          name: label,
-          project_id: selectedProjectId,
-          allow_submit: allowSubmit,
-          allow_delete: allowDelete,
-          allow_cancel: allowCancel,
-          token_plain: plain,
-          token_prefix: plain.slice(0, 12),
-          token_last4: plain.slice(-4),
-          scopes: ['runtime', 'project', 'task'],
-          is_active: true,
-          expires_at: expiresAt,
-          revoked_at: null
-        });
-      } else {
-        saved = await insertApiToken({
-          user_id: session.userId,
-          name: label,
-          token_hash: tokenHash,
-          token_plain: plain,
-          project_id: selectedProjectId,
-          allow_submit: allowSubmit,
-          allow_delete: allowDelete,
-          allow_cancel: allowCancel,
-          token_prefix: plain.slice(0, 12),
-          token_last4: plain.slice(-4),
-          scopes: ['runtime', 'project', 'task'],
-          is_active: true,
-          expires_at: expiresAt,
-          revoked_at: null
-        });
-      }
+      // Server-side mint (F2): the plaintext is generated on the server, returned ONCE for
+      // this display, and only the sha256 hash is stored — the browser never writes
+      // api_tokens nor sees other users' rows.
+      const minted = await createApiTokenServer({
+        name: label,
+        project_id: selectedProjectId,
+        allow_submit: allowSubmit,
+        allow_delete: allowDelete,
+        allow_cancel: allowCancel
+      });
+      const plain = minted.token_plain;
+      // The list rows never carry the plaintext (hash-only storage); attaching it to the
+      // in-memory row keeps it visible in the Builder's "Token Plaintext" field for this
+      // session — a reload clears it back to the shown-once model.
+      const saved: ApiToken = { ...toApiToken(minted.token), token_plain: plain };
 
       setTokens((prev) => {
         const idx = prev.findIndex((item) => item.id === saved.id);
@@ -569,14 +539,10 @@ export function ApiAccessPage() {
       setAllowSubmit(true);
       setAllowDelete(true);
       setAllowCancel(true);
-      setSuccess(existing ? 'Existing token updated.' : 'API token created. Copy it now; it will not be shown again.');
+      setSuccess('API token created. Copy it now; it will not be shown again.');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create API token.';
-      if (message.includes('idx_api_tokens_token_hash') || message.includes('"code":"23505"')) {
-        setError('Token hash already exists, please retry.');
-      } else {
-        setError(message);
-      }
+      setError(message);
     } finally {
       setTokenCreating(false);
     }
@@ -587,7 +553,7 @@ export function ApiAccessPage() {
     setError(null);
     setSuccess(null);
     try {
-      const updated = await revokeApiToken(tokenId);
+      const updated = toApiToken(await updateApiTokenServer(tokenId, { revoked_at: new Date().toISOString() }));
       setTokens((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
       setSuccess('API token revoked.');
     } catch (err) {
@@ -605,7 +571,7 @@ export function ApiAccessPage() {
     setError(null);
     setSuccess(null);
     try {
-      await deleteApiToken(tokenId);
+      await deleteApiTokenServer(tokenId);
       setTokens((prev) => {
         const next = prev.filter((item) => item.id !== tokenId);
         setSelectedTokenId((current) => (current === tokenId ? next[0]?.id || '' : current));
@@ -796,15 +762,24 @@ export function ApiAccessPage() {
 
   useEffect(() => {
     if (!isAffinityWorkflow) return;
-    const useMsa = Boolean(selectedProject?.use_msa);
-    setBuilderUseMsaAffinity(useMsa);
-    setBuilderAffinityMode('score');
+    // A task-scoped builder (task_row_id in the URL) is prefilled from the task snapshot;
+    // the reset must not wipe that prefill when the async workflow flag flips after it lands.
+    if (isProjectScoped && scopedTaskRowId) return;
+    // Reset on PROJECT IDENTITY only: depending on selectedProject?.use_msa made this effect
+    // re-fire when the projects list resolved AFTER a task prefill, wiping the prefill back
+    // to defaults (mode/seed/chains/SMILES).
+    setBuilderAffinityMode('dock');
     setBuilderAffinitySeed(null);
     setBuilderAffinityConfidenceOnly(true);
     setBuilderAffinityTargetChain('A');
     setBuilderAffinityLigandChain('L');
     setBuilderAffinityLigandSmiles('');
-  }, [isAffinityWorkflow, selectedTokenProjectId, selectedProject?.use_msa]);
+    setBuilderDockCenterX(''); setBuilderDockCenterY(''); setBuilderDockCenterZ('');
+    setBuilderDockSizeX(''); setBuilderDockSizeY(''); setBuilderDockSizeZ('');
+    setBuilderPocketMethod('center');
+    setBuilderPocketLigandPath('./reference_ligand.sdf');
+    setBuilderPocketResidues('');
+  }, [isAffinityWorkflow, selectedTokenProjectId, isProjectScoped, scopedTaskRowId]);
 
   useEffect(() => {
     if (!isPredictionWorkflow) return;
@@ -902,7 +877,13 @@ export function ApiAccessPage() {
             const screeningInput = String(
               taskInputOptions.virtualScreeningInput ?? taskInputOptions.virtual_screening_input ?? ''
             );
-            if (screeningInput.trim()) setBuilderVirtualScreeningInput(screeningInput);
+            if (screeningInput.trim()) {
+              setBuilderVirtualScreeningInput(screeningInput);
+              // The snapshot carries an inline library; a library path left over from a
+              // different task would silently drop the prefilled compounds (file mode
+              // disables the textarea) and submit the wrong file channel.
+              setBuilderVsLibraryPath('');
+            }
             const target = taskComponents.find((component) => component.type === 'protein');
             if (target?.sequence) setBuilderVirtualScreeningProtein(target.sequence.replace(/\s+/g, '').toUpperCase());
           }
@@ -922,7 +903,9 @@ export function ApiAccessPage() {
     return () => {
       cancelled = true;
     };
-  }, [isProjectScoped, isVirtualScreeningWorkflow, scopedProjectId, scopedTaskRowId]);
+    // isAffinityWorkflow re-fires when the async projects list resolves; without it the
+    // affinity reset effect wipes a task prefill that landed before the workflow was known.
+  }, [isProjectScoped, isVirtualScreeningWorkflow, isAffinityWorkflow, scopedProjectId, scopedTaskRowId]);
 
   const filteredTokens = useMemo(() => {
     const keyword = tokenQuery.trim().toLowerCase();
@@ -1272,13 +1255,23 @@ export function ApiAccessPage() {
       return isSamePredictionProperties(base, normalized) ? prev : normalized;
     });
   }, [isPredictionWorkflow, predictionTargetChainOptions, predictionChainOptions]);
+  // Library upload mode: when a compounds_file path is set, the library travels as its own
+  // multipart part and the generated YAML carries only the target sequences — the two
+  // channels are mutually exclusive by contract.
+  const vsLibraryFileMode = isVirtualScreeningWorkflow && Boolean(builderVsLibraryPath.trim());
+  useEffect(() => {
+    if (!isVirtualScreeningWorkflow) return;
+    setBuilderVsLibraryPath('');
+  }, [isVirtualScreeningWorkflow, selectedTokenProjectId]);
+
   const yamlBuilderText = (() => {
     if (isVirtualScreeningWorkflow) {
       try {
         return buildVirtualScreeningYaml({
           proteinSequence: builderVirtualScreeningProtein,
-          rawInput: builderVirtualScreeningInput,
-          batchName: selectedProject?.name || 'Virtual screening'
+          rawInput: vsLibraryFileMode ? '' : builderVirtualScreeningInput,
+          batchName: selectedProject?.name || 'Virtual screening',
+          libraryFromFile: vsLibraryFileMode
         }).yaml;
       } catch (error) {
         return `# ${error instanceof Error ? error.message : 'Virtual screening YAML generation failed.'}`;
@@ -1316,7 +1309,12 @@ export function ApiAccessPage() {
     : '';
   const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './protein.pdb');
   const escapedLigandPath = escapeForDoubleQuotedShell(builderLigandPath.trim() || './ligand.sdf');
+  const escapedVsLibraryPath = escapeForDoubleQuotedShell(builderVsLibraryPath.trim());
+  const vsCompoundsFileFlag = vsLibraryFileMode
+    ? ` \\\n  -F "compounds_file=@${escapedVsLibraryPath}"`
+    : '';
   const normalizedAffinityMode = normalizeAffinityBuilderMode(builderAffinityMode);
+  const isDockBuilderMode = normalizedAffinityMode === 'dock';
   const normalizedAffinitySeed =
     typeof builderAffinitySeed === 'number' && Number.isFinite(builderAffinitySeed)
       ? Math.max(0, Math.floor(builderAffinitySeed))
@@ -1324,25 +1322,80 @@ export function ApiAccessPage() {
   const affinityTargetChain = String(builderAffinityTargetChain || '').trim();
   const affinityLigandChain = String(builderAffinityLigandChain || '').trim();
   const affinityLigandSmiles = String(builderAffinityLigandSmiles || '').trim();
+  // Affinity-mode semantics (dock pocket, SMILES-vs-file ligand) only apply inside the affinity
+  // builder; the state default 'dock' must not leak hints or flags into other workflows' commands.
+  const isDockAffinityMode = builderWorkflowKey === 'affinity' && isDockBuilderMode;
   const affinityCanEnableActivity =
     !builderAffinityConfidenceOnly &&
     Boolean(affinityTargetChain && affinityLigandChain && affinityLigandSmiles);
-  const affinityActivityFlags = affinityCanEnableActivity
+  const affinityActivityFlags = (effectiveAffinityBackend === 'boltz') && (affinityCanEnableActivity || (isDockAffinityMode && affinityLigandSmiles))
     ? (() => {
-      const affinitySmilesMap = escapeForDoubleQuotedShell(
-        JSON.stringify({ [affinityLigandChain]: affinityLigandSmiles })
-      );
-      return ` \\\n  -F "enable_affinity=true" \\
-  -F "target_chain=${escapeForDoubleQuotedShell(affinityTargetChain)}" \\
-  -F "ligand_chain=${escapeForDoubleQuotedShell(affinityLigandChain)}" \\
+        // Dock mode always scores the docked pose (the workspace submits enable_affinity with
+        // target chain A / ligand chain L); Confidence Only applies to the score-mode family.
+        const targetChain = affinityTargetChain || 'A';
+        const ligandChain = affinityLigandChain || 'L';
+        const affinitySmilesMap = escapeForDoubleQuotedShell(
+          JSON.stringify({ [ligandChain]: affinityLigandSmiles })
+        );
+        return ` \\\n  -F "enable_affinity=true" \\
+  -F "target_chain=${escapeForDoubleQuotedShell(targetChain)}" \\
+  -F "ligand_chain=${escapeForDoubleQuotedShell(ligandChain)}" \\
   -F "ligand_smiles_map=${affinitySmilesMap}"`;
-    })()
+      })()
     : '';
   const affinitySeedFlag = normalizedAffinitySeed !== null ? ` \\\n  -F "seed=${normalizedAffinitySeed}"` : '';
-  const affinityModeHint =
-    !builderAffinityConfidenceOnly && !affinityCanEnableActivity
-      ? '\n# Affinity mode requires target chain, ligand chain, and ligand SMILES.'
-      : '';
+  const affinityLigandInputFlag = isDockAffinityMode
+    ? ` \\\n  -F "ligand_smiles=${escapeForDoubleQuotedShell(affinityLigandSmiles || '<LIGAND_SMILES>')}"`
+    : ` \\\n  -F "ligand_file=@${escapedLigandPath}"`;
+  const dockCenterComplete = Boolean(builderDockCenterX && builderDockCenterY && builderDockCenterZ);
+  const dockPocketNumbers = {
+    x: Number(builderDockCenterX), y: Number(builderDockCenterY), z: Number(builderDockCenterZ),
+    sx: builderDockSizeX ? Number(builderDockSizeX) : 22,
+    sy: builderDockSizeY ? Number(builderDockSizeY) : 22,
+    sz: builderDockSizeZ ? Number(builderDockSizeZ) : 22,
+  };
+  // The backend accepts exactly one pocket method: explicit center axes, a
+  // pocket_residues list, or a pocket_ligand reference compound whose pose
+  // defines the pocket (server-side auto detection). Size axes are optional
+  // extras for every method (omitted -> server default radius).
+  const pocketResiduesTrimmed = builderPocketResidues.trim();
+  const pocketResiduesValid = /^[A-Za-z]+:\d+(\s*,\s*[A-Za-z]+:\d+)*$/.test(pocketResiduesTrimmed);
+  const pocketLigandPath = builderPocketLigandPath.trim() || './reference_ligand.sdf';
+  const dockPocketSizeFlags = ` \\\n  -F "size_x=${dockPocketNumbers.sx}" \\\n  -F "size_y=${dockPocketNumbers.sy}" \\\n  -F "size_z=${dockPocketNumbers.sz}"`;
+  const dockPocketMethodFlags = (() => {
+    if (builderPocketMethod === 'ligand') {
+      return ` \\\n  -F "pocket_ligand=@${escapeForDoubleQuotedShell(pocketLigandPath)}"`;
+    }
+    if (builderPocketMethod === 'residues') {
+      return ` \\\n  -F "pocket_residues=${escapeForDoubleQuotedShell(
+        pocketResiduesTrimmed && pocketResiduesValid ? pocketResiduesTrimmed.replace(/\s+/g, '') : '<CHAIN:RESNUM,...>'
+      )}"`;
+    }
+    return ` \\\n  -F "center_x=${dockCenterComplete ? dockPocketNumbers.x : '<POCKET_X>'}" \\\n  -F "center_y=${dockCenterComplete ? dockPocketNumbers.y : '<POCKET_Y>'}" \\\n  -F "center_z=${dockCenterComplete ? dockPocketNumbers.z : '<POCKET_Z>'}"`;
+  })();
+  const affinityDockPocketFlags = isDockAffinityMode
+    ? ` \\\n  -F "ligand_filename=ligand_from_smiles.sdf"${dockPocketMethodFlags}${dockPocketSizeFlags}`
+    : '';
+  const dockPocketMethodHint = !isDockAffinityMode
+    ? ''
+    : builderPocketMethod === 'ligand'
+      ? '\n# Pocket is auto-detected server-side from the reference ligand file (pocket_ligand) — an SDF/MOL/PDB of a known binder placed in the binding site.'
+      : builderPocketMethod === 'residues'
+        ? !pocketResiduesTrimmed
+          ? '\n# Fill pocket_residues with a comma-separated CHAIN:RESNUM list (e.g. A:100,A:101), or edit the command before running.'
+          : pocketResiduesValid
+            ? '\n# Pocket is defined by residue numbers (pocket_residues, CHAIN:RESNUM list).'
+            : '\n# pocket_residues must be a comma-separated CHAIN:RESNUM list, e.g. A:100,A:101.'
+        : dockCenterComplete
+          ? ''
+          : '\n# Dock mode submits the ligand as SMILES and needs a pocket box — fill the Pocket center fields, switch to the reference-ligand or residues method, or edit the command before running.';
+  const affinityModeHint = !isAffinityWorkflow
+    ? ''
+    : isDockAffinityMode
+      ? dockPocketMethodHint
+      : !builderAffinityConfidenceOnly && !affinityCanEnableActivity
+        ? '\n# Affinity activity scoring (enable_affinity) requires target chain, ligand chain, and ligand SMILES.'
+        : '';
   const predictionPairHint =
     isPredictionWorkflow && !predictionPairReady
       ? '\n# Prediction chain pairing must be encoded inside yaml_file properties.'
@@ -1378,25 +1431,25 @@ fi
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
-  -F "yaml_file=@${escapedYamlPath}" \\
+  -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectivePredictionBackend}" \\
-  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}"${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
+  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
+  -F "priority=high"${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
-  const commandSubmitAffinityBoltz = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
+  const commandSubmitAffinity = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
-  -F "protein_file=@${escapedTargetPath}" \\
-  -F "ligand_file=@${escapedLigandPath}" \\
-  -F "backend=boltz" \\
+  -F "protein_file=@${escapedTargetPath}"${affinityLigandInputFlag}${affinityDockPocketFlags} \\
+  -F "backend=${effectiveAffinityBackend}" \\
   -F "mode=${normalizedAffinityMode}" \\
   -F "compute_ipsae=true" \\
-  -F "use_msa_server=${builderUseMsaAffinity ? 'true' : 'false'}" \\
+  -F "use_msa_server=true" \\
   -F "priority=high"${affinitySeedFlag}${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
     ? `# Workflow "${selectedWorkflow.title}" is not supported in Command Builder.\n# Use project workflows: Prediction, Virtual Screening, or Affinity.`
     : (builderWorkflowKey === 'affinity'
-      ? commandSubmitAffinityBoltz
+      ? commandSubmitAffinity
       : commandSubmitPrediction);
   const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}${leadOptHint}${customResidueHint}`;
   const submitBackendLabel = builderWorkflowKey === 'affinity' ? effectiveAffinityBackend : effectivePredictionBackend;
@@ -1407,6 +1460,11 @@ ${submitTaskIdCapture}`;
   const commandResults = `curl -X GET "${managementApiBaseUrl}${resultsEndpoint}?project_id=${selectedTokenProjectId}" \\
   -H "X-API-Token: ${curlToken}" \\
   -o "${escapedResultPath}"`;
+  const screeningEndpoint = `/results/${taskIdForCommand}/screening`;
+  const commandScreeningResults = isVirtualScreeningWorkflow
+    ? `curl -X GET "${managementApiBaseUrl}${screeningEndpoint}?project_id=${selectedTokenProjectId}" \\
+  -H "X-API-Token: ${curlToken}"`
+    : '';
   const commandTaskAction = `curl -X DELETE "${managementApiBaseUrl}/tasks/${taskIdForCommand}?project_id=${selectedTokenProjectId}&operation_mode=${builderTaskOperation}" \\
   -H "X-API-Token: ${curlToken}"`;
 
@@ -2100,6 +2158,7 @@ ${submitTaskIdCapture}`;
                   onChange={(e) => setBuilderAffinityBackend(normalizeAffinityBackend(e.target.value))}
                 >
                   <option value="boltz">boltz</option>
+                  <option value="protenix">protenix</option>
                 </select>
               </label>
             )}
@@ -2212,17 +2271,51 @@ ${submitTaskIdCapture}`;
                   />
                 </label>
                 <label className="field">
-                  <span>Compound library</span>
+                  <span>Compound library (SMILES per line, optional &apos;name SMILES&apos; or FASTA-style &gt;name headers)</span>
                   <textarea
                     rows={10}
                     value={builderVirtualScreeningInput}
                     onChange={(e) => setBuilderVirtualScreeningInput(e.target.value)}
                     placeholder={VIRTUAL_SCREENING_EXAMPLE}
                     spellCheck={false}
+                    disabled={vsLibraryFileMode}
+                  />
+                </label>
+                <label className="field">
+                  <span>Load library from file (.smi / .csv / .txt)</span>
+                  <input
+                    type="file"
+                    accept=".smi,.smiles,.csv,.tsv,.txt"
+                    disabled={vsLibraryFileMode}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.currentTarget.value = '';
+                      if (!file) return;
+                      void file.text().then((text) => {
+                        setBuilderVirtualScreeningInput(text.trim());
+                      });
+                    }}
+                  />
+                </label>
+                <label className="field">
+                  <span>Compound library file path (uploads the library as compounds_file)</span>
+                  <input
+                    value={builderVsLibraryPath}
+                    onChange={(e) => setBuilderVsLibraryPath(e.target.value)}
+                    placeholder="./library.smi"
+                    spellCheck={false}
                   />
                 </label>
                 <div className="api-builder-note muted small">
-                  The generated YAML submits one target and a batch of SMILES to the independent Nesso-1 backend.
+                  The generated YAML submits one target plus a compound library (inline SMILES or a separate
+                  <code>compounds_file</code> part) to the independent Nesso-1 backend.
+                  Set a library file path to upload the compounds as a separate <code>compounds_file</code> part
+                  (the textarea above is then ignored; the YAML carries only the target). Provide the library either
+                  inline or as a file, never both.
+                  Results are ranking-only: the ZIP contains nesso/screening.json with rank, affinity_pred_value
+                  (log10 IC50 in µM — LOWER is stronger) and ic50_um per compound; no 3D structures are produced.
+                  Poll the same /status and /results endpoints as prediction tasks, or read the ranking directly
+                  from the /results/&lt;TASK_ID&gt;/screening endpoint.
                 </div>
               </>
             )}
@@ -2230,14 +2323,8 @@ ${submitTaskIdCapture}`;
             {isAffinityWorkflow && (
               <>
                 <div className="api-yaml-component-flags api-affinity-options">
-                  <label className="checkbox-inline">
-                    <input
-                      type="checkbox"
-                      checked={builderUseMsaAffinity}
-                      onChange={(e) => setBuilderUseMsaAffinity(e.target.checked)}
-                    />
-                    <span>MSA</span>
-                  </label>
+                  {/* No MSA toggle: boltz2score always runs with the MSA server (the backend
+                      force-enables use_msa_server), so the switch was a dead control. */}
                   <label className="checkbox-inline">
                     <input
                       type="checkbox"
@@ -2257,6 +2344,7 @@ ${submitTaskIdCapture}`;
                     <option value="pose">pose</option>
                     <option value="refine">refine</option>
                     <option value="interface">interface</option>
+                    <option value="dock">dock</option>
                   </select>
                 </label>
                 <label className="field">
@@ -2276,11 +2364,113 @@ ${submitTaskIdCapture}`;
                   <span>Target file path</span>
                   <input value={builderTargetPath} onChange={(e) => setBuilderTargetPath(e.target.value)} placeholder="./protein.pdb" />
                 </label>
-                <label className="field">
-                  <span>Ligand file path</span>
-                  <input value={builderLigandPath} onChange={(e) => setBuilderLigandPath(e.target.value)} placeholder="./ligand.sdf" />
-                </label>
-                {!builderAffinityConfidenceOnly && (
+                {isDockBuilderMode ? (
+                  <>
+                    <label className="field">
+                      <span>Ligand SMILES (required by dock)</span>
+                      <input
+                        value={builderAffinityLigandSmiles}
+                        onChange={(e) => setBuilderAffinityLigandSmiles(e.target.value)}
+                        placeholder="e.g. CC(C)CC1=CC=C(C=C1)C(C)C(=O)O"
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Pocket definition method</span>
+                      <select
+                        value={builderPocketMethod}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setBuilderPocketMethod(value === 'ligand' || value === 'residues' ? value : 'center');
+                        }}
+                      >
+                        <option value="center">Manual coordinates</option>
+                        <option value="ligand">Reference ligand (auto-detect pocket)</option>
+                        <option value="residues">Pocket residues</option>
+                      </select>
+                    </label>
+                    {builderPocketMethod === 'center' ? (
+                      <label className="field">
+                        <span>Pocket center X / Y / Z (Å)</span>
+                        <div className="row gap-8">
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={builderDockCenterX}
+                            onChange={(e) => setBuilderDockCenterX(e.target.value)}
+                            placeholder="x"
+                          />
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={builderDockCenterY}
+                            onChange={(e) => setBuilderDockCenterY(e.target.value)}
+                            placeholder="y"
+                          />
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={builderDockCenterZ}
+                            onChange={(e) => setBuilderDockCenterZ(e.target.value)}
+                            placeholder="z"
+                          />
+                        </div>
+                      </label>
+                    ) : builderPocketMethod === 'ligand' ? (
+                      <label className="field">
+                        <span>Reference ligand file path (pocket auto-detected server-side)</span>
+                        <input
+                          value={builderPocketLigandPath}
+                          onChange={(e) => setBuilderPocketLigandPath(e.target.value)}
+                          placeholder="./reference_ligand.sdf"
+                        />
+                      </label>
+                    ) : (
+                      <label className="field">
+                        <span>Pocket residues (CHAIN:RESNUM, comma-separated)</span>
+                        <input
+                          value={builderPocketResidues}
+                          onChange={(e) => setBuilderPocketResidues(e.target.value)}
+                          placeholder="A:100,A:101"
+                        />
+                      </label>
+                    )}
+                    <label className="field">
+                      <span>Pocket size X / Y / Z (Å, default 22)</span>
+                      <div className="row gap-8">
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={builderDockSizeX}
+                          onChange={(e) => setBuilderDockSizeX(e.target.value)}
+                          placeholder="22"
+                        />
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={builderDockSizeY}
+                          onChange={(e) => setBuilderDockSizeY(e.target.value)}
+                          placeholder="22"
+                        />
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={builderDockSizeZ}
+                          onChange={(e) => setBuilderDockSizeZ(e.target.value)}
+                          placeholder="22"
+                        />
+                      </div>
+                    </label>
+                  </>
+                ) : (
+                  <label className="field">
+                    <span>Ligand file path</span>
+                    <input value={builderLigandPath} onChange={(e) => setBuilderLigandPath(e.target.value)} placeholder="./ligand.sdf" />
+                  </label>
+                )}
+                {!builderAffinityConfidenceOnly && !isDockBuilderMode && (
                   <>
                     <label className="field">
                       <span>Target chain</span>
@@ -2298,14 +2488,16 @@ ${submitTaskIdCapture}`;
                         placeholder="L"
                       />
                     </label>
-                    <label className="field">
-                      <span>Ligand SMILES</span>
-                      <input
-                        value={builderAffinityLigandSmiles}
-                        onChange={(e) => setBuilderAffinityLigandSmiles(e.target.value)}
-                        placeholder="Required for affinity mode"
-                      />
-                    </label>
+                    {!isDockBuilderMode && (
+                      <label className="field">
+                        <span>Ligand SMILES</span>
+                        <input
+                          value={builderAffinityLigandSmiles}
+                          onChange={(e) => setBuilderAffinityLigandSmiles(e.target.value)}
+                          placeholder="Required for affinity mode"
+                        />
+                      </label>
+                    )}
                   </>
                 )}
               </>
@@ -2419,9 +2611,24 @@ ${submitTaskIdCapture}`;
                 <pre><code>{commandResults}</code></pre>
               </article>
 
+              {commandScreeningResults && (
+                <article className="api-command-item">
+                  <header>
+                    <span>5. Screening Ranking</span>
+                    <button className={`icon-btn ${copiedActionId === 'copy-screening' ? 'is-copied' : ''}`} type="button" aria-label="Copy screening ranking command" onClick={() => { void copyText(commandScreeningResults, 'Screening ranking command copied.', 'Screening Ranking', 'copy-screening'); }}>
+                      <Copy size={14} />
+                    </button>
+                  </header>
+                  <p className="muted small">
+                    Ranked JSON from nesso/screening.json — compounds[0] is the strongest binder (lowest affinity_pred_value, log10 IC50 in µM).
+                  </p>
+                  <pre><code>{commandScreeningResults}</code></pre>
+                </article>
+              )}
+
               <article className="api-command-item">
                 <header>
-                  <span>5. {builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task'}</span>
+                  <span>{commandScreeningResults ? '6.' : '5.'} {builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task'}</span>
                   <button className={`icon-btn ${copiedActionId === 'copy-task-action' ? 'is-copied' : ''}`} type="button" aria-label="Copy task action command" onClick={() => { void copyText(commandTaskAction, 'Task action command copied.', builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task', 'copy-task-action'); }}>
                     <Copy size={14} />
                   </button>

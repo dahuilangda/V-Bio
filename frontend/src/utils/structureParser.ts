@@ -26,9 +26,102 @@ const AMINO_THREE_TO_ONE: Record<string, string> = {
 
 export function detectStructureFormat(fileName: string): 'pdb' | 'cif' | null {
   const lower = fileName.trim().toLowerCase();
-  if (lower.endsWith('.pdb')) return 'pdb';
+  // .ent is the legacy PDB extension (accepted by the manual upload input too).
+  if (lower.endsWith('.pdb') || lower.endsWith('.ent')) return 'pdb';
   if (lower.endsWith('.cif') || lower.endsWith('.mmcif')) return 'cif';
   return null;
+}
+
+// Shared atom-record predicates — one source of truth for both the format sniffer and the
+// download validator, so a future tweak can never make the two diverge. The _atom_site check
+// is line-anchored because the CIF grammar always starts the tag at column 0; an unanchored
+// substring would let a PDB REMARK mentioning "_atom_site." flip a valid PDB to cif.
+function hasCifAtomSite(structureText: string): boolean {
+  return /^\s*_atom_site\./m.test(structureText);
+}
+
+function hasPdbAtomRow(structureText: string): boolean {
+  return /^(ATOM|HETATM)/m.test(structureText);
+}
+
+// Content sniff for a file whose NAME carries no recognizable extension (e.g. a
+// copilot-applied "KLK1"). Precedence matters: mmCIF atom_site rows ALSO start with
+// "ATOM", but only mmCIF contains an _atom_site definition — so cif is checked first.
+export function detectStructureTextFormat(structureText: string): 'pdb' | 'cif' | null {
+  const text = String(structureText || '');
+  if (!text.trim()) return null;
+  if (hasCifAtomSite(text)) return 'cif';
+  if (hasPdbAtomRow(text)) return 'pdb';
+  return null;
+}
+
+// Guards copilot/harness structure downloads: a fetched URL can return an HTML
+// error page (or an empty body) with HTTP 200, which would otherwise be stored
+// as a "structure" that silently renders nothing in the viewer.
+export function structureTextHasAtomRecords(structureText: string, format: 'pdb' | 'cif'): boolean {
+  const text = String(structureText || '');
+  if (!text.trim()) return false;
+  return format === 'pdb' ? hasPdbAtomRow(text) : hasCifAtomSite(text);
+}
+
+// The run-chain policy for gates that hold both the file NAME and its TEXT: the declared
+// name wins when it carries a recognized extension; otherwise sniff the content. One bad
+// name must never block (or misroute) the preview / pocket-box / submit gates.
+export function resolveStructureFormat(fileName: string, structureText: string): 'pdb' | 'cif' | null {
+  return detectStructureFormat(fileName) ?? detectStructureTextFormat(structureText);
+}
+
+// Stamp the content-detected format onto a name that carries no recognized extension
+// ("KLK1" → "KLK1.cif"). The single storage-name policy: every file entering an affinity
+// target slot — copilot download, draft restore, manual upload — passes through here, so a
+// legacy extension-less PERSISTED draft self-heals on restore instead of re-raising
+// "Target file must be .pdb/.ent/.cif/.mmcif" forever. Unsniffable content returns the name
+// unchanged (the gates report it honestly).
+export function normalizeStructureFileName(fileName: string, structureText: string): string {
+  if (detectStructureFormat(fileName)) return fileName;
+  const sniffed = detectStructureTextFormat(structureText);
+  if (!sniffed) return fileName;
+  return `${fileName.replace(/[.\s]+$/, '')}.${sniffed}`;
+}
+
+// Download a structure file from a copilot-provided URL and validate that it actually
+// contains atom records — an HTML error page or empty body with HTTP 200 would otherwise
+// be stored as a "structure" that silently renders nothing.
+export async function fetchValidatedStructure(
+  structureUrl: string,
+  rawFileName: unknown
+): Promise<{ fileName: string; format: 'pdb' | 'cif'; contentText: string }> {
+  // Planner-controlled names must not carry control characters into File names, receipts,
+  // or persisted snapshots.
+  let fileName = String(rawFileName || '').trim().replace(/[\r\n\t\x00-\x1f]/g, '');
+  const urlSegment = (structureUrl.split('/').pop() || '').split('?')[0].split('#')[0];
+  if (!fileName) fileName = urlSegment;
+  // The name the planner passes may lack an extension (e.g. "9VO8"); the URL is what is
+  // actually fetched, so fall back to detecting the format from it.
+  let format = detectStructureFormat(fileName) ?? detectStructureFormat(urlSegment);
+  if (!format) throw new Error('The structure URL must point to a .pdb, .ent, .cif, or .mmcif file — pass the entry\'s pdbId instead and the host will build the correct file URL.');
+  const response = await fetch(structureUrl);
+  if (!response.ok) throw new Error(`Could not download the structure (HTTP ${response.status}).`);
+  const contentText = await response.text();
+  // The CONTENT wins over the declared name on conflict: a .pdb-named mmCIF passes the pdb
+  // atom-record gate (mmCIF rows start with ATOM) yet breaks every column-based parser
+  // downstream while Mol* (which tries both formats) hides the damage — the same poisoned
+  // run chain the stamping below exists to prevent, so re-resolve format AND restamp.
+  const sniffed = detectStructureTextFormat(contentText);
+  if (sniffed && sniffed !== format) {
+    format = sniffed;
+    fileName = `${fileName.replace(/\.(pdb|ent|cif|mmcif)$/i, '')}.${format}`;
+  }
+  // Every downstream gate (preview parse, pocket-box detection, submit validation) keys the
+  // format off the STORED file's name. A planner-supplied name without a recognized extension
+  // (e.g. "KLK1") downloads fine and then silently poisons the whole run chain — the exact
+  // "target loaded but nothing can run" failure — so stamp the detected format onto the name
+  // (shared policy with the draft-restore and upload paths).
+  fileName = normalizeStructureFileName(fileName, contentText);
+  if (!structureTextHasAtomRecords(contentText, format)) {
+    throw new Error('The downloaded file does not contain structural atom records (ATOM/HETATM or _atom_site) — the URL likely returned an error page.');
+  }
+  return { fileName, format, contentText };
 }
 
 function cleanToken(token: string): string {
@@ -565,4 +658,20 @@ export function extractStructureResidueAtomOptions(
   format: 'pdb' | 'cif'
 ): StructureAtomOptionsByChain {
   return format === 'pdb' ? parsePdbStructureResidueAtomOptions(structureText) : parseCifStructureResidueAtomOptions(structureText);
+}
+
+/**
+ * The guaranteed-valid mmCIF download URL for an RCSB entry id. mmCIF is RCSB's master
+ * archive format and exists for EVERY entry, so the host builds the URL from the identifier
+ * itself — the planner passes a pdbId, never a hand-copied URL (the record's sourceUrl is
+ * the human entry page, and .pdb-format files exist only for some entries).
+ */
+export function rcsbCifUrl(pdbId: string): string {
+  const id = pdbId.trim().toUpperCase();
+  return `https://files.rcsb.org/download/${encodeURIComponent(id)}.cif`;
+}
+
+/** True when the string looks like a 4-character RCSB entry id (e.g. 8YGY, 1UBQ). */
+export function isRcsbEntryId(value: string): boolean {
+  return /^[0-9A-Za-z]{4}$/.test(value.trim());
 }

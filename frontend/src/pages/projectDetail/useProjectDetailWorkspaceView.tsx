@@ -11,11 +11,11 @@ import type {
 import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { deleteProjectTask } from '../../api/supabaseLite';
 import { createInputComponent, saveProjectInputConfig } from '../../utils/projectInputs';
+import type { LeadOptHaloCandidate } from '../../components/project/leadopt/hooks/useLeadOptHaloRun';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { ProjectDetailLayout } from './ProjectDetailLayout';
 import {
-  computeUseMsaFlag,
   filterConstraintsByBackend,
 } from './projectDraftUtils';
 import { useProjectResultDisplay } from './useProjectResultDisplay';
@@ -39,27 +39,19 @@ import {
   mergeTaskInputOptionsIntoProperties,
   type LeadOptPersistedUploads
 } from './projectTaskSnapshot';
-import {
-  buildLeadOptCandidatesUiStateSignature,
-  type LeadOptCandidatesUiState
-} from '../../components/project/leadopt/LeadOptCandidatesPanel';
-import {
-  buildLeadOptPredictionRecordKey,
-  parseLeadOptPredictionRecordKey,
-  type LeadOptPredictionRecord
-} from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
+import type { CopilotPlanAction } from '../../types/models';
+import { detectStructureFormat, extractProteinChainSequences, fetchValidatedStructure, resolveStructureFormat, rcsbCifUrl } from '../../utils/structureParser';
+import { computeAutoPocketBox } from '../../utils/pocketBox';
+import { peptidePocketSummaryLabel } from '../../utils/peptidePocket';
+import { useCopilotAvailability } from '../../hooks/useCopilotAvailability';
 import {
   ProjectCopilotModal,
-  type CopilotAttachmentApplication,
-  type CopilotUploadedAttachment,
   clearStoredCopilotTaskPrefill,
   readStoredCopilotOpen,
   readStoredCopilotTaskPrefill,
   writeStoredCopilotOpen
 } from '../../components/copilot/ProjectCopilotModal';
-import type { CopilotPlanAction } from '../../types/models';
-import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
-import { useCopilotAvailability } from '../../hooks/useCopilotAvailability';
+import type { CopilotUploadedAttachment, CopilotAttachmentApplication } from '../../components/copilot/ProjectCopilotModal';
 
 import {
   readText,
@@ -71,34 +63,8 @@ import {
   normalizeCopilotPrefillComponents,
   applyCopilotComponentPatchOperations,
   readFiniteNumber,
-  asPredictionRecordMap,
   hasPersistedIpsaeMetric,
-  mergePredictionRecordMaps,
-  summarizeLeadOptPredictions,
-  hydratePredictionRecordMapFromHistory,
-  readBooleanToken,
-  normalizePredictionBackendStrict,
-  readSessionIdentityFromLocalStorage,
-  buildLeadOptUiStateScopeKey,
-  readLeadOptUiStateFromLocal,
-  writeLeadOptUiStateToLocal,
-  compactLeadOptPredictionMap,
-  compactLeadOptEnumeratedCandidates,
-  compactLeadOptQueryResult,
-  mergeLeadOptStateMetaIntoProperties,
-  mergeLeadOptMetaIntoProperties,
-  compactLeadOptForConfidenceWrite,
-  buildLeadOptPredictionPersistSignature,
-  mergeLeadOptSnapshotForPersist,
-  mergeLeadOptPatchPayloadForPersist,
-  compactLeadOptCandidatesUiState,
-  resolveLeadOptSnapshotFromTask,
-  resolveLeadOptDownloadTaskId,
-  collectLeadOptDownloadRecords,
-  downloadLeadOptCombinedArchive,
-  pickPreferredLeadOptTask,
-  buildLeadOptAggregatedSnapshot,
-  buildLeadOptSelectionFromPayload
+  pickPreferredLeadOptTask
 } from './workspaceViewHelpers';
 
 type WorkspaceRuntime = ReturnType<typeof useProjectDetailRuntimeContext>;
@@ -111,7 +77,12 @@ export function useProjectDetailWorkspaceView() {
   const runtime = useProjectDetailRuntimeContext();
   const { locationSearch, entryRoutingResolved, loading, error, project, draft } = runtime;
 
-  if (!entryRoutingResolved || loading) {
+  // Stale-while-revalidate: a refetch of the SAME project (submit, copilot prefill, param
+  // change) keeps the current workspace on screen — the full-screen "Loading project..."
+  // placeholder unmounted everything and remounted it, which the user saw as a flash. The
+  // placeholder stays only for a genuinely new project (or the very first load).
+  const projectId = String(runtime.projectId || '');
+  if (!entryRoutingResolved || (loading && (!project || project.id !== projectId))) {
     const query = new URLSearchParams(locationSearch);
     const requestedTaskRowId =
       String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
@@ -145,24 +116,13 @@ export function useProjectDetailWorkspaceView() {
 function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeReady }) {
   const { session } = useAuth();
   const copilotAvailable = useCopilotAvailability();
-  const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void | Promise<void>) | null>(null);
-  const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }));
   useEffect(() => {
     writeStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }, copilotOpen);
   }, [copilotOpen, session?.userId]);
 
-  const explicitRequestedTaskRowId = useMemo(
-    () => {
-      const query = new URLSearchParams(runtime.locationSearch);
-      return String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
-    },
-    [runtime.locationSearch]
-  );
-  const handleRegisterLeadOptHeaderRunAction = useCallback((action: (() => void | Promise<void>) | null) => {
-    setLeadOptHeaderRunAction(() => action);
-  }, []);
+
   const {
     loading,
     error,
@@ -290,7 +250,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     resultChainIds,
     onAffinityTargetFileChange,
     onAffinityLigandFileChange,
-    onAffinityUseMsaChange,
     onAffinityConfidenceOnlyChange,
     onAffinityModeChange,
     setAffinityLigandSmiles,
@@ -308,7 +267,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     displayTaskState,
     isActiveRuntime,
     progressPercent,
-    waitingSeconds,
     totalRuntimeSeconds,
     hasUnsavedChanges,
     runMenuOpen,
@@ -317,6 +275,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     resultChainConsistencyWarning,
     runActionRef,
     topRunButtonRef,
+    affinityDockPocket,
+    onAffinityDockPocketChange,
+    snapshotPic50,
+    snapshotPic50Mw,
+    displaySubmittedAt,
     patchTask,
     pullResultForViewer,
     persistDraftTaskSnapshot,
@@ -329,14 +292,244 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityLigandFile
   } = runtime;
 
+
+  const handleLeadOptHaloTaskCompleted = async (payload: {
+    taskId: string;
+    candidates: LeadOptHaloCandidate[];
+    roundsLog: Array<Record<string, unknown>>;
+    roundsCompleted: number | null;
+    totalRounds: number | null;
+    mode: string;
+    backend: string;
+  }) => {
+    const taskId = readText(payload.taskId).trim();
+    const taskRowId = leadOptHaloTaskRowMapRef.current[taskId];
+    const completedAt = new Date().toISOString();
+    const rowPatch: Partial<ProjectTask> = {
+      task_state: 'SUCCESS',
+      status_text: `Optimization complete (${payload.candidates.length} candidates).`,
+      error_text: '',
+      completed_at: completedAt
+    };
+    if (taskRowId) {
+      await patchTask(taskRowId, {
+        ...rowPatch,
+        confidence: {
+          lead_opt_halo: {
+            mode: payload.mode,
+            backend: payload.backend,
+            rounds_completed: payload.roundsCompleted,
+            total_rounds: payload.totalRounds,
+            rounds_log: payload.roundsLog,
+            candidates: payload.candidates,
+            candidate_count: payload.candidates.length
+          }
+        } as ProjectTask['confidence']
+      });
+      delete leadOptHaloTaskRowMapRef.current[taskId];
+      return;
+    }
+    const fallbackRow = projectTasks.find((row) => readText(row.task_id).trim() === taskId);
+    if (fallbackRow) {
+      await patchTask(fallbackRow.id, {
+        ...rowPatch,
+        confidence: {
+          lead_opt_halo: {
+            mode: payload.mode,
+            backend: payload.backend,
+            rounds_completed: payload.roundsCompleted,
+            total_rounds: payload.totalRounds,
+            rounds_log: payload.roundsLog,
+            candidates: payload.candidates,
+            candidate_count: payload.candidates.length
+          }
+        } as ProjectTask['confidence']
+      });
+    }
+    delete leadOptHaloTaskRowMapRef.current[taskId];
+  };
+
+  const handleLeadOptHaloTaskFailed = async (payload: { taskId: string; error: string }) => {
+    const taskId = readText(payload.taskId).trim();
+    const taskRowId = leadOptHaloTaskRowMapRef.current[taskId];
+    const errorText = readText(payload.error).trim() || 'Optimization failed.';
+    const rowPatch: Partial<ProjectTask> = {
+      task_state: 'FAILURE',
+      status_text: `Optimization failed${errorText ? `: ${errorText.slice(0, 140)}` : ''}`,
+      error_text: errorText,
+      completed_at: new Date().toISOString()
+    };
+    if (taskRowId) {
+      await patchTask(taskRowId, rowPatch);
+      delete leadOptHaloTaskRowMapRef.current[taskId];
+      return;
+    }
+    const fallbackRow = projectTasks.find((row) => readText(row.task_id).trim() === taskId);
+    if (fallbackRow) {
+      await patchTask(fallbackRow.id, rowPatch);
+    }
+  };
+
+  const handleLeadOptReferenceUploadsChange = useCallback(
+    async (uploads: LeadOptPersistedUploads) => {
+      if (!project || !draft || !canEdit) return;
+      if (workspaceTab !== 'components') return;
+      const targetName = readText(uploads.target?.fileName).trim();
+      const targetSize = readText(uploads.target?.content).length;
+      const ligandName = readText(uploads.ligand?.fileName).trim();
+      const ligandSize = readText(uploads.ligand?.content).length;
+      const contextDraftRowId =
+        String((requestedStatusTaskRow || statusContextTaskRow)?.task_state || '').toUpperCase() === 'DRAFT'
+          ? readText((requestedStatusTaskRow || statusContextTaskRow)?.id).trim()
+          : '';
+      const editableDraftRowId = contextDraftRowId;
+      const effectiveLeadOptLigandSmiles = readText(leadOptPrimary.ligandSmiles).trim();
+      const dedupeKey = `${project.id}|${editableDraftRowId}|${targetName}:${targetSize}|${ligandName}:${ligandSize}|${effectiveLeadOptLigandSmiles}`;
+      if (leadOptUploadPersistKeyRef.current === dedupeKey) return;
+      leadOptUploadPersistKeyRef.current = dedupeKey;
+
+      const snapshotComponents = buildLeadOptUploadSnapshotComponents(
+        draft.inputConfig.components,
+        uploads,
+        effectiveLeadOptLigandSmiles
+      );
+      setDraft((prev) =>
+        prev
+          ? {
+              ...prev,
+              inputConfig: {
+                ...prev.inputConfig,
+                components: snapshotComponents
+              }
+            }
+          : prev
+      );
+
+      if (editableDraftRowId) {
+        await patchTask(editableDraftRowId, {
+          components: snapshotComponents,
+          protein_sequence: leadOptPrimary.proteinSequence,
+          ligand_smiles: effectiveLeadOptLigandSmiles
+        });
+      }
+    },
+    [
+      canEdit,
+      draft,
+      leadOptPrimary.ligandSmiles,
+      leadOptPrimary.proteinSequence,
+      patchTask,
+      project,
+      setDraft,
+      requestedStatusTaskRow,
+      statusContextTaskRow,
+      workspaceTab
+    ]
+  );
+
+  const handleCopilotAttachments = useCallback(
+    async (attachments: CopilotUploadedAttachment[], _content: string, applications?: CopilotAttachmentApplication[]) => {
+      if (!canEdit || attachments.length === 0) return;
+      if (!applications || applications.length === 0) return;
+      const applicationsById = new Map(
+        applications.map((application) => [application.attachmentId, application])
+      );
+      const roleEntries = attachments.map((attachment) => {
+        const application = applicationsById.get(attachment.id);
+        if (application && application.fileName !== attachment.name) {
+          throw new Error('Copilot attachment declaration does not match the selected file.');
+        }
+        return {
+          attachment,
+          role: application?.role || null
+        };
+      });
+
+      if (isAffinityWorkflow || isPeptideDesignWorkflow) {
+        const target = roleEntries.find((entry) => entry.role === 'target')?.attachment || null;
+        const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
+        if (target) onAffinityTargetFileChange(target.file);
+        if (isAffinityWorkflow && ligand) onAffinityLigandFileChange(ligand.file);
+        // The target/ligand editors and 3D preview only render on the Components
+        // tab; switch there so the applied files are actually visible.
+        if (isAffinityWorkflow && (target || ligand)) setWorkspaceTab('components');
+        return;
+      }
+
+      if (isLeadOptimizationWorkflow) {
+        const target = roleEntries.find((entry) => entry.role === 'target')?.attachment || null;
+        const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
+        if (!target && !ligand) return;
+        const readUpload = async (attachment: CopilotUploadedAttachment | null) =>
+          attachment ? { fileName: attachment.name, content: await attachment.file.text() } : null;
+        await handleLeadOptReferenceUploadsChange({
+          target: await readUpload(target),
+          ligand: await readUpload(ligand)
+        });
+        return;
+      }
+
+      if (isPredictionWorkflow) {
+        const template = roleEntries.find((entry) => entry.role === 'template')?.attachment || null;
+        if (!template) return;
+        const targetProteinComponent = draft.inputConfig.components.find((component) => component.type === 'protein') || null;
+        if (!targetProteinComponent) {
+          setError('Copilot could not attach the template because the current prediction task has no protein component.');
+          return;
+        }
+        const format = detectStructureFormat(template.name);
+        if (!format) {
+          setError('Copilot template upload supports .pdb, .ent, .cif, or .mmcif files.');
+          return;
+        }
+        try {
+          const contentText = await template.file.text();
+          const chainSequences = extractProteinChainSequences(contentText, format);
+          const chainIds = Object.keys(chainSequences).sort((a, b) => a.localeCompare(b));
+          if (chainIds.length === 0) {
+            setError('Copilot could not parse a protein chain from the uploaded template.');
+            return;
+          }
+          const upload: ProteinTemplateUpload = {
+            fileName: template.name,
+            format,
+            content: contentText,
+            chainId: chainIds[0],
+            chainSequences
+          };
+          setProteinTemplates((prev) => ({ ...prev, [targetProteinComponent.id]: upload }));
+          setError(null);
+          setWorkspaceTab('components');
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Failed to read Copilot template upload.');
+        }
+      }
+    },
+    [
+      canEdit,
+      draft.inputConfig.components,
+      handleLeadOptReferenceUploadsChange,
+      isAffinityWorkflow,
+      isLeadOptimizationWorkflow,
+      isPeptideDesignWorkflow,
+      isPredictionWorkflow,
+      onAffinityLigandFileChange,
+      onAffinityTargetFileChange,
+      setError,
+      setProteinTemplates,
+      setWorkspaceTab
+    ]
+  );
+
+  const workflow = getWorkflowDefinition(project.task_type);
+  const runSubmitting = submitting;
+  const leadOptWorkspaceTargetChain = readText(leadOptChainContext.targetChain).trim();
+  const leadOptWorkspaceLigandChain = readText(leadOptChainContext.ligandChain).trim();
+
   const copilotSequenceAppliedRef = useRef(false);
-  // Latest-value ref for saveDraft: an in-flight async closure (e.g. the Copilot
-  // apply_parameter_patch handler) may outlive the render it was created in. Reading
-  // saveDraftRef.current after the patch's setDraft has been committed gives the saveDraft from
-  // THAT render, whose closure captures the PATCHED draft — a plain closure capture can never
-  // refresh itself by waiting, which is why the earlier double-rAF approach lost the patch.
   const saveDraftRef = useRef(saveDraft);
   saveDraftRef.current = saveDraft;
+
   const [copilotPrefillSave, setCopilotPrefillSave] = useState<{ components: InputComponent[] } | null>(null);
   useEffect(() => {
     if (copilotSequenceAppliedRef.current) return;
@@ -475,114 +668,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     void saveDraft();
   }, [copilotPrefillSave, draft, saveDraft]);
 
-  const sessionIdentity =
-    readText(session?.userId).trim() ||
-    readText(session?.username).trim().toLowerCase() ||
-    readSessionIdentityFromLocalStorage();
-  const leadOptMmpTaskRowMapRef = useRef<Record<string, string>>({});
-  const leadOptPredictionTaskRowMapRef = useRef<Record<string, string>>({});
+  const leadOptHaloTaskRowMapRef = useRef<Record<string, string>>({});
   const leadOptUploadPersistKeyRef = useRef('');
-  const leadOptActiveTaskRowIdRef = useRef('');
-  const leadOptPredictionPersistKeyRef = useRef('');
-  const leadOptPredictionPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const leadOptPredictionPersistTimerRef = useRef<number | null>(null);
   const resultViewHydrationAttemptedRef = useRef<Set<string>>(new Set());
-  const leadOptPredictionPersistPendingByTaskRowRef = useRef<Record<string, {
-    taskRowId: string;
-    patchPayload: Record<string, unknown>;
-  }>>({});
-  const leadOptPredictionPersistShadowByTaskRowRef = useRef<Record<string, Record<string, unknown>>>({});
-  const leadOptPersistSnapshotByTaskRowRef = useRef<Record<string, Record<string, unknown>>>({});
-  const leadOptUiStatePersistKeyRef = useRef('');
-  const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
   const virtualScreeningPredictionPersistSignatureRef = useRef('');
   const virtualScreeningPredictionPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
-
-  const flushLeadOptPredictionPersistQueue = useCallback(() => {
-    const pendingEntries = Object.values(leadOptPredictionPersistPendingByTaskRowRef.current);
-    leadOptPredictionPersistPendingByTaskRowRef.current = {};
-    if (pendingEntries.length === 0) return;
-    const nextPersist = leadOptPredictionPersistQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        for (const entry of pendingEntries) {
-          await patchTask(entry.taskRowId, entry.patchPayload as any);
-        }
-      });
-    leadOptPredictionPersistQueueRef.current = nextPersist;
-  }, [patchTask]);
-
-  const flushLeadOptPredictionPersistQueueNow = useCallback(() => {
-    if (leadOptPredictionPersistTimerRef.current !== null) {
-      window.clearTimeout(leadOptPredictionPersistTimerRef.current);
-      leadOptPredictionPersistTimerRef.current = null;
-    }
-    flushLeadOptPredictionPersistQueue();
-  }, [flushLeadOptPredictionPersistQueue]);
-
-  const queueLeadOptPredictionPersistPatch = useCallback(
-    (
-      taskRowId: string,
-      patchPayload: Record<string, unknown>,
-      options?: { immediate?: boolean; debounceMs?: number }
-    ) => {
-      const normalizedTaskRowId = readText(taskRowId).trim();
-      if (!normalizedTaskRowId) return;
-      const pendingForRow = leadOptPredictionPersistPendingByTaskRowRef.current[normalizedTaskRowId];
-      const shadowForRow = leadOptPredictionPersistShadowByTaskRowRef.current[normalizedTaskRowId];
-      const mergedPatchPayload = mergeLeadOptPatchPayloadForPersist(
-        patchPayload,
-        pendingForRow?.patchPayload || shadowForRow || {}
-      );
-      leadOptPredictionPersistPendingByTaskRowRef.current[normalizedTaskRowId] = {
-        taskRowId: normalizedTaskRowId,
-        patchPayload: mergedPatchPayload
-      };
-      leadOptPredictionPersistShadowByTaskRowRef.current[normalizedTaskRowId] = mergedPatchPayload;
-      if (options?.immediate) {
-        flushLeadOptPredictionPersistQueueNow();
-        return;
-      }
-      if (leadOptPredictionPersistTimerRef.current !== null) return;
-      const debounceMsRaw = Number(options?.debounceMs);
-      const debounceMs = Number.isFinite(debounceMsRaw)
-        ? Math.max(0, Math.floor(debounceMsRaw))
-        : 900;
-      leadOptPredictionPersistTimerRef.current = window.setTimeout(() => {
-        leadOptPredictionPersistTimerRef.current = null;
-        flushLeadOptPredictionPersistQueue();
-      }, debounceMs);
-    },
-    [flushLeadOptPredictionPersistQueue, flushLeadOptPredictionPersistQueueNow]
-  );
-
-  useEffect(() => {
-    return () => {
-      flushLeadOptPredictionPersistQueueNow();
-    };
-  }, [flushLeadOptPredictionPersistQueueNow]);
-
-  useEffect(() => {
-    if (!isLeadOptimizationWorkflow) return;
-    if (workspaceTab === 'results' || workspaceTab === 'components') return;
-    flushLeadOptPredictionPersistQueueNow();
-  }, [flushLeadOptPredictionPersistQueueNow, isLeadOptimizationWorkflow, workspaceTab]);
-
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== 'hidden') return;
-      flushLeadOptPredictionPersistQueueNow();
-    };
-    const handlePageHide = () => {
-      flushLeadOptPredictionPersistQueueNow();
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('pagehide', handlePageHide);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('pagehide', handlePageHide);
-    };
-  }, [flushLeadOptPredictionPersistQueueNow]);
 
   useEffect(() => {
     if (workspaceTab !== 'results') return;
@@ -621,811 +711,59 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     [projectTasks]
   );
 
-  const resolveLeadOptTaskRowId = useCallback((): string => {
-    const explicitRequestedRowId = readText(explicitRequestedTaskRowId).trim();
-    if (explicitRequestedRowId) {
-      const explicitRequestedRow = projectTasks.find((row) => readText(row?.id).trim() === explicitRequestedRowId) || null;
-      if (explicitRequestedRow) return explicitRequestedRowId;
-    }
+  // HALO snapshot: candidates/rounds persisted on the task row by the run
+  // handlers below (live runs carry their own copy inside the workspace).
+  const leadOptHaloSnapshot = useMemo(() => {
+    const row = preferredLeadOptSnapshotTask || requestedStatusTaskRow || statusContextTaskRow || activeResultTask || null;
+    const confidence = asRecord(row?.confidence);
+    const halo = asRecord(confidence.lead_opt_halo);
+    if (Object.keys(halo).length === 0) return null;
+    const candidates = Array.isArray(halo.candidates) ? halo.candidates : [];
+    const roundsLog = Array.isArray(halo.rounds_log) ? halo.rounds_log : [];
+    return {
+      taskId: readText(row?.task_id).trim() || null,
+      candidates: candidates as LeadOptHaloCandidate[],
+      roundsLog: roundsLog as Array<Record<string, unknown>>,
+      mode: readText(halo.mode),
+      backend: readText(halo.backend),
+      roundsCompleted: Number.isFinite(Number(halo.rounds_completed)) ? Number(halo.rounds_completed) : null,
+      totalRounds: Number.isFinite(Number(halo.total_rounds)) ? Number(halo.total_rounds) : null
+    };
+  }, [preferredLeadOptSnapshotTask, requestedStatusTaskRow, statusContextTaskRow, activeResultTask]);
 
-    const requestedRowId = readText(requestedStatusTaskRow?.id).trim();
-    if (requestedRowId) return requestedRowId;
-
-    const preferredLeadOptTaskRowId = readText(preferredLeadOptSnapshotTask?.id).trim();
-    if (preferredLeadOptTaskRowId) return preferredLeadOptTaskRowId;
-
-    const rememberedRowId = readText(leadOptActiveTaskRowIdRef.current).trim();
-    if (rememberedRowId) return rememberedRowId;
-
-    const contextRowId = readText(statusContextTaskRow?.id).trim();
-    if (contextRowId) return contextRowId;
-
-    const activeResultRowId = readText(activeResultTask?.id).trim();
-    if (activeResultRowId) return activeResultRowId;
-
-    const latestRuntimeTaskRow = projectTasks.find((row) => readText(row?.task_id).trim().length > 0);
-    const latestRuntimeTaskRowId = readText(latestRuntimeTaskRow?.id).trim();
-    if (latestRuntimeTaskRowId) return latestRuntimeTaskRowId;
-
-    const firstTaskRowId = readText(projectTasks[0]?.id).trim();
-    if (firstTaskRowId) return firstTaskRowId;
-
-    return '';
-  }, [activeResultTask, explicitRequestedTaskRowId, preferredLeadOptSnapshotTask, projectTasks, requestedStatusTaskRow, statusContextTaskRow]);
-
-  const resolveLeadOptSourceTask = useCallback(
-    (taskRowId: string) => {
-      const id = readText(taskRowId).trim();
-      if (!id) return null;
-      if (requestedStatusTaskRow && String(requestedStatusTaskRow.id) === id) return requestedStatusTaskRow;
-      if (statusContextTaskRow && String(statusContextTaskRow.id) === id) return statusContextTaskRow;
-      if (activeResultTask && String(activeResultTask.id) === id) return activeResultTask;
-      const projectTask = projectTasks.find((row) => readText(row?.id).trim() === id);
-      if (projectTask) return projectTask;
-      return null;
-    },
-    [activeResultTask, projectTasks, requestedStatusTaskRow, statusContextTaskRow]
-  );
-
-  const resolveLeadOptTaskRowIdByPredictionTaskId = useCallback(
-    (predictionTaskIdInput: string): string => {
-      const predictionTaskId = readText(predictionTaskIdInput).trim();
-      if (!predictionTaskId) return '';
-      for (const row of projectTasks) {
-        const snapshot = resolveLeadOptSnapshotFromTask(row);
-        const predictionMap = asPredictionRecordMap(snapshot.prediction_by_smiles);
-        for (const record of Object.values(predictionMap)) {
-          if (readText(record?.taskId).trim() === predictionTaskId) {
-            return readText(row?.id).trim();
-          }
-        }
-      }
-      return '';
-    },
-    [projectTasks]
-  );
-
-  const leadOptHistoricalReferenceRecords = useMemo(() => {
-    let merged: Record<string, LeadOptPredictionRecord> = {};
-    for (const row of projectTasks) {
-      const snapshot = resolveLeadOptSnapshotFromTask(row);
-      const records = asPredictionRecordMap(snapshot.reference_prediction_by_backend);
-      if (Object.keys(records).length === 0) continue;
-      merged = mergePredictionRecordMaps(merged, records);
-    }
-    return compactLeadOptPredictionMap(merged);
-  }, [projectTasks]);
-
-  const leadOptDownloadTaskId = useMemo(
-    () => resolveLeadOptDownloadTaskId(activeResultTask, structureTaskId),
-    [activeResultTask, structureTaskId]
-  );
-  const defaultDownloadTaskId = useMemo(() => {
-    const viewerTaskId = readText(structureTaskId).trim();
-    if (viewerTaskId) return viewerTaskId;
-    const activeTaskId = readText(activeResultTask?.task_id).trim();
-    const activeStructureName = readText(activeResultTask?.structure_name).trim();
-    if (activeStructureName && activeTaskId) return activeTaskId;
-    return readText(project.task_id).trim();
-  }, [activeResultTask?.structure_name, activeResultTask?.task_id, project.task_id, structureTaskId]);
-
-  const aggregatedLeadOptSnapshot = useMemo(
-    () =>
-      buildLeadOptAggregatedSnapshot({
-        projectTasks,
-        requestedTaskRow: requestedStatusTaskRow,
-        preferRequestedQuery: Boolean(explicitRequestedTaskRowId || requestedStatusTaskRow?.id),
-        strictRequestedTaskRow: Boolean(explicitRequestedTaskRowId || requestedStatusTaskRow?.id),
-        preferredListTask: preferredLeadOptSnapshotTask,
-        historicalReferenceRecords: leadOptHistoricalReferenceRecords
-      }),
-    [
-      explicitRequestedTaskRowId,
-      leadOptHistoricalReferenceRecords,
-      preferredLeadOptSnapshotTask,
-      projectTasks,
-      requestedStatusTaskRow
-    ]
-  );
-  const aggregatedLeadOptSnapshotRecord = asRecord(aggregatedLeadOptSnapshot);
-  const leadOptDownloadRecords = useMemo(
-    () =>
-      collectLeadOptDownloadRecords(
-        aggregatedLeadOptSnapshotRecord.prediction_by_smiles,
-        aggregatedLeadOptSnapshotRecord.selected_backend
-      ),
-    [aggregatedLeadOptSnapshotRecord]
-  );
-  const leadOptActiveTaskRowId = resolveLeadOptTaskRowId();
-  const leadOptActiveQueryId = readText(
-    aggregatedLeadOptSnapshotRecord.query_id || asRecord(aggregatedLeadOptSnapshotRecord.query_result).query_id
-  ).trim();
-  const leadOptUiStateScopeKey = buildLeadOptUiStateScopeKey({
-    sessionIdentity,
-    projectId: project.id,
-    taskRowId: leadOptActiveTaskRowId,
-    queryId: leadOptActiveQueryId
-  });
-  const leadOptUserScopedUiState = useMemo(
-    () => readLeadOptUiStateFromLocal(leadOptUiStateScopeKey),
-    [leadOptUiStateScopeKey]
-  );
-
-  const handleLeadOptMmpTaskQueued = async (payload: {
+  const handleLeadOptHaloTaskQueued = async (payload: {
     taskId: string;
     requestPayload: Record<string, unknown>;
-    querySmiles: string;
-    referenceUploads: LeadOptPersistedUploads;
   }) => {
-    if (!project || !draft) return;
-    const taskId = String(payload.taskId || '').trim();
+    const taskId = readText(payload.taskId).trim();
     if (!taskId) return;
-    const effectiveLeadOptLigandSmiles =
-      readText(payload.querySmiles).trim() || readText(leadOptPrimary.ligandSmiles).trim();
     const snapshotComponents = buildLeadOptUploadSnapshotComponents(
       draft.inputConfig.components,
-      payload.referenceUploads,
-      effectiveLeadOptLigandSmiles
+      leadOptPersistedUploads,
+      leadOptPrimary.ligandSmiles
     );
-    const queuedAt = new Date().toISOString();
-    const selection = buildLeadOptSelectionFromPayload(payload.requestPayload || {}, {
-      querySmiles: payload.querySmiles || leadOptPrimary.ligandSmiles,
-      targetChain: leadOptChainContext.targetChain,
-      ligandChain: leadOptChainContext.ligandChain
-    });
-    const mmpContext = {
-      query_payload: payload.requestPayload || {},
-      selection,
-      target_chain: readText(leadOptChainContext.targetChain).trim(),
-      ligand_chain: readText(leadOptChainContext.ligandChain).trim()
-    } as Record<string, unknown>;
-    const inheritedReferenceRecords = leadOptHistoricalReferenceRecords;
     const draftTaskRow = await persistDraftTaskSnapshot(draft.inputConfig, {
-      statusText: 'Lead optimization MMP query queued',
+      statusText: 'Optimization queued',
       reuseTaskRowId: null,
-      snapshotComponents,
-      proteinSequenceOverride: leadOptPrimary.proteinSequence,
-      ligandSmilesOverride: effectiveLeadOptLigandSmiles
+      snapshotComponents
     });
-    leadOptMmpTaskRowMapRef.current[taskId] = draftTaskRow.id;
-    leadOptActiveTaskRowIdRef.current = draftTaskRow.id;
-    leadOptMmpContextByTaskIdRef.current[taskId] = mmpContext;
-    const leadOptPayload = {
-      stage: 'queued',
-      task_id: taskId,
-      prediction_stage: 'idle',
-      prediction_summary: {
-        total: 0,
-        queued: 0,
-        running: 0,
-        success: 0,
-        failure: 0
-      },
-      prediction_by_smiles: {},
-      reference_prediction_by_backend: inheritedReferenceRecords,
-      ...mmpContext
-    } as Record<string, unknown>;
+    leadOptHaloTaskRowMapRef.current[taskId] = draftTaskRow.id;
+    setRunRedirectTaskId(taskId);
     await patchTask(draftTaskRow.id, {
       task_id: taskId,
       task_state: 'QUEUED',
-      status_text: 'MMP query queued',
-      error_text: '',
-      submitted_at: queuedAt,
-      completed_at: null,
-      duration_seconds: null,
-      components: snapshotComponents,
-      properties: mergeLeadOptMetaIntoProperties(draft.inputConfig.properties, leadOptPayload) as any,
+      status_text: 'Optimization queued',
+      backend: readText((payload.requestPayload as Record<string, unknown>).backend) || 'protenix2dock',
       confidence: {
-        lead_opt_mmp: compactLeadOptForConfidenceWrite(leadOptPayload)
-      }
+        lead_opt_halo: {
+          mode: readText((payload.requestPayload as Record<string, unknown>).mode) || 'fragment',
+          backend: readText((payload.requestPayload as Record<string, unknown>).backend) || 'protenix2dock',
+          stage: 'queued'
+        }
+      } as ProjectTask['confidence']
     });
-    setRunRedirectTaskId(taskId);
   };
 
-  const handleLeadOptMmpTaskCompleted = async (payload: {
-    taskId: string;
-    queryId: string;
-    transformCount: number;
-    candidateCount: number;
-    elapsedSeconds: number;
-    resultSnapshot?: Record<string, unknown>;
-  }) => {
-    const taskId = String(payload.taskId || '').trim();
-    if (!taskId) return;
-    const taskRowId = leadOptMmpTaskRowMapRef.current[taskId];
-    if (!taskRowId) return;
-    leadOptActiveTaskRowIdRef.current = taskRowId;
-    const completedAt = new Date().toISOString();
-    const mmpContext = asRecord(leadOptMmpContextByTaskIdRef.current[taskId]);
-    const snapshot = asRecord(payload.resultSnapshot);
-    const queryResult = asRecord(snapshot.query_result);
-    const enumeratedCandidates = compactLeadOptEnumeratedCandidates(snapshot.enumerated_candidates);
-    const compactQueryResult = compactLeadOptQueryResult({
-      ...queryResult,
-      query_id: readText(payload.queryId).trim(),
-      task_id: readText(taskId).trim(),
-      count: Number.isFinite(Number(queryResult.count)) ? Number(queryResult.count) : payload.transformCount,
-      global_count: Number.isFinite(Number(queryResult.global_count)) ? Number(queryResult.global_count) : payload.transformCount
-    });
-    const inheritedReferenceRecords = hydratePredictionRecordMapFromHistory(
-      asPredictionRecordMap(snapshot.reference_prediction_by_backend),
-      leadOptHistoricalReferenceRecords
-    );
-    const leadOptPayload = {
-      stage: 'completed',
-      query_id: payload.queryId,
-      task_id: taskId,
-      transform_count: payload.transformCount,
-      candidate_count: payload.candidateCount,
-      query_result: compactQueryResult,
-      result_storage: 'server_query_cache',
-      enumerated_candidates: enumeratedCandidates,
-      prediction_stage: 'idle',
-      prediction_summary: {
-        total: 0,
-        queued: 0,
-        running: 0,
-        success: 0,
-        failure: 0
-      },
-      prediction_by_smiles: {},
-      reference_prediction_by_backend: inheritedReferenceRecords,
-      ...mmpContext
-    } as Record<string, unknown>;
-    leadOptPersistSnapshotByTaskRowRef.current[taskRowId] = mergeLeadOptSnapshotForPersist(
-      leadOptPayload,
-      leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
-    );
-    const sourceTask = resolveLeadOptSourceTask(taskRowId);
-    await patchTask(taskRowId, {
-      task_state: 'SUCCESS',
-      status_text: `MMP complete (${payload.transformCount} transforms, ${payload.candidateCount} rows). Scoring not started.`,
-      error_text: '',
-      completed_at: completedAt,
-      duration_seconds: Number.isFinite(payload.elapsedSeconds) ? payload.elapsedSeconds : null,
-      properties: mergeLeadOptMetaIntoProperties(sourceTask?.properties, leadOptPayload) as any,
-      confidence: {
-        lead_opt_mmp: compactLeadOptForConfidenceWrite(leadOptPayload)
-      }
-    });
-    delete leadOptMmpTaskRowMapRef.current[taskId];
-    delete leadOptMmpContextByTaskIdRef.current[taskId];
-  };
-
-  const handleLeadOptMmpTaskFailed = async (payload: { taskId: string; error: string }) => {
-    const taskId = String(payload.taskId || '').trim();
-    if (!taskId) return;
-    const taskRowId = leadOptMmpTaskRowMapRef.current[taskId];
-    if (!taskRowId) return;
-    leadOptActiveTaskRowIdRef.current = taskRowId;
-    const completedAt = new Date().toISOString();
-    const mmpContext = asRecord(leadOptMmpContextByTaskIdRef.current[taskId]);
-    const inheritedReferenceRecords = leadOptHistoricalReferenceRecords;
-    const leadOptPayload = {
-      stage: 'failed',
-      task_id: taskId,
-      prediction_stage: 'idle',
-      prediction_summary: {
-        total: 0,
-        queued: 0,
-        running: 0,
-        success: 0,
-        failure: 0
-      },
-      prediction_by_smiles: {},
-      reference_prediction_by_backend: inheritedReferenceRecords,
-      ...mmpContext
-    } as Record<string, unknown>;
-    const sourceTask = resolveLeadOptSourceTask(taskRowId);
-    const errorText = readText(payload.error).trim() || 'MMP query failed.';
-    const statusText = `MMP query failed${errorText ? `: ${errorText.slice(0, 140)}` : ''}`;
-    await patchTask(taskRowId, {
-      task_state: 'FAILURE',
-      status_text: statusText,
-      error_text: errorText,
-      completed_at: completedAt,
-      properties: mergeLeadOptMetaIntoProperties(sourceTask?.properties, leadOptPayload) as any,
-      confidence: {
-        lead_opt_mmp: compactLeadOptForConfidenceWrite(leadOptPayload)
-      }
-    });
-    delete leadOptMmpTaskRowMapRef.current[taskId];
-    delete leadOptMmpContextByTaskIdRef.current[taskId];
-  };
-
-  const handleLeadOptPredictionQueued = useCallback(
-    async (payload: { taskId: string; backend: string; candidateSmiles: string }) => {
-      const taskId = readText(payload.taskId).trim();
-      if (!taskId) return;
-      const isLocalTaskId = taskId.startsWith('local:');
-      const backend = normalizePredictionBackendStrict(payload.backend);
-      if (!backend) return;
-      const candidateSmiles = readText(payload.candidateSmiles).trim();
-      const predictionKey = buildLeadOptPredictionRecordKey(backend, candidateSmiles);
-      if (!predictionKey) return;
-      const mappedTaskRowId = readText(leadOptPredictionTaskRowMapRef.current[taskId]).trim();
-      const rowIdFromSnapshot = !isLocalTaskId ? resolveLeadOptTaskRowIdByPredictionTaskId(taskId) : '';
-      const taskRowId = mappedTaskRowId || rowIdFromSnapshot || resolveLeadOptTaskRowId();
-      if (!taskRowId) return;
-      leadOptActiveTaskRowIdRef.current = taskRowId;
-      leadOptPredictionTaskRowMapRef.current[taskId] = taskRowId;
-      const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceLeadOpt = mergeLeadOptSnapshotForPersist(
-        resolveLeadOptSnapshotFromTask(sourceTask),
-        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
-      );
-      const sourceQueryResult = asRecord(sourceLeadOpt.query_result);
-      const sourceLeadOptQueryId = readText(sourceLeadOpt.query_id || sourceQueryResult.query_id).trim();
-      const nextPredictionMap = compactLeadOptPredictionMap(
-        asPredictionRecordMap(sourceLeadOpt.prediction_by_smiles)
-      );
-      nextPredictionMap[predictionKey] = {
-        taskId,
-        state: 'QUEUED',
-        backend,
-        pairIptm: null,
-        interfaceMetricValue: null,
-        interfaceMetricLabel: 'IPSAE',
-        interfaceMetricSource: 'none',
-        pairPae: null,
-        pairIptmResolved: false,
-        ligandPlddt: null,
-        ligandAtomPlddts: [],
-        structureText: '',
-        structureFormat: 'cif',
-        structureName: '',
-        error: '',
-        updatedAt: Date.now()
-      };
-      const summary = summarizeLeadOptPredictions(nextPredictionMap);
-      const statusText = `Scoring ${Math.max(1, summary.queued + summary.running)} queued (${summary.success}/${Math.max(1, summary.total)} done)`;
-      const referenceRecords = compactLeadOptPredictionMap(
-        hydratePredictionRecordMapFromHistory(
-          asPredictionRecordMap(sourceLeadOpt.reference_prediction_by_backend),
-          leadOptHistoricalReferenceRecords
-        )
-      );
-      const nextLeadOpt = {
-        ...sourceLeadOpt,
-        stage: 'prediction_queued',
-        prediction_stage: 'queued',
-        prediction_summary: {
-          ...summary,
-          latest_task_id: taskId
-        },
-        prediction_task_id: taskId,
-        prediction_candidate_smiles: candidateSmiles,
-        bucket_count: summary.total,
-        prediction_by_smiles: nextPredictionMap,
-        reference_prediction_by_backend: referenceRecords
-      } as Record<string, unknown>;
-      leadOptPersistSnapshotByTaskRowRef.current[taskRowId] = mergeLeadOptSnapshotForPersist(
-        nextLeadOpt,
-        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
-      );
-      const lightweightStateForProperties = {
-        stage: nextLeadOpt.stage,
-        prediction_stage: nextLeadOpt.prediction_stage,
-        query_id: sourceLeadOptQueryId,
-        prediction_summary: {
-          ...summary,
-          latest_task_id: taskId
-        },
-        prediction_task_id: taskId,
-        prediction_candidate_smiles: candidateSmiles,
-        bucket_count: summary.total,
-        prediction_by_smiles: nextPredictionMap,
-        reference_prediction_by_backend: referenceRecords,
-        selected_backend: backend,
-        target_chain: readText(sourceLeadOpt.target_chain).trim(),
-        ligand_chain: readText(sourceLeadOpt.ligand_chain).trim()
-      } as Record<string, unknown>;
-      const patchPayload = {
-        task_state: 'QUEUED',
-        status_text: statusText,
-        error_text: '',
-        confidence: {
-          lead_opt_mmp: compactLeadOptForConfidenceWrite(nextLeadOpt)
-        },
-        properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, lightweightStateForProperties) as any
-      };
-      queueLeadOptPredictionPersistPatch(taskRowId, patchPayload, { immediate: !isLocalTaskId });
-    },
-    [
-      leadOptHistoricalReferenceRecords,
-      queueLeadOptPredictionPersistPatch,
-      resolveLeadOptSourceTask,
-      resolveLeadOptTaskRowId,
-      resolveLeadOptTaskRowIdByPredictionTaskId
-    ]
-  );
-
-  const handleLeadOptPredictionStateChange = useCallback(
-    async (payload: {
-      records: Record<string, LeadOptPredictionRecord>;
-      referenceRecords: Record<string, LeadOptPredictionRecord>;
-      summary: {
-        total: number;
-        queued: number;
-        running: number;
-        success: number;
-        failure: number;
-        latestTaskId: string;
-      };
-    }) => {
-      const latestTaskId = readText(payload.summary?.latestTaskId).trim();
-      const mappedTaskRowId = latestTaskId ? readText(leadOptPredictionTaskRowMapRef.current[latestTaskId]).trim() : '';
-      const rowIdFromSnapshot = latestTaskId ? resolveLeadOptTaskRowIdByPredictionTaskId(latestTaskId) : '';
-      const taskRowId = mappedTaskRowId || rowIdFromSnapshot || resolveLeadOptTaskRowId();
-      if (!taskRowId) return;
-      leadOptActiveTaskRowIdRef.current = taskRowId;
-
-      const records = compactLeadOptPredictionMap(asPredictionRecordMap(payload.records));
-      const referenceRecords = compactLeadOptPredictionMap(
-        hydratePredictionRecordMapFromHistory(
-          asPredictionRecordMap(payload.referenceRecords),
-          leadOptHistoricalReferenceRecords
-        )
-      );
-      const latestCandidateSmiles = latestTaskId
-        ? parseLeadOptPredictionRecordKey(
-            Object.entries(records).find(([, record]) => readText(record.taskId).trim() === latestTaskId)?.[0] || ''
-          ).smiles
-        : '';
-      const summary = summarizeLeadOptPredictions(records);
-      const latestRecordBackend = latestTaskId
-        ? normalizePredictionBackendStrict(
-            parseLeadOptPredictionRecordKey(
-              Object.entries(records).find(([, record]) => readText(record.taskId).trim() === latestTaskId)?.[0] || ''
-            ).backend
-          )
-        : '';
-      const unresolved = summary.queued + summary.running;
-      const unresolvedState = summary.running > 0 ? 'RUNNING' : summary.queued > 0 ? 'QUEUED' : null;
-      const hasResolvablePendingRecord = Object.values(records).some((record) => {
-        const state = readText(record.state).trim().toUpperCase();
-        if (state !== 'QUEUED' && state !== 'RUNNING') return false;
-        const taskId = readText(record.taskId).trim();
-        return taskId.length > 0 && !taskId.startsWith('local:');
-      });
-      if (unresolved > 0 && !hasResolvablePendingRecord) {
-        // Do not persist transient local placeholders; wait for backend-assigned task ids.
-        return;
-      }
-      const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceLeadOpt = mergeLeadOptSnapshotForPersist(
-        resolveLeadOptSnapshotFromTask(sourceTask),
-        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
-      );
-      const sourceQueryResult = asRecord(sourceLeadOpt.query_result);
-      const sourceLeadOptQueryId = readText(sourceLeadOpt.query_id || sourceQueryResult.query_id).trim();
-      const preferredSelectedBackend =
-        latestRecordBackend || normalizePredictionBackendStrict(sourceLeadOpt.selected_backend);
-      const nextTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' =
-        unresolved > 0
-          ? unresolvedState === 'RUNNING'
-            ? 'RUNNING'
-            : 'QUEUED'
-          : summary.total > 0 && summary.success === 0 && summary.failure > 0
-            ? 'FAILURE'
-            : 'SUCCESS';
-      const persistedTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' = nextTaskState;
-      const statusText =
-        unresolved > 0
-          ? unresolvedState === 'RUNNING'
-            ? `Scoring ${unresolved} running (${summary.success}/${Math.max(1, summary.total)} done)`
-            : `Scoring ${unresolved} queued (${summary.success}/${Math.max(1, summary.total)} done)`
-          : summary.total > 0
-            ? `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`
-            : 'MMP complete';
-      const errorText =
-        summary.total > 0 && summary.success === 0 && summary.failure > 0
-          ? 'All candidate scoring jobs failed.'
-          : '';
-
-      const nextLeadOpt = {
-        ...sourceLeadOpt,
-        stage:
-          unresolved > 0
-            ? unresolvedState === 'RUNNING'
-              ? 'prediction_running'
-              : 'prediction_queued'
-            : summary.failure > 0 && summary.success === 0
-              ? 'prediction_failed'
-              : 'prediction_completed',
-        prediction_stage: unresolved > 0 ? (unresolvedState === 'RUNNING' ? 'running' : 'queued') : 'completed',
-        prediction_summary: {
-          ...summary,
-          latest_task_id: latestTaskId
-        },
-        prediction_task_id: latestTaskId,
-        prediction_candidate_smiles: latestCandidateSmiles,
-        bucket_count: summary.total,
-        prediction_by_smiles: records,
-        reference_prediction_by_backend: referenceRecords
-      } as Record<string, unknown>;
-      leadOptPersistSnapshotByTaskRowRef.current[taskRowId] = mergeLeadOptSnapshotForPersist(
-        nextLeadOpt,
-        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
-      );
-      const persistKey = [
-        taskRowId,
-        statusText,
-        errorText,
-        summary.total,
-        summary.queued,
-        summary.running,
-        summary.success,
-        summary.failure,
-        buildLeadOptPredictionPersistSignature(records),
-        buildLeadOptPredictionPersistSignature(referenceRecords)
-      ].join('|');
-      if (leadOptPredictionPersistKeyRef.current === persistKey) return;
-      leadOptPredictionPersistKeyRef.current = persistKey;
-
-      const lightweightStateForProperties = {
-        stage: nextLeadOpt.stage,
-        prediction_stage: nextLeadOpt.prediction_stage,
-        query_id: sourceLeadOptQueryId,
-        prediction_summary: {
-          ...summary,
-          latest_task_id: latestTaskId
-        },
-        prediction_task_id: latestTaskId,
-        prediction_candidate_smiles: latestCandidateSmiles,
-        bucket_count: summary.total,
-        prediction_by_smiles: records,
-        reference_prediction_by_backend: referenceRecords,
-        ...(preferredSelectedBackend ? { selected_backend: preferredSelectedBackend } : {}),
-        target_chain: readText(sourceLeadOpt.target_chain).trim(),
-        ligand_chain: readText(sourceLeadOpt.ligand_chain).trim()
-      } as Record<string, unknown>;
-      const patchPayload = {
-        task_state: persistedTaskState,
-        status_text: statusText,
-        error_text: errorText,
-        confidence: {
-          lead_opt_mmp: compactLeadOptForConfidenceWrite(nextLeadOpt)
-        },
-        properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, lightweightStateForProperties) as any
-      };
-      queueLeadOptPredictionPersistPatch(taskRowId, patchPayload, { immediate: true });
-    },
-    [
-      leadOptHistoricalReferenceRecords,
-      queueLeadOptPredictionPersistPatch,
-      resolveLeadOptSourceTask,
-      resolveLeadOptTaskRowId,
-      resolveLeadOptTaskRowIdByPredictionTaskId
-    ]
-  );
-
-  const handleLeadOptUiStateChange = useCallback(
-    (payload: { uiState: LeadOptCandidatesUiState }) => {
-      if (!leadOptUiStateScopeKey) return;
-      const compactUiState = compactLeadOptCandidatesUiState(payload.uiState);
-      const persistKey = [
-        leadOptUiStateScopeKey,
-        buildLeadOptCandidatesUiStateSignature(compactUiState)
-      ].join('|');
-      if (leadOptUiStatePersistKeyRef.current === persistKey) return;
-      leadOptUiStatePersistKeyRef.current = persistKey;
-      writeLeadOptUiStateToLocal(leadOptUiStateScopeKey, compactUiState);
-    },
-    [leadOptUiStateScopeKey]
-  );
-
-  const handleLeadOptReferenceUploadsChange = useCallback(
-    async (uploads: LeadOptPersistedUploads) => {
-      if (!project || !draft || !canEdit) return;
-      if (workspaceTab !== 'components') return;
-      const targetName = readText(uploads.target?.fileName).trim();
-      const targetSize = readText(uploads.target?.content).length;
-      const ligandName = readText(uploads.ligand?.fileName).trim();
-      const ligandSize = readText(uploads.ligand?.content).length;
-      const contextDraftRowId =
-        String((requestedStatusTaskRow || statusContextTaskRow)?.task_state || '').toUpperCase() === 'DRAFT'
-          ? readText((requestedStatusTaskRow || statusContextTaskRow)?.id).trim()
-          : '';
-      const editableDraftRowId = contextDraftRowId;
-      const effectiveLeadOptLigandSmiles = readText(leadOptPrimary.ligandSmiles).trim();
-      const dedupeKey = `${project.id}|${editableDraftRowId}|${targetName}:${targetSize}|${ligandName}:${ligandSize}|${effectiveLeadOptLigandSmiles}`;
-      if (leadOptUploadPersistKeyRef.current === dedupeKey) return;
-      leadOptUploadPersistKeyRef.current = dedupeKey;
-
-      const snapshotComponents = buildLeadOptUploadSnapshotComponents(
-        draft.inputConfig.components,
-        uploads,
-        effectiveLeadOptLigandSmiles
-      );
-      setDraft((prev) =>
-        prev
-          ? {
-              ...prev,
-              inputConfig: {
-                ...prev.inputConfig,
-                components: snapshotComponents
-              }
-            }
-          : prev
-      );
-
-      if (editableDraftRowId) {
-        await patchTask(editableDraftRowId, {
-          components: snapshotComponents,
-          protein_sequence: leadOptPrimary.proteinSequence,
-          ligand_smiles: effectiveLeadOptLigandSmiles
-        });
-      }
-    },
-    [
-      canEdit,
-      draft,
-      leadOptPrimary.ligandSmiles,
-      leadOptPrimary.proteinSequence,
-      patchTask,
-      project,
-      setDraft,
-      requestedStatusTaskRow,
-      statusContextTaskRow,
-      workspaceTab
-    ]
-  );
-
-  const handleCopilotAttachments = useCallback(
-    async (attachments: CopilotUploadedAttachment[], _content: string, applications?: CopilotAttachmentApplication[]) => {
-      if (!canEdit || attachments.length === 0) return;
-      if (!applications || applications.length === 0) return;
-      const applicationsById = new Map(
-        applications.map((application) => [application.attachmentId, application])
-      );
-      const roleEntries = attachments.map((attachment) => {
-        const application = applicationsById.get(attachment.id);
-        if (application && application.fileName !== attachment.name) {
-          throw new Error('Copilot attachment declaration does not match the selected file.');
-        }
-        return {
-          attachment,
-          role: application?.role || null
-        };
-      });
-
-      if (isAffinityWorkflow || isPeptideDesignWorkflow) {
-        const target = roleEntries.find((entry) => entry.role === 'target')?.attachment || null;
-        const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
-        if (target) onAffinityTargetFileChange(target.file);
-        if (isAffinityWorkflow && ligand) onAffinityLigandFileChange(ligand.file);
-        return;
-      }
-
-      if (isLeadOptimizationWorkflow) {
-        const target = roleEntries.find((entry) => entry.role === 'target')?.attachment || null;
-        const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
-        if (!target && !ligand) return;
-        const readUpload = async (attachment: CopilotUploadedAttachment | null) =>
-          attachment ? { fileName: attachment.name, content: await attachment.file.text() } : null;
-        await handleLeadOptReferenceUploadsChange({
-          target: await readUpload(target),
-          ligand: await readUpload(ligand)
-        });
-        return;
-      }
-
-      if (isPredictionWorkflow) {
-        const template = roleEntries.find((entry) => entry.role === 'template')?.attachment || null;
-        if (!template) return;
-        const targetProteinComponent = draft.inputConfig.components.find((component) => component.type === 'protein') || null;
-        if (!targetProteinComponent) {
-          setError('Copilot could not attach the template because the current prediction task has no protein component.');
-          return;
-        }
-        const format = detectStructureFormat(template.name);
-        if (!format) {
-          setError('Copilot template upload supports .pdb, .cif, or .mmcif files.');
-          return;
-        }
-        try {
-          const contentText = await template.file.text();
-          const chainSequences = extractProteinChainSequences(contentText, format);
-          const chainIds = Object.keys(chainSequences).sort((a, b) => a.localeCompare(b));
-          if (chainIds.length === 0) {
-            setError('Copilot could not parse a protein chain from the uploaded template.');
-            return;
-          }
-          const upload: ProteinTemplateUpload = {
-            fileName: template.name,
-            format,
-            content: contentText,
-            chainId: chainIds[0],
-            chainSequences
-          };
-          setProteinTemplates((prev) => ({ ...prev, [targetProteinComponent.id]: upload }));
-          setError(null);
-        } catch (err) {
-          setError(err instanceof Error ? err.message : 'Failed to read Copilot template upload.');
-        }
-      }
-    },
-    [
-      canEdit,
-      draft.inputConfig.components,
-      handleLeadOptReferenceUploadsChange,
-      isAffinityWorkflow,
-      isLeadOptimizationWorkflow,
-      isPeptideDesignWorkflow,
-      isPredictionWorkflow,
-      onAffinityLigandFileChange,
-      onAffinityTargetFileChange,
-      setError,
-      setProteinTemplates
-    ]
-  );
-
-  const workflow = getWorkflowDefinition(project.task_type);
-  const affinityUseMsa = computeUseMsaFlag(draft.inputConfig.components, draft.use_msa);
-  const runSubmitting = submitting || (isLeadOptimizationWorkflow && leadOptHeaderRunPending);
-  const leadOptInitialMmpSnapshot = (() => {
-    const leadOptMmp = aggregatedLeadOptSnapshot;
-    if (!leadOptMmp || Object.keys(leadOptMmp).length === 0) return null;
-    const queryResult = asRecord(leadOptMmp.query_result);
-    const queryId = readText(leadOptMmp.query_id || queryResult.query_id).trim();
-    if (!queryId) return null;
-    return {
-      query_result: {
-        query_id: queryId,
-        task_id: readText(leadOptMmp.task_id || queryResult.task_id).trim(),
-        query_mode: readText(queryResult.query_mode || 'one-to-many') || 'one-to-many',
-        aggregation_type: readText(queryResult.aggregation_type).trim(),
-        property_targets: asRecord(queryResult.property_targets),
-        rule_env_radius: Number.isFinite(Number(queryResult.rule_env_radius)) ? Number(queryResult.rule_env_radius) : 1,
-        grouped_by_environment:
-          readBooleanToken(queryResult.grouped_by_environment) === null
-            ? undefined
-            : readBooleanToken(queryResult.grouped_by_environment),
-        mmp_database_id: readText(queryResult.mmp_database_id).trim(),
-        mmp_database_label: readText(queryResult.mmp_database_label).trim(),
-        mmp_database_schema: readText(queryResult.mmp_database_schema).trim(),
-        cluster_group_by: readText(queryResult.cluster_group_by).trim(),
-        transforms: Array.isArray(queryResult.transforms) ? queryResult.transforms : [],
-        global_transforms: Array.isArray(queryResult.global_transforms) ? queryResult.global_transforms : [],
-        clusters: Array.isArray(queryResult.clusters) ? queryResult.clusters : [],
-        stats: asRecord(queryResult.stats),
-        count: Number(queryResult.count || 0),
-        global_count: Number(queryResult.global_count || 0)
-      },
-      enumerated_candidates: compactLeadOptEnumeratedCandidates(leadOptMmp.enumerated_candidates),
-      prediction_by_smiles: compactLeadOptPredictionMap(asPredictionRecordMap(leadOptMmp.prediction_by_smiles)),
-      reference_prediction_by_backend: compactLeadOptPredictionMap(
-        hydratePredictionRecordMapFromHistory(
-          asPredictionRecordMap(leadOptMmp.reference_prediction_by_backend),
-          leadOptHistoricalReferenceRecords
-        )
-      ),
-      ui_state: leadOptUserScopedUiState ? compactLeadOptCandidatesUiState(leadOptUserScopedUiState) : {},
-      selection: asRecord(leadOptMmp.selection),
-      query_payload: asRecord(leadOptMmp.query_payload),
-      task_row_id: leadOptActiveTaskRowId,
-      task_id: readText(leadOptMmp.task_id || queryResult.task_id).trim(),
-      query_cache_state: readText(leadOptMmp.query_cache_state).trim().toLowerCase(),
-      candidate_count: Number.isFinite(Number(leadOptMmp.candidate_count)) ? Number(leadOptMmp.candidate_count) : 0,
-      transform_count: Number.isFinite(Number(leadOptMmp.transform_count)) ? Number(leadOptMmp.transform_count) : 0,
-      target_chain: readText(leadOptMmp.target_chain).trim(),
-      ligand_chain: readText(leadOptMmp.ligand_chain).trim()
-    } as Record<string, unknown>;
-  })();
-  const leadOptSnapshotContext = asRecord(leadOptInitialMmpSnapshot || null);
-  const leadOptSnapshotSelection = asRecord(leadOptSnapshotContext.selection);
-  const leadOptSnapshotQueryPayload = asRecord(leadOptSnapshotContext.query_payload);
-  const leadOptSnapshotTargetChain =
-    readText(leadOptSnapshotContext.target_chain).trim() ||
-    readText(leadOptSnapshotSelection.target_chain).trim() ||
-    readText(leadOptSnapshotQueryPayload.target_chain).trim();
-  const leadOptSnapshotLigandChain =
-    readText(leadOptSnapshotContext.ligand_chain).trim() ||
-    readText(leadOptSnapshotSelection.ligand_chain).trim() ||
-    readText(leadOptSnapshotQueryPayload.ligand_chain).trim();
-  const leadOptWorkspaceTargetChain = leadOptSnapshotTargetChain || readText(leadOptChainContext.targetChain).trim();
-  const leadOptWorkspaceLigandChain = leadOptSnapshotLigandChain || readText(leadOptChainContext.ligandChain).trim();
   const {
     componentStepLabel,
     isRunRedirecting,
@@ -1455,6 +793,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityPreviewLoading,
     affinityPreviewCurrent,
     affinityPreviewError: String(affinityPreviewError || ''),
+    affinityDockMode: affinityMode === 'dock',
+    affinityDockPocketPresent: Boolean(affinityDockPocket),
     affinityTargetChainCount: affinityTargetChainIds.length,
     affinityLigandChainId,
     affinityLigandSmiles,
@@ -1576,6 +916,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     snapshotIptm,
     snapshotSelectedPairIptm,
     snapshotIc50Um,
+    snapshotPic50,
+    snapshotPic50Mw,
     snapshotIc50Error,
     snapshotIc50Tone,
     snapshotBindingProbability,
@@ -1605,14 +947,20 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimeSeedChange,
     handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
+    handleRuntimePeptideChiralityChange,
+    handleRuntimePeptideStructureUploadChange,
     handleRuntimePeptideBinderLengthChange,
+    handleRuntimePeptideLengthRange,
     handleRuntimePeptideUseInitialSequenceChange,
     handleRuntimePeptideInitialSequenceChange,
     handleRuntimePeptideSequenceMaskChange,
     handleRuntimePeptideIterationsChange,
+    handleRuntimePeptidePocketFieldChange,
+    handleRuntimePeptideDockPocketChange,
+    handleRuntimeLeadOptOptionChange,
+    handleRuntimeLeadOptDockPocketChange,
     handleRuntimePeptidePopulationSizeChange,
     handleRuntimePeptideEliteSizeChange,
-    handleRuntimePeptideMutationRateChange,
     handleRuntimePeptideResiduePoolChange,
     handleRuntimePeptideNonNaturalRangeChange,
     handleRuntimePeptideBicyclicLinkerCcdChange,
@@ -1631,6 +979,32 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     setProteinTemplates,
     filterConstraintsByBackend
   });
+  // Peptide-design target context: the protein component owning the target
+  // chain (properties.target, falling back to the first protein chain) hosts
+  // the binding-pocket picker inside its component editor block — its uploaded
+  // structure enables the docking-style 3D box, otherwise the target sequence
+  // gets the constraint-style residue selection.
+  const peptideTargetContext = useMemo(() => {
+    const targetChain = String(draft.inputConfig.properties?.target || '').trim();
+    const proteinChains = activeChainInfos.filter((info) => info.type === 'protein');
+    const ownerChain =
+      (targetChain
+        ? proteinChains.find((info) => info.id === targetChain) || null
+        : null) || proteinChains[0] || null;
+    const component = ownerChain
+      ? normalizedDraftComponents.find((item) => item.id === ownerChain.componentId) || null
+      : null;
+    return {
+      componentId: component?.id || null,
+      chainId: ownerChain?.id || null,
+      sequence: component?.sequence || ''
+    };
+  }, [
+    draft.inputConfig.properties?.target,
+    activeChainInfos,
+    normalizedDraftComponents
+  ]);
+
   const { predictionConstraintsWorkspaceProps, predictionComponentsSidebarProps } = usePredictionWorkspaceProps({
     workspaceTab,
     draft,
@@ -1691,7 +1065,17 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     workspaceLigandSelectableOptions,
     setAffinityComponentFromWorkspace,
     affinityEnableDisabledReason,
-    showAffinityComputeToggle: !isPeptideDesignWorkflow
+    showAffinityComputeToggle: !isPeptideDesignWorkflow,
+    peptidePocket:
+      isPeptideDesignWorkflow && peptideTargetContext.componentId
+        ? {
+            summaryLabel: peptidePocketSummaryLabel(
+              draft.inputConfig.options.peptidePocketCenter,
+              draft.inputConfig.options.peptidePocketResidues
+            ),
+            targetComponentId: peptideTargetContext.componentId
+          }
+        : null
   });
   const peptideResiduePoolAvailable = useMemo(() => {
     if (!isPeptideDesignWorkflow) return true;
@@ -1761,8 +1145,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
     if (!screeningTaskRow?.id) return;
     const sourceProperties = (screeningTaskRow.properties || nextConfig.properties) as ProjectInputConfig['properties'];
+    // Persist ONLY the job records. Merging the live draft options here would
+    // write unsaved editor state into the viewed row's stored options.
     const patchPayload = {
-      properties: mergeTaskInputOptionsIntoProperties(sourceProperties, nextOptions)
+      properties: mergeTaskInputOptionsIntoProperties(sourceProperties, {
+        virtualScreeningPredictions: normalizedRecords
+      })
     };
     virtualScreeningPredictionPersistQueueRef.current =
       virtualScreeningPredictionPersistQueueRef.current
@@ -1853,7 +1241,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityLigandSmiles,
     affinityPreviewLigandSmiles: String(affinityPreview?.ligandSmiles || ''),
     affinityMode,
-    affinityUseMsa,
+    affinityDockPocket,
     affinityConfidenceOnlyUiValue,
     affinityConfidenceOnlyUiLocked,
     affinityPreviewStructureText,
@@ -1862,9 +1250,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityPreviewLigandOverlayFormat,
     onAffinityTargetFileChange,
     onAffinityLigandFileChange,
-    onAffinityUseMsaChange,
     onAffinityConfidenceOnlyChange,
     onAffinityModeChange,
+    onAffinityDockPocketChange,
     setAffinityLigandSmiles,
     leadOptProteinSequence: leadOptPrimary.proteinSequence,
     leadOptLigandSmiles: leadOptPrimary.ligandSmiles,
@@ -1873,17 +1261,18 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     leadOptReferenceScopeKey: `${project.id}:leadopt`,
     leadOptPersistedReferenceUploads: leadOptPersistedUploads,
     onLeadOptReferenceUploadsChange: handleLeadOptReferenceUploadsChange,
-    onLeadOptMmpTaskQueued: handleLeadOptMmpTaskQueued,
-    onLeadOptMmpTaskCompleted: handleLeadOptMmpTaskCompleted,
-    onLeadOptMmpTaskFailed: handleLeadOptMmpTaskFailed,
-    onLeadOptUiStateChange: handleLeadOptUiStateChange,
-    onLeadOptPredictionQueued: handleLeadOptPredictionQueued,
-    onLeadOptPredictionStateChange: handleLeadOptPredictionStateChange,
-    onLeadOptNavigateToResults: () => {},
-    leadOptInitialMmpSnapshot,
+    onLeadOptHaloTaskQueued: handleLeadOptHaloTaskQueued,
+    onLeadOptHaloTaskCompleted: handleLeadOptHaloTaskCompleted,
+    onLeadOptHaloTaskFailed: handleLeadOptHaloTaskFailed,
+    onLeadOptNavigateToResults: () => {
+      setWorkspaceTab('results');
+    },
+    leadOptHaloSnapshot,
+    leadOptOptions: draft.inputConfig.options,
+    onLeadOptOptionChange: handleRuntimeLeadOptOptionChange,
+    onLeadOptDockPocketChange: handleRuntimeLeadOptDockPocketChange,
     setDraft,
     setWorkspaceTab,
-    onRegisterLeadOptHeaderRunAction: handleRegisterLeadOptHeaderRunAction,
     workspaceTab,
     componentsWorkspaceRef,
     isComponentsResizing,
@@ -1911,16 +1300,27 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     seed: draft.inputConfig.options.seed ?? null,
     lowVram: draft.inputConfig.options.lowVram ?? false,
     peptideDesignMode: draft.inputConfig.options.peptideDesignMode ?? 'linear',
+    peptideChirality: draft.inputConfig.options.peptideChirality ?? 'l',
     peptideBinderLength: draft.inputConfig.options.peptideBinderLength ?? 20,
+    peptideLengthMin: draft.inputConfig.options.peptideLengthMin ?? 10,
+    peptideLengthMax: draft.inputConfig.options.peptideLengthMax ?? 25,
     peptideUseInitialSequence: draft.inputConfig.options.peptideUseInitialSequence ?? false,
     peptideInitialSequence: draft.inputConfig.options.peptideInitialSequence ?? '',
+    peptideStructureUpload: draft.inputConfig.options.peptideStructureUpload ?? null,
     peptideSequenceMask:
       draft.inputConfig.options.peptideSequenceMask ??
       'X'.repeat(Math.max(1, draft.inputConfig.options.peptideBinderLength ?? 20)),
     peptideIterations: draft.inputConfig.options.peptideIterations ?? 12,
+    peptideTargetComponentId: peptideTargetContext.componentId,
+    peptideTargetChainId: peptideTargetContext.chainId,
+    peptideTargetSequence: peptideTargetContext.sequence,
+    peptidePocketCenter: draft.inputConfig.options.peptidePocketCenter ?? '',
+    peptidePocketResidues: draft.inputConfig.options.peptidePocketResidues ?? '',
+    peptidePocketBox: draft.inputConfig.options.peptidePocketBox ?? 6,
+    peptideDockPocket: draft.inputConfig.options.peptideDockPocket ?? null,
+    onPeptideDockPocketChange: handleRuntimePeptideDockPocketChange,
     peptidePopulationSize: draft.inputConfig.options.peptidePopulationSize ?? 16,
     peptideEliteSize: draft.inputConfig.options.peptideEliteSize ?? 5,
-    peptideMutationRate: draft.inputConfig.options.peptideMutationRate ?? 0.25,
     peptideResiduePool: draft.inputConfig.options.peptideResiduePool ?? [],
     peptideResiduePoolAvailable,
     peptideNonNaturalMin: draft.inputConfig.options.peptideNonNaturalMin ?? 0,
@@ -1938,14 +1338,16 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onSeedChange: handleRuntimeSeedChange,
     onLowVramChange: handleRuntimeLowVramChange,
     onPeptideDesignModeChange: handleRuntimePeptideDesignModeChange,
-    onPeptideBinderLengthChange: handleRuntimePeptideBinderLengthChange,
+    onPeptideChiralityChange: handleRuntimePeptideChiralityChange,
+    onPeptideStructureUploadChange: handleRuntimePeptideStructureUploadChange,
+    onPeptideLengthRange: handleRuntimePeptideLengthRange,
     onPeptideUseInitialSequenceChange: handleRuntimePeptideUseInitialSequenceChange,
     onPeptideInitialSequenceChange: handleRuntimePeptideInitialSequenceChange,
     onPeptideSequenceMaskChange: handleRuntimePeptideSequenceMaskChange,
     onPeptideIterationsChange: handleRuntimePeptideIterationsChange,
+    onPeptidePocketFieldChange: handleRuntimePeptidePocketFieldChange,
     onPeptidePopulationSizeChange: handleRuntimePeptidePopulationSizeChange,
     onPeptideEliteSizeChange: handleRuntimePeptideEliteSizeChange,
-    onPeptideMutationRateChange: handleRuntimePeptideMutationRateChange,
     onPeptideResiduePoolChange: handleRuntimePeptideResiduePoolChange,
     onPeptideNonNaturalRangeChange: handleRuntimePeptideNonNaturalRangeChange,
     onPeptideBicyclicLinkerCcdChange: handleRuntimePeptideBicyclicLinkerCcdChange,
@@ -1992,12 +1394,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     navigate,
   });
 
-  const leadOptHeaderActionMissing = isLeadOptimizationWorkflow && !leadOptHeaderRunAction;
-  const effectiveRunDisabled = runDisabled || leadOptHeaderActionMissing;
-  const effectiveRunBlockedReason = leadOptHeaderActionMissing
-    ? workspaceTab === 'components'
-      ? 'Select at least one fragment to run.'
-      : 'Run action is only available in Lead Optimization Components view.'
+  // Lead-opt runs from the Optimization panel's own Run button; the header
+  // Run stays disabled for this workflow with a pointer to the panel.
+  const effectiveRunDisabled = runDisabled || isLeadOptimizationWorkflow;
+  const effectiveRunBlockedReason = isLeadOptimizationWorkflow
+    ? 'Use the Run Optimization button in the Lead Optimization workspace.'
     : runBlockedReason;
   const submitTaskRef = useRef(submitTask);
   const runDisabledRef = useRef(effectiveRunDisabled);
@@ -2022,15 +1423,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const headerStopRunDisabled = !showHeaderStopAction || headerStopRunPending || runSubmitting;
   const handleHeaderRunAction = () => {
     if (isLeadOptimizationWorkflow) {
-      if (!leadOptHeaderRunAction || leadOptHeaderRunPending) return;
-      setLeadOptHeaderRunPending(true);
-      void Promise.resolve(leadOptHeaderRunAction())
-        .catch(() => {
-          // Lead opt workspace already surfaces query errors.
-        })
-        .finally(() => {
-          setLeadOptHeaderRunPending(false);
-        });
       return;
     }
     handleRunAction();
@@ -2086,12 +1478,16 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const backendPatch = readText(patch.backend).trim().toLowerCase();
       const backendPatchAllowed = isVirtualScreeningWorkflow
         ? backendPatch === 'nesso'
-        : backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix';
+        : backendPatch === 'boltz' ||
+        backendPatch === 'alphafold3' ||
+        backendPatch === 'protenix' ||
+        backendPatch === 'boltz2dock' ||
+        backendPatch === 'protenix2dock';
       if (backendPatchAllowed) {
         handleRuntimeBackendChange(backendPatch);
       }
       const affinityModePatch = readText(patch.affinityMode).trim();
-      if (affinityModePatch === 'score' || affinityModePatch === 'pose' || affinityModePatch === 'refine' || affinityModePatch === 'interface') {
+      if (affinityModePatch === 'score' || affinityModePatch === 'pose' || affinityModePatch === 'refine' || affinityModePatch === 'interface' || affinityModePatch === 'dock') {
         onAffinityModeChange(affinityModePatch);
       }
       const affinityBinding = asRecord(patch.affinityBinding);
@@ -2140,8 +1536,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (peptidePopulationSize !== null) handleRuntimePeptidePopulationSizeChange(Math.max(1, Math.floor(peptidePopulationSize)));
       const peptideEliteSize = readFiniteNumber(patch.peptideEliteSize);
       if (peptideEliteSize !== null) handleRuntimePeptideEliteSizeChange(Math.max(1, Math.floor(peptideEliteSize)));
-      const peptideMutationRate = readFiniteNumber(patch.peptideMutationRate);
-      if (peptideMutationRate !== null) handleRuntimePeptideMutationRateChange(Math.min(1, Math.max(0, peptideMutationRate)));
       if (typeof patch.peptideUseInitialSequence === 'boolean') {
         handleRuntimePeptideUseInitialSequenceChange(patch.peptideUseInitialSequence);
       }
@@ -2149,6 +1543,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (peptideInitialSequence) handleRuntimePeptideInitialSequenceChange(peptideInitialSequence);
       const peptideSequenceMask = readText(patch.peptideSequenceMask).trim();
       if (peptideSequenceMask) handleRuntimePeptideSequenceMaskChange(peptideSequenceMask);
+      const peptideChirality = readText(patch.peptideChirality).trim().toLowerCase();
+      if (peptideChirality === 'l' || peptideChirality === 'd') {
+        handleRuntimePeptideChiralityChange(peptideChirality as 'l' | 'd');
+      }
       const peptideBicyclicLinkerCcd = readText(patch.peptideBicyclicLinkerCcd).trim();
       if (peptideBicyclicLinkerCcd === 'SEZ' || peptideBicyclicLinkerCcd === '29N' || peptideBicyclicLinkerCcd === 'BS3') {
         handleRuntimePeptideBicyclicLinkerCcdChange(peptideBicyclicLinkerCcd);
@@ -2216,10 +1614,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (!canEdit) throw new Error('This project is read-only for your account.');
       const components = Array.isArray(action.payload?.components) ? action.payload.components : [];
       if (components.length === 0) throw new Error('No components were provided for the new task.');
+      const taskName = readText(action.payload?.taskName).trim();
+      const taskSummary = readText(action.payload?.taskSummary).trim();
       const params = new URLSearchParams();
       params.set('tab', 'components');
       params.set('new_task', '1');
       params.set('copilot_components', JSON.stringify(components));
+      if (taskName) params.set('copilot_task_name', taskName);
+      if (taskSummary) params.set('copilot_task_summary', taskSummary);
       navigate(`/projects/${project.id}?${params.toString()}`);
       return 'New task draft created with the provided components.';
     }
@@ -2242,17 +1644,20 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     if (action.id === 'task_detail:apply_structure_template') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       if (!isPredictionWorkflow) throw new Error('Structure templates are only supported for prediction tasks.');
-      const structureUrl = String(action.payload?.structureUrl || '').trim();
-      if (!structureUrl) throw new Error('No structure URL was provided.');
+      // Identifier-first: the host builds the guaranteed-valid mmCIF URL from the entry id.
+      const structurePdbId = String(action.payload?.structurePdbId || '').trim();
+      const structureUrl = structurePdbId
+        ? rcsbCifUrl(structurePdbId)
+        : String(action.payload?.structureUrl || '').trim();
+      if (!structureUrl) {
+        throw new Error('No structure was provided — pass the chosen entry\'s structurePdbId (preferred) or a cifUrl returned by a lookup.');
+      }
+      const templateFileName = structurePdbId
+        ? (String(action.payload?.fileName || '').trim() || `${structurePdbId.toUpperCase()}.cif`)
+        : action.payload?.fileName;
       const targetProteinComponent = (draft.inputConfig?.components || []).find((component) => component.type === 'protein') || null;
       if (!targetProteinComponent) throw new Error('This prediction task has no protein component to attach a template to.');
-      let fileName = String(action.payload?.fileName || '').trim();
-      if (!fileName) fileName = (structureUrl.split('/').pop() || 'template').split('?')[0];
-      const format = detectStructureFormat(fileName);
-      if (!format) throw new Error('The structure URL must point to a .pdb, .cif, or .mmcif file.');
-      const response = await fetch(structureUrl);
-      if (!response.ok) throw new Error(`Could not download the structure (HTTP ${response.status}).`);
-      const contentText = await response.text();
+      const { fileName, format, contentText } = await fetchValidatedStructure(structureUrl, templateFileName);
       const chainSequences = extractProteinChainSequences(contentText, format);
       const chainIds = Object.keys(chainSequences).sort((a, b) => a.localeCompare(b));
       if (!chainIds.length) throw new Error('No protein chain could be parsed from the fetched structure.');
@@ -2264,39 +1669,104 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         chainSequences
       };
       setProteinTemplates((prev) => ({ ...prev, [targetProteinComponent.id]: upload }));
-      return;
+      setWorkspaceTab('components');
+      return `Structure template applied to component "${targetProteinComponent.id}" (chain ${chainIds[0]}). Switched to the Components tab.`;
     }
-    if (action.id === 'task_detail:apply_affinity_target_structure') {
+    if (action.id === 'task_detail:apply_docking_target_structure') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
-      if (!isAffinityWorkflow) throw new Error('Affinity target structures are only supported for affinity tasks.');
-      const structureUrl = String(action.payload?.structureUrl || '').trim();
-      if (!structureUrl) throw new Error('No structure URL was provided.');
-      let fileName = String(action.payload?.fileName || '').trim();
-      if (!fileName) fileName = (structureUrl.split('/').pop() || 'target').split('?')[0];
-      const format = detectStructureFormat(fileName);
-      if (!format) throw new Error('The structure URL must point to a .pdb, .cif, or .mmcif file.');
-      const response = await fetch(structureUrl);
-      if (!response.ok) throw new Error(`Could not download the structure (HTTP ${response.status}).`);
-      const contentText = await response.text();
+      if (!isAffinityWorkflow) throw new Error('Docking target structures are only supported for docking tasks.');
+      // Identifier-first: the host builds the guaranteed-valid mmCIF URL from the entry id.
+      const structurePdbId = String(action.payload?.structurePdbId || '').trim();
+      const structureUrl = structurePdbId
+        ? rcsbCifUrl(structurePdbId)
+        : String(action.payload?.structureUrl || '').trim();
+      if (!structureUrl) {
+        throw new Error('No docking target was provided — pass the chosen entry\'s structurePdbId (preferred) or a cifUrl returned by a lookup.');
+      }
+      const targetFileName = structurePdbId
+        ? (String(action.payload?.fileName || '').trim() || `${structurePdbId.toUpperCase()}.cif`)
+        : action.payload?.fileName;
+      const { fileName, format, contentText } = await fetchValidatedStructure(structureUrl, targetFileName);
       const file = new File([contentText], fileName, { type: format === 'pdb' ? 'chemical/x-pdb' : 'chemical/x-cif' });
+      // onTargetFileChange resets ligand-dependent state INCLUDING the SMILES the
+      // user may have just had copilot fill in — a target swap must not discard an
+      // independently-valid ligand SMILES, so capture and restore it.
+      const ligandSmilesBefore = String(affinityLigandSmiles || '').trim();
       onAffinityTargetFileChange(file);
-      return 'Structure template applied to the protein component.';
+      if (ligandSmilesBefore) setAffinityLigandSmiles(ligandSmilesBefore);
+      // The target viewer + preview pipeline only live on the Components tab; without
+      // this switch the apply is invisible (the exact "applied but nothing loaded" bug).
+      setWorkspaceTab('components');
+      return 'Docking target structure applied. Switched to the Components tab — the 3D preview is being prepared.';
     }
-    if (action.id === 'task_detail:apply_affinity_ligand_smiles') {
+    if (action.id === 'task_detail:apply_docking_ligand_smiles') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
-      if (!isAffinityWorkflow) throw new Error('Affinity binder SMILES are only supported for affinity tasks.');
+      if (!isAffinityWorkflow) throw new Error('Docking ligand SMILES are only supported for docking tasks.');
       const smiles = String(action.payload?.smiles || '').trim();
       if (!smiles) throw new Error('No SMILES was provided.');
+      // The SMILES is only consumed in dock mode; in pose/refine/interface the submit validation
+      // requires an uploaded ligand file and this value would be silently ignored.
+      const modeSwitched = affinityMode !== 'dock';
+      if (modeSwitched) onAffinityModeChange('dock');
       setAffinityLigandSmiles(smiles);
-      return 'Ligand SMILES set.';
+      setWorkspaceTab('components');
+      return modeSwitched
+        ? 'Ligand SMILES set (mode switched to dock). Switched to the Components tab.'
+        : 'Ligand SMILES set. Switched to the Components tab.';
     }
     if (action.id === 'task_detail:save_draft') {
       await saveDraft();
       return 'Draft saved.';
     }
+    if (action.id === 'task_detail:set_docking_pocket_box') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      if (!isAffinityWorkflow) throw new Error('Docking pocket boxes are only supported for docking tasks.');
+      const mode = String(action.payload?.mode || 'auto').trim();
+      if (!affinityTargetFile) {
+        throw new Error('No target structure is uploaded yet — apply the docking target first.');
+      }
+      const structureText = await affinityTargetFile.text();
+      // Name first, content sniff second (shared policy): a target applied without a
+      // recognizable extension must still box instead of failing the whole docking chain
+      // on its file name.
+      const format = resolveStructureFormat(affinityTargetFile.name, structureText);
+      if (!format) throw new Error('The uploaded target file is not a .pdb, .ent, .cif or .mmcif structure.');
+      if (mode !== 'auto' && mode !== 'protein') {
+        throw new Error('mode must be "auto" (ligand pocket if present, else whole protein) or "protein".');
+      }
+      // "auto": co-crystallized ligand pocket first, whole protein as fallback.
+      // "protein": whole-protein box explicitly (strip heteroatoms so a co-crystal ligand
+      // cannot pull the box off-center).
+      const chosen = computeAutoPocketBox(
+        mode === 'protein' ? structureText.replace(/^HETATM.*$/gm, '') : structureText,
+        format
+      );
+      if (!chosen) throw new Error('No atoms could be parsed from the target structure.');
+      onAffinityDockPocketChange({
+        centerX: chosen.box.centerX,
+        centerY: chosen.box.centerY,
+        centerZ: chosen.box.centerZ,
+        sizeX: chosen.box.sizeX,
+        sizeY: chosen.box.sizeY,
+        sizeZ: chosen.box.sizeZ,
+        method: chosen.method
+      });
+      setWorkspaceTab('components');
+      return chosen.ligandLabel
+        ? `Pocket box set around the co-crystallized ligand ${chosen.ligandLabel} (generous size).`
+        : 'Pocket box set to the whole protein (large box, blind docking).';
+    }
     if (action.id === 'task_detail:submit_current') {
       if (runDisabledRef.current) {
         throw new Error(runBlockedReasonRef.current || 'Current task cannot be submitted yet.');
+      }
+      // Honest precondition (pi: actionable errors at the decision point): submit silently
+      // no-ops without a pocket in dock mode — surface it HERE with the fix, so the receipt
+      // is a failed one carrying next steps instead of a false "queued".
+      if (isAffinityWorkflow && affinityMode === 'dock' && !affinityDockPocket) {
+        throw new Error(
+          'Dock mode requires a pocket box — apply task_detail:set_docking_pocket_box (mode "auto") first: it boxes the co-crystallized ligand site or the whole protein.'
+        );
       }
       await submitTaskRef.current();
       return 'Task submitted. The task is now queued.';
@@ -2337,7 +1807,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       navigate(`/projects/${project.id}/tasks`, { replace: true });
       return 'Task deleted.';
     }
+    // An unrecognized task-detail action must fail loudly: returning undefined would make the
+    // Copilot panel record an `applied` receipt for a silent no-op.
+    throw new Error(`Unsupported Copilot task-detail action: ${action.id}`);
   }, [
+    affinityDockPocket,
+    affinityLigandSmiles,
+    affinityMode,
+    affinityTargetFile,
     activeResultTask,
     canEdit,
     displayTaskState,
@@ -2349,6 +1826,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onAffinityTargetFileChange,
     setAffinityLigandSmiles,
     setProteinTemplates,
+    setWorkspaceTab,
     handleHeaderRunAction,
     handleRuntimePeptideBinderLengthChange,
     handleRuntimeBackendChange,
@@ -2363,7 +1841,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimePeptideEliteSizeChange,
     handleRuntimePeptideInitialSequenceChange,
     handleRuntimePeptideIterationsChange,
-    handleRuntimePeptideMutationRateChange,
     handleRuntimePeptideResiduePoolChange,
     handleRuntimePeptideNonNaturalRangeChange,
     handleRuntimePeptidePopulationSizeChange,
@@ -2383,7 +1860,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     setError,
     statusContextTaskRow
   ]);
-
 
   const copilotContextPayload = useMemo(() => {
     const statusTaskRowId = readText(statusContextTaskRow?.id).trim();
@@ -2438,10 +1914,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       },
       affinityUploads: isAffinityWorkflow
         ? {
-            targetFileName: affinityTargetFile?.name || '',
-            ligandFileName: affinityLigandFile?.name || '',
-            targetUploaded: Boolean(affinityTargetFile),
-            ligandUploaded: Boolean(affinityLigandFile)
+            // PERSISTED uploads win over the transient File: the File hydrates only on the
+            // Components tab, so a truth-lie here made the planner re-apply an existing target.
+            targetFileName:
+              runtime.affinityCurrentUploads?.target?.fileName || affinityTargetFile?.name || '',
+            ligandFileName:
+              runtime.affinityCurrentUploads?.ligand?.fileName || affinityLigandFile?.name || '',
+            targetUploaded: Boolean(runtime.affinityCurrentUploads?.target || affinityTargetFile),
+            ligandUploaded: Boolean(runtime.affinityCurrentUploads?.ligand || affinityLigandFile)
           }
         : undefined,
       currentTask: summarizeCopilotTask(statusContextTaskRow || activeResultTask || null)
@@ -2473,12 +1953,21 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     workflow.title
   ]);
 
+  const defaultDownloadTaskId = useMemo(() => {
+    const viewerTaskId = readText(structureTaskId).trim();
+    if (viewerTaskId) return viewerTaskId;
+    const activeTaskId = readText(activeResultTask?.task_id).trim();
+    const activeStructureName = readText(activeResultTask?.structure_name).trim();
+    if (activeStructureName && activeTaskId) return activeTaskId;
+    return readText(project.task_id).trim();
+  }, [activeResultTask?.structure_name, activeResultTask?.task_id, project.task_id, structureTaskId]);
+
   return (
     <>
     <ProjectDetailLayout
       projectName={project.name}
       canDownloadResult={Boolean(
-        isLeadOptimizationWorkflow ? (leadOptDownloadRecords.length > 0 || leadOptDownloadTaskId) : defaultDownloadTaskId
+        defaultDownloadTaskId
       )}
       workflow={{
         shortTitle: workflow.shortTitle,
@@ -2497,7 +1986,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       displayTaskState={displayTaskState}
       isActiveRuntime={isActiveRuntime}
       progressPercent={progressPercent}
-      waitingSeconds={waitingSeconds}
+      statusSubmittedAt={displaySubmittedAt}
       totalRuntimeSeconds={totalRuntimeSeconds}
       canEdit={canEdit}
       loading={loading}
@@ -2533,20 +2022,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       onOpenTaskHistory={handleOpenTaskHistory}
       onDownloadResult={() => {
         setError(null);
-        if (isLeadOptimizationWorkflow) {
-          void downloadLeadOptCombinedArchive({
-            predictionMap: aggregatedLeadOptSnapshotRecord.prediction_by_smiles,
-            preferredBackend: aggregatedLeadOptSnapshotRecord.selected_backend,
-            projectName: project.name,
-            queryId:
-              readText(aggregatedLeadOptSnapshotRecord.query_id).trim() ||
-              readText(asRecord(aggregatedLeadOptSnapshotRecord.query_result).query_id).trim(),
-            fallbackTaskId: leadOptDownloadTaskId,
-          }).catch((err) => {
-            setError(err instanceof Error ? err.message : 'Failed to download lead-opt result archive.');
-          });
-          return;
-        }
         if (!defaultDownloadTaskId) return;
         void downloadResultFile(defaultDownloadTaskId).catch((err) => {
           setError(err instanceof Error ? err.message : 'Failed to download result archive.');

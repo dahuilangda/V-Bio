@@ -46,9 +46,18 @@ class TaskMonitor:
             result = AsyncResult(task_id, app=celery_app)
 
             task_start_key = f"task_start:{task_id}"
-            start_time_str = self.redis_client.get(task_start_key)
+            start_time_raw = self.redis_client.get(task_start_key)
             last_update_key = f"task_update:{task_id}"
-            last_update_str = self.redis_client.get(last_update_key)
+            last_update_raw = self.redis_client.get(last_update_key)
+            # The shared redis pool runs decode_responses=False — raw values are bytes,
+            # and fromisoformat(bytes) raises. Decode explicitly (writers store UTF-8 ISO
+            # timestamps).
+            if isinstance(start_time_raw, bytes):
+                start_time_raw = start_time_raw.decode('utf-8', 'replace')
+            if isinstance(last_update_raw, bytes):
+                last_update_raw = last_update_raw.decode('utf-8', 'replace')
+            start_time_str = start_time_raw
+            last_update_str = last_update_raw
 
             if start_time_str:
                 start_time = datetime.fromisoformat(start_time_str)
