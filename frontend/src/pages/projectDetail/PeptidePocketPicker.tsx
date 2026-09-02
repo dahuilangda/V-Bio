@@ -193,6 +193,7 @@ export function PeptidePocketPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetSignature]);
 
+
   const handleResiduePick = (pick: MolstarResiduePick) => {
     if (!canEdit || !hasStructure) return;
     const exists = picks.some((p) => p.chainId === pick.chainId && p.residue === pick.residue);
@@ -317,9 +318,6 @@ export function PeptidePocketPicker({
         </div>
       ) : (
         <div className="peptide-pocket-sequence">
-          <div className="muted small peptide-pocket-hint">
-            序列模式：口袋氨基酸在引擎（Protenix / Boltz2 / AlphaFold3）预测的靶标结构上解析。
-          </div>
           <PeptidePocketSequencePicker
             sequence={targetSequence}
             selectedPositions={plainPositions}

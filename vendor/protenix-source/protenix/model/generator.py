@@ -145,14 +145,6 @@ def sample_diffusion(
     init_mask: Optional[torch.Tensor] = None,
     init_noise_scale: float = 0.0,
     pin_mask: Optional[torch.Tensor] = None,
-    anchor_index: Optional[torch.Tensor] = None,
-    anchor_upper: Optional[torch.Tensor] = None,
-    anchor_lower: Optional[torch.Tensor] = None,
-    chiral_quads: Optional[torch.Tensor] = None,
-    chiral_sign: Optional[torch.Tensor] = None,
-    bond_index: Optional[torch.Tensor] = None,
-    bond_upper: Optional[torch.Tensor] = None,
-    bond_lower: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
     It performances denoising steps from time 0 to time T.
@@ -196,10 +188,7 @@ def sample_diffusion(
             (1 = clamped to init_coords after every step, 0 = denoised). The
             pinned atoms therefore stay bit-exact through the loop; use this
             for receptor-fixed peptide design/refinement.
-        anchor_index (Optional[torch.Tensor]): [2, M] hard-anchor atom pairs.
-        anchor_upper (Optional[torch.Tensor]): [M] upper bounds (A).
-        anchor_lower (Optional[torch.Tensor]): [M] lower bounds (A); the band
-            [lower, upper] holds the free chains at the placed geometry —
+                        [lower, upper] holds the free chains at the placed geometry —
             neither drifting away nor penetrating the receptor wall.
 
     Returns:
@@ -216,214 +205,7 @@ def sample_diffusion(
         # fp32: TFG math (projections, linalg) requires it; see TFGEngine.step.
         tfg = TFGEngine(tfg_cfg, device=device, dtype=torch.float32)
 
-    _pin_col_for_bands = (
-        pin_mask.to(device=device, dtype=torch.float32)
-        if pin_mask is not None
-        else None
-    )
 
-    def _make_band_projector(
-        idx: torch.Tensor,
-        up: torch.Tensor,
-        lo: torch.Tensor,
-    ):
-        """Damped-Jacobi band projector on the given pairs (see the anchor
-        notes below for why not a min-norm solve). Weights come from the
-        free/pinned split: pinned endpoints take zero correction (constants),
-        free-free pairs split the correction between both atoms — SHAKE-like.
-        """
-        free_col = (
-            1.0 - _pin_col_for_bands
-            if _pin_col_for_bands is not None
-            else torch.ones(idx.max().item() + 1, device=device, dtype=torch.float32)
-        )
-        _active = (free_col[idx[0]] + free_col[idx[1]]) > 0
-        idx = idx[:, _active]
-        up = up[_active]
-        lo = lo[_active]
-        wi = free_col[idx[0]]
-        wj = free_col[idx[1]]
-        if idx.numel() == 0:
-            return None
-
-        def _project(x_l: torch.Tensor, _iters: int = 30) -> None:
-            shape = x_l.shape
-            xs = x_l.reshape(-1, shape[-2], 3).float()
-            for si in range(xs.shape[0]):
-                x = xs[si]
-                for _ in range(_iters):
-                    a = x[idx[0]]
-                    b = x[idx[1]]
-                    d = (a - b).norm(dim=-1)
-                    viol = torch.where(d > up, d - up, (d - lo).clamp(max=0))
-                    if float(viol.abs().max()) < 1e-3:
-                        break
-                    u = (a - b) / d.clamp(min=1e-8).unsqueeze(-1)
-                    corr = torch.zeros_like(x)
-                    half = 0.5 * viol.clamp(-4.0, 4.0)
-                    corr.index_add_(0, idx[0], (-half).unsqueeze(-1) * u * wi.unsqueeze(-1))
-                    corr.index_add_(0, idx[1], (+half).unsqueeze(-1) * u * wj.unsqueeze(-1))
-                    corr_norm = corr.norm(dim=-1, keepdim=True)
-                    corr = corr * (corr_norm.clamp(max=0.5) / corr_norm.clamp(min=1e-8))
-                    x += corr
-                xs[si] = x
-            x_l.copy_(xs.to(dtype).reshape(shape))
-
-        return _project
-
-    _anchor_state = None
-    if (
-        pin_mask is not None
-        and init_coords is not None
-        and anchor_index is not None
-        and anchor_upper is not None
-    ):
-        # Precomputed hard-anchor projector: damped Jacobi projection of the
-        # anchor distance pairs back inside their band [lower, upper], moving
-        # FREE atoms only (pinned atoms are constants). A direct minimum-norm
-        # linalg solve goes singular here when many pairs share free atoms
-        # (measured: coordinates blown up by hundreds of A); the damped
-        # per-pair form is unconditionally stable and converges in a few tens
-        # of sweeps on step-sized violations. Without the lower bound the
-        # projection drives the peptide INTO the receptor wall (measured 0.25
-        # A clashes); the band holds the placed geometry from both sides.
-        _pin_col = pin_mask.to(device=device, dtype=torch.float32)
-        _free_col = 1.0 - _pin_col
-        _a_idx = anchor_index.to(device=device, dtype=torch.long)
-        _a_up = anchor_upper.to(device=device, dtype=torch.float32)
-        _a_lo = (
-            anchor_lower.to(device=device, dtype=torch.float32)
-            if anchor_lower is not None
-            else torch.zeros_like(_a_up)
-        )
-        _active = (_free_col[_a_idx[0]] + _free_col[_a_idx[1]]) > 0
-        _a_idx = _a_idx[:, _active]
-        _a_up = _a_up[_active]
-        _a_lo = _a_lo[_active]
-        _wi = _free_col[_a_idx[0]]
-        _wj = _free_col[_a_idx[1]]
-
-        def _anchor_project(x_l: torch.Tensor, _iters: int = 30) -> None:
-            if _a_idx.numel() == 0:
-                return
-            shape = x_l.shape
-            xs = x_l.reshape(-1, shape[-2], 3).float()
-            for si in range(xs.shape[0]):
-                x = xs[si]
-                for _ in range(_iters):
-                    a = x[_a_idx[0]]
-                    b = x[_a_idx[1]]
-                    d = (a - b).norm(dim=-1)
-                    # signed violation: positive = too far (shrink), negative
-                    # = too close (expand)
-                    viol = torch.where(d > _a_up, d - _a_up, (d - _a_lo).clamp(max=0))
-                    if float(viol.abs().max()) < 1e-3:
-                        break
-                    u = (a - b) / d.clamp(min=1e-8).unsqueeze(-1)
-                    corr = torch.zeros_like(x)
-                    # Bound each sweep's displacement: a linearized projection
-                    # is only valid for step-sized violations; degenerate
-                    # upstream geometry would otherwise teleport atoms (the
-                    # TFG linalg solver had the same failure mode before its
-                    # clamp — measured a Cys SG pushed 32 A). Convergence
-                    # still takes a few extra sweeps.
-                    half = 0.5 * viol.clamp(-4.0, 4.0)
-                    corr.index_add_(0, _a_idx[0], (-half).unsqueeze(-1) * u * _wi.unsqueeze(-1))
-                    corr.index_add_(0, _a_idx[1], (+half).unsqueeze(-1) * u * _wj.unsqueeze(-1))
-                    # Per-ATOM cap: many anchor pairs share one atom (the
-                    # pocket pairs all touch the same SG/CB on the anchored
-                    # residues); index_add_ accumulates their corrections
-                    # without bound and one sweep can fling the atom tens of
-                    # A (measured: Cys1 CA-CB 17-32 A). Cap the per-atom step
-                    # to the sweep scale. (A/B switch for the confidence
-                    # non-regression study; default on.)
-                    corr_norm = corr.norm(dim=-1, keepdim=True)
-                    corr = corr * (corr_norm.clamp(max=0.5) / corr_norm.clamp(min=1e-8))
-                    x += corr
-                xs[si] = x
-            x_l.copy_(xs.to(dtype).reshape(shape))
-
-        _anchor_state = {"project": _anchor_project}
-        logger.info(
-            f"Hard anchor projection enabled: {int(_a_idx.shape[1])} band pairs."
-        )
-
-    _chiral_state = None
-    if chiral_quads is not None and chiral_sign is not None:
-        # Backbone chirality guard: the denoiser can locally flip a residue's
-        # stereochemistry while folding a free chain (measured: +2.54 CA volume
-        # on an L-designed peptide, product-gate rejected). The CA chirality is
-        # exactly the side of the N-CA-C plane the CB sits on, so reflecting CB
-        # across that plane restores the designed sign with ZERO backbone
-        # perturbation. Runs after the pin + anchor projections each step.
-        _q = chiral_quads.to(device=device, dtype=torch.long)  # [4, M]
-        _s = chiral_sign.to(device=device, dtype=torch.float32)  # [M]
-
-        def _chirality_project(x_l: torch.Tensor) -> int:
-            shape = x_l.shape
-            xs = x_l.reshape(-1, shape[-2], 3).float()
-            flipped = 0
-            for si in range(xs.shape[0]):
-                x = xs[si]
-                n = x[_q[0]] - x[_q[1]]          # N - CA
-                c = x[_q[2]] - x[_q[1]]          # C - CA
-                normal = torch.cross(n, c, dim=-1)
-                norm = normal.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                n_hat = normal / norm
-                cb = x[_q[3]] - x[_q[1]]         # CB - CA
-                signed = (cb * n_hat).sum(dim=-1)  # signed distance along normal
-                cb_len = cb.norm(dim=-1)
-                # Guard both defect classes: stereochemistry flips AND
-                # stretched CA-CB bonds (2.6-3.2 A with the sign intact).
-                # Any flagged residue gets CB rebuilt at the standard 1.53 A
-                # along a direction that keeps/repairs the designed sign.
-                bad = ((torch.sign(signed) != torch.sign(_s)) & (signed.abs() > 1e-6)) | \
-                      (cb_len > 1.8) | (cb_len < 1.2)
-                if bool(bad.any()):
-                    flipped += int(bad.sum().item())
-                    # REBUILD rather than reflect: a plain reflection keeps
-                    # whatever deformed CA-CB distance the earlier
-                    # projections left behind. Rebuilding at the standard
-                    # 1.53 A along the sign-corrected direction restores the
-                    # designed sign and a valid bond in one shot.
-                    idx_bad = _q[3][bad]
-                    direction = cb[bad] - 2.0 * (cb[bad] * n_hat[bad]).sum(
-                        dim=-1, keepdim=True) * n_hat[bad] * \
-                        (torch.sign(signed[bad]) != torch.sign(_s[bad])).float().unsqueeze(-1)
-                    direction = direction / direction.norm(
-                        dim=-1, keepdim=True).clamp(min=1e-8)
-                    x[idx_bad] = x[_q[1]][bad] + 1.53 * direction
-                xs[si] = x
-            x_l.copy_(xs.to(dtype).reshape(shape))
-            return flipped
-
-        _chiral_state = {"project": _chirality_project}
-        logger.info(
-            f"Backbone chirality guard enabled: {int(_q.shape[1])} residues."
-        )
-
-    # Free-chain covalent bond projector. Bonds project AFTER the pocket and
-    # clash bands each step (the official PairwiseDistancePotential ordering:
-    # angles first, bonds last), so a steric correction on one atom
-    # distributes through its bond network as a side-chain torsion change
-    # instead of displacing the atom off its residue. Bonds are chemistry,
-    # not guidance: they apply whether or not anchor/guidance channels are
-    # active.
-    _bond_state = None
-    if bond_index is not None and bond_upper is not None:
-        _b_idx = bond_index.to(device=device, dtype=torch.long)
-        _b_up = bond_upper.to(device=device, dtype=torch.float32)
-        _b_lo = (
-            bond_lower.to(device=device, dtype=torch.float32)
-            if bond_lower is not None
-            else torch.maximum(_b_up - 0.24, torch.tensor(0.5))
-        )
-        _bond_fn = _make_band_projector(_b_idx, _b_up, _b_lo)
-        if _bond_fn is not None:
-            _bond_state = {"project": _bond_fn}
-            logger.info(
-                f"Covalent bond bands enabled: {int(_b_idx.shape[1])} bonds."
-            )
 
     def _chunk_sample_diffusion(chunk_n_sample, inplace_safe, chunk_offset=0):
         # init noise
@@ -588,14 +370,6 @@ def sample_diffusion(
                 # the pinned atoms held as constants (minimum-norm solution
                 # over the free columns only). Step-sized displacements keep
                 # the linearization exact.
-                if _anchor_state is not None:
-                    _anchor_state["project"](x_l)
-                if _chiral_state is not None:
-                    _chiral_state["project"](x_l)
-                if _bond_state is not None:
-                    # bonds LAST: official angles-then-bonds ordering — bond
-                    # geometry wins the negotiation with pocket/clash bands
-                    _bond_state["project"](x_l)
                 if _nan_dbg and not bool(torch.isfinite(x_l).all()):
                     logger.warning(
                         f"SAMPLER-NAN post-pin step={step_i} nonfinite="
@@ -610,14 +384,6 @@ def sample_diffusion(
                 (1,) * (len(batch_shape) + 1) + (N_atom, 3)
             )
             x_l = x_l * (1.0 - _pin) + _base * _pin
-            if _anchor_state is not None:
-                _anchor_state["project"](x_l)
-            if _chiral_state is not None:
-                _chiral_state["project"](x_l)
-        if _bond_state is not None:
-            # final polish after every projection family: exact covalent
-            # geometry at ship, pin or no pin (blind runs keep it too)
-            _bond_state["project"](x_l, _iters=60)
 
         return x_l
 

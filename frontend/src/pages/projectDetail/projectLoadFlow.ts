@@ -8,6 +8,7 @@ import {
 } from '../../api/supabaseLite';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { CustomCcdMoleculeInput, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import { pocketOptionsWithRestoredTemplate } from '../../utils/peptidePocket';
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { resolveRestoredEditorState, resolveTaskSnapshotContext } from './projectLoadHelpers';
@@ -251,6 +252,16 @@ export async function loadProjectFlow(params: {
     hasProteinTemplates,
     readTaskAffinityUploads,
   });
+
+  // Pocket picks reference the uploaded target structure; when the restore
+  // carries no structure content they are dropped (plain sequence picks stay).
+  const hasRestoredTargetTemplate = Object.values(restoredTemplates).some(
+    (template) => String(template?.content || '').trim().length > 0
+  );
+  loadedDraft.inputConfig.options = pocketOptionsWithRestoredTemplate(
+    loadedDraft.inputConfig.options,
+    hasRestoredTargetTemplate
+  );
 
   const defaultContextTask = snapshotSourceTaskRow || requestedTaskRow || activeTaskRow;
   const contextHasResult = Boolean(

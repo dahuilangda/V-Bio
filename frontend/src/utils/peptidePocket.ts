@@ -152,6 +152,31 @@ export function peptidePocketTargetChanged(previous: string, next: string): bool
  * interactive box. One source of truth: a residues-method box (with picks)
  * submits the residue list; anything else submits center + radius.
  */
+/**
+ * Pocket picks made on an uploaded structure (chain-prefixed residues or an
+ * explicit center) resolve against that structure's numbering and frame.
+ * When a snapshot is restored without the structure's content they cannot
+ * be interpreted and are dropped rather than carried into a sequence-only
+ * submission; plain sequence positions stay valid either way.
+ */
+export function pocketOptionsWithRestoredTemplate<T extends {
+  peptidePocketResidues?: string | null;
+  peptidePocketCenter?: string | null;
+}>(options: T, hasTargetTemplate: boolean): T {
+  if (hasTargetTemplate) return options;
+  const { chainContacts, plainPositions } = parsePocketResidueTokens(
+    options.peptidePocketResidues);
+  const center = String(options.peptidePocketCenter || '').trim();
+  if (chainContacts.length === 0 && !center) return options;
+  return {
+    ...options,
+    peptidePocketResidues: plainPositions.length > 0
+      ? formatPlainPocketPositions(plainPositions)
+      : null,
+    peptidePocketCenter: null
+  };
+}
+
 export function pocketSubmissionFieldsFromBox(
   targetChainId: string | null | undefined,
   pocket: AffinityDockPocket | null,

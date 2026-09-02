@@ -39,8 +39,7 @@ from core.input_prep import (
     build_input_json,
     build_peptide_complex_input,
     compute_bond_contact_pairs,
-    compute_clash_floor_pairs,
-    compute_covalent_bond_bands,
+    compute_free_chain_tfg_constraints,
     compute_contact_pairs,
     compute_ligand_covalent_bands,
     load_ligand_pose,
@@ -520,26 +519,6 @@ def _run_peptide_engine(
     #     happens DURING diffusion, so the bonds need the same every-step
     #     hard treatment (TFG only projects the x0 prediction, not x_t)
     # Skipped entirely under --no_guidance (blind docking).
-    anchor_idx: list[np.ndarray] = []
-    anchor_up: list[np.ndarray] = []
-    anchor_lo: list[np.ndarray] = []
-    if guidance and float(args.anchor_slack) > 0 and pocket is not None:
-        anchor_idx.append(pocket[0])
-        anchor_up.append(pocket[1])
-        anchor_lo.append(pocket[2])
-    if guidance and staged_bond_pairs:
-        bond_band = _bond_pairs_as_rows(
-            info, staged_bond_pairs,
-            staged_to_auto=(
-                {name: chr(ord("A") + i)
-                 for i, name in enumerate(entity_chain_names)}
-            ),
-            lower=1.75, upper=2.05,
-        )
-        if bond_band is not None:
-            anchor_idx.append(bond_band[0])
-            anchor_up.append(bond_band[1])
-            anchor_lo.append(bond_band[2])
     # Physics bands for the free chains (peptide + linker), built on the
     # assembled atom table — the coordinates the sampler actually moves:
     #   - every intra-chain covalent bond as a tight rest-length band
@@ -552,41 +531,20 @@ def _run_peptide_engine(
         len(receptor_names),
         *((len(receptor_names) + 1,) if linker_entity is not None else ()),
     }
-    cov_bands = compute_covalent_bond_bands(
+    tfg_constraints = compute_free_chain_tfg_constraints(
         info, coords, mask, free_entities=free_entities)
-    clash = compute_clash_floor_pairs(
-        info, coords, mask, free_entities=free_entities)
-    if clash is not None:
-        anchor_idx.append(clash[0])
-        anchor_up.append(clash[1])
-        anchor_lo.append(clash[2])
-        log.info("clash floor pairs: %d receptor-free VDW bands", len(clash[1]))
-    if anchor_idx:
-        anchors = work_dir / "anchor_pairs.npz"
-        np.savez(
-            anchors,
-            pair_index=np.concatenate(anchor_idx, axis=0),
-            upper=np.concatenate(anchor_up, axis=0),
-            lower=np.concatenate(anchor_lo, axis=0),
-        )
-        os.environ["PROTENIX_ANCHOR_PAIRS_PATH"] = str(anchors)
-        log.info(
-            "hard anchor pairs: %d pocket + %d ring-bond + %d clash-floor",
-            len(pocket[0]) if (guidance and float(args.anchor_slack) > 0 and pocket is not None) else 0,
-            len(bond_band[0]) if (staged_bond_pairs and bond_band is not None) else 0,
-            len(clash[1]) if clash is not None else 0,
-        )
+    # Clash floors ride the TFG contact set: the official
+    # PairwiseDistancePotential enforces VDW lower bounds through its clash
+    # category on x0.
 
-    if cov_bands is not None:
-        cov_npz = work_dir / "covalent_bonds.npz"
-        np.savez(
-            cov_npz,
-            pair_index=cov_bands[0],
-            upper=cov_bands[1],
-            lower=cov_bands[2],
-        )
-        os.environ["PROTENIX_COVALENT_BONDS_PATH"] = str(cov_npz)
-        log.info("covalent bond bands: %d free-chain bonds", len(cov_bands[1]))
+    if tfg_constraints is not None:
+        tfg_npz = work_dir / "tfg_constraints.npz"
+        np.savez(tfg_npz, **tfg_constraints)
+        os.environ["PROTENIX_TFG_CONSTRAINTS_PATH"] = str(tfg_npz)
+        n_bond = int(tfg_constraints["pairwise_distance_is_bond"].sum())
+        n_angle = int(tfg_constraints["pairwise_distance_is_angle"].sum())
+        log.info("free-chain TFG constraints: %d bonds + %d angles",
+                 n_bond, n_angle)
 
     return input_json, {
         "coords": coords,

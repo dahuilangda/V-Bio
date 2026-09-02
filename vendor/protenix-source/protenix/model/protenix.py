@@ -60,8 +60,7 @@ def _load_p2d_side_channels():
         os.environ.get("PROTENIX_TFG_CONTACTS_PATH", ""),
         os.environ.get("PROTENIX_SCORE_ONLY", ""),
         os.environ.get("PROTENIX_PIN_MASK_PATH", ""),
-        os.environ.get("PROTENIX_ANCHOR_PAIRS_PATH", ""),
-        os.environ.get("PROTENIX_COVALENT_BONDS_PATH", ""),
+        os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", ""),
     )
     if cache is not None and cache[0] == key:
         return cache[1]
@@ -87,26 +86,6 @@ def _load_p2d_side_channels():
             )
             if pin.shape[0] == n_atom:
                 out["pin"] = pin
-                anchor_path = os.environ.get("PROTENIX_ANCHOR_PAIRS_PATH", "").strip()
-                if anchor_path and os.path.exists(anchor_path):
-                    a_blob = np.load(anchor_path, allow_pickle=False)
-                    a_idx = np.asarray(a_blob["pair_index"], dtype=np.int64)
-                    a_up = np.asarray(a_blob["upper"], dtype=np.float32)
-                    a_lo = (
-                        np.asarray(a_blob["lower"], dtype=np.float32)
-                        if "lower" in a_blob.files
-                        else np.zeros_like(a_up)
-                    )
-                    if a_idx.ndim == 2 and a_idx.shape[1] == 2 and a_idx.shape[0] == a_up.shape[0]:
-                        # producers write [M, 2]; the sampler consumes [2, M]
-                        out["anchor_index"] = a_idx.T.copy()
-                        out["anchor_upper"] = a_up
-                        out["anchor_lower"] = a_lo
-                    else:
-                        logger.warning(
-                            "protenix2dock anchor pairs malformed (pair_index "
-                            "must be [M,2] matching upper [M]); ignoring anchors."
-                        )
             else:
                 logger.warning(
                     f"protenix2dock pin mask N={pin.shape[0]} does not match "
@@ -122,29 +101,10 @@ def _load_p2d_side_channels():
             "index": np.asarray(blob["pair_index"], dtype=np.int64),
             "upper": np.asarray(blob["upper"], dtype=np.float32),
         }
-    cov_path = os.environ.get("PROTENIX_COVALENT_BONDS_PATH", "").strip()
-    if cov_path and os.path.exists(cov_path):
-        # Free-chain covalent bonds as hard bands: the pocket/clash
-        # projection corrects single atoms, so the bond bands ride the same
-        # sweep to distribute every correction through the bond network.
-        blob = np.load(cov_path, allow_pickle=False)
-        c_idx = np.asarray(blob["pair_index"], dtype=np.int64)
-        c_up = np.asarray(blob["upper"], dtype=np.float32)
-        c_lo = (
-            np.asarray(blob["lower"], dtype=np.float32)
-            if "lower" in blob.files
-            else np.zeros_like(c_up)
-        )
-        if c_idx.ndim == 2 and c_idx.shape[1] == 2 and c_idx.shape[0] == c_up.shape[0]:
-            # producers write [M, 2]; the sampler consumes [2, M]
-            out["cov_index"] = c_idx.T.copy()
-            out["cov_upper"] = c_up
-            out["cov_lower"] = c_lo
-        else:
-            logger.warning(
-                "protenix2dock covalent bonds malformed (pair_index must be "
-                "[M,2] matching upper [M]); ignoring covalent bands."
-            )
+    tfg_const_path = os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", "").strip()
+    if tfg_const_path and os.path.exists(tfg_const_path):
+        blob = np.load(tfg_const_path, allow_pickle=False)
+        out["tfg_constraints"] = {k: blob[k] for k in blob.files}
     _load_p2d_side_channels._cache = (key, out)
     return out
 
@@ -158,88 +118,6 @@ def _p2d_tensor(p2d: dict[str, Any], key: str) -> Any:
     return torch.from_numpy(np.asarray(p2d[key]))
 
 
-def _build_chiral_quads(input_feature_dict, init_coords, pin):
-    """Backbone chirality guard inputs from the model's own input features.
-
-    Groups atoms into residues via atom_to_token_idx (one token per residue
-    for polymers), decodes atom names from ref_atom_name_chars (ord(c)-32
-    one-hot), and records (N, CA, C, CB) index quads with the DESIGNED
-    chirality sign computed from the init coordinates. Residues anchored on
-    pinned (receptor) atoms are excluded — they never move. A residue
-    without usable init geometry (zero rows) takes the L (+1) design
-    contract instead of being skipped. Returns
-    ([4, M] int64 tensor, [M] float32 tensor) or (None, None).
-    """
-    import torch
-
-    if init_coords is None:
-        return None, None
-    _raw = (
-        init_coords.detach().cpu().float().numpy()
-        if hasattr(init_coords, "detach")
-        else init_coords
-    )
-    coords = np.asarray(_raw, dtype=np.float32)
-    if coords.ndim == 3:
-        # per-sample ensemble start; the pinned/free split and the designed
-        # chirality are identical across samples by contract
-        coords = coords[0]
-    pin_col = (
-        np.asarray(
-            pin.detach().cpu().float().numpy()
-            if hasattr(pin, "detach")
-            else pin,
-            dtype=np.float32,
-        )
-        if pin is not None
-        else np.zeros(coords.shape[0], dtype=np.float32)
-    )
-    a2t = input_feature_dict["atom_to_token_idx"]
-    if a2t.dim() >= 2:
-        a2t = a2t[0] if a2t.shape[0] == 1 else a2t.argmax(dim=-1)
-    token_of = np.asarray(a2t.detach().cpu().long().numpy()).flatten()
-
-    chars = input_feature_dict["ref_atom_name_chars"]
-    if chars.dim() >= 3:
-        chars = chars[0] if chars.shape[0] == 1 else chars
-    codes = chars.detach().cpu().argmax(dim=-1).numpy()  # [N_atom, 4]
-    names = []
-    for row in codes:
-        name = "".join(chr(int(c) + 32) for c in row).strip()
-        names.append(name)
-
-    groups: dict[int, dict[str, int]] = {}
-    for i, name in enumerate(names):
-        groups.setdefault(int(token_of[i]), {})[name] = i
-
-    quads: list[list[int]] = []
-    signs: list[float] = []
-    for _, atoms in groups.items():
-        needed = ("N", "CA", "C", "CB")
-        if not all(nm in atoms for nm in needed):
-            continue
-        i_n, i_ca, i_c, i_cb = (atoms[nm] for nm in needed)
-        if pin_col[i_ca] > 0.5:
-            continue
-        n = coords[i_n] - coords[i_ca]
-        c = coords[i_c] - coords[i_ca]
-        cb = coords[i_cb] - coords[i_ca]
-        vol = float(np.dot(np.cross(n, c), cb))
-        if abs(vol) < 1e-3:
-            # no usable init geometry (unmatched residue -> zero rows): the
-            # design contract for free protein residues is L (+) in the
-            # staged frame — enforce it instead of leaving the residue
-            # unguarded (a silently skipped residue ends diffusion with
-            # arbitrary stereochemistry)
-            vol = 1.0
-        quads.append([i_n, i_ca, i_c, i_cb])
-        signs.append(1.0 if vol > 0 else -1.0)
-    if not quads:
-        return None, None
-    return (
-        torch.tensor(quads, dtype=torch.long).T.contiguous(),
-        torch.tensor(signs, dtype=torch.float32),
-    )
 from protenix.model.modules.primitives import LinearNoBias
 from protenix.model.triangular.layers import LayerNorm
 from protenix.model.utils import simple_merge_dict_list
@@ -924,41 +802,32 @@ class Protenix(nn.Module):
         # VDW clamps and angles-then-bonds projection ordering to the x0
         # prediction of every guided step, keeping the denoiser's
         # clean-structure estimate chemically valid.
-        if (
-            p2d.get("cov_index") is not None
-            and "pairwise_distance_index" in input_feature_dict
-        ):
-            cov_idx = _p2d_tensor(p2d, "cov_index").to(s_inputs.device)
-            cov_up = _p2d_tensor(p2d, "cov_upper").to(s_inputs.device)
-            cov_lo = _p2d_tensor(p2d, "cov_lower").to(s_inputs.device)
-            input_feature_dict["pairwise_distance_index"] = torch.cat(
-                [input_feature_dict["pairwise_distance_index"], cov_idx], dim=-1
-            )
-            input_feature_dict["pairwise_distance_upper_bound"] = torch.cat(
-                [input_feature_dict["pairwise_distance_upper_bound"], cov_up],
-                dim=-1,
-            )
-            input_feature_dict["pairwise_distance_lower_bound"] = torch.cat(
-                [input_feature_dict["pairwise_distance_lower_bound"], cov_lo],
-                dim=-1,
-            )
-            input_feature_dict["pairwise_distance_is_bond"] = torch.cat(
-                [
-                    input_feature_dict["pairwise_distance_is_bond"],
-                    torch.ones_like(cov_up),
-                ],
-                dim=-1,
-            )
-            input_feature_dict["pairwise_distance_is_angle"] = torch.cat(
-                [
-                    input_feature_dict["pairwise_distance_is_angle"],
-                    torch.zeros_like(cov_up),
-                ],
-                dim=-1,
-            )
+        constraints = p2d.get("tfg_constraints")
+        if constraints and "pairwise_distance_index" in input_feature_dict:
+            n = constraints["pairwise_distance_index"].shape[1] \
+                if constraints["pairwise_distance_index"].ndim == 2 \
+                else constraints["pairwise_distance_index"].shape[0]
+            for feat, key in (
+                ("pairwise_distance_index", "pairwise_distance_index"),
+                ("pairwise_distance_upper_bound", "pairwise_distance_upper_bound"),
+                ("pairwise_distance_lower_bound", "pairwise_distance_lower_bound"),
+                ("pairwise_distance_is_bond", "pairwise_distance_is_bond"),
+                ("pairwise_distance_is_angle", "pairwise_distance_is_angle"),
+            ):
+                incoming = torch.from_numpy(
+                    np.asarray(constraints[key])
+                ).to(s_inputs.device)
+                if feat == "pairwise_distance_index" and incoming.shape[0] != 2:
+                    incoming = incoming.T
+                if feat != "pairwise_distance_index" and incoming.ndim > 1:
+                    incoming = incoming.flatten()
+                input_feature_dict[feat] = torch.cat(
+                    [input_feature_dict[feat], incoming], dim=-1)
+            n_bond = int(np.asarray(constraints["pairwise_distance_is_bond"]).sum())
+            n_angle = int(np.asarray(constraints["pairwise_distance_is_angle"]).sum())
             logger.info(
-                f"protenix2dock: injected {cov_idx.shape[1]} free-chain covalent "
-                "bond pairs into TFG (is_bond)."
+                f"protenix2dock: injected {n_bond} bond + {n_angle} angle "
+                "constraints into TFG."
             )
         if p2d.get("score_only") and p2d_coords is not None:
             # Score mode: skip diffusion entirely and evaluate the confidence
@@ -1001,21 +870,6 @@ class Protenix(nn.Module):
                     if p2d_coords is not None and "pin" in p2d
                     else None
                 ),
-                anchor_index=(
-                    _p2d_tensor(p2d, "anchor_index").to(s_inputs.device)
-                    if p2d.get("anchor_index") is not None
-                    else None
-                ),
-                anchor_upper=(
-                    _p2d_tensor(p2d, "anchor_upper").to(s_inputs.device)
-                    if p2d.get("anchor_upper") is not None
-                    else None
-                ),
-                anchor_lower=(
-                    _p2d_tensor(p2d, "anchor_lower").to(s_inputs.device)
-                    if p2d.get("anchor_lower") is not None
-                    else None
-                ),
                 # Free-chain covalent bonds as their OWN projection family:
                 # the generator projects them AFTER the pocket/clash bands
                 # each step (official angle->bond ordering in
@@ -1023,29 +877,7 @@ class Protenix(nn.Module):
                 # geometry wins the negotiation. Independent of the anchor
                 # npz — blind/no-guidance runs keep them (chemistry, not
                 # guidance).
-                bond_index=(
-                    _p2d_tensor(p2d, "cov_index").to(s_inputs.device)
-                    if p2d.get("cov_index") is not None
-                    else None
-                ),
-                bond_upper=(
-                    _p2d_tensor(p2d, "cov_upper").to(s_inputs.device)
-                    if p2d.get("cov_upper") is not None
-                    else None
-                ),
-                bond_lower=(
-                    _p2d_tensor(p2d, "cov_lower").to(s_inputs.device)
-                    if p2d.get("cov_lower") is not None
-                    else None
-                ),
             )
-            if p2d_coords is not None:
-                quads, signs = _build_chiral_quads(
-                    input_feature_dict, p2d_coords, p2d.get("pin")
-                )
-                if quads is not None:
-                    sample_kwargs["chiral_quads"] = quads.to(s_inputs.device)
-                    sample_kwargs["chiral_sign"] = signs.to(s_inputs.device)
             pred_dict["coordinate"] = self.sample_diffusion(**sample_kwargs)
 
         step_diffusion = time.time()
