@@ -9,6 +9,7 @@ import { normalizePredictionBackend } from './projectDraftUtils';
 import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { useAuth } from '../../hooks/useAuth';
+import { InfoTip } from '../../components/common/InfoTip';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
 type BicyclicLinkerType = 'SEZ' | '29N' | 'BS3';
@@ -988,20 +989,25 @@ export function WorkflowRuntimeSettingsSection({
                     />
                   </div>
                 </label>
-                <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
-                  <input
-                    type="checkbox"
-                    checked={peptideUseInitialSequence}
-                    onChange={(e) => onPeptideUseInitialSequenceChange(e.target.checked)}
-                    disabled={!canEdit}
-                  />
-                  <span>Seed first generation from reference sequence</span>
-                </label>
+                <div className="peptide-runtime-inline-row">
+                  <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
+                    <input
+                      type="checkbox"
+                      checked={peptideUseInitialSequence}
+                      onChange={(e) => onPeptideUseInitialSequenceChange(e.target.checked)}
+                      disabled={!canEdit}
+                    />
+                    <span>Seed from reference</span>
+                  </label>
+                  <InfoTip text="Use the reference sequence as the starting point for generation 1." align="start" />
+                </div>
                 <div className="peptide-residue-config">
                   <div className="peptide-residue-config-head">
                     <div className="peptide-residue-config-title">
-                      <strong>Residues used for design</strong>
-                      <span>Select the residues available for the next peptide generation.</span>
+                      <strong>
+                        Residues used for design
+                        <InfoTip text="Choose which residues the next generation may use." align="start" />
+                      </strong>
                     </div>
                     <span className="peptide-residue-selection-summary">
                       {selectedNaturalCount} natural / {selectedNonNaturalCount} non-natural selected
@@ -1009,12 +1015,10 @@ export function WorkflowRuntimeSettingsSection({
                   </div>
                   <div className="peptide-residue-usage">
                     <div className="peptide-residue-usage-copy">
-                      <strong>Non-natural residue count</strong>
-                      <span>
-                        {selectedNonNaturalCount === 0
-                          ? 'Select non-natural residues to enable this constraint.'
-                          : 'Set how many selected non-natural residues each designed peptide may contain.'}
-                      </span>
+                      <strong>
+                        Non-natural residue count
+                        <InfoTip text="Caps how many selected non-natural residues each designed peptide may contain." align="start" />
+                      </strong>
                     </div>
                     <div className="peptide-residue-usage-controls">
                       <label className="field peptide-residue-usage-field">
@@ -1178,7 +1182,7 @@ export function WorkflowRuntimeSettingsSection({
                         <input
                           value={customEditingCcd || generateCustomResidueCode(currentUserId, customDraftSmiles.trim())}
                           readOnly
-                          title="Auto-generated per user + residue (not editable). User CCDs override built-ins, so this only needs to be unique."
+                          title="Auto-generated per user + residue; must be unique."
                         />
                       </label>
                       <label className="field">
@@ -1383,12 +1387,12 @@ export function WorkflowRuntimeSettingsSection({
             {isBicyclicMode && (
               <section className="peptide-runtime-group peptide-runtime-group-bicyclic">
                 <div className="peptide-runtime-group-headline">
-                  <div className="peptide-runtime-group-head">Bicyclic Specific</div>
+                  <div className="peptide-runtime-group-head">
+                    Bicyclic Specific
+                    <InfoTip text="Linker and cysteine topology for bicyclic designs." align="start" />
+                  </div>
                   <span className="peptide-runtime-chip">Bicyclic</span>
                 </div>
-                <p className="muted small peptide-runtime-group-desc">
-                  Configure linker and cysteine topology for bicyclic peptide generation.
-                </p>
                 <div className="peptide-bicyclic-layout">
                   <div className="field peptide-linker-field peptide-linker-field-compact">
                     <span>Linker Type</span>

@@ -121,7 +121,6 @@ class PredictOracle:
         target,
         work_dir,
         backend: str = DEFAULT_BACKEND,
-        concurrency: int = 8,
         timeout_s: int = 7200,
         api_url: str | None = None,
         api_token: str | None = None,
@@ -139,7 +138,6 @@ class PredictOracle:
                 f"Supported: {', '.join(self.SUPPORTED_BACKENDS)}."
             )
         self.backend = normalized
-        self.concurrency = max(1, int(concurrency))
         self.timeout_s = int(timeout_s)
         self.base = (api_url or os.environ.get("VBIO_API_URL", "http://127.0.0.1:5000")).rstrip("/")
         self.token = api_token or os.environ.get("VBIO_API_TOKEN", "")
@@ -283,6 +281,12 @@ class PredictOracle:
 
     # ----------------------------------------------------------------- main
     def score_smiles(self, smiles_list, tag="batch") -> pd.DataFrame:
+        """Submit the whole batch, then poll until all results land.
+
+        No orchestrator-side concurrency cap: the runtime's shared GPU pool is
+        what schedules the submitted tasks, so every candidate is dispatched
+        immediately and freed GPUs are picked up as they release.
+        """
         import requests
 
         t0 = time.time()
@@ -291,24 +295,20 @@ class PredictOracle:
         rows: list = [None] * len(smiles_list)
 
         pending: dict[str, int] = {}
-        queue = list(enumerate(smiles_list))
-        while queue or pending:
+        for idx, smiles in enumerate(smiles_list):
+            task_id = self._submit(smiles, tag)
+            if task_id is None:
+                rows[idx] = {"smiles": smiles, "pose_method": "failed"}
+                continue
+            pending[task_id] = idx
+
+        while pending:
             if time.time() > deadline:
                 self.log(
                     f"[halo-oracle] batch {tag} exceeded timeout ({self.timeout_s}s); "
-                    f"{len(queue)} unscored, {len(pending)} in flight"
+                    f"{len(pending)} in flight"
                 )
                 break
-            while queue and len(pending) < self.concurrency:
-                idx, smiles = queue.pop(0)
-                task_id = self._submit(smiles, tag)
-                if task_id is None:
-                    rows[idx] = {"smiles": smiles, "pose_method": "failed"}
-                    continue
-                pending[task_id] = idx
-
-            if not pending:
-                continue
             time.sleep(10)
             for task_id in list(pending):
                 if time.time() > deadline:

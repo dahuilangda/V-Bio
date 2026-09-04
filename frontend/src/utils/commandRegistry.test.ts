@@ -13,10 +13,10 @@ function cmd(id: string, label: string, order: number, group = 'g', hint?: strin
 
 describe('filterCommands', () => {
   const commands = [
-    cmd('nav:projects', '项目列表', 10, '导航', 'projects home'),
-    cmd('nav:shares', '共享与令牌', 20, '导航', 'shares'),
-    cmd('action:new', '新建项目', 30, '操作', 'create prediction docking'),
-    cmd('recent:1', 'Docking 2026-08-17', 100, '最近项目', '最近项目 affinity'),
+    cmd('nav:projects', 'Projects', 10, 'Navigation', 'projects home'),
+    cmd('nav:shares', 'Sharing & tokens', 20, 'Navigation', 'shares'),
+    cmd('action:new', 'New project', 30, 'Actions', 'create prediction docking'),
+    cmd('recent:1', 'Docking 2026-08-17', 100, 'Recent projects', 'Recent project affinity'),
   ];
 
   it('empty query keeps the full list in declared order', () => {
@@ -25,8 +25,8 @@ describe('filterCommands', () => {
     );
   });
 
-  it('fuzzy-matches labels (CJK subsequences included) and drops non-matches', () => {
-    expect(filterCommands(commands, '建项').map((c) => c.id)).toEqual(['action:new']);
+  it('fuzzy-matches label subsequences and drops non-matches', () => {
+    expect(filterCommands(commands, 'wproj').map((c) => c.id)).toEqual(['action:new']);
     expect(filterCommands(commands, 'dock').map((c) => c.id)).toContain('recent:1');
     expect(filterCommands(commands, 'zzz')).toEqual([]);
   });
@@ -44,11 +44,11 @@ describe('filterCommands', () => {
 describe('groupCommands', () => {
   it('merges same-name groups into their first bucket, preserving per-command order', () => {
     const grouped = groupCommands([
-      cmd('a', 'x', 1, '导航'),
-      cmd('b', 'x', 2, '操作'),
-      cmd('c', 'x', 3, '导航'),
+      cmd('a', 'x', 1, 'Navigation'),
+      cmd('b', 'x', 2, 'Actions'),
+      cmd('c', 'x', 3, 'Navigation'),
     ]);
-    expect(grouped.map((bucket) => bucket.group)).toEqual(['导航', '操作']);
+    expect(grouped.map((bucket) => bucket.group)).toEqual(['Navigation', 'Actions']);
     expect(grouped[0].commands.map((c) => c.id)).toEqual(['a', 'c']);
   });
 });

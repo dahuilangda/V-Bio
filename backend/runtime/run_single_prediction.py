@@ -2233,8 +2233,14 @@ def _run_boltz_ipsae_postprocess(
     postprocess_base: Path,
     results_dir: Path,
     yaml_data: Dict[str, Any],
+    explicit_ligand_chain: Optional[str] = None,
 ) -> List[Tuple[Path, str]]:
     requested_chain_ids = _extract_ligand_chain_ids_from_yaml_data(yaml_data)
+    # Same as the protenix side: peptide-design candidates declare their binder chain
+    # explicitly — without it the ligand-only YAML extraction skips interface scoring.
+    explicit_chain = str(explicit_ligand_chain or "").strip()
+    if explicit_chain and explicit_chain not in requested_chain_ids:
+        requested_chain_ids.insert(0, explicit_chain)
     model_entries: List[Dict[str, Any]] = []
     record_id: Optional[str] = None
 
@@ -2449,6 +2455,7 @@ def _run_protenix_ipsae_postprocess(
     yaml_data: Dict[str, Any],
     prep: ProtenixPreparation,
     protenix_output_dir: Path,
+    explicit_ligand_chain: Optional[str] = None,
 ) -> List[Tuple[Path, str]]:
     summary_candidates = list(protenix_output_dir.rglob("*_summary_confidence_sample_*.json"))
     if not summary_candidates:
@@ -2492,6 +2499,14 @@ def _run_protenix_ipsae_postprocess(
         yaml_data,
         alias_map=prep.chain_alias_map,
     )
+    # Peptide-design candidates carry no small-molecule ligand, so the YAML-based
+    # extraction finds nothing and interface scoring was silently skipped for every
+    # candidate (all rows shipped ligand_ipsae_max=None and the UI showed "IPSAE -").
+    # The design loop declares the binder chain explicitly; it resolves through the
+    # existing chain-exists branch (a polymer chain is a valid interface "ligand").
+    explicit_chain = str(explicit_ligand_chain or "").strip()
+    if explicit_chain and explicit_chain not in requested_chain_ids:
+        requested_chain_ids.insert(0, explicit_chain)
     annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
     if not annotations:
         _log_ipsae_ligand_annotation_skip("protenix", requested_chain_ids, structure_path)
@@ -3225,7 +3240,30 @@ def _merge_a3m_texts(first: str, second: str) -> str:
     return "".join(f"{h}\n{s}\n" for h, s in out)
 
 
-def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Optional[dict]:
+def _cancel_msa_ticket(ticket_id: str) -> None:
+    """Best-effort DELETE of an MSA ticket: the patched colabfold server kills the
+    search's processes and frees its GPU slot. Never raises — a plain (unpatched)
+    server answers 405 and we simply keep the old abandon behaviour."""
+    try:
+        requests.delete(f"{MSA_SERVER_URL}/ticket/{ticket_id}", timeout=15)
+    except requests.RequestException:
+        pass
+
+
+def _msa_search_concurrency() -> int:
+    """Concurrent MSA searches against the shared colabfold server. Policy: one
+    search per GPU (each envdb search pins a full card); default 4, override
+    with VBIO_MSA_SEARCH_CONCURRENCY."""
+    try:
+        value = int(os.environ.get("VBIO_MSA_SEARCH_CONCURRENCY", "4"))
+    except (TypeError, ValueError):
+        value = 4
+    return max(1, min(8, value))
+
+
+def request_msa_from_server(
+    sequence: str, timeout: Optional[int] = None, msa_mode: str = "auto",
+) -> Optional[dict]:
     """
     从 ColabFold MSA 服务器请求多序列比对
     
@@ -3249,7 +3287,14 @@ def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Opt
         # mode=env 启用宏基因组库搜索并在结果包里附带
         # bfd.mgnify30.metaeuk30.smag30.a3m；只取第一个 a3m（uniref）会
         # 丢掉整个宏基因组深度，下面下载时合并两份。
-        msa_mode = "env"
+        # 智能分层(auto): 长链(>=50aa, 蛋白)用 env — 良性成本;短链(肽)用
+        # uniref — env 的 CPU result2msa 阶段对短查询爆炸(实测 20aa 设计肽
+        # 30-60min vs 22aa 蛋白样序列 20s)。显式 env/uniref 可覆盖。
+        if msa_mode == "auto":
+            normalized = "".join(
+                aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A"
+                for aa in str(sequence or "").strip().upper())
+            msa_mode = "env" if len(normalized) >= 50 else "uniref"
         payload = {
             "q": sequence,
             "mode": msa_mode
@@ -3371,7 +3416,8 @@ def request_msa_from_server(sequence: str, timeout: Optional[int] = None) -> Opt
             # 等待一段时间再次检查
             time.sleep(10)
         
-        print(f"MSA 搜索超时 ({effective_timeout}秒)", file=sys.stderr)
+        print(f"MSA 搜索超时 ({effective_timeout}秒)，取消服务器任务以释放 GPU", file=sys.stderr)
+        _cancel_msa_ticket(ticket_id)
         return None
         
     except Exception as e:
@@ -4562,6 +4608,7 @@ def run_protenix_backend(
     task_id: Optional[str] = None,
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
     low_vram: bool = False,
+    ipsae_ligand_chain_id: Optional[str] = None,
 ) -> None:
     print("Using Protenix backend", file=sys.stderr)
     # Same normalization as the boltz path: pocket contacts arrive in author
@@ -4911,14 +4958,24 @@ def run_protenix_backend(
 
     extra_files: List[Tuple[Path, str]] = [(Path(protenix_log_path), "protenix/protenix_docker.log")]
     try:
-        extra_files.extend(
-            _run_protenix_ipsae_postprocess(
-                postprocess_base=protenix_results_root / "ipsae",
-                yaml_data=yaml_data,
-                prep=prep,
-                protenix_output_dir=Path(protenix_output_dir),
-            )
+        ipsae_entries = _run_protenix_ipsae_postprocess(
+            postprocess_base=protenix_results_root / "ipsae",
+            yaml_data=yaml_data,
+            prep=prep,
+            protenix_output_dir=Path(protenix_output_dir),
+            explicit_ligand_chain=ipsae_ligand_chain_id,
         )
+        extra_files.extend(ipsae_entries)
+        # Also mirror the IPSAE json outputs into the engine output dir: the output walker
+        # archives everything under protenix/output/**, which is where the peptide-design
+        # candidate parser scans (**/*.json) for ipsae_dom / ligand_ipsae_max. The flat
+        # archive-root copies below stay for the legacy result-archive consumers.
+        if ipsae_entries:
+            ipsae_mirror_dir = Path(protenix_output_dir) / "ipsae"
+            ipsae_mirror_dir.mkdir(parents=True, exist_ok=True)
+            for entry_path, _arcname in ipsae_entries:
+                if entry_path.suffix.lower() == ".json":
+                    shutil.copyfile(entry_path, ipsae_mirror_dir / entry_path.name)
     except Exception as err:
         print(f"[WARN] 运行 Protenix IPSAE 后处理失败: {err}", file=sys.stderr)
     extra_files.extend(
@@ -5669,6 +5726,7 @@ def _build_peptide_candidate_yaml(
     cys_positions: Optional[List[int]] = None,
     pocket_constraint: Optional[Dict[str, Any]] = None,
     binder_only: bool = False,
+    binder_msa: str = "empty",
 ) -> str:
     yaml_data = copy.deepcopy(base_yaml_data)
     if binder_only:
@@ -5688,7 +5746,11 @@ def _build_peptide_candidate_yaml(
         "protein": {
             "id": binder_chain_id,
             "sequence": binder_sequence,
-            "msa": "empty",
+            # Binder MSA policy (user directive: MSA everywhere): the orchestrator
+            # pre-fetches this candidate's MSA into the shared cache and passes the a3m
+            # path here (PROVIDED mode — the worker needs no server round trip). When the
+            # search fails for this one candidate, "empty" keeps the run alive.
+            "msa": binder_msa,
         }
     }
     if modifications:
@@ -5953,39 +6015,6 @@ def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
         pass
 
 
-def _detect_peptide_gpu_pool_capacity() -> Optional[int]:
-    try:
-        from gpu_manager import get_gpu_status as get_gpu_status_fn
-        status = get_gpu_status_fn()
-        if isinstance(status, dict):
-            available_count = int(status.get("available_count") or 0)
-            in_use_count = int(status.get("in_use_count") or 0)
-            total = available_count + in_use_count
-            if total > 0:
-                return total
-    except Exception:
-        pass
-    return None
-
-
-def _resolve_peptide_parallel_workers(
-    options: Dict[str, Any],
-    requested_gpu_ids: List[int],
-    population_size: int,
-) -> int:
-    del options  # Multi-worker parallelism is now derived from runtime GPU pool capacity.
-    upper_bound = min(max(1, population_size), 64)
-    if requested_gpu_ids:
-        return min(max(1, len(requested_gpu_ids)), upper_bound)
-
-    gpu_pool_capacity = _detect_peptide_gpu_pool_capacity()
-    if isinstance(gpu_pool_capacity, int) and gpu_pool_capacity > 0:
-        return min(max(1, gpu_pool_capacity), upper_bound)
-
-    # Fallback when pool metadata is temporarily unavailable.
-    return upper_bound
-
-
 def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, parent_task_id: str):
     from backend.core.celery_app import celery_app
 
@@ -6012,14 +6041,18 @@ def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, p
 
 def _execute_peptide_generation_jobs(
     jobs: List[Dict[str, Any]],
-    parallel_workers: int,
     queue_name: str,
     parent_task_id: str,
     progress_callback: Optional[Callable[[Dict[str, int]], None]] = None,
 ) -> List[Dict[str, Any]]:
+    """Dispatch every candidate job at once and drain their results.
+
+    No orchestrator-side concurrency window: the shared GPU pool plus the
+    worker's own concurrency are the only bounds, so freed GPUs are picked up
+    immediately no matter how pool occupancy shifted since dispatch.
+    """
     if not jobs:
         return []
-    worker_count = max(1, int(parallel_workers or 1))
     pending = list(jobs)
     running: List[Tuple[Any, Dict[str, Any]]] = []
     completed_jobs: List[Dict[str, Any]] = []
@@ -6027,7 +6060,7 @@ def _execute_peptide_generation_jobs(
     last_progress_signature: Optional[Tuple[int, int, int, int, int]] = None
 
     while pending or running:
-        while pending and len(running) < worker_count and first_error is None:
+        while pending and first_error is None:
             next_job = pending.pop(0)
             async_result = _submit_peptide_candidate_worker_job(
                 next_job,
@@ -6115,6 +6148,70 @@ def _execute_peptide_generation_jobs(
     return completed_jobs
 
 
+def _run_dpeptide_refine_stage(
+    stage_contexts: List[Dict[str, Any]],
+    parent_task_id: str,
+    finalize_context: Callable[[Dict[str, Any]], None],
+    poll_interval: float = 2.0,
+) -> None:
+    """Run the per-candidate GPU refine stage with all refines in flight.
+
+    Each context carries a ``dispatch`` callable (staging/placement already
+    done — dispatching only sends the celery task) or ``dispatch=None`` for
+    candidates that need no GPU refine. Historically the refine ran inline in
+    the collection loop — one ~4-5 min protenix2dock task at a time while
+    every other GPU in the pool sat idle for the whole generation (design
+    wall time ≈ candidates × refine). Every refine is now dispatched
+    immediately; the shared GPU pool plus worker concurrency schedule them,
+    and each candidate finalizes as soon as its own refine lands, so
+    per-candidate progress keeps updating.
+
+    A per-candidate refine failure rejects only that candidate (the task
+    still fails when NO candidate survives, enforced by the collection tail).
+    """
+    for ctx in stage_contexts:
+        if ctx.get("dispatch") is None:
+            finalize_context(ctx)
+
+    pending = [ctx for ctx in stage_contexts if ctx.get("dispatch") is not None]
+    running: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    while pending or running:
+        while pending:
+            ctx = pending.pop(0)
+            try:
+                async_result = ctx["dispatch"]()
+            except Exception as exc:  # noqa: BLE001 — reject this candidate only
+                ctx["refine_error"] = exc
+                finalize_context(ctx)
+                continue
+            _register_peptide_subtask(
+                parent_task_id=parent_task_id,
+                subtask_id=str(getattr(async_result, "id", "") or ""),
+            )
+            ctx["async_result"] = async_result
+            running[str(getattr(async_result, "id", "") or "")] = (async_result, ctx)
+
+        if not running:
+            break
+
+        finished: List[str] = []
+        for task_key, (async_result, ctx) in running.items():
+            state = str(getattr(async_result, "state", "") or "").upper()
+            if state in {"FAILURE", "REVOKED"}:
+                ctx["refine_error"] = RuntimeError(
+                    f"D-space refine task {getattr(async_result, 'id', '')} failed."
+                )
+                finished.append(task_key)
+            elif state == "SUCCESS":
+                finished.append(task_key)
+        if not finished:
+            time.sleep(max(0.2, poll_interval))
+            continue
+        for task_key in finished:
+            _async_result, ctx = running.pop(task_key)
+            finalize_context(ctx)
+
+
 def _dpeptide_target_sequence(base_yaml_data: Dict[str, Any], target_chain_id: str) -> str:
     """First (or requested) protein chain sequence from the design YAML."""
     target = (target_chain_id or "").strip()
@@ -6155,6 +6252,94 @@ def _dpeptide_uploaded_target_structure(predict_args: Dict[str, Any], out_dir: P
     return None
 
 
+def _binder_msa_assignment(binder_sequence: str) -> str:
+    """MSA for one designed binder, cache-first, HARD failure on miss.
+
+    Policy (2026-09-04, "MSA everywhere" + no-fallback): the env-database MSA
+    service returns usable alignments for designed peptides too, and the MSA
+    measurably improves results — a candidate without its MSA is not
+    equivalent and must not silently run degraded. A transport/search failure
+    raises; the generation prefetch propagates it and the design task fails
+    loudly instead of burning GPU hours on no-MSA conformers.
+    Returns the shared-cache a3m path.
+    """
+    sequence = str(binder_sequence or "").strip().upper()
+    if not sequence:
+        raise RuntimeError("binder MSA 预取收到空序列")
+    sequence_hash = get_sequence_hash(sequence)
+    # auto 分层与 input_prep.resolve_msa 一致: 短肽 uniref(秒级), 长链 env。
+    # 分层缓存文件名同样对齐(msa_<h>_<tier>.a3m), 两端共享同一份缓存。
+    normalized = "".join(
+        aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A"
+        for aa in sequence)
+    binder_tier = "env" if len(normalized) >= 50 else "uniref"
+    cache_dir = MSA_CACHE_CONFIG["cache_dir"]
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_name = (f"msa_{sequence_hash}.a3m" if binder_tier == "env"
+                  else f"msa_{sequence_hash}_{binder_tier}.a3m")
+    cached_msa_path = os.path.join(cache_dir, cache_name)
+    if MSA_CACHE_CONFIG["enable_cache"] and os.path.exists(cached_msa_path):
+        sanitize_a3m_file(cached_msa_path, context="binder 缓存原文件")
+        if _ensure_nonempty_a3m_file(cached_msa_path, sequence, context="binder 缓存校验", header="binder"):
+            return cached_msa_path
+    msa_timeout = MSA_SERVER_TIMEOUT_SECONDS if MSA_SERVER_TIMEOUT_SECONDS > 0 else 600
+    # Measured boundary (2026-09-04): the env-db CPU stages (result2msa) on a
+    # short designed peptide can run tens of minutes — the GPU prefilter is
+    # NOT the bottleneck. The auto tier (uniref for short binders) keeps the
+    # per-generation prefetch at seconds; env stays available for long chains.
+    binder_timeout = min(int(msa_timeout), 1800)
+    msa_result = request_msa_from_server(sequence, timeout=binder_timeout, msa_mode=binder_tier)
+    if not msa_result or not save_msa_result_to_file(msa_result, cached_msa_path):
+        raise RuntimeError(
+            f"binder MSA 搜索失败（{sequence[:12]}…, tier={binder_tier}）— "
+            "基础设施故障不降级;请检查 MSA 服务健康状态")
+    if not _ensure_nonempty_a3m_file(cached_msa_path, sequence, context="binder 下载写入", header="binder"):
+        raise RuntimeError(
+            f"binder MSA 写入校验失败（{sequence[:12]}…）— 硬失败,不降级")
+    print(f"binder MSA 就绪: {os.path.basename(cached_msa_path)} (tier={binder_tier})", file=sys.stderr)
+    return cached_msa_path
+
+
+def _prefetch_generation_binder_msas(
+    sequences: List[str],
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> Dict[str, str]:
+    """Binder MSAs for one generation, deduped and fetched concurrently.
+
+    Serial per-candidate prefetch would stack population_size MSA searches of
+    pure wall time onto every generation; the searches are HTTP-bound, so a
+    small thread pool overlaps them (cache hits return instantly — elites and
+    repeated proposals dominate later generations). ``on_progress(done, total)``
+    fires after each search lands so the task status can show the prefetch
+    instead of a silent multi-minute stall before the first candidates.
+    """
+    unique = list(dict.fromkeys(str(s or "").strip().upper() for s in sequences if str(s or "").strip()))
+    if not unique:
+        return {}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    max_workers = max(1, min(_msa_search_concurrency(), len(unique)))
+    t0 = time.time()
+    assignments: Dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_binder_msa_assignment, sequence): sequence for sequence in unique}
+        done_count = 0
+        for future in as_completed(futures):
+            sequence = futures[future]
+            assignments[sequence] = future.result()
+            done_count += 1
+            if callable(on_progress):
+                try:
+                    on_progress(done_count, len(unique))
+                except Exception:  # noqa: BLE001
+                    pass
+    print(
+        f"binder MSA 预取完成: {len(assignments)}/{len(assignments)} 就绪（{time.time() - t0:.1f}s）",
+        file=sys.stderr,
+    )
+    return assignments
+
+
 def _dpeptide_predict_target_structure(
     sequence: str,
     backend: str,
@@ -6187,15 +6372,6 @@ def _dpeptide_predict_target_structure(
     )
     import uuid as _uuid
 
-    sub_task_id = f"dpeptide-target-{_uuid.uuid4().hex[:12]}"
-    worker_temp = Path(os.environ.get(
-        "WORKER_SHARED_TMP_ROOT",
-        str(Path(os.environ.get("RESULTS_BASE_DIR", "/data/boltz_central_results")) / "_runtime_tmp"),
-    ))
-    task_temp_dir = worker_temp / f"predict_{sub_task_id}"
-    out_pred = task_temp_dir / "predict_out"
-    task_temp_dir.mkdir(parents=True, exist_ok=True)
-
     from backend.worker.tasks import predict_task  # same entry used by routes
 
     async_result = predict_task.apply_async(
@@ -6217,9 +6393,15 @@ def _dpeptide_predict_target_structure(
         str(getattr(__import__("backend.core.config", fromlist=["RESULTS_BASE_DIR"]),
                     "RESULTS_BASE_DIR", "/data/boltz_central_results")),
     ))
+    # The dispatched predict_task writes engine outputs under
+    # <results_base>/<engine_cap>/<CELERY task id>/ (see _resolve_backend_results_root,
+    # which keys on the runtime task id == the celery id), and the worker uploads its
+    # archive flat to <results_base>/<CELERY task id>_results.zip (upload_result saves
+    # under UPLOAD_FOLDER, no engine subfolder). Poll exactly those two layouts — the
+    # historical sub_task_id-keyed root never existed, so a sequence-only D-peptide
+    # target prediction spun here until the 1-hour deadline and failed the task.
     result_roots = [
-        results_base / engine_cap / sub_task_id,
-        task_temp_dir,
+        results_base / engine_cap / str(async_result.id),
     ]
 
     deadline = time.time() + 3600
@@ -6248,10 +6430,9 @@ def _dpeptide_predict_target_structure(
                 cifs.extend(c for c in root.rglob("*.cif") if cif_pat.search(str(c)))
         if cifs:
             return max(cifs, key=lambda p: p.stat().st_mtime)
-        # Results may exist only as the uploaded zip (<celery_id>_results.zip);
-        # read straight from it instead of waiting on an unpack step.
-        engine_cap = "protenix" if str(backend).startswith("protenix") else "boltz2"
-        zip_candidate = results_base / engine_cap / f"{async_result.id}_results.zip"
+        # Results may exist only as the uploaded zip (<celery_id>_results.zip at the
+        # results root); read straight from it instead of waiting on an unpack step.
+        zip_candidate = results_base / f"{async_result.id}_results.zip"
         if zip_candidate.is_file():
             extracted = _extract_first_cif(zip_candidate)
             if extracted is not None:
@@ -6487,18 +6668,26 @@ def _dpeptide_pick_clash_free_placement(
     pocket_center: np.ndarray,
     seed: int,
     pocket_coords: Optional[np.ndarray] = None,
+    bond_pairs: Optional[list[tuple[int, int]]] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Rigid placement search for a staged binder around the user pocket.
 
-    Deterministic rotations x radial offsets along the outward normal, scored
-    by (clashes <2.2 A against the receptor, floating penalty, centroid gap).
-    The floating penalty drives the nearest free atom to a ~3.2-4.2 A contact
-    with the pocket residues' own atoms — the pocket residue list may be a
-    consecutive stretch whose CA centroid sits inside the protein, so the
-    binder must hug the residue patch from the surface, not park its centroid
-    on the CA mean (which buries it, measured 0.3 A min distance) nor float
-    12 A off (which leaves the refine's 8 A pocket conditioning nothing to
-    anchor to)."""
+    Multiple random rotation axes x full turn per axis x radial offsets along
+    the outward normal, scored by (clashes <2.2 A against the receptor,
+    floating penalty, centroid gap). The floating penalty drives the nearest
+    free atom to a ~3.2-4.2 A contact with the pocket residues' own atoms —
+    the pocket residue list may be a consecutive stretch whose CA centroid
+    sits inside the protein, so the binder must hug the residue patch from
+    the surface, not park its centroid on the CA mean (which buries it,
+    measured 0.3 A min distance) nor float 12 A off (which leaves the
+    refine's 8 A pocket conditioning nothing to anchor to).
+
+    A single-axis rotation family (the original 24-trial search) cannot
+    cover orientation space: on buried pockets every trial overlapped and
+    the least-bad pose still entered the sampler 0.2 A deep (measured on the
+    2026-09-04 MDM2 runs: 95 <2 A clashes in staged, chirality inversions
+    in every refined sample). The search now covers many axes; callers
+    hard-fail when no zero-clash pose exists (see staging self-check)."""
     rng = np.random.default_rng(seed)
     free_c = free_coords.mean(axis=0)
     rec_c = receptor_coords.mean(axis=0)
@@ -6506,36 +6695,55 @@ def _dpeptide_pick_clash_free_placement(
     norm = np.linalg.norm(outward)
     outward = outward / norm if norm > 1e-6 else np.array([0.0, 0.0, 1.0])
     anchor_coords = pocket_coords if pocket_coords is not None else receptor_coords
+    # KD-tree free collision query: the O(n*m) distance matrix at 24x7=168
+    # poses was fine; 16 axes x 24 angles x 9 offsets = 3456 poses needs it.
+    from scipy.spatial import cKDTree
+
+    rec_tree = cKDTree(receptor_coords)
+    anchor_tree = cKDTree(anchor_coords)
     best = None
-    for trial in range(24):
+    n_axes, n_angles = 16, 24
+    for axis_i in range(n_axes):
         axis = rng.normal(size=3)
         axis /= np.linalg.norm(axis)
-        theta = 2 * np.pi * trial / 24
         K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
-        R = np.eye(3) + math.sin(theta) * K + (1 - math.cos(theta)) * (K @ K)
-        for offset in (0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0):
-            shift_v = pocket_center + outward * offset - R @ free_c
-            moved = (R @ free_coords.T).T + shift_v
-            d2 = ((moved[:, None, :] - receptor_coords[None, :, :]) ** 2).sum(-1)
-            clashes = int((d2 < 4.84).sum())  # <2.2 A
-            # NOTE on the placement scoring policy: a penetration-first term
-            # (surface poses, min distance >= 2.8 A) eliminates residual
-            # clashes but forces a large folding excursion in the refine;
-            # candidate-dependent projections then deform the peptide (CA-CB
-            # up to 32 A, integrity-gate-rejected) or it drifts off-pocket.
-            # Clash-count-first with the ~3.7 A contact target is the
-            # validated combination (full e2e SUCCESS with all gates green).
-            anchor_d = np.sqrt(((moved[:, None, :] - anchor_coords[None, :, :]) ** 2).sum(-1)).min()
-            floating = abs(float(anchor_d) - 3.7)
-            centroid_gap = float(np.linalg.norm(moved.mean(axis=0) - pocket_center))
-            key = (clashes, round(floating, 1), centroid_gap)
-            if best is None or key < best[0]:
-                best = (key, R, shift_v)
+        for angle_i in range(n_angles):
+            theta = 2 * np.pi * angle_i / n_angles
+            R = np.eye(3) + math.sin(theta) * K + (1 - math.cos(theta)) * (K @ K)
+            rot_free = (R @ free_coords.T).T
+            for offset in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0):
+                moved = rot_free + (pocket_center + outward * offset - R @ free_c)
+                clashes = int(rec_tree.query_ball_point(
+                    moved, 2.2, return_length=True).sum())
+                # NOTE on the placement scoring policy: a penetration-first
+                # term (surface poses, min distance >= 2.8 A) eliminates
+                # residual clashes but forces a large folding excursion in
+                # the refine; candidate-dependent projections then deform the
+                # peptide (CA-CB up to 32 A, integrity-gate-rejected) or it
+                # drifts off-pocket. Clash-count-first with the ~3.7 A
+                # contact target is the validated combination (full e2e
+                # SUCCESS with all gates green).
+                anchor_d = float(anchor_tree.query(moved, k=1)[0].min())
+                floating = abs(anchor_d - 3.7)
+                centroid_gap = float(np.linalg.norm(moved.mean(axis=0) - pocket_center))
+                # Bicyclic chemistry: the linker anchors ride along rigidly
+                # with the peptide; a pose that parks an anchor 10 A from its
+                # Cys-SG cannot be rescued by the post-placement strain relief
+                # (measured 3.37 A residual). Penalise deviation from the
+                # ~2.0 A bond distance directly in the search.
+                bond_penalty = 0.0
+                if bond_pairs:
+                    for ia, ib in bond_pairs:
+                        bond_penalty += abs(float(
+                            np.linalg.norm(moved[ia] - moved[ib]) - 2.0))
+                key = (clashes, round(bond_penalty, 1), round(floating, 1),
+                       centroid_gap)
+                if best is None or key < best[0]:
+                    best = (key, R, pocket_center + outward * offset - R @ free_c)
     # callers apply v = R @ (x - c) + c + shift, so return the shift in that
     # convention (the scored pose used R @ x + shift_v; see emit sites)
     R_best, s_scored = best[1], best[2]
-    shift_emit = s_scored - free_c + R_best @ free_c
-    return R_best, shift_emit
+    return R_best, s_scored - free_c + R_best @ free_c
 
 
 def _dpeptide_kabsch_rotation(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -6697,6 +6905,33 @@ def _relax_staged_bicyclic_strain(
         print(f"[d-peptide] linker neighbor bonds unavailable: {exc}",
               file=sys.stderr)
 
+    # Receptor steric guard: the bond projections below can shove peptide
+    # or linker atoms into the receptor wall (measured on the bs3 fixture:
+    # a 2.00 A contact after relief). Every sweep, push any free heavy atom
+    # closer than 2.3 A to a receptor atom back out along the contact
+    # normal; the bond projections and this guard converge jointly.
+    from scipy.spatial import cKDTree as _RelaxKD
+    rec_pts = np.array([
+        [a.pos.x, a.pos.y, a.pos.z]
+        for r in polymer[0] for a in r if a.element != gemmi.Element("H")])
+    rec_tree = _RelaxKD(rec_pts)
+
+    def _steric_guard() -> float:
+        worst = 0.0
+        for group in (pep, [linker_res]):
+            for residue in group:
+                for atom in _residue_atoms(residue):
+                    v = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
+                    d, j = rec_tree.query(v, k=1)
+                    if d >= 2.3:
+                        continue
+                    worst = max(worst, 2.3 - float(d))
+                    u = v - rec_pts[j]
+                    n = np.linalg.norm(u)
+                    u = u / n if n > 1e-8 else np.array([0.0, 0.0, 1.0])
+                    atom.pos = gemmi.Position(*(rec_pts[j] + 2.3 * u))
+        return worst
+
     # iterative bond relaxation: the SG absorbs the correction, its residue
     # follows at 30% (flexible propagation so the residue is not torn apart),
     # the linker anchor keeps its CCD geometry
@@ -6743,6 +6978,7 @@ def _relax_staged_bicyclic_strain(
             half = np.clip(0.5 * viol, -0.25, 0.25)
             aa.pos = gemmi.Position(*(pa + half * u))
             ab.pos = gemmi.Position(*(pb - half * u))
+        _steric_guard()
         if max_v < 5e-3:
             break
 
@@ -6761,6 +6997,9 @@ def _relax_staged_bicyclic_strain(
         direction = (v_cb - v_ca) / max(d, 1e-8)
         cb.pos = gemmi.Position(*(v_ca + 1.53 * direction))
         fixed_cb += 1
+    # the renormalisation above can push CBs back into the receptor wall;
+    # final guard so the written pose honours the staging contract
+    _steric_guard()
 
     st.setup_entities()
     st.write_pdb(str(staged_path))
@@ -6936,6 +7175,7 @@ def _dpeptide_stage_conformer_in_pocket(
     seed: int,
     linker_ccd: str = "SEZ",
     reference_peptide_path: Optional[Path] = None,
+    pose_matters: bool = True,
 ) -> Path:
     """Stage the design-space complex: pinned D-target + placed L-conformer.
 
@@ -6966,13 +7206,24 @@ def _dpeptide_stage_conformer_in_pocket(
         for atom in residue:
             if atom.element != gemmi.Element("H"):
                 pocket_atoms.append([atom.pos.x, atom.pos.y, atom.pos.z])
+    has_reference = (
+        reference_peptide_path is not None
+        and os.path.isfile(str(reference_peptide_path)))
     if pocket_sequence_contacts and not pocket_pts:
         raise ValueError(
             "pocket residues "
             + ",".join(f"{c}:{n}" for c, n in pocket_sequence_contacts)
             + " not found on the mirrored D-target")
-    center = (np.mean(np.array(pocket_pts), axis=0) if pocket_pts
-              else rec_atoms.mean(axis=0))
+    if not pocket_pts and not has_reference and pose_matters:
+        # No silent centroid fallback when the pose feeds the sampler: without
+        # a pocket the binder gets buried at the receptor centroid (measured
+        # 0.16 A min distance on the 2026-09-04 MDM2 runs). pose_matters=False
+        # (blind inpainting route) discards the peptide start entirely — the
+        # engine re-noises those rows — so any placement is acceptable.
+        raise ValueError(
+            "D-肽 staging 需要口袋定义(残基或中心)或参考肽结构;无口袋时不存在"
+            "合法摆位。线性盲对接模式不需要口袋。")
+    center = np.mean(np.array(pocket_pts), axis=0) if pocket_pts else rec_atoms.mean(axis=0)
 
     conf_chains = sorted(
         (c for c in conf[0]
@@ -7017,9 +7268,37 @@ def _dpeptide_stage_conformer_in_pocket(
             free_center = free_atoms.mean(axis=0)
             shift = center - free_center
     else:
+        # bicyclic SG<->linker-anchor pairs as free-atom index pairs for the
+        # placement bond penalty (both chains transform rigidly together)
+        bond_pair_idx: list[tuple[int, int]] = []
+        if len(conf_chains) > 1 and any(
+                r.name in BICYCLIC_LINKER_ATOM_MAP for r in conf_chains[1]):
+            heavy_counts = [
+                sum(1 for r in c for a in r if a.element != gemmi.Element("H"))
+                for c in conf_chains]
+            pep_offsets = np.concatenate(([0], np.cumsum(heavy_counts)))[:-1]
+            pep_sg: list[int] = []            # peptide Cys-SG row indices, seq order
+            link_anchor: dict[str, int] = {}  # linker anchor atom name -> row idx
+            for ci, c in enumerate(conf_chains[:2]):
+                row = int(pep_offsets[ci])
+                for r in c:
+                    for a in r:
+                        if a.element == gemmi.Element("H"):
+                            continue
+                        if ci == 0 and a.name == "SG":
+                            pep_sg.append(row)
+                        if ci == 1:
+                            link_anchor[a.name] = row
+                        row += 1
+            anchors = BICYCLIC_LINKER_ATOM_MAP.get(conf_chains[1][0].name, ())
+            for k, anchor_name in enumerate(anchors):
+                li = link_anchor.get(anchor_name)
+                if li is not None and k < len(pep_sg):
+                    bond_pair_idx.append((pep_sg[k], li))
         rot, shift = _dpeptide_pick_clash_free_placement(
             free_atoms, rec_atoms, center, seed=seed,
-            pocket_coords=(np.array(pocket_atoms) if pocket_atoms else None))
+            pocket_coords=(np.array(pocket_atoms) if pocket_atoms else None),
+            bond_pairs=bond_pair_idx or None)
         free_center = free_atoms.mean(axis=0)
 
     lines: List[str] = []
@@ -7108,9 +7387,15 @@ def _dpeptide_stage_conformer_in_pocket(
             # the atom on the LINKER residue, so take the anchor half
             specs = []
             for pair in pairs.split(";"):
-                a2 = pair.split(",")[1]
-                _, resnum, atom = a2.strip().split(":")
-                specs.append((int(resnum), atom))
+                a1, a2 = pair.split(",")
+                # a1 = peptide side "B:<cys>:SG" (the residue to project),
+                # a2 = linker side "L:1:<anchor>" (the anchor atom). The old
+                # parser took a2's resnum — the linker residue is always 1,
+                # so EVERY anchor relaxed against Cys-1 (2026-09-04: staged
+                # ring bonds landed 3.4 A while two converged by accident).
+                _, cys_num, _ = a1.strip().split(":")
+                _, _, anchor = a2.strip().split(":")
+                specs.append((int(cys_num), anchor))
             _relax_staged_bicyclic_strain(
                 out_path, bond_specs=specs, linker_code=linker_name)
 
@@ -7120,6 +7405,33 @@ def _dpeptide_stage_conformer_in_pocket(
     if not {"A", "B"} <= set(names):
         raise RuntimeError(
             f"D-peptide staging: written PDB missing chains (got {names}).")
+
+    # Self-check hard gate: the staged pose ENTERS the diffusion sampler as
+    # the inpainting reference. A pose with inter-chain hard clashes is a
+    # garbage reference — measured on 2026-09-04, a 95-clash staged start
+    # flipped >50% of binder CA chiralities in every refined sample. The
+    # sampler must never receive a buried pose silently: zero <2.2 A pairs
+    # and at least one <6 A contact (anchored, not floating) or we fail.
+    # Skipped when pose_matters=False (blind route: peptide rows are
+    # re-noised; only the receptor + sequences feed the engine).
+    if pose_matters:
+        rec_atoms_chk = np.array([
+            [a.pos.x, a.pos.y, a.pos.z]
+            for r in check[0]["A"] for a in r if a.element.name != "H"])
+        pep_atoms_chk = np.array([
+            [a.pos.x, a.pos.y, a.pos.z]
+            for r in check[0]["B"] for a in r if a.element.name != "H"])
+        from scipy.spatial import cKDTree as _CKD
+        _tree = _CKD(rec_atoms_chk)
+        _nbr = _tree.query(pep_atoms_chk, k=1)[0]
+        _n_clash = int((_nbr < 2.2).sum())
+        _min_d = float(_nbr.min())
+        _anchored = bool((_nbr < 6.0).any())
+        if _n_clash > 0 or not _anchored:
+            raise RuntimeError(
+                f"D-peptide staging 自检失败: {_n_clash} 个受体-肽原子对 <2.2 A"
+                f"(最近 {_min_d:.2f} A), anchored={_anchored}。摆位搜索未能产生"
+                "无冲突的表面构型 — 拒绝将埋置构型送入精修(请检查口袋定义)。")
     return out_path
 
 
@@ -7178,22 +7490,16 @@ def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
     return ";".join(pairs)
 
 
-def _dpeptide_refine_and_validate(
-    staged_path: Path,
-    refined_cif: Path,
-    seed: int,
-    queue: str,
-    options: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Fixed-D-target diffusion refinement + confidence.
+def _dpeptide_dispatch_refine(
+    staged_path: Path, seed: int, queue: str, blind: bool = False,
+) -> Any:
+    """Dispatch one protenix2dock ``peptide`` refine task and return its
+    AsyncResult immediately (pair with :func:`_dpeptide_collect_refine`).
 
-    Dispatches one protenix2dock ``peptide`` task: the receptor is pinned to
-    the staged coordinates for every diffusion step (vendor inpainting side
-    channel), the peptide enters the input json as a proteinChain, and
-    bicyclic ring bonds (peptide SG <-> linker anchors) are carried both as
-    input.json covalent_bonds and as hard TFG contacts. The confidence head
-    scores the refined coordinates; the best sample (by ipTM) is copied to
-    refined_cif and its metrics returned.
+    The receptor is pinned to the staged coordinates for every diffusion step
+    (vendor inpainting side channel), the peptide enters the input json as a
+    proteinChain, and bicyclic ring bonds (peptide SG <-> linker anchors) are
+    carried both as input.json covalent_bonds and as hard TFG contacts.
     """
     from backend.core.celery_app import celery_app as _celery
 
@@ -7210,7 +7516,7 @@ def _dpeptide_refine_and_validate(
                         break
         except Exception:  # noqa: BLE001
             pass
-    async_result = _celery.send_task(
+    return _celery.send_task(
         "backend.worker.tasks.protenix2dock_task",
         kwargs={"score_args": {
             "mode": "peptide",
@@ -7230,9 +7536,110 @@ def _dpeptide_refine_and_validate(
             # the 8.0 default) and every candidate gets rejected.
             "pocket_upper": float(POCKET_CONTACT_MAX_A) + 1.0,
             "dpeptide_contract": True,
+            "blind_peptide": bool(blind),
         }},
         queue=queue,
     )
+
+
+def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
+    """Hard per-residue chirality gate on a REFINED mirror-space complex.
+
+    Mirror-space contract: receptor chain must be all-D, designed peptide
+    all-L (the product flip then yields L-target + D-peptide). The diffusion
+    sampler has no improper-dihedral term — under contradictory guidance it
+    inverts CA centres (measured 2026-09-04: 11-15 of 17 residues flipped on
+    buried starts). A mixed-chirality refined complex is a sampler failure:
+    reject the candidate loudly instead of shipping a product whose peptide
+    is part-L after the flip.
+    """
+    peplm_root = str(_resolve_capability_dir("peptide_lm"))
+    if peplm_root not in sys.path:
+        sys.path.insert(0, peplm_root)
+    from peplm.dpeptide import chirality_violations
+
+    st = gemmi.read_structure(str(refined_path))
+    st.setup_entities()
+    protein_chains = [
+        c for c in st[0]
+        if sum(1 for r in c if r.het_flag != "H") >= 3
+    ]
+    protein_chains.sort(key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+    if len(protein_chains) < 2:
+        raise RuntimeError(
+            f"精修产物缺少两条聚合链: {[c.name for c in st[0]]}")
+    receptor, peptide = protein_chains[0], protein_chains[1]
+    rec_bad = chirality_violations(st, receptor.name, "D")
+    pep_bad = chirality_violations(st, peptide.name, "L")
+    if rec_bad or pep_bad:
+        parts = []
+        if rec_bad:
+            parts.append(
+                f"受体链 {receptor.name} 应为 D, 违规 {len(rec_bad)}: "
+                + ",".join(f"{n}{r}" for n, r, _ in rec_bad[:6]))
+        if pep_bad:
+            parts.append(
+                f"肽链 {peptide.name} 应为 L, 违规 {len(pep_bad)}: "
+                + ",".join(f"{n}{r}" for n, r, _ in pep_bad[:6]))
+        raise RuntimeError(
+            "精修产物手性违规(镜像空间契约: 受体全D/肽全L) — " + "; ".join(parts))
+
+
+def _dpeptide_composite_from_refined(
+    *,
+    refined_ipsae: float,
+    binder_avg_plddt: float,
+    developability_score: float,
+    has_pocket: bool,
+) -> Dict[str, Any]:
+    """Ranking inputs recomputed from the REFINED D-space complex.
+
+    Interface objective is ipSAE (interface_score), matching the published
+    Mirror-Peptidizer BO fitness (0.6*ipsae_dom + 0.4*plddt - ...) and the
+    engine's own ipsae-favoring ranking weights — ipTM systematically
+    overrates strained/anchored poses (measured on the 2026-09-04 A/B: the
+    staged-local arm scored ipTM 0.82 while its poses were 10-21 A off and
+    chirality-broken; the blind arm's honest ipTM was 0.73 with 1.5-2.0 A
+    redock RMSD). Weights mirror the native interface branch: with a user
+    pocket the base sums to 0.68 so the refined-pocket rescore composes to
+    1.0; without a pocket the terms sum to 1.0. Pure function — unit tested.
+    """
+    interface_confidence = max(0.0, min(1.0, float(refined_ipsae)))
+    binder_confidence = (
+        max(0.0, min(1.0, float(binder_avg_plddt) / 100.0))
+        if float(binder_avg_plddt) > 0 else 0.0)
+    pair_iptm_confidence = interface_confidence
+    developability = max(0.0, min(1.0, float(developability_score)))
+    if has_pocket:
+        composite = (0.40 * interface_confidence + 0.15 * binder_confidence
+                     + 0.08 * pair_iptm_confidence + 0.05 * developability)
+    else:
+        composite = (0.58 * interface_confidence + 0.22 * binder_confidence
+                     + 0.12 * pair_iptm_confidence + 0.08 * developability)
+    return {
+        "interface_metric_value": float(refined_ipsae),
+        "interface_metric_label": "ipSAE",
+        "interface_metric_source": "d_space_refined_ipsae",
+        "interface_metric_kind": "ipsae",
+        "interface_confidence": interface_confidence,
+        "binder_confidence": binder_confidence,
+        "pair_iptm_confidence": pair_iptm_confidence,
+        "developability_score": developability,
+        "composite_score": float(composite),
+    }
+
+
+def _dpeptide_collect_refine(
+    async_result: Any,
+    staged_path: Path,
+    refined_cif: Path,
+) -> Dict[str, Any]:
+    """Wait for a dispatched refine task, then rank its diffusion samples.
+
+    The confidence head scores the refined coordinates; the best sample (by
+    ipTM, gated on covalent integrity + clash-freedom) is copied to
+    refined_cif and its metrics returned.
+    """
     task_tmp = Path("/data/boltz_central_results/_runtime_tmp") / \
         f"dpeptide_task_{async_result.id}"
     conf_path = task_tmp / "out" / "confidence.json"
@@ -7250,11 +7657,31 @@ def _dpeptide_refine_and_validate(
         if state in ("FAILURE", "REVOKED"):
             raise RuntimeError(f"D-space refine task {async_result.id} failed.")
         if time.time() > refine_deadline:
-            _celery.control.revoke(async_result.id, terminate=True)
+            _celery_revoke_quiet(async_result)
             raise RuntimeError("D-space refine timed out.")
         time.sleep(4.0)
 
     metrics = json.loads(conf_path.read_text())
+    # Interface objective is ipSAE (published Mirror-Peptidizer BO fitness
+    # uses ipsae_dom; the engine's own ranking weights default to ipsae too).
+    # The per-sample confidence jsons carry raw engine numbers only — the
+    # ipSAE metrics live in the task RESULT summary (best_by_interface),
+    # exactly the source Mirror-Peptidizer consumes. Hard-require them: a
+    # refine that produced no ipSAE is a broken refine, not a 0.
+    try:
+        _res = async_result.result
+        _best = (_res.get("best_by_interface") or _res.get("best") or {}) \
+            if isinstance(_res, dict) else {}
+        metrics["interface_score"] = _best.get("interface_score")
+        metrics["ipsae_dom"] = _best.get("ipsae_dom")
+        metrics["ligand_ipsae_max"] = _best.get("ligand_ipsae_max")
+        metrics["chain_iptm"] = _best.get("chain_iptm")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"D-space refine 结果缺少 ipSAE 读数 ({exc})") from exc
+    if not isinstance(metrics.get("interface_score"), (int, float)):
+        raise RuntimeError(
+            "D-space refine 结果未携带 ipSAE interface_score — 评分目标为 "
+            "ipSAE(非 ipTM),缺数即拒绝")
     # persist staged + refined samples for post-run audits (task tmp dirs are
     # auto-cleaned); keep under the TASK-scoped candidate dir — a shared
     # "cand_001" name let consecutive tasks overwrite each other's evidence
@@ -7318,6 +7745,33 @@ def _dpeptide_refine_and_validate(
     except Exception:  # noqa: BLE001
         metrics["chain_mean_plddt"] = {}
     return metrics
+
+
+def _celery_revoke_quiet(async_result: Any, *, terminate: bool = True) -> None:
+    """Best-effort revoke; a control-bus hiccup must not mask the real error."""
+    try:
+        from backend.core.celery_app import celery_app as _celery
+
+        _celery.control.revoke(async_result.id, terminate=terminate)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _dpeptide_refine_and_validate(
+    staged_path: Path,
+    refined_cif: Path,
+    seed: int,
+    queue: str,
+    options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Blocking dispatch+collect convenience wrapper around the split halves
+    (kept for call sites that refine one candidate at a time)."""
+    del options  # historical signature; the refine payload needs no options
+    return _dpeptide_collect_refine(
+        _dpeptide_dispatch_refine(staged_path, seed, queue),
+        staged_path,
+        refined_cif,
+    )
 
 
 def _chain_mean_plddt_from_structure(path: Path) -> Dict[str, float]:
@@ -7488,28 +7942,23 @@ def _pocket_contact_report(
 POCKET_CONTACT_MAX_A = 5.0
 
 
-def _pocket_place_and_refine(
+def _pocket_place_for_refine(
     staged_path: Path,
     *,
     pocket_sequence_contacts: List[Tuple[str, int]],
-    refined_cif: Path,
     seed: int,
-    options: Dict[str, Any],
     require_bonds: bool,
-    chirality_label: str,
     bicyclic_cys_positions: Optional[List[int]] = None,
     linker_ccd: str = "SEZ",
     keep_pose: bool = False,
-) -> Dict[str, Any]:
-    """Shared pocket mechanism for both chiralities (protenix-v2 has no
-    constraint embedder, so the pocket is honored geometrically): rigidly
+) -> None:
+    """CPU half of the pocket route (pairs with dispatch + collect): rigidly
     place the free chains (peptide+linker) at the user pocket on the staged
     receptor — skipped when keep_pose is set (the staged pose is already
-    anchored to a reference), refine under the fixed receptor with a
-    confinement box around that pose, then gate on pocket contact and
-    (bicyclic) ring bonds.
+    anchored to a reference) — and restore the covalent LINK topology that
+    gemmi's write_pdb drops, so the refine diffusion keeps the ring intact.
 
-    Raises ValueError when a gate fails; the caller rejects the candidate.
+    Raises ValueError when the pocket residues are not on the staged receptor.
     """
     # rigid placement at the pocket center (contacts already sequence-numbered
     # to match the staged PDB's 1..N polymer numbering)
@@ -7577,13 +8026,23 @@ def _pocket_place_and_refine(
         _append_staged_bicyclic_links(
             staged_path, bicyclic_cys_positions, linker_ccd)
 
-    metrics = _dpeptide_refine_and_validate(
-        staged_path,
-        refined_cif=refined_cif,
-        seed=seed,
-        queue=build_capability_queue("protenix", "default"),
-        options=options,
-    )
+
+def _pocket_collect_refine(
+    async_result: Any,
+    *,
+    staged_path: Path,
+    refined_cif: Path,
+    pocket_sequence_contacts: List[Tuple[str, int]],
+    require_bonds: bool,
+    chirality_label: str,
+) -> Dict[str, Any]:
+    """GPU-result half of the pocket route (pairs with
+    :func:`_pocket_place_for_refine` + dispatch): collect the dispatched
+    refine, then report on the shipped structure.
+
+    Raises ValueError when a gate fails; the caller rejects the candidate.
+    """
+    metrics = _dpeptide_collect_refine(async_result, staged_path, refined_cif)
     refined_path = str(refined_cif)
 
     # Quality TELEMETRY, not filtering: the staged strain relief upstream
@@ -7623,6 +8082,45 @@ def _pocket_place_and_refine(
         "integrity": integrity,
         "quality_flags": flags,
     }
+
+
+def _pocket_place_and_refine(
+    staged_path: Path,
+    *,
+    pocket_sequence_contacts: List[Tuple[str, int]],
+    refined_cif: Path,
+    seed: int,
+    options: Dict[str, Any],
+    require_bonds: bool,
+    chirality_label: str,
+    bicyclic_cys_positions: Optional[List[int]] = None,
+    linker_ccd: str = "SEZ",
+    keep_pose: bool = False,
+) -> Dict[str, Any]:
+    """Shared pocket mechanism for both chiralities — blocking place +
+    dispatch + collect convenience wrapper around the split halves (kept for
+    single-candidate call sites; the design loop uses the split halves so a
+    generation's refines overlap across the GPU pool)."""
+    del options  # historical signature; the refine payload needs no options
+    _pocket_place_for_refine(
+        staged_path,
+        pocket_sequence_contacts=pocket_sequence_contacts,
+        seed=seed,
+        require_bonds=require_bonds,
+        bicyclic_cys_positions=bicyclic_cys_positions,
+        linker_ccd=linker_ccd,
+        keep_pose=keep_pose,
+    )
+    return _pocket_collect_refine(
+        _dpeptide_dispatch_refine(
+            staged_path, seed, build_capability_queue("protenix", "default")
+        ),
+        staged_path=staged_path,
+        refined_cif=refined_cif,
+        pocket_sequence_contacts=pocket_sequence_contacts,
+        require_bonds=require_bonds,
+        chirality_label=chirality_label,
+    )
 
 
 def _pdb_link_line(
@@ -7825,23 +8323,28 @@ def _assert_product_chirality(
 
     rec_report = chirality_report(st, receptor_chain.name)
     pep_report = chirality_report(st, peptide_chain.name)
-    chirality_flags = []
+    from peplm.dpeptide import chirality_violations
+    # Product frame contract: receptor ALL-L, peptide ALL-D — per residue.
+    # The mean-volume check silently passed 11L/9D mixtures (the mean stays on
+    # the expected side); a mixed-chirality product is a failed product.
+    rec_bad = chirality_violations(st, receptor_chain.name, "L")
+    pep_bad = chirality_violations(st, peptide_chain.name, "D")
     if rec_report.n_scored <= 0 or pep_report.n_scored <= 0:
-        chirality_flags.append("no_scorable_ca")
-    if rec_report.mean_volume <= 0:
-        chirality_flags.append(
-            f"receptor_not_L({rec_report.mean_volume:+.3f})")
-    if pep_report.mean_volume >= 0:
-        chirality_flags.append(
-            f"peptide_not_D({pep_report.mean_volume:+.3f})")
-    if chirality_flags:
-        # telemetry, not rejection: the sampler's backbone chirality guard and
-        # the staged strain relief are the source-level fixes; a flag here is
-        # diagnostics for the report, the product still ships
-        print(
-            f"[d-peptide] product chirality flags: {chirality_flags}",
-            file=sys.stderr,
-        )
+        raise RuntimeError(
+            "D-peptide product gate: no scorable CA chiral volumes "
+            f"(receptor {rec_report.n_scored}, peptide {pep_report.n_scored})")
+    if rec_bad or pep_bad:
+        parts = []
+        if rec_bad:
+            parts.append(
+                f"receptor not all-L: {len(rec_bad)} violations ("
+                + ",".join(f"{n}{r}" for n, r, _ in rec_bad[:6]) + ")")
+        if pep_bad:
+            parts.append(
+                f"peptide not all-D: {len(pep_bad)} violations ("
+                + ",".join(f"{n}{r}" for n, r, _ in pep_bad[:6]) + ")")
+        raise RuntimeError(
+            "D-peptide product chirality gate FAILED — " + "; ".join(parts))
 
     rmsd = None
     if reference_structure_path is not None:
@@ -7882,7 +8385,8 @@ def _assert_product_chirality(
         "receptor_vs_input_rmsd": (float(rmsd) if rmsd is not None else None),
         "receptor_config": "L",
         "peptide_config": "D",
-        "chirality_flags": chirality_flags,
+        "receptor_violations": len(rec_bad),
+        "peptide_violations": len(pep_bad),
     }
 
 
@@ -8212,6 +8716,17 @@ def run_peptide_design_backend(
                 binder_length=binder_length)
     else:
         d_reference_peptide = None
+    blind_linear_route = (
+        peptide_chirality == 'd' and design_mode == "linear"
+        and d_reference_peptide is None)
+    if (peptide_chirality == 'd' and not pocket_sequence_contacts
+            and not blind_linear_route):
+        # 无口袋 D-肽此前静默退化到"靶点质心摆位"(2026-09-04 事故: staged 埋置
+        # 0.16 A,精修全面翻手性)。BICYCLIC/参考锚定模式必须有口袋或参考;
+        # 线性模式走盲 inpainting(受体钉住+肽从噪声,姿态由 MSA 先验产生,
+        # A/B 实测红dock RMSD 1.5-2.0 A),不需要口袋。
+        raise ValueError(
+            "D-肽设计(双环/参考锚定)必须提供口袋定义或上传初始肽结构。")
 
     def _peptide_runtime_timing(done_count: int) -> Dict[str, Any]:
         elapsed_seconds = max(0.0, time.time() - peptide_started_at)
@@ -8274,22 +8789,28 @@ def run_peptide_design_backend(
     runtime_predict_args.pop("peptideParallelGpus", None)
     if custom_molecules:
         runtime_predict_args["custom_ccd_molecules"] = custom_molecules
+    # Interface scoring (ipSAE) for candidates: the binder chain is the interface "ligand".
+    # Without it the ipsae postprocess looks for a small-molecule ligand chain in the
+    # candidate YAML, finds none, and every row ships ligand_ipsae_max=None.
+    if peptide_backend in ("protenix", "boltz"):
+        runtime_predict_args["ipsaeLigandChainId"] = binder_chain_id
 
     resolved_subtask_queue = str(subtask_queue or "").strip() or build_capability_queue(
         "boltz2" if peptide_backend == "boltz" else peptide_backend,
         "default",
     )
     peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
-    parallel_workers = _resolve_peptide_parallel_workers(options, peptide_gpu_ids, population_size)
     parent_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "peptide-design").strip() or "peptide-design"
+    # 候选子任务全量入队：共享 GPU 池 + worker 并发是唯一的并发边界，
+    # 不在编排侧做容量快照或窗口猜测。
     if peptide_gpu_ids:
         print(
-            f"Peptide design parallel workers: {parallel_workers} (requested_gpu_ids={peptide_gpu_ids})",
+            f"Peptide design candidate subtasks dispatch unbounded (requested_gpu_ids={peptide_gpu_ids})",
             file=sys.stderr,
         )
     else:
         print(
-            f"Peptide design parallel workers: {parallel_workers} (gpu pool auto-detected)",
+            "Peptide design candidate subtasks dispatch unbounded (GPU pool schedules them)",
             file=sys.stderr,
         )
     print(f"Peptide design subtask celery queue: {resolved_subtask_queue}", file=sys.stderr)
@@ -8356,6 +8877,36 @@ def run_peptide_design_backend(
         if not generation_candidates:
             break
 
+        # Binder MSA (user policy: MSA everywhere) — prefetch the generation's
+        # candidates concurrently before dispatch; per-candidate failure degrades
+        # to "empty" without touching the run. The prefetch is reported into the
+        # task status: without it the first minutes of every generation look
+        # like a dead stall ("老是不开始").
+        def _report_msa_prefetch(done: int, total: int) -> None:
+            _write_peptide_progress(
+                progress_path,
+                {
+                    "peptide_design": {
+                        "current_generation": generation,
+                        "total_generations": iterations,
+                        "completed_tasks": completed_tasks,
+                        "pending_tasks": max(0, total_tasks - completed_tasks),
+                        "total_tasks": total_tasks,
+                        "best_score": all_results[0].get("composite_score") if all_results else None,
+                        "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
+                        "current_status": f"Generation {generation}/{iterations}",
+                        "status_message": f"Generation {generation}: binder MSA 搜索中（{done}/{total}）",
+                        "current_best_sequences": _current_best_peptide_rows(),
+                        **_peptide_runtime_timing(completed_tasks),
+                    }
+                },
+            )
+
+        generation_binder_msa = _prefetch_generation_binder_msas(
+            [str(c.get("sequence") or "") for c in generation_candidates],
+            on_progress=_report_msa_prefetch,
+        )
+
         generation_jobs: List[Dict[str, Any]] = []
         generation_completed_base = completed_tasks
         for idx, candidate in enumerate(generation_candidates, start=1):
@@ -8391,6 +8942,7 @@ def run_peptide_design_backend(
                 cys_positions=candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else None,
                 pocket_constraint=candidate_pocket_constraint,
                 binder_only=(peptide_chirality == 'd'),
+                binder_msa=generation_binder_msa.get(candidate_sequence, "empty"),
             )
             archive_path = os.path.join(candidate_dir, "result.zip")
 
@@ -8456,7 +9008,6 @@ def run_peptide_design_backend(
         # collection loop below.
         completed_generation_jobs = _execute_peptide_generation_jobs(
             generation_jobs,
-            parallel_workers,
             resolved_subtask_queue,
             parent_task_id,
             progress_callback=_emit_generation_runtime_progress,
@@ -8465,6 +9016,302 @@ def run_peptide_design_backend(
             raise RuntimeError(f"Peptide generation {generation} completed with no candidate results.")
 
         generation_done = 0
+        # ==== Candidate finalize: runs as each candidate's refine lands ====
+        # (The GPU refine used to run inline in a strictly serial per-candidate
+        # loop — one ~4-5 min protenix2dock task at a time while every other
+        # GPU idled for the whole generation. The loop is now a two-stage
+        # pipeline: the prepare pass below stages/dispatches, and
+        # _run_dpeptide_refine_stage finalizes each candidate as its refine
+        # completes. Finalization order is completion order; all_results gets
+        # sorted on every append either way.)
+        def _finalize_candidate(ctx: Dict[str, Any]) -> None:
+            nonlocal completed_tasks, generation_done
+            if ctx.get("reject"):
+                print(ctx["reject"], file=sys.stderr)
+                return
+            job = ctx["job"]
+            candidate_sequence = ctx["candidate_sequence"]
+            candidate_modifications = ctx["candidate_modifications"]
+            metrics = ctx["metrics"]
+            pair_iptm_target_binder = ctx["pair_iptm_target_binder"]
+            pair_iptm_target_linker = ctx["pair_iptm_target_linker"]
+            pair_iptm = ctx["pair_iptm"]
+            pair_iptm_formula = ctx["pair_iptm_formula"]
+            interface_metric_value = ctx["interface_metric_value"]
+            interface_metric_label = ctx["interface_metric_label"]
+            interface_metric_source = ctx["interface_metric_source"]
+            interface_metric_kind = ctx["interface_metric_kind"]
+            binder_avg_plddt = ctx["binder_avg_plddt"]
+            binder_confidence = ctx["binder_confidence"]
+            pair_iptm_confidence = ctx["pair_iptm_confidence"]
+            interface_confidence = ctx["interface_confidence"]
+            liability = ctx["liability"]
+            liability_penalty = ctx["liability_penalty"]
+            developability_score = ctx["developability_score"]
+            composite_score = ctx["composite_score"]
+            structure_file = ctx["structure_file"]
+            staged_path = ctx["staged_path"]
+            d_space_refined = ctx["d_space_refined"]
+            d_space_metrics = ctx["d_space_metrics"]
+            pocket_report_row = ctx["pocket_report_row"]
+
+            def _rescore_with_refined_pocket(refined_path: Path) -> None:
+                """Recompute the composite once the REFINED pocket distance
+                exists — the ranking must reflect the shipped pose, not the
+                native prediction's."""
+                nonlocal composite_score
+                if not (pocket_sequence_contacts and isinstance(composite_score, (int, float))):
+                    return
+                try:
+                    rpr = _pocket_contact_report(refined_path, pocket_sequence_contacts)
+                except Exception:
+                    return
+                pm = rpr.get("pocket_min_distance")
+                if not isinstance(pm, (int, float)):
+                    return
+                ps = max(0.0, min(1.0, (8.0 - float(pm)) / 3.0)) if pm > 5.0 else 1.0
+                composite_score = 0.68 * composite_score + 0.32 * ps
+
+            # D-route (chirality=d): collect the dispatched fixed-D diffusion
+            # refine; per-candidate failure rejects the candidate, the task
+            # only fails when NO candidate survives.
+            if peptide_chirality == 'd':
+                try:
+                    if ctx.get("refine_error") is not None:
+                        raise ctx["refine_error"]
+                    if ctx["route"] == "pocket":
+                        gate_result = _pocket_collect_refine(
+                            ctx["async_result"],
+                            staged_path=Path(ctx["staged_path"]),
+                            refined_cif=Path(ctx["refined_cif"]),
+                            pocket_sequence_contacts=pocket_sequence_contacts,
+                            require_bonds=(design_mode == "bicyclic"),
+                            chirality_label="d",
+                        )
+                        d_space_refined = gate_result["refined"]
+                        d_space_metrics = gate_result["metrics"]
+                        pocket_report_row = gate_result["pocket"]
+                        _rescore_with_refined_pocket(Path(d_space_refined))
+                    else:
+                        d_space_metrics = _dpeptide_collect_refine(
+                            ctx["async_result"],
+                            Path(ctx["staged_path"]),
+                            Path(ctx["refined_cif"]),
+                        )
+                        d_space_refined = str(ctx["refined_cif"])
+                        if design_mode == "bicyclic":
+                            bond_report = _dpeptide_linker_bond_report(Path(d_space_refined))
+                            if not (bond_report and bond_report.get("all_bonded")):
+                                print(
+                                    f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                                    f"rejected: refined ring bonds broken {bond_report}",
+                                    file=sys.stderr,
+                                )
+                                return
+                    # 硬手性门: 精修产物必须满足镜像空间契约(受体全D/肽全L)。
+                    _dpeptide_refined_chirality_gate(Path(d_space_refined))
+                    print(
+                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                        f"D-space ipTM={d_space_metrics.get('iptm')}",
+                        file=sys.stderr,
+                    )
+                except (RuntimeError, ValueError) as d_exc:
+                    print(
+                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                        f"rejected: {d_exc}",
+                        file=sys.stderr,
+                    )
+                    return
+
+            # L chirality + user pocket: collect the dispatched pocket refine;
+            # the refined structure becomes the candidate's shipped product.
+            if (peptide_chirality == 'l' and pocket_sequence_contacts
+                    and structure_file is not None):
+                try:
+                    if ctx.get("refine_error") is not None:
+                        raise ctx["refine_error"]
+                    gate_result = _pocket_collect_refine(
+                        ctx["async_result"],
+                        staged_path=Path(ctx["staged_path"]),
+                        refined_cif=Path(ctx["refined_cif"]),
+                        pocket_sequence_contacts=pocket_sequence_contacts,
+                        require_bonds=(design_mode == "bicyclic"),
+                        chirality_label="l",
+                    )
+                    structure_file = Path(gate_result["refined"])
+                    staged_path = gate_result["staged"]
+                    d_space_refined = gate_result["refined"]
+                    d_space_metrics = gate_result["metrics"]
+                    pocket_report_row = gate_result["pocket"]
+                    _rescore_with_refined_pocket(Path(d_space_refined))
+                except (RuntimeError, ValueError) as pocket_exc:
+                    print(
+                        f"[l-peptide] candidate {candidate_sequence[:12]}… "
+                        f"rejected: {pocket_exc}",
+                        file=sys.stderr,
+                    )
+                    return
+
+            if peptide_chirality == 'd' and isinstance(d_space_metrics, dict):
+                # The refined D-space complex is the ONLY interface readout for
+                # D candidates (binder-only conformers carry none). Recompute
+                # every ranking input from it — the pre-fix code merged only
+                # pair_iptm and left interface/binder confidences at the
+                # conformer-stage zeros, freezing every composite at the
+                # developability floor (all rows scored exactly 0.08 and the
+                # 12-generation search random-walked).
+                try:
+                    refined_ipsae = d_space_metrics.get("interface_score")
+                    if not isinstance(refined_ipsae, (int, float)):
+                        raise RuntimeError(
+                            "精修结果缺少 ipSAE interface_score 读数,"
+                            "拒绝以空值评分(评分目标=ipSAE): "
+                            f"{sorted(d_space_metrics.keys())}")
+                    pair_iptm = float(refined_ipsae)
+                    pair_iptm_formula = "d_space_refined_ipsae"
+                    chain_plddt = d_space_metrics.get("chain_mean_plddt")
+                    if (not isinstance(chain_plddt, dict)
+                            or not isinstance(chain_plddt.get("B"), (int, float))
+                            or float(chain_plddt["B"]) <= 0):
+                        raise RuntimeError("精修结果缺少肽链 pLDDT 读数,拒绝以空值评分")
+                    chain_b = float(chain_plddt["B"])
+                    binder_avg_plddt = chain_b * 100.0 if chain_b <= 1.0 else chain_b
+                    resc = _dpeptide_composite_from_refined(
+                        refined_ipsae=pair_iptm,
+                        binder_avg_plddt=binder_avg_plddt,
+                        developability_score=developability_score,
+                        has_pocket=bool(pocket_sequence_contacts),
+                    )
+                except RuntimeError as score_exc:
+                    print(
+                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                        f"rejected: {score_exc}",
+                        file=sys.stderr,
+                    )
+                    return
+                interface_metric_value = resc["interface_metric_value"]
+                interface_metric_label = resc["interface_metric_label"]
+                interface_metric_source = resc["interface_metric_source"]
+                interface_metric_kind = resc["interface_metric_kind"]
+                interface_confidence = resc["interface_confidence"]
+                binder_confidence = resc["binder_confidence"]
+                pair_iptm_confidence = resc["pair_iptm_confidence"]
+                developability_score = resc["developability_score"]
+                composite_score = resc["composite_score"]
+                # surface the raw ipSAE components on the row: the frontend's
+                # interface resolver keys on ligand_ipsae_max/ipsae_dom
+                metrics["ipsae_dom"] = d_space_metrics.get("ipsae_dom")
+                metrics["ligand_ipsae_max"] = d_space_metrics.get("ligand_ipsae_max")
+
+            result_row = {
+                "sequence": candidate_sequence,
+                "modifications": candidate_modifications,
+                "cys_positions": job.get("cys_positions") if isinstance(job.get("cys_positions"), list) else [],
+                "generation": generation,
+                "iptm": pair_iptm,
+                "pair_iptm": pair_iptm,
+                "pair_iptm_target_binder": pair_iptm_target_binder,
+                "pair_iptm_target_linker": pair_iptm_target_linker,
+                "pair_iptm_formula": pair_iptm_formula,
+                "pair_iptm_resolved": pair_iptm is not None,
+                "ipsae_dom": metrics.get("ipsae_dom"),
+                "ligand_ipsae_max": metrics.get("ligand_ipsae_max"),
+                "interface_metric": interface_metric_value,
+                "interface_metric_label": interface_metric_label,
+                "interface_metric_source": interface_metric_source,
+                "interface_metric_kind": interface_metric_kind,
+                "binder_avg_plddt": binder_avg_plddt,
+                "interface_confidence": interface_confidence,
+                "binder_confidence": binder_confidence,
+                "pair_iptm_confidence": pair_iptm_confidence,
+                "developability_score": developability_score,
+                "liability_penalty": liability_penalty,
+                "sequence_liabilities": liability,
+                "composite_score": composite_score,
+                "score": composite_score,
+                "plddt": binder_avg_plddt,
+                "model": "Boltz" if peptide_backend == "boltz" else ("AlphaFold3" if peptide_backend == "alphafold3" else "Protenix"),
+                "backend": peptide_backend,
+                "target_chain_id": resolved_target_chain_id,
+                "binder_chain_id": binder_chain_id,
+                "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
+                "structure_source_path": str(structure_file) if structure_file else "",
+                "d_space_staged": str(staged_path),
+                "d_space_refined": d_space_refined,
+                "pocket_min_distance": (
+                    pocket_report_row.get("pocket_min_distance")
+                    if isinstance(pocket_report_row, dict) else None),
+                "pocket_contacts_within_4p5": (
+                    pocket_report_row.get("pocket_contacts_within_4p5")
+                    if isinstance(pocket_report_row, dict) else None),
+                "d_space_iptm": (
+                    float(d_space_metrics.get("iptm"))
+                    if isinstance(d_space_metrics, dict) and isinstance(d_space_metrics.get("iptm"), (int, float))
+                    else None),
+                "structure_format": (
+                    "pdb"
+                    if structure_file and structure_file.suffix.lower() == ".pdb"
+                    else "cif"
+                ),
+                "plddts": metrics.get("plddts") if isinstance(metrics.get("plddts"), list) else [],
+            }
+            all_results.append(result_row)
+            completed_tasks += 1
+            generation_done += 1
+
+            all_results.sort(
+                key=lambda item: (
+                    1 if isinstance(item.get("composite_score"), (int, float)) else 0,
+                    float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
+                ),
+                reverse=True,
+            )
+            elite_population = [
+                {
+                    "sequence": str(row.get("sequence") or ""),
+                    "modifications": row.get("modifications") if isinstance(row.get("modifications"), list) else [],
+                    "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
+                }
+                for row in _select_nsga2_peptide_elites(all_results, elite_size)
+            ]
+            # PeptideLM: GRPO update on this generation's scored rows so the
+            # proposal policy improves round over round
+            try:
+                peptidelm_proposer.learn(
+                    elite_population,
+                    [row for row in all_results if row.get("generation") == generation],
+                )
+            except Exception as exc:
+                raise RuntimeError(f"PeptideLM learn 失败（generation {generation}）：{exc}") from exc
+
+            progress_payload = {
+                "peptide_design": {
+                    "current_generation": generation,
+                    "total_generations": iterations,
+                    "completed_tasks": completed_tasks,
+                    "pending_tasks": max(0, total_tasks - completed_tasks),
+                    "total_tasks": total_tasks,
+                    "best_score": all_results[0].get("composite_score") if all_results else 0.0,
+                    "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
+                    "current_status": f"Generation {generation}/{iterations}",
+                    "status_message": (
+                        f"Generation {generation}/{iterations}: "
+                        f"{generation_done}/{len(generation_jobs)} candidates completed"
+                    ),
+                    "generation_total_tasks": len(generation_jobs),
+                    "generation_completed_tasks": generation_done,
+                    "generation_running_tasks": max(0, len(generation_jobs) - generation_done),
+                    "generation_queued_tasks": 0,
+                    "current_best_sequences": _current_best_peptide_rows(),
+
+
+                    **_peptide_runtime_timing(completed_tasks),
+                }
+            }
+            _write_peptide_progress(progress_path, progress_payload)
+
+        # ==== Stage 1 (CPU, per candidate): extract, score, stage, dispatch ====
+        stage_contexts: List[Dict[str, Any]] = []
         for job in completed_generation_jobs:
             idx = int(job.get("candidate_index") or 0)
             candidate_sequence = str(job.get("sequence") or "")
@@ -8578,43 +9425,32 @@ def run_peptide_design_backend(
                 composite_score = None
             structure_file = _select_primary_structure_file(result_dir)
 
-            def _rescore_with_refined_pocket(refined_path: Path) -> None:
-                """Recompute the composite once the REFINED pocket distance
-                exists — the ranking must reflect the shipped pose, not the
-                native prediction's."""
-                nonlocal composite_score
-                if not (pocket_sequence_contacts and isinstance(composite_score, (int, float))):
-                    return
-                try:
-                    rpr = _pocket_contact_report(refined_path, pocket_sequence_contacts)
-                except Exception:
-                    return
-                pm = rpr.get("pocket_min_distance")
-                if not isinstance(pm, (int, float)):
-                    return
-                ps = max(0.0, min(1.0, (8.0 - float(pm)) / 3.0)) if pm > 5.0 else 1.0
-                composite_score = 0.68 * composite_score + 0.32 * ps
-
             # D-route (chirality=d): stage the candidate's isolated conformer
-            # against the prepared D-target at the user pocket, then refine
-            # under the pinned receptor. Failure here fails the task — the
-            # D-space numbers are a mandatory deliverable, never skipped.
+            # against the prepared D-target at the user pocket, then dispatch
+            # the fixed-D diffusion refine (collected in _finalize_candidate
+            # as it completes). Failure here fails the task — the D-space
+            # numbers are a mandatory deliverable, never skipped.
             staged_path = ""
             d_space_refined = ""
             d_space_metrics: Optional[Dict[str, Any]] = None
             pocket_report_row: Optional[Dict[str, Any]] = None
+            route: Optional[str] = None
+            dispatch = None
+            refined_cif = ""
             # all D candidates go through fixed-D diffusion: it resolves the
             # placement clashes of the staged pose; the per-candidate bond gate
-            # below rejects any bicyclic candidate whose ring bonds broke
+            # in _finalize_candidate rejects any bicyclic candidate whose ring
+            # bonds broke
             if peptide_chirality == 'd' and structure_file is None:
                 # a worker archive without a structure cannot enter the D
                 # route (staging/refine need coordinates); reject the
                 # candidate instead of failing the task at zip time
-                print(
-                    f"[d-peptide] candidate {candidate_sequence[:12]}… "
-                    f"rejected: worker returned no structure",
-                    file=sys.stderr,
-                )
+                stage_contexts.append({
+                    "reject": (
+                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                        f"rejected: worker returned no structure"
+                    ),
+                })
                 continue
             if peptide_chirality == 'd':
                 # A candidate whose staging/refine degenerates (e.g. a
@@ -8624,7 +9460,7 @@ def run_peptide_design_backend(
                     _job_seed = job.get("predict_args") if isinstance(job.get("predict_args"), dict) else {}
                     _seed_v = _job_seed.get("seed")
                     _seed_v = int(_seed_v) if isinstance(_seed_v, int) else random_seed
-                    staged_path = str(_dpeptide_stage_conformer_in_pocket(
+                    staged_path = _dpeptide_stage_conformer_in_pocket(
                         d_target_staged,
                         Path(structure_file),
                         Path(candidate_dir) / "d_space_staged.pdb",
@@ -8632,64 +9468,48 @@ def run_peptide_design_backend(
                         seed=_seed_v,
                         linker_ccd=linker_ccd,
                         reference_peptide_path=d_reference_peptide,
-                    ))
-                    refined_cif = Path(candidate_dir) / "d_space_refined.cif"
+                        pose_matters=not blind_linear_route,
+                    )
+                    refined_cif = str(Path(candidate_dir) / "d_space_refined.cif")
                     if pocket_sequence_contacts:
-                        gate_result = _pocket_place_and_refine(
+                        # Pocket placement is CPU work (mutates the staged
+                        # file); the GPU refine dispatch follows.
+                        _pocket_place_for_refine(
                             Path(staged_path),
                             pocket_sequence_contacts=pocket_sequence_contacts,
-                            refined_cif=refined_cif,
                             seed=_seed_v,
-                            options=options,
                             require_bonds=(design_mode == "bicyclic"),
-                            chirality_label="d",
-                            keep_pose=(d_reference_peptide is not None),
                             bicyclic_cys_positions=(
                                 job.get("cys_positions")
                                 if isinstance(job.get("cys_positions"), list) else None),
                             linker_ccd=linker_ccd,
+                            keep_pose=(d_reference_peptide is not None),
                         )
-                        d_space_refined = gate_result["refined"]
-                        d_space_metrics = gate_result["metrics"]
-                        pocket_report_row = gate_result["pocket"]
-                        _rescore_with_refined_pocket(Path(d_space_refined))
+                        route = "pocket"
                     else:
-                        d_space_metrics = _dpeptide_refine_and_validate(
-                            staged_path,
-                            refined_cif=refined_cif,
-                            seed=_seed_v,
-                            queue=build_capability_queue("protenix", "default"),
-                            options=options,
-                        )
-                        d_space_refined = str(refined_cif)
-                        if design_mode == "bicyclic":
-                            bond_report = _dpeptide_linker_bond_report(Path(d_space_refined))
-                            if not (bond_report and bond_report.get("all_bonded")):
-                                print(
-                                    f"[d-peptide] candidate {candidate_sequence[:12]}… "
-                                    f"rejected: refined ring bonds broken {bond_report}",
-                                    file=sys.stderr,
-                                )
-                                continue
-                    print(
-                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
-                        f"D-space ipTM={d_space_metrics.get('iptm')}",
-                        file=sys.stderr,
-                    )
+                        route = "plain"
+                    _staged_for_dispatch = Path(staged_path)
+                    _seed_for_dispatch = _seed_v
+
+                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch):  # noqa: E731
+                        return _dpeptide_dispatch_refine(
+                            _staged, _seed, build_capability_queue("protenix", "default"),
+                            blind=blind_linear_route)
                 except (RuntimeError, ValueError) as d_exc:
-                    print(
-                        f"[d-peptide] candidate {candidate_sequence[:12]}… "
-                        f"rejected: {d_exc}",
-                        file=sys.stderr,
-                    )
+                    stage_contexts.append({
+                        "reject": (
+                            f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                            f"rejected: {d_exc}"
+                        ),
+                    })
                     continue
 
             # L chirality + user pocket: protenix-v2 has no constraint
             # embedder, so the native prediction's peptide pose does not
             # follow the pocket. Honor it the same way the D route does:
             # rigidly place the free chains at the pocket on the native
-            # product's receptor, refine under the fixed receptor, gate on
-            # pocket contact (and ring bonds for bicyclic). The refined
+            # product's receptor, dispatch the refine under the fixed
+            # receptor (collected in _finalize_candidate); the refined
             # structure becomes the candidate's shipped product.
             if (peptide_chirality == 'l' and pocket_sequence_contacts
                     and structure_file is not None):
@@ -8708,156 +9528,75 @@ def run_peptide_design_backend(
                             if isinstance(job.get("cys_positions"), list) else None,
                             linker_ccd,
                         )
-                    gate_result = _pocket_place_and_refine(
+                    _pocket_place_for_refine(
                         Path(staged_path),
                         pocket_sequence_contacts=pocket_sequence_contacts,
-                        refined_cif=Path(candidate_dir) / "pocket_refined.cif",
                         seed=_seed_v,
-                        options=options,
                         require_bonds=(design_mode == "bicyclic"),
-                        chirality_label="l",
                         bicyclic_cys_positions=(
                             job.get("cys_positions")
                             if isinstance(job.get("cys_positions"), list) else None),
                         linker_ccd=linker_ccd,
                     )
-                    structure_file = Path(gate_result["refined"])
-                    staged_path = gate_result["staged"]
-                    d_space_refined = gate_result["refined"]
-                    d_space_metrics = gate_result["metrics"]
-                    pocket_report_row = gate_result["pocket"]
-                    _rescore_with_refined_pocket(Path(d_space_refined))
+                    route = "pocket"
+                    refined_cif = str(Path(candidate_dir) / "pocket_refined.cif")
+                    _staged_for_dispatch = Path(staged_path)
+                    _seed_for_dispatch = _seed_v
+
+                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch):  # noqa: E731
+                        return _dpeptide_dispatch_refine(
+                            _staged, _seed, build_capability_queue("protenix", "default"),
+                            blind=blind_linear_route)
                 except (RuntimeError, ValueError) as pocket_exc:
-                    print(
-                        f"[l-peptide] candidate {candidate_sequence[:12]}… "
-                        f"rejected: {pocket_exc}",
-                        file=sys.stderr,
-                    )
+                    stage_contexts.append({
+                        "reject": (
+                            f"[l-peptide] candidate {candidate_sequence[:12]}… "
+                            f"rejected: {pocket_exc}"
+                        ),
+                    })
                     continue
 
-            if (peptide_chirality == 'd' and isinstance(d_space_metrics, dict)
-                    and not pair_iptm
-                    and isinstance(d_space_metrics.get("iptm"), (int, float))):
-                # binder-only conformer predictions carry no interface
-                # numbers; the refined D-space complex is the interface
-                # readout for D candidates
-                pair_iptm = float(d_space_metrics["iptm"])
-                pair_iptm_formula = "d_space_refined_iptm"
-                chain_plddt = d_space_metrics.get("chain_mean_plddt")
-                if (not binder_avg_plddt and isinstance(chain_plddt, dict)
-                        and isinstance(chain_plddt.get("B"), (int, float))):
-                    # chain values arrive in either 0-1 or 0-100 scale; pLDDT of
-                    # exactly 0 is a placeholder, never a measurement.
-                    chain_b = float(chain_plddt["B"])
-                    if chain_b > 0:
-                        binder_avg_plddt = chain_b * 100.0 if chain_b <= 1.0 else chain_b
-
-            result_row = {
-                "sequence": candidate_sequence,
-                "modifications": candidate_modifications,
-                "cys_positions": job.get("cys_positions") if isinstance(job.get("cys_positions"), list) else [],
-                "generation": generation,
-                "iptm": pair_iptm,
-                "pair_iptm": pair_iptm,
+            stage_contexts.append({
+                "job": job,
+                "candidate_sequence": candidate_sequence,
+                "candidate_modifications": candidate_modifications,
+                "metrics": metrics,
                 "pair_iptm_target_binder": pair_iptm_target_binder,
                 "pair_iptm_target_linker": pair_iptm_target_linker,
+                "pair_iptm": pair_iptm,
                 "pair_iptm_formula": pair_iptm_formula,
-                "pair_iptm_resolved": pair_iptm is not None,
-                "ipsae_dom": metrics.get("ipsae_dom"),
-                "ligand_ipsae_max": metrics.get("ligand_ipsae_max"),
-                "interface_metric": interface_metric_value,
+                "interface_metric_value": interface_metric_value,
                 "interface_metric_label": interface_metric_label,
                 "interface_metric_source": interface_metric_source,
                 "interface_metric_kind": interface_metric_kind,
                 "binder_avg_plddt": binder_avg_plddt,
-                "interface_confidence": interface_confidence,
                 "binder_confidence": binder_confidence,
                 "pair_iptm_confidence": pair_iptm_confidence,
-                "developability_score": developability_score,
+                "interface_confidence": interface_confidence,
+                "liability": liability,
                 "liability_penalty": liability_penalty,
-                "sequence_liabilities": liability,
+                "developability_score": developability_score,
                 "composite_score": composite_score,
-                "score": composite_score,
-                "plddt": binder_avg_plddt,
-                "model": "Boltz" if peptide_backend == "boltz" else ("AlphaFold3" if peptide_backend == "alphafold3" else "Protenix"),
-                "backend": peptide_backend,
-                "target_chain_id": resolved_target_chain_id,
-                "binder_chain_id": binder_chain_id,
-                "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
-                "structure_source_path": str(structure_file) if structure_file else "",
-                "d_space_staged": str(staged_path),
+                "structure_file": structure_file,
+                "staged_path": staged_path,
+                "refined_cif": refined_cif,
                 "d_space_refined": d_space_refined,
-                "pocket_min_distance": (
-                    pocket_report_row.get("pocket_min_distance")
-                    if isinstance(pocket_report_row, dict) else None),
-                "pocket_contacts_within_4p5": (
-                    pocket_report_row.get("pocket_contacts_within_4p5")
-                    if isinstance(pocket_report_row, dict) else None),
-                "d_space_iptm": (
-                    float(d_space_metrics.get("iptm"))
-                    if isinstance(d_space_metrics, dict) and isinstance(d_space_metrics.get("iptm"), (int, float))
-                    else None),
-                "structure_format": (
-                    "pdb"
-                    if structure_file and structure_file.suffix.lower() == ".pdb"
-                    else "cif"
-                ),
-                "plddts": metrics.get("plddts") if isinstance(metrics.get("plddts"), list) else [],
-            }
-            all_results.append(result_row)
-            completed_tasks += 1
-            generation_done += 1
+                "d_space_metrics": d_space_metrics,
+                "pocket_report_row": pocket_report_row,
+                "route": route,
+                "dispatch": dispatch,
+                "async_result": None,
+            })
 
-            all_results.sort(
-                key=lambda item: (
-                    1 if isinstance(item.get("composite_score"), (int, float)) else 0,
-                    float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
-                ),
-                reverse=True,
-            )
-            elite_population = [
-                {
-                    "sequence": str(row.get("sequence") or ""),
-                    "modifications": row.get("modifications") if isinstance(row.get("modifications"), list) else [],
-                    "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
-                }
-                for row in _select_nsga2_peptide_elites(all_results, elite_size)
-            ]
-            # PeptideLM: GRPO update on this generation's scored rows so the
-            # proposal policy improves round over round
-            try:
-                peptidelm_proposer.learn(
-                    elite_population,
-                    [row for row in all_results if row.get("generation") == generation],
-                )
-            except Exception as exc:
-                raise RuntimeError(f"PeptideLM learn 失败（generation {generation}）：{exc}") from exc
-
-            progress_payload = {
-                "peptide_design": {
-                    "current_generation": generation,
-                    "total_generations": iterations,
-                    "completed_tasks": completed_tasks,
-                    "pending_tasks": max(0, total_tasks - completed_tasks),
-                    "total_tasks": total_tasks,
-                    "best_score": all_results[0].get("composite_score") if all_results else 0.0,
-                    "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
-                    "current_status": f"Generation {generation}/{iterations}",
-                    "status_message": (
-                        f"Generation {generation}/{iterations}: "
-                        f"{generation_done}/{len(generation_jobs)} candidates completed"
-                    ),
-                    "generation_total_tasks": len(generation_jobs),
-                    "generation_completed_tasks": generation_done,
-                    "generation_running_tasks": max(0, len(generation_jobs) - generation_done),
-                    "generation_queued_tasks": 0,
-                    "current_best_sequences": _current_best_peptide_rows(),
-
-
-                    **_peptide_runtime_timing(completed_tasks),
-                }
-            }
-            _write_peptide_progress(progress_path, progress_payload)
+        # ==== Stage 2 (GPU): collect refines, finalize ====
+        # All refines dispatch immediately — the GPU pool + worker concurrency
+        # schedule them across every idle card, and each candidate still
+        # finalizes (score/learn/progress) the moment its own refine lands.
+        _run_dpeptide_refine_stage(
+            stage_contexts,
+            parent_task_id,
+            _finalize_candidate,
+        )
 
     all_results.sort(
         key=lambda item: (
@@ -9192,6 +9931,7 @@ def run_boltz_backend(
     strict_ligand_confidence_contract: bool = False,
     custom_ccd_molecules: Optional[List[Dict[str, str]]] = None,
     low_vram: bool = False,
+    ipsae_ligand_chain_id: Optional[str] = None,
 ) -> None:
     normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
     _validate_unique_sequence_chain_ids(normalized_yaml)
@@ -9457,6 +10197,7 @@ def run_boltz_backend(
                 postprocess_base=results_root / "ipsae",
                 results_dir=Path(output_directory_path),
                 yaml_data=boltz_yaml_data,
+                explicit_ligand_chain=ipsae_ligand_chain_id,
             )
         )
     except Exception as err:
@@ -10028,6 +10769,11 @@ def main():
 
                 worker_seed = worker_predict_args.pop("seed", None)
                 worker_custom_ccd_molecules = worker_predict_args.pop("custom_ccd_molecules", [])
+                worker_ipsae_ligand_chain = str(
+                    worker_predict_args.pop("ipsaeLigandChainId", None)
+                    or worker_predict_args.pop("ipsae_ligand_chain_id", None)
+                    or ""
+                ).strip() or None
                 use_msa_raw = worker_predict_args.get("use_msa_server", True)
                 if isinstance(use_msa_raw, bool):
                     worker_use_msa_server = use_msa_raw
@@ -10057,6 +10803,7 @@ def main():
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
                         low_vram=worker_low_vram,
+                        ipsae_ligand_chain_id=worker_ipsae_ligand_chain,
                     )
                 elif worker_backend == "boltz":
                     if worker_seed is not None:
@@ -10070,6 +10817,7 @@ def main():
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
                         low_vram=worker_low_vram,
+                        ipsae_ligand_chain_id=worker_ipsae_ligand_chain,
                     )
                 else:
                     raise ValueError(f"Unsupported peptide candidate backend: '{worker_backend}'.")

@@ -554,7 +554,6 @@ export function SharesPage() {
       <section className="page-header">
         <div className="page-header-left">
           <h1>Shares</h1>
-          <p className="muted">Browse all incoming and outgoing shares in one list, grouped by project.</p>
         </div>
         <div className="row gap-8 page-header-actions page-header-actions-minimal">
           <div className="project-compact-meta">

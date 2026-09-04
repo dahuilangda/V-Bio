@@ -112,7 +112,8 @@ export function AffinityBasicsWorkspace({
 
   useEffect(() => {
     // A new target structure invalidates any pocket defined against the old one — the box
-    // coordinates would dock against the wrong protein ("运行后的 box 需要记忆"; see
+    // coordinates would dock against the wrong protein (the submitted box must be
+    // remembered; see
     // pocketTargetChanged for why the preview-loading step must not count as a change).
     const next = { name: targetFileName.trim(), length: previewTargetStructureText.length };
     const previous = lastTargetSignatureRef.current;
@@ -546,9 +547,6 @@ export function AffinityResultsWorkspace({
                 onBackgroundClick={exactLigandAtomLinks ? () => setSelectedLigandAtomIndex(null) : undefined}
               />
             </div>
-            {exactLigandAtomLinks ? (
-              <div className="muted small top-margin">Click a ligand atom in 2D or 3D to inspect the same exact atom.</div>
-            ) : null}
           </section>
 
           <section className="result-aside-block">

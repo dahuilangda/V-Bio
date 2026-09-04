@@ -8,9 +8,12 @@ the same mode workflow with equivalent noise schedules:
   pose      — input-pose anchored refinement, sigma_max 0.02, 8 steps
   refine    — general flexible refinement,       sigma_max 0.03, 10 steps
   interface — interface-focused refinement,      sigma_max 0.04, 12 steps
-  dock      — SMILES -> placement ensemble against a rigid receptor,
-              sigma_max 0.05, 12 steps
-  peptide   — receptor-fixed peptide inpainting, sigma_max 0.05, 12 steps
+  dock      — native blind inpainting: receptor pinned, SMILES ligand
+              denoises from pure noise on the full schedule (160, 200)
+  peptide   — receptor-fixed peptide inpainting; --blind_peptide starts the
+              peptide from pure noise on the full schedule (default for the
+              V-Bio linear D-route; the staged local refine stays for the
+              bicyclic/linker route)
 
 Protenix's InferenceNoiseScheduler uses the same EDM parameterisation as
 Boltz2 (sigma_data = 16), so ``s_max == sigma_max`` reproduces Boltz2Score's

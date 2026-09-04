@@ -620,43 +620,16 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> list[int]:
     return normalized
 
 
-def _detect_peptide_gpu_pool_capacity() -> Optional[int]:
-    try:
-        from gpu_manager import get_gpu_status as get_gpu_status_fn
+def _gpu_pool_device_count() -> int:
+    """Authoritative GPU-pool size (valid devices registered at pool init).
 
-        status = get_gpu_status_fn()
-        if isinstance(status, dict):
-            available_count = int(status.get("available_count") or 0)
-            in_use_count = int(status.get("in_use_count") or 0)
-            total = available_count + in_use_count
-            if total > 0:
-                return total
-    except Exception:
-        pass
-    return None
+    No config/env fallback tiers: the pool is what actually schedules
+    candidate subtasks, so its own registry is the single source of truth.
+    A missing/empty pool is a hard error, not a guess.
+    """
+    from gpu_manager import get_gpu_status as get_gpu_status_fn
 
-
-def _resolve_peptide_parallel_workers_for_timeout(
-    requested_gpu_ids: list[int],
-    population_size: int,
-) -> tuple[int, str]:
-    upper_bound = min(max(1, population_size), 64)
-    if requested_gpu_ids:
-        return min(max(1, len(requested_gpu_ids)), upper_bound), "requested_gpu_ids"
-
-    detected_pool_capacity = _detect_peptide_gpu_pool_capacity()
-    if isinstance(detected_pool_capacity, int) and detected_pool_capacity > 0:
-        return min(max(1, detected_pool_capacity), upper_bound), "gpu_pool_capacity"
-
-    configured_gpu_ids = list(getattr(config, "GPU_DEVICE_IDS", None) or [])
-    if configured_gpu_ids:
-        return min(max(1, len(configured_gpu_ids)), upper_bound), "config_gpu_device_ids"
-
-    configured_max_concurrent = int(getattr(config, "MAX_CONCURRENT_TASKS", 0) or 0)
-    if configured_max_concurrent > 0:
-        return min(configured_max_concurrent, upper_bound), "config_max_concurrent_tasks"
-
-    return 1, "fallback_single_worker"
+    return int((get_gpu_status_fn() or {}).get("valid_count") or 0)
 
 
 def _collect_peptide_design_setup_meta(predict_args: dict) -> dict:
@@ -808,12 +781,13 @@ def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
     safe_population = max(1, population_size if isinstance(population_size, int) else 16)
     total_candidates = safe_iterations * safe_population
 
-    requested_gpu_ids = _normalize_peptide_gpu_ids(predict_args.get('peptide_gpu_ids', []))
-    safe_workers, worker_source = _resolve_peptide_parallel_workers_for_timeout(
-        requested_gpu_ids,
-        safe_population,
-    )
-    wave_count = max(1, (total_candidates + safe_workers - 1) // safe_workers)
+    # 候选子任务全量入队，由 GPU 池调度：波次只取决于池的设备数这一个权威值。
+    pool_devices = _gpu_pool_device_count()
+    if pool_devices <= 0:
+        raise RuntimeError(
+            "GPU pool has no valid devices; cannot schedule peptide design candidate subtasks."
+        )
+    wave_count = safe_iterations * max(1, -(-safe_population // pool_devices))
     per_wave_timeout = max(
         60,
         PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS,
@@ -826,13 +800,12 @@ def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
     if PEPTIDE_PARENT_SUBPROCESS_TIMEOUT <= 0:
         logger.info(
             "Resolved peptide parent subprocess timeout: disabled "
-            "(estimated=%ss iterations=%s population=%s total_candidates=%s workers=%s source=%s per_wave=%ss buffer=%ss)",
+            "(estimated=%ss iterations=%s population=%s total_candidates=%s pool_devices=%s per_wave=%ss buffer=%ss)",
             estimated_timeout,
             safe_iterations,
             safe_population,
             total_candidates,
-            safe_workers,
-            worker_source,
+            pool_devices,
             per_wave_timeout,
             PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS,
         )
@@ -842,15 +815,14 @@ def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
 
     logger.info(
         "Resolved peptide parent subprocess timeout: effective=%ss estimated=%ss cap=%ss "
-        "(iterations=%s population=%s total_candidates=%s workers=%s source=%s per_wave=%ss buffer=%ss)",
+        "(iterations=%s population=%s total_candidates=%s pool_devices=%s per_wave=%ss buffer=%ss)",
         effective_timeout,
         estimated_timeout,
         PEPTIDE_PARENT_SUBPROCESS_TIMEOUT,
         safe_iterations,
         safe_population,
         total_candidates,
-        safe_workers,
-        worker_source,
+        pool_devices,
         per_wave_timeout,
         PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS,
     )
@@ -858,14 +830,13 @@ def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
     if estimated_timeout > PEPTIDE_PARENT_SUBPROCESS_TIMEOUT:
         logger.warning(
             "Peptide parent timeout estimate (%ss) exceeds configured cap (%ss). "
-            "Using capped timeout. iterations=%s population=%s workers=%s total_candidates=%s source=%s",
+            "Using capped timeout. iterations=%s population=%s pool_devices=%s total_candidates=%s",
             estimated_timeout,
             PEPTIDE_PARENT_SUBPROCESS_TIMEOUT,
             safe_iterations,
             safe_population,
-            safe_workers,
+            pool_devices,
             total_candidates,
-            worker_source,
         )
 
     return effective_timeout

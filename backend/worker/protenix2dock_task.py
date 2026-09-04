@@ -20,7 +20,7 @@ from celery.exceptions import Ignore
 
 from backend.core import config
 from backend.core.celery_app import celery_app
-from gpu_manager import get_redis_client, release_gpu
+from gpu_manager import get_gpu_total_memory_mib, get_redis_client, release_gpu
 
 import logging
 
@@ -29,6 +29,39 @@ logger = logging.getLogger(__name__)
 P2D_SCRIPT = "/workspace/vbio/capabilities/protenix2dock/protenix2dock.py"
 
 VALID_P2D_MODES = {"score", "pose", "refine", "interface", "dock", "peptide"}
+
+
+def _coerce_opt_bool(value: Any) -> bool | None:
+    """Tri-state bool: True/False from common encodings, None if absent/unparseable.
+
+    Form fields arrive as strings, so "false" must not fall through as truthy.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if token in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _resolve_low_vram(score_args: dict, gpu_id: int) -> bool:
+    """low_vram: ONLY an explicit user request enables it (default off).
+
+    The engine's default mode (fp32 trunk, cuequivariance kernels, all
+    diffusion samples batched) is markedly faster but needs roughly double the
+    memory of low_vram — the measured OOM driving the old auto path was a
+    ~2150-token complex on a 24 GB card. Policy (2026-09-04): no silent
+    performance/precision degradation; an OOM on an undersized card surfaces
+    loudly instead. Pass low_vram=true explicitly to opt in.
+    """
+    requested = _coerce_opt_bool(score_args.get("low_vram"))
+    return bool(requested)
 
 
 def _build_protenix2dock_command(
@@ -174,7 +207,7 @@ def protenix2dock_task(self, score_args: dict):
         ]
         if msa_server_url:
             entry.extend(["--msa_server_url", msa_server_url])
-        if score_args.get("low_vram", True):
+        if _resolve_low_vram(score_args, gpu_id):
             entry.append("--low_vram")
 
         # Persist uploaded inputs (route forwards file CONTENTS, matching the
@@ -254,6 +287,10 @@ def protenix2dock_task(self, score_args: dict):
                 entry.extend(["--peptide_sequence", str(score_args["peptide_sequence"])])
             if score_args.get("score_only"):
                 entry.append("--score_only")
+            if score_args.get("blind_peptide"):
+                # blind inpainting route: peptide denoises from pure noise
+                # (receptor stays pinned) with the full noise schedule
+                entry.append("--blind_peptide")
 
         target_chain = str(score_args.get("target_chain") or "").strip()
         if target_chain:
@@ -340,6 +377,7 @@ def protenix2dock_task(self, score_args: dict):
             structure_dir = os.path.join(out_root, "fixed", tag)
             os.makedirs(structure_dir, exist_ok=True)
             scored = []
+            scored_meta = []
             # engine layout: <output>/<sample_name>/seed_<seed>/predictions/
             #   <sample_name>_sample_<i>.cif + <..>_summary_confidence_sample_<i>.json
             import glob as _glob
@@ -371,6 +409,9 @@ def protenix2dock_task(self, score_args: dict):
                 with open(conf_json, "w", encoding="utf-8") as fh:
                     json.dump({**payload, "iptm": iptm}, fh)
                 scored.append((iptm, model_path))
+                # remember the engine predictions dir + sample base for the
+                # per-sample ipsae lookup after the best sample is chosen
+                scored_meta.append((os.path.dirname(cif_path), model_path, base))
             if not scored:
                 raise RuntimeError(
                     f"protenix2dock peptide mode produced no samples under {output_dir}"
@@ -382,18 +423,38 @@ def protenix2dock_task(self, score_args: dict):
                        "best_cif": best_path, "docked_mode": "fixed",
                        "engine": "protenix-v2"}
             try:
-                pred_dir = os.path.dirname(best_path)
-                base = os.path.basename(best_path).rsplit("_model_", 1)[0]
-                ips_path = next(_glob.glob(
-                    os.path.join(pred_dir, f"{base}_ipsae_sample_{sample_no}.json")), None)
-                if ips_path:
-                    meta = json.loads(open(ips_path, encoding="utf-8").read())
-                    lig_plddt = meta.get("ligand_plddt_mean")
-                    if isinstance(lig_plddt, (int, float)):
-                        # the design loop expects per-chain values on the
-                        # 0-1 scale (it multiplies by 100)
-                        payload["chain_mean_plddt"] = {"B": float(lig_plddt)}
+                # IPSAE for the best sample: the engine writes
+                # {sample_name}_ipsae_sample_{n}.json next to its own
+                # predictions (the copied fixed/<tag>/ dir holds only the
+                # copies this loop made, so globbing THERE never matched).
+                # The source predictions dir rides on the scored tuple.
+                best_entry = next(
+                    (row for row in scored_meta if row[1] == best_path), None)
+                if best_entry is not None:
+                    src_dir, src_base = best_entry[0], best_entry[2]
+                    ips_path = os.path.join(
+                        src_dir, f"{src_base}_ipsae_sample_{sample_no}.json")
+                    meta = None
+                    if os.path.exists(ips_path):
+                        meta = json.loads(open(ips_path, encoding="utf-8").read())
+                    if meta is None:
+                        # engine also merges the display fields into the
+                        # per-sample summary confidence json
+                        summary = json.loads(open(
+                            os.path.join(src_dir, f"{src_base}_summary_confidence_sample_{sample_no}.json"),
+                            encoding="utf-8").read())
+                        meta = {
+                            k: summary.get(k)
+                            for k in ("ligand_ipsae_max", "ipsae_dom")
+                        } if summary.get("ligand_ipsae_max") is not None else None
+                    if meta:
+                        lig_plddt = meta.get("ligand_plddt_mean")
+                        if isinstance(lig_plddt, (int, float)):
+                            # the design loop expects per-chain values on the
+                            # 0-1 scale (it multiplies by 100)
+                            payload["chain_mean_plddt"] = {"B": float(lig_plddt)}
                         payload["ligand_ipsae_max"] = meta.get("ligand_ipsae_max")
+                        payload["ipsae_dom"] = meta.get("ipsae_dom")
             except Exception:  # noqa: BLE001
                 pass
             with open(os.path.join(out_root, "confidence.json"), "w", encoding="utf-8") as fh:

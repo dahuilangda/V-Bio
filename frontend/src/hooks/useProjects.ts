@@ -930,7 +930,8 @@ export function useProjects(session: Session | null) {
         user_id: session.userId,
         name: input.name.trim(),
         summary: input.summary?.trim() || '',
-        backend: input.backend || 'boltz',
+        // Docking defaults to Protenix2Dock; every other workflow keeps 'boltz'.
+        backend: input.backend || (workflow === 'affinity' ? 'protenix' : 'boltz'),
         use_msa: input.useMsa ?? true,
         protein_sequence: input.proteinSequence || '',
         ligand_smiles: input.ligandSmiles || '',

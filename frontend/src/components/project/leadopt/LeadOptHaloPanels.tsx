@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { MemoLigand2DPreview } from '../Ligand2DPreview';
-import { fetchLeadOptimizationHaloBackends, type LeadOptHaloBackend, type LeadOptHaloMode, type LeadOptHaloRoundEvent } from '../../../api/backendLeadOptimizationApi';
+import { fetchLeadOptimizationHaloBackends, type LeadOptHaloBackend, type LeadOptHaloRoundEvent } from '../../../api/backendLeadOptimizationApi';
 import type { LeadOptHaloCandidate } from './hooks/useLeadOptHaloRun';
 
 /** Fallback while (or if) the backend listing is unavailable — must mirror
@@ -11,53 +11,33 @@ const HALO_BACKEND_FALLBACK: Array<{ value: LeadOptHaloBackend; label: string }>
   { value: 'alphafold3', label: 'AlphaFold3' }
 ];
 
-export const HALO_MODE_OPTIONS: Array<{ value: LeadOptHaloMode; label: string; hint: string }> = [
-  { value: 'fragment', label: 'Fragment replacement', hint: 'Regenerate around the selected fragments / reference ligand.' },
-  { value: 'scaffold_hop', label: 'Scaffold hopping', hint: 'Keep the environment, redesign the core.' },
-  { value: 'denovo', label: 'De novo', hint: 'Generate from scratch inside the pocket.' }
-];
-
-
-
 interface LeadOptHaloParamsPanelProps {
   canEdit: boolean;
   running: boolean;
-  mode: LeadOptHaloMode;
   backend: LeadOptHaloBackend;
   rounds: number;
   budgetPerRound: number;
-  scaffoldHopRatio: number;
-  oracleConcurrency: number;
   pocketLabel: string;
   canRun: boolean;
   runDisabledReason: string;
-  onModeChange: (value: LeadOptHaloMode) => void;
   onBackendChange: (value: LeadOptHaloBackend) => void;
   onRoundsChange: (value: number) => void;
   onBudgetChange: (value: number) => void;
-  onScaffoldHopRatioChange: (value: number) => void;
-  onOracleConcurrencyChange: (value: number) => void;
   onRun: () => void;
 }
 
 export function LeadOptHaloParamsPanel({
   canEdit,
   running,
-  mode,
   backend,
   rounds,
   budgetPerRound,
-  scaffoldHopRatio,
-  oracleConcurrency,
   pocketLabel,
   canRun,
   runDisabledReason,
-  onModeChange,
   onBackendChange,
   onRoundsChange,
   onBudgetChange,
-  onScaffoldHopRatioChange,
-  onOracleConcurrencyChange,
   onRun
 }: LeadOptHaloParamsPanelProps) {
   const disabled = !canEdit || running || !canRun;
@@ -80,14 +60,6 @@ export function LeadOptHaloParamsPanel({
     <section className="panel subtle lead-opt-panel">
       <div className="lead-opt-panel-title">Optimization</div>
       <div className="lead-opt-halo-grid">
-        <label className="field">
-          <span>Mode</span>
-          <select value={mode} disabled={disabled} onChange={(e) => onModeChange(e.target.value as LeadOptHaloMode)}>
-            {HALO_MODE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
         <label className="field">
           <span>Scoring backend</span>
           <select value={backend} disabled={disabled} onChange={(e) => onBackendChange(e.target.value as LeadOptHaloBackend)}>
@@ -116,31 +88,6 @@ export function LeadOptHaloParamsPanel({
             value={budgetPerRound}
             disabled={disabled}
             onChange={(e) => onBudgetChange(Math.max(1, Math.min(512, Math.floor(Number(e.target.value) || 1))))}
-          />
-        </label>
-        {mode === 'scaffold_hop' ? (
-          <label className="field">
-            <span>Scaffold-hop ratio</span>
-            <input
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={scaffoldHopRatio}
-              disabled={disabled}
-              onChange={(e) => onScaffoldHopRatioChange(Math.max(0, Math.min(1, Number(e.target.value) || 0)))}
-            />
-          </label>
-        ) : null}
-        <label className="field">
-          <span>Scoring concurrency</span>
-          <input
-            type="number"
-            min={1}
-            max={32}
-            value={oracleConcurrency}
-            disabled={disabled}
-            onChange={(e) => onOracleConcurrencyChange(Math.max(1, Math.min(32, Math.floor(Number(e.target.value) || 1))))}
           />
         </label>
         <div className="field field-span-2">

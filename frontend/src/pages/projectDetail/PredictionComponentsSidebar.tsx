@@ -261,6 +261,21 @@ export function PredictionComponentsSidebar({
               ))}
             </select>
           </label>
+          <label className="field affinity-field">
+            <span className="affinity-key">Ligand</span>
+            <select
+              value={selectedWorkspaceLigand.componentId || ''}
+              disabled={!canEdit || workspaceLigandSelectableOptions.length === 0}
+              onChange={(e) => onSetAffinityComponentFromWorkspace('ligand', e.target.value || null)}
+            >
+              {showAffinityComputeToggle ? <option value="">-</option> : null}
+              {workspaceLigandSelectableOptions.map((item) => (
+                <option key={`workspace-affinity-ligand-${item.componentId}`} value={item.componentId}>
+                  {item.isSmallMolecule || !showAffinityComputeToggle ? item.label : `${item.label} (affinity disabled)`}
+                </option>
+              ))}
+            </select>
+          </label>
           {peptidePocket ? (
             <button
               type="button"
@@ -277,28 +292,11 @@ export function PredictionComponentsSidebar({
               </span>
             </button>
           ) : null}
-          <label className="field affinity-field">
-            <span className="affinity-key">Ligand</span>
-            <select
-              value={selectedWorkspaceLigand.componentId || ''}
-              disabled={!canEdit || workspaceLigandSelectableOptions.length === 0}
-              onChange={(e) => onSetAffinityComponentFromWorkspace('ligand', e.target.value || null)}
-            >
-              {showAffinityComputeToggle ? <option value="">-</option> : null}
-              {workspaceLigandSelectableOptions.map((item) => (
-                <option key={`workspace-affinity-ligand-${item.componentId}`} value={item.componentId}>
-                  {item.isSmallMolecule || !showAffinityComputeToggle ? item.label : `${item.label} (affinity disabled)`}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
         {!canEnableAffinityFromWorkspace && affinityEnableDisabledReason.trim() && (
           <div className="component-sidebar-empty muted small">{affinityEnableDisabledReason}</div>
         )}
       </section>
-
-      <div className="component-sidebar-note muted small">Click items to jump to the target editor block.</div>
     </aside>
   );
 }

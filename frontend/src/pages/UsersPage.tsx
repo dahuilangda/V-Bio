@@ -87,7 +87,6 @@ export function UsersPage() {
       <section className="page-header">
         <div>
           <h1>User Management</h1>
-          <p className="muted">Create users, grant admin role, reset passwords, and deactivate accounts.</p>
         </div>
         <button
           className="btn btn-ghost"

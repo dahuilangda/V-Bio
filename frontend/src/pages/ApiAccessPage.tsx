@@ -33,6 +33,7 @@ import {
   Trash2,
   X
 } from 'lucide-react';
+import { InfoTip } from '../components/common/InfoTip';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   AffinityScoringMode,
@@ -2093,7 +2094,13 @@ ${submitTaskIdCapture}`;
             {LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && (
               <>
                 <label className="field">
-                  <span>target_config path</span>
+                  <span>
+                    target_config path
+                    <InfoTip
+                      text="Must point to a valid lead-optimization YAML containing the protein sequence."
+                      align="end"
+                    />
+                  </span>
                   <input
                     value={builderLeadOptTargetConfigPath}
                     onChange={(e) => setBuilderLeadOptTargetConfigPath(e.target.value)}
@@ -2144,9 +2151,6 @@ ${submitTaskIdCapture}`;
                     </label>
                   </div>
                 </section>
-                <div className="api-builder-note muted small">
-                  `target_config` is required and should point to a valid lead-optimization YAML with protein sequence.
-                </div>
               </>
             )}
 
@@ -2176,7 +2180,13 @@ ${submitTaskIdCapture}`;
             {isPredictionWorkflow && (
               <>
                 <label className="field">
-                  <span>YAML file path</span>
+                  <span>
+                    YAML file path
+                    <InfoTip
+                      text="The YAML Builder keeps ligand SMILES as smiles; choose CCD input only for known CCD codes."
+                      align="end"
+                    />
+                  </span>
                   <input value={builderYamlPath} onChange={(e) => setBuilderYamlPath(e.target.value)} placeholder="./config.yaml" />
                 </label>
                 <div className="api-yaml-builder-trigger">
@@ -2186,9 +2196,6 @@ ${submitTaskIdCapture}`;
                   <span className="muted small">
                     {builderYamlComponents.length} components · {predictionTemplateEnabled ? 'template configured' : 'no template'}
                   </span>
-                </div>
-                <div className="api-builder-note muted small">
-                  YAML Builder keeps ligand SMILES as smiles in generated prediction YAML; choose CCD only for known CCD ligands.
                 </div>
                 <section className="api-prediction-affinity-panel">
                   <div className="api-prediction-affinity-head">
@@ -2248,7 +2255,7 @@ ${submitTaskIdCapture}`;
                     <span className="muted small">Target + ligand are required.</span>
                   )}
                   {predictionPairReady && !predictionAffinityAvailable && (
-                    <span className="muted small">Selected ligand is not a small molecule. Pair metrics still work.</span>
+                    <span className="muted small">Not a small molecule — pair metrics still computed.</span>
                   )}
                 </section>
               </>
@@ -2271,7 +2278,13 @@ ${submitTaskIdCapture}`;
                   />
                 </label>
                 <label className="field">
-                  <span>Compound library (SMILES per line, optional &apos;name SMILES&apos; or FASTA-style &gt;name headers)</span>
+                  <span>
+                    Compound library
+                    <InfoTip
+                      text="One SMILES per line; optional 'name SMILES' rows or FASTA-style >name headers."
+                      align="end"
+                    />
+                  </span>
                   <textarea
                     rows={10}
                     value={builderVirtualScreeningInput}
@@ -2298,7 +2311,13 @@ ${submitTaskIdCapture}`;
                   />
                 </label>
                 <label className="field">
-                  <span>Compound library file path (uploads the library as compounds_file)</span>
+                  <span>
+                    Library file path
+                    <InfoTip
+                      text="Uploaded as a separate compounds_file part, replacing the inline library. Provide the library inline or as a file — never both."
+                      align="end"
+                    />
+                  </span>
                   <input
                     value={builderVsLibraryPath}
                     onChange={(e) => setBuilderVsLibraryPath(e.target.value)}
@@ -2307,15 +2326,11 @@ ${submitTaskIdCapture}`;
                   />
                 </label>
                 <div className="api-builder-note muted small">
-                  The generated YAML submits one target plus a compound library (inline SMILES or a separate
-                  <code>compounds_file</code> part) to the independent Nesso-1 backend.
-                  Set a library file path to upload the compounds as a separate <code>compounds_file</code> part
-                  (the textarea above is then ignored; the YAML carries only the target). Provide the library either
-                  inline or as a file, never both.
-                  Results are ranking-only: the ZIP contains nesso/screening.json with rank, affinity_pred_value
-                  (log10 IC50 in µM — LOWER is stronger) and ic50_um per compound; no 3D structures are produced.
-                  Poll the same /status and /results endpoints as prediction tasks, or read the ranking directly
-                  from the /results/&lt;TASK_ID&gt;/screening endpoint.
+                  Ranking-only results (no structures) — read them from /results/&lt;TASK_ID&gt;/screening.
+                  <InfoTip
+                    text="screening.json carries rank, affinity_pred_value (log10 IC50 in µM — lower is stronger) and ic50_um per compound. Poll /status and /results like prediction tasks."
+                    align="end"
+                  />
                 </div>
               </>
             )}
@@ -2536,7 +2551,6 @@ ${submitTaskIdCapture}`;
                     <Copy size={14} />
                   </button>
                 </header>
-                <p className="muted small">Set runtime variables once in your local terminal session.</p>
                 <pre><code>{commandEnv}</code></pre>
               </article>
 
@@ -2553,9 +2567,6 @@ ${submitTaskIdCapture}`;
                       </button>
                     </div>
                   </header>
-                  <p className="muted small">
-                    {isVirtualScreeningWorkflow ? 'Generated from target and compound-library inputs.' : 'Generated from YAML Builder inputs.'}
-                  </p>
                   <pre><code>{yamlBuilderText}</code></pre>
                 </article>
               )}
@@ -2581,22 +2592,22 @@ ${submitTaskIdCapture}`;
                     <Copy size={14} />
                   </button>
                 </header>
-                <p className="muted small">
-                  {!isSupportedSubmitWorkflow
-                    ? 'Select a Prediction, Virtual Screening, or Affinity project to generate submit command.'
-                    : 'Generated from project workflow and selected backend. task_name/task_summary are omitted unless you fill them.'}
-                </p>
+                {!isSupportedSubmitWorkflow && (
+                  <p className="muted small">Select a Prediction, Virtual Screening, or Affinity project to generate submit command.</p>
+                )}
                 <pre><code>{commandSubmitWithHints}</code></pre>
               </article>
 
               <article className="api-command-item">
                 <header>
-                  <span>3. Check Status</span>
+                  <span>
+                    3. Check Status
+                    <InfoTip text="Uses the $TASK_ID captured from the submit response." />
+                  </span>
                   <button className={`icon-btn ${copiedActionId === 'copy-status' ? 'is-copied' : ''}`} type="button" aria-label="Copy status command" onClick={() => { void copyText(commandStatus, 'Status command copied.', 'Status', 'copy-status'); }}>
                     <Copy size={14} />
                   </button>
                 </header>
-                <p className="muted small">Uses <code>$TASK_ID</code> captured from submit response.</p>
                 <pre><code>{commandStatus}</code></pre>
               </article>
 
@@ -2607,7 +2618,6 @@ ${submitTaskIdCapture}`;
                     <Copy size={14} />
                   </button>
                 </header>
-                <p className="muted small">Download result archive to the chosen local path.</p>
                 <pre><code>{commandResults}</code></pre>
               </article>
 
@@ -2619,9 +2629,7 @@ ${submitTaskIdCapture}`;
                       <Copy size={14} />
                     </button>
                   </header>
-                  <p className="muted small">
-                    Ranked JSON from nesso/screening.json — compounds[0] is the strongest binder (lowest affinity_pred_value, log10 IC50 in µM).
-                  </p>
+                  <InfoTip text="compounds[0] is the strongest binder (lowest affinity_pred_value, log10 IC50 in µM)." />
                   <pre><code>{commandScreeningResults}</code></pre>
                 </article>
               )}
@@ -2633,7 +2641,7 @@ ${submitTaskIdCapture}`;
                     <Copy size={14} />
                   </button>
                 </header>
-                <p className="muted small">Use operation mode `{builderTaskOperation}` for task control.</p>
+                <InfoTip text={`Operation mode: ${builderTaskOperation}.`} />
                 <pre><code>{commandTaskAction}</code></pre>
               </article>
             </div>
@@ -2824,31 +2832,31 @@ ${submitTaskIdCapture}`;
         <ol className="api-doc-steps">
           <li>
             <strong>Create project in V-Bio web</strong>
-            <span className="muted small">API does not create project. Pick existing project in the builder.</span>
+            <InfoTip text="API does not create project. Pick existing project in the builder." />
           </li>
           <li>
             <strong>Create token and bind project</strong>
-            <span className="muted small">Token registry controls submit/cancel/delete permissions per project.</span>
+            <InfoTip text="Token registry controls submit/cancel/delete permissions per project." />
           </li>
           <li>
             <strong>Use generated submit command</strong>
-            <span className="muted small">Workflow is fixed by project type; select backend where applicable before copying.</span>
+            <InfoTip text="Workflow is fixed by project type; select backend where applicable before copying." />
           </li>
           <li>
             <strong>YAML format (prediction)</strong>
-            <span className="muted small">Use `version + sequences`; ligand entries can use `smiles` or `ccd`; add constraints/properties/templates only when needed.</span>
+            <InfoTip text="Use `version + sequences`; ligand entries can use `smiles` or `ccd`; add constraints/properties/templates only when needed." />
           </li>
           <li>
             <strong>Track and download</strong>
-            <span className="muted small">Use status and result commands with the same `project_id` and token.</span>
+            <InfoTip text="Use status and result commands with the same `project_id` and token." />
           </li>
           <li>
             <strong>Cancel or delete safely</strong>
-            <span className="muted small">`operation_mode=cancel|delete`, permission checked by gateway.</span>
+            <InfoTip text="`operation_mode=cancel|delete`, permission checked by gateway." />
           </li>
           <li>
             <strong>Reuse from history</strong>
-            <span className="muted small">Recent copied commands are saved below builder for one-click reuse.</span>
+            <InfoTip text="Recent copied commands are saved below builder for one-click reuse." />
           </li>
         </ol>
       </section>

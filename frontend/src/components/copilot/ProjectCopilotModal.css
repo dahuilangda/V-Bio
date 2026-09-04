@@ -329,6 +329,26 @@
   margin-bottom: 2px;
 }
 
+/* Render-window affordance: older transcript messages stay unrendered until asked for, so the
+   button reads as a quiet centered seam between loaded history and the unrendered tail. */
+.copilot-chat-window .copilot-load-earlier {
+  align-self: center;
+  border: 1px solid #d5e0d9;
+  border-radius: 999px;
+  background: #f4f8f5;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  padding: 6px 12px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.copilot-chat-window .copilot-load-earlier:hover {
+  background: #e9f1ec;
+  color: var(--text);
+}
+
 .copilot-chat-window .copilot-empty {
   min-height: 180px;
   display: grid;
@@ -401,7 +421,7 @@
   padding-top: 7px;
   border-top: 1px solid #edf2ef;
 }
-/* Bare "思考中…" indicator shown before the first trace step arrives (no chrome, no empty body). */
+/* Bare "thinking…" indicator shown before the first trace step arrives (no chrome, no empty body). */
 .copilot-chat-window .copilot-thinking-inline {
   display: inline-flex;
   align-items: center;

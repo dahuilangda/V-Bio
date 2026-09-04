@@ -42,7 +42,10 @@ import {
   normalizeConfigForBackend,
   sortProjectTasks
 } from './projectDraftUtils';
-import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
+import {
+  inferTaskStateFromStatusPayload,
+  readTaskRuntimeStatusText as readStatusText
+} from '../../utils/taskRuntime';
 import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
 
 function normalizeAffinityMode(value: unknown): AffinityScoringMode {
@@ -61,6 +64,8 @@ import { useConstraintTemplateContext } from './useConstraintTemplateContext';
 import { useWorkspaceAffinitySelection } from './useWorkspaceAffinitySelection';
 import { useProjectDraftSynchronizers } from './useProjectDraftSynchronizers';
 import { useProjectWorkspaceRuntimeUi } from './useProjectWorkspaceRuntimeUi';
+import { createAdaptivePollScheduler } from '../../utils/adaptivePollScheduler';
+import { isTransientRuntimeStatusText } from '../../utils/taskRuntime';
 import { useProjectWorkspaceLoader } from './useProjectWorkspaceLoader';
 import {
   showRunQueuedNotice as showRunQueuedNoticeControl,
@@ -127,10 +132,13 @@ function buildRuntimePollingSignature(rows: Array<{
   id?: string | null;
   task_id?: string | null;
   task_state?: string | null;
-  updated_at?: string | null;
   properties?: unknown;
   confidence?: unknown;
 }>): string {
+  // Identity + runtime state (+ lead-opt stage/counters) only. updated_at is
+  // deliberately excluded: every runtime state overlay used to bump it, which changed
+  // the signature, restarted both polling effects and fired an immediate extra tick —
+  // a self-amplifying request loop. Progress text changes must never re-arm a poller.
   return rows
     .filter((row) => {
       const hasRuntimeTaskState = isRuntimeTaskState(row.task_state) && String(row.task_id || '').trim();
@@ -143,12 +151,11 @@ function buildRuntimePollingSignature(rows: Array<{
         const queued = Math.max(0, summary?.predictionQueued || 0);
         const running = Math.max(0, summary?.predictionRunning || 0);
         const stage = String(summary?.stage || '').trim().toLowerCase();
-        return `leadopt|${String(row.id || '').trim()}|${queued}|${running}|${stage}|${String(row.updated_at || '').trim()}`;
+        return `leadopt|${String(row.id || '').trim()}|${queued}|${running}|${stage}`;
       }
       const taskId = String(row.task_id || '').trim();
       const taskState = String(row.task_state || '').trim().toUpperCase();
-      const updatedAt = String(row.updated_at || '').trim();
-      return `${taskId}|${taskState}|${updatedAt}`;
+      return `${taskId}|${taskState}`;
     })
     .sort((a, b) => a.localeCompare(b))
     .join('\n');
@@ -649,23 +656,6 @@ function readLeadOptEnumeratedCandidateCount(row: { properties?: unknown; confid
   return 0;
 }
 
-function hasTransientRuntimeStatusText(value: unknown): boolean {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized) return false;
-  return (
-    normalized === 'running' ||
-    normalized === 'queued' ||
-    normalized === 'pending' ||
-    normalized === 'started' ||
-    normalized.includes(' running') ||
-    normalized.includes(' queued') ||
-    normalized.includes('pending') ||
-    normalized.includes('started') ||
-    normalized.includes('preparing') ||
-    normalized.includes('processing')
-  );
-}
-
 function countLeadOptUploadPayloads(task: { components?: unknown } | null | undefined): number {
   const uploads = readLeadOptUploadsFromComponents(task?.components);
   let count = 0;
@@ -1037,53 +1027,19 @@ export function useProjectDetailRuntimeContext() {
       (!runtimePollingSummary.hasRuntimeTasks || !hasFocusedQueryCandidates);
 
     let cancelled = false;
-    let inFlight = false;
-    let timer: number | null = null;
 
-    const computePollDelayMs = () => {
-      const isLeadOptOrPeptide = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
-      if (workflowKey === 'lead_optimization' && !runtimePollingSummary.hasRuntimeTasks) {
-        return typeof document !== 'undefined' && document.visibilityState !== 'visible' ? 40000 : 20000;
-      }
-      const baseDelayMs = runtimePollingSummary.hasRunning
-        ? isLeadOptOrPeptide
-          ? 4500
-          : 4200
-        : runtimePollingSummary.hasQueued
-          ? isLeadOptOrPeptide
-            ? 7500
-            : 7000
-          : 12000;
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-        return baseDelayMs * 2;
-      }
-      return baseDelayMs;
-    };
-    const scheduleNext = (
-      hasLeadOptSummaryRows: boolean,
-      hasLeadOptCandidates: boolean
-    ) => {
-      if (cancelled) return;
-      if (workflowKey === 'lead_optimization' && !runtimePollingSummary.hasRuntimeTasks && workspaceTab !== 'results') return;
-      if (
-        workflowKey === 'lead_optimization' &&
-        !runtimePollingSummary.hasRuntimeTasks &&
-        workspaceTab === 'results' &&
-        hasLeadOptSummaryRows &&
-        hasLeadOptCandidates
-      ) {
-        return;
-      }
-      timer = window.setTimeout(() => {
-        void refreshTaskRows();
-      }, computePollDelayMs());
-    };
+    // Adaptive poll cadence (see adaptivePollScheduler): fast while fetched rows keep
+    // changing, ~2× slower after three identical fetches, doubled while hidden, immediate
+    // catch-up when the tab becomes visible again.
+    let lastFetchedRowsSignature = '';
+    let pauseChainOnce = false;
 
-    const refreshTaskRows = async () => {
-      if (cancelled || inFlight) return;
-      inFlight = true;
+    const refreshTaskRows = async (): Promise<{ changed: boolean; shouldContinue: boolean }> => {
+      if (cancelled) return { changed: false, shouldContinue: false };
       let hasLeadOptSummaryRows = false;
       let hasLeadOptCandidates = false;
+      let hadError = false;
+      let rowsForUiSnapshot: ProjectTask[] = [];
       try {
         const rowsRaw = await listProjectTasksForList(projectIdValue, {
           includeComponents: false,
@@ -1101,7 +1057,7 @@ export function useProjectDetailRuntimeContext() {
           accessLevel: project?.access_level || 'owner',
           editableTaskIds: project?.editable_task_ids || []
         });
-        if (cancelled) return;
+        if (cancelled) return { changed: false, shouldContinue: false };
         const nextRows = sortProjectTasks(rowsRaw).map((row) => normalizeLeadOptRuntimeRow(row));
         const terminalStatusByTaskId = runtimeTerminalStatusByTaskIdRef.current;
         const cachedStatusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
@@ -1258,7 +1214,7 @@ export function useProjectDetailRuntimeContext() {
 
         // A cancelled/teardown poll must not land its (stale-closure) writes — it could
         // paint the previous active task's state over the newly-focused one.
-        if (cancelled) return;
+        if (cancelled) return { changed: false, shouldContinue: false };
 
         setProjectTasks((prev) => {
           const prevById = new Map(prev.map((item) => [item.id, item]));
@@ -1271,9 +1227,9 @@ export function useProjectDetailRuntimeContext() {
         });
 
         const activeProjectTaskId = String(project?.task_id || '').trim();
-        if (!activeProjectTaskId) return;
+        if (!activeProjectTaskId) return { changed: false, shouldContinue: true };
         const activeRow = rowsForUi.find((row) => String(row.task_id || '').trim() === activeProjectTaskId) || null;
-        if (!activeRow) return;
+        if (!activeRow) return { changed: false, shouldContinue: true };
         setProject((prev) => {
           if (!prev) return prev;
           const mergedActiveRow = mergeTaskRuntimeFields(activeRow, prev);
@@ -1311,19 +1267,62 @@ export function useProjectDetailRuntimeContext() {
             duration_seconds: nextDurationSeconds
           };
         });
+        rowsForUiSnapshot = rowsForUi;
       } catch (err) {
         console.error('refreshTaskRows polling failed; keeping local state.', err);
-      } finally {
-        inFlight = false;
-        scheduleNext(hasLeadOptSummaryRows, hasLeadOptCandidates);
+        hadError = true;
       }
+      // Cadence signal: "changed" compares this fetch against the previous fetch (not the
+      // React state — the effect closure would be stale mid-run). A failing poll changes
+      // nothing and drifts toward the idle cadence instead of hammering.
+      const fetchedSignature = buildTaskRuntimeSignature(rowsForUiSnapshot);
+      const changed = !hadError && fetchedSignature !== lastFetchedRowsSignature;
+      lastFetchedRowsSignature = fetchedSignature;
+      const shouldContinue =
+        !cancelled &&
+        !(
+          workflowKey === 'lead_optimization' &&
+          !runtimePollingSummary.hasRuntimeTasks &&
+          (workspaceTab !== 'results' || (hasLeadOptSummaryRows && hasLeadOptCandidates))
+        );
+      return { changed, shouldContinue };
     };
 
-    void refreshTaskRows();
+    const scheduler = createAdaptivePollScheduler({
+      tickOnStart: true,
+      resolveIntervals: () => {
+        if (pauseChainOnce) {
+          pauseChainOnce = false;
+          return null;
+        }
+        if (workflowKey === 'lead_optimization' && !runtimePollingSummary.hasRuntimeTasks) {
+          return { activeMs: 20000, idleMs: 20000 };
+        }
+        const isLeadOptOrPeptide = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
+        let activeMs: number;
+        if (runtimePollingSummary.hasRunning) {
+          activeMs = isLeadOptOrPeptide ? 4500 : 4200;
+        } else if (runtimePollingSummary.hasQueued) {
+          activeMs = isLeadOptOrPeptide ? 7500 : 7000;
+        } else {
+          activeMs = 12000;
+        }
+        return { activeMs, idleMs: Math.min(Math.max(activeMs * 2, 12000), 30000) };
+      },
+      idleAfterUnchangedTicks: 3,
+      hiddenIntervalMultiplier: 2,
+      maxIntervalMs: 40000,
+      tick: async () => {
+        const outcome = await refreshTaskRows();
+        if (!outcome.shouldContinue) pauseChainOnce = true;
+        return outcome.changed;
+      }
+    });
+    scheduler.start();
 
     return () => {
       cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      scheduler.stop();
     };
   }, [
     project?.access_level,
@@ -1369,7 +1368,11 @@ export function useProjectDetailRuntimeContext() {
       if (!hasStoredTaskInputOptions(taskRow)) return;
       const taskOptions = readTaskInputOptions(taskRow);
       if (Object.keys(taskOptions).length === 0) return;
-      const marker = `${focusedRowId}|${String(taskRow.updated_at || '').trim()}|${JSON.stringify(taskOptions)}`;
+      // Content-level marker: the snapshot must be applied when the focused task or its
+      // stored options actually change — NOT when updated_at moves. Runtime overlays and
+      // status refreshes used to bump updated_at every poll, rebuilding the whole
+      // inputConfig (and clobbering in-progress edits) on every tick while a task ran.
+      const marker = `${focusedRowId}|${JSON.stringify(taskOptions)}`;
       if (peptideTaskSwitchRef.current === marker) return;
       peptideTaskSwitchRef.current = marker;
 
@@ -2210,7 +2213,7 @@ export function useProjectDetailRuntimeContext() {
     const sourceTaskState = String(sourceRow?.task_state || '').trim().toUpperCase();
     if (!sourceRowId || !sourceTaskId) return;
     if (sourceTaskState !== 'SUCCESS' && sourceTaskState !== 'FAILURE' && sourceTaskState !== 'REVOKED') return;
-    if (!hasTransientRuntimeStatusText(sourceRow?.status_text)) return;
+    if (!isTransientRuntimeStatusText(sourceRow?.status_text)) return;
 
     const marker = ['terminal-status', sourceRowId, sourceTaskId, String(sourceRow?.updated_at || '').trim()].join('|');
     if (leadOptResultMaterializationRef.current[sourceRowId] === marker) return;
@@ -2330,7 +2333,6 @@ export function useProjectDetailRuntimeContext() {
   useProjectRuntimeEffects({
     projectTaskId: statusContextTaskRow?.task_id || project?.task_id || null,
     projectTaskState: displayTaskState || project?.task_state || null,
-    projectTasksDependency: runtimePollingSignature,
     refreshStatus,
     statusContextTaskRow,
     runtimeResultTask,

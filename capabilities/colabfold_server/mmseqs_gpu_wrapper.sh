@@ -104,11 +104,16 @@ fi
 
 MSA_GPU_REDIS_HOST="${MSA_GPU_REDIS_HOST:-172.17.3.200}"
 MSA_GPU_REDIS_PORT="${MSA_GPU_REDIS_PORT:-6379}"
-MSA_GPU_WAIT_SECONDS="${MSA_GPU_WAIT_SECONDS:-1800}"
+MSA_GPU_WAIT_SECONDS="${MSA_GPU_WAIT_SECONDS:-600}"
 POOL_KEY="${MSA_GPU_POOL_KEY:-boltz_gpu_pool:available}"
 IN_USE_KEY="${MSA_GPU_IN_USE_KEY:-boltz_gpu_pool:in_use}"
 HEARTBEAT_INTERVAL=20
 HEARTBEAT_TTL=60
+# 卡死的 search(如 CUDA 死锁)会被此硬超时击杀,随后租约经下方 trap 正常归还;
+# 没有它,一次卡死 = 一张卡永久泄漏(GPU 池抽干后所有 search 睡眠等待租约)。
+MMSEQS_GPU_SEARCH_TIMEOUT="${MMSEQS_GPU_SEARCH_TIMEOUT:-1800}"
+# 租约年龄下限:刚租到的持有者尚未发出第一次心跳,回收逻辑必须跳过这个窗口。
+LEASE_MIN_AGE_SECONDS=120
 
 # 发送一条 RESP 命令,解析单条回复到 REPLY(+status / :int / bulk / array-of-bulk)。
 redis_cmd() {
@@ -156,6 +161,7 @@ lease_gpu() {
   local owner="colabfold_msa:$$:$(date +%s)"
   local deadline=$(( $(date +%s) + MSA_GPU_WAIT_SECONDS )) slice result value
   while (( $(date +%s) < deadline )); do
+    reclaim_stale_leases
     slice=$(( deadline - $(date +%s) ))
     (( slice > 30 )) && slice=30
     (( slice < 1 )) && slice=1
@@ -175,6 +181,39 @@ lease_gpu() {
   return 2
 }
 
+# 回收陈旧租约:持有者进程已死(心跳过期)且租约年龄超过 LEASE_MIN_AGE_SECONDS。
+# 这是 celery gpu_manager 协议在专用池命名空间缺失的兜底——没有任何周期任务清扫
+# 本池,泄漏的租约只有等待中的 search 能代为归还。HDEL 的原子返回值保证并发回收
+# 时只有一个等待方 RPUSH,不会把同一张卡入队两次。
+reclaim_stale_leases() {
+  local now gpu owner ts
+  if ! redis_cmd HGETALL "$IN_USE_KEY"; then
+    return 0
+  fi
+  local -a entries
+  mapfile -t entries <<< "$REPLY"
+  (( ${#entries[@]} >= 2 )) || return 0
+  now=$(date +%s)
+  local i
+  for (( i = 0; i + 1 < ${#entries[@]}; i += 2 )); do
+    gpu="${entries[i]}"
+    owner="${entries[i + 1]}"
+    ts="${owner##*:}"
+    [[ "$ts" =~ ^[0-9]+$ ]] || continue
+    (( now - ts <= LEASE_MIN_AGE_SECONDS )) && continue
+    if ! redis_cmd EXISTS "task_heartbeat:$owner"; then
+      continue
+    fi
+    [[ "$REPLY" == "1" ]] && continue
+    if ! redis_cmd HDEL "$IN_USE_KEY" "$gpu"; then
+      continue
+    fi
+    [[ "$REPLY" == "1" ]] || continue
+    redis_cmd RPUSH "$POOL_KEY" "$gpu" >/dev/null || true
+    echo "[msa-gpu] reclaimed stale lease GPU $gpu (owner $owner)" >&2
+  done
+}
+
 release_gpu() {  # $1=gpu $2=owner;仅当 lease 仍归本任务时释放(多余 RPUSH 由 reconcile 兜底去重)
   local gpu="$1" owner="$2" current
   if redis_cmd HGET "$IN_USE_KEY" "$gpu"; then
@@ -185,6 +224,28 @@ release_gpu() {  # $1=gpu $2=owner;仅当 lease 仍归本任务时释放(多余 
     fi
   fi
 }
+
+GPU_ID=""
+OWNER=""
+HB_PID=""
+
+# 任何退出路径(SIGKILL 之外的信号/正常退出)都归还租约并停心跳;SIGKILL 场景
+# 由其他等待方的 reclaim_stale_leases 兜底回收。
+cleanup_lease() {
+  local rc=$?
+  if [[ -n "$HB_PID" ]]; then
+    kill "$HB_PID" 2>/dev/null
+  fi
+  if [[ -n "$GPU_ID" ]]; then
+    redis_cmd DEL "task_heartbeat:$OWNER" >/dev/null 2>&1
+    release_gpu "$GPU_ID" "$OWNER"
+    echo "[msa-gpu] released GPU $GPU_ID" >&2
+  fi
+  exit $rc
+}
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap cleanup_lease EXIT
 
 LEASE=$(lease_gpu)
 lease_rc=$?
@@ -209,12 +270,12 @@ echo "[msa-gpu] leased GPU $GPU_ID ($OWNER)" >&2
 ) &
 HB_PID=$!
 
-CUDA_VISIBLE_DEVICES="$GPU_ID" "$real_bin" "$@" --gpu 1 --prefilter-mode 1
+CUDA_VISIBLE_DEVICES="$GPU_ID" timeout -k 60 "$MMSEQS_GPU_SEARCH_TIMEOUT" \
+  "$real_bin" "$@" --gpu 1 --prefilter-mode 1
 run_rc=$?
+if (( run_rc == 124 || run_rc == 137 )); then
+  echo "[msa-gpu] search exceeded ${MMSEQS_GPU_SEARCH_TIMEOUT}s; killed (stuck-search protection)" >&2
+  run_rc=124
+fi
 
-kill "$HB_PID" 2>/dev/null
-wait "$HB_PID" 2>/dev/null
-redis_cmd DEL "task_heartbeat:$OWNER" >/dev/null
-release_gpu "$GPU_ID" "$OWNER"
-echo "[msa-gpu] released GPU $GPU_ID" >&2
 exit $run_rc

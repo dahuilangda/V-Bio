@@ -1,0 +1,79 @@
+/* InfoTip: info circle + hover/focus tooltip, mirroring the metric-tooltip
+   look (sage palette, soft shadow) so it blends with existing panels. */
+
+.info-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+
+.info-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  color: #567666;
+  cursor: help;
+  border-radius: 999px;
+}
+
+.info-tip-trigger:focus-visible {
+  outline: 2px solid var(--primary, #1f4f3f);
+  outline-offset: 1px;
+}
+
+.info-tip-label {
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.info-tip-bubble {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 7px);
+  transform: translateX(-50%) translateY(-2px);
+  width: max-content;
+  min-width: 180px;
+  max-width: 300px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #d6e2da;
+  background: #fdfefe;
+  color: #334f41;
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 10px 30px rgba(24, 54, 40, 0.14);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 20;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.info-tip-bubble--start {
+  left: -4px;
+  transform: translateY(-2px);
+}
+
+.info-tip-bubble--end {
+  left: auto;
+  right: -4px;
+  transform: translateY(-2px);
+}
+
+.info-tip:hover .info-tip-bubble,
+.info-tip:focus-within .info-tip-bubble {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.info-tip:hover .info-tip-bubble {
+  transform: translateX(-50%) translateY(0);
+}
+
+.info-tip:hover .info-tip-bubble--start,
+.info-tip:hover .info-tip-bubble--end {
+  transform: translateY(0);
+}

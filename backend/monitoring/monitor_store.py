@@ -165,7 +165,39 @@ class MonitorStore:
             return self._apply_worker_event(event)
         if kind in {"task", "task_status", "task_heartbeat"}:
             return self._apply_task_event(event)
+        if kind == "infra":
+            return self._apply_infra_event(event)
         raise ValueError(f"Unsupported monitor event kind: {kind or '<empty>'}")
+
+    def _apply_infra_event(self, event: Mapping[str, Any]) -> bool:
+        """基础设施健康事件（如 MSA 服务器降级/恢复）：只追加进 monitor_events，
+        不维护 current 状态表。event_key 由发布方提供时可幂等去重。"""
+        event_type = str(event.get("event_type") or "infra-event").strip().lower()
+        occurred_at = _event_time(event.get("occurred_at"))
+        event_key = str(
+            event.get("event_key")
+            or f"infra:{event.get('component') or 'unknown'}:{event_type}:{occurred_at.isoformat()}"
+        )
+        source = str(event.get("source") or "collector")
+        with self._transaction() as cursor:
+            if self._event_exists(cursor, event_key):
+                return False
+            self._record_event(
+                cursor,
+                event_key=event_key,
+                entity_type=str(event.get("component") or "infra"),
+                entity_id=str(event.get("component") or "infra"),
+                event_type=event_type,
+                state_bucket=str(event.get("state") or "info"),
+                occurred_at=occurred_at,
+                source=source,
+                payload={
+                    "component": event.get("component"),
+                    "state": event.get("state"),
+                    "details_text": event.get("details_text"),
+                },
+            )
+        return True
 
     def _apply_worker_event(self, event: Mapping[str, Any]) -> bool:
         worker_id = str(event.get("worker_id") or event.get("hostname") or "").strip()

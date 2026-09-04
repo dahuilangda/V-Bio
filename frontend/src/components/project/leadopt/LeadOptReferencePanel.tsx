@@ -1,6 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { type MolstarAtomHighlight, type MolstarResidueHighlight, type MolstarResiduePick } from '../MolstarViewer';
 import { LeadOptMolstarViewer } from './LeadOptMolstarViewer';
+import { combineLigandAndBoxOverlay } from '../../../utils/pocketBox';
+import { InfoTip } from '../../../components/common/InfoTip';
 
 interface LeadOptReferencePanelProps {
   sectionId?: string;
@@ -12,6 +14,12 @@ interface LeadOptReferencePanelProps {
   previewStructureFormat: 'cif' | 'pdb';
   previewOverlayStructureText: string;
   previewOverlayStructureFormat: 'cif' | 'pdb';
+  /** Docking-style pocket box wireframe; takes priority over the ligand overlay. */
+  boxOverlayText?: string;
+  /** Toolbar (Box / Clear) rendered next to the status line once the reference is ready. */
+  pocketToolbar?: ReactNode;
+  /** PocketBoxControls drawer rendered inside the viewer while open. */
+  pocketControls?: ReactNode;
   ligandChain: string;
   highlightedLigandAtoms: MolstarAtomHighlight[];
   highlightedPocketResidues: MolstarResidueHighlight[];
@@ -31,6 +39,9 @@ export function LeadOptReferencePanel({
   previewStructureFormat,
   previewOverlayStructureText,
   previewOverlayStructureFormat,
+  boxOverlayText = '',
+  pocketToolbar,
+  pocketControls,
   ligandChain,
   highlightedLigandAtoms,
   highlightedPocketResidues,
@@ -57,8 +68,19 @@ export function LeadOptReferencePanel({
     [highlightedLigandAtoms]
   );
 
+  const hasStructure = Boolean(previewStructureText.trim());
+  // One overlay slot carries both the ligand and the box wireframe so the
+  // ligand stays visible once the box is drawn.
+  const combinedOverlay = useMemo(() => {
+    if (!hasStructure) return { text: '', format: 'pdb' as const };
+    const ligandOverlay = previewOverlayStructureText.trim();
+    const box = boxOverlayText.trim();
+    if (box) return combineLigandAndBoxOverlay(ligandOverlay, previewOverlayStructureFormat, box);
+    return { text: ligandOverlay, format: previewOverlayStructureFormat };
+  }, [boxOverlayText, hasStructure, previewOverlayStructureFormat, previewOverlayStructureText]);
+
   return (
-    <section id={sectionId} className="panel subtle lead-opt-panel">
+    <section id={sectionId} className="panel subtle lead-opt-panel lead-opt-panel--reference">
       <div className="lead-opt-reference-grid">
         <label className="field">
           <span>Target (PDB/CIF)</span>
@@ -91,18 +113,28 @@ export function LeadOptReferencePanel({
           />
         </label>
       </div>
-      <p className="small muted">
-        {referenceReady
-          ? 'Reference ready. Fragment and 3D stay synced.'
-          : 'Upload target + ligand to start.'}
-      </p>
+      <div className="lead-opt-reference-status">
+        <p className="small muted">
+          {loading
+            ? 'Parsing reference…'
+            : referenceReady
+              ? (
+                <>
+                  Reference ready
+                  <InfoTip text="Pocket box sits on the ligand; fragments and the 3D view stay in sync." align="start" />
+                </>
+              )
+              : 'Upload target + ligand to start.'}
+        </p>
+        {referenceReady ? pocketToolbar : null}
+      </div>
       <div className="lead-opt-structure-panel">
-        {previewStructureText ? (
+        {hasStructure ? (
           <LeadOptMolstarViewer
             structureText={previewStructureText}
             format={previewStructureFormat}
-            overlayStructureText={previewOverlayStructureText}
-            overlayFormat={previewOverlayStructureFormat}
+            overlayStructureText={combinedOverlay.text || undefined}
+            overlayFormat={combinedOverlay.format}
             colorMode="default"
             ligandFocusChainId={ligandChain}
             onResiduePick={onResiduePick}
@@ -115,8 +147,11 @@ export function LeadOptReferencePanel({
             suppressAutoFocus={false}
           />
         ) : (
-          <div className="ligand-preview-empty">Upload reference target+ligand to view 3D.</div>
+          <div className="ligand-preview-empty">
+            {loading ? 'Rendering reference…' : 'Upload reference target+ligand to view 3D.'}
+          </div>
         )}
+        {hasStructure ? pocketControls : null}
       </div>
     </section>
   );

@@ -126,12 +126,12 @@ const CASES: Array<{ input: string; error: string | null; compounds: Array<{ id:
     ]
   },
   {
-    "input": ">阿司匹林\nCCO\n",
+    "input": ">aspirin\nCCO\n",
     "error": null,
     "compounds": [
       {
-        "id": "compound-001",
-        "name": "阿司匹林",
+        "id": "aspirin",
+        "name": "aspirin",
         "smiles": "CCO"
       }
     ]

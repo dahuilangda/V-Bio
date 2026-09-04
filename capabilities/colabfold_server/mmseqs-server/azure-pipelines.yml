@@ -1,0 +1,39 @@
+# https://aka.ms/yaml
+
+trigger:
+  tags:
+    include:
+    - v*
+  branches:
+    include:
+    - master
+
+pool:
+  vmImage: 'macOS-10.15'
+steps:
+  - task: GoTool@0
+    inputs:
+      version: '1.18.2'
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '16.x'
+  - script: |
+      npm install
+      make all -j $(nproc --all 2>/dev/null || sysctl -n hw.ncpu)
+      ELECTRON=1 FRONTEND_APP=mmseqs node ./electron/build.js
+  - task: DownloadSecureFile@1
+    name: certificate
+    inputs:
+      secureFile: certificate.p12
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  - task: CmdLine@2
+    inputs:
+      ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+        script: ./node_modules/.bin/electron-builder -mwl
+      ${{ else }}:
+        script: ./node_modules/.bin/electron-builder -mwl -c.mac.identity=null -p never
+    ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+      env:
+        CSC_LINK: $(certificate.secureFilePath)
+        CSC_KEY_PASSWORD: $(CSC_KEY_PASSWORD)
+        GH_TOKEN: $(GH_TOKEN)

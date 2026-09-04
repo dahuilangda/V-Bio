@@ -1,4 +1,4 @@
-import type { MutableRefObject } from 'react';
+import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import {
   downloadResultBlob,
   getTaskStatus,
@@ -13,26 +13,11 @@ import {
   hasMeaningfulValue
 } from '../../utils/resultConfidenceStorage';
 import { normalizeWorkflowKey } from '../../utils/workflows';
-import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
-
-function isTransientRuntimeStatusText(value: unknown): boolean {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized) return false;
-  return (
-    normalized === 'running' ||
-    normalized === 'queued' ||
-    normalized === 'pending' ||
-    normalized === 'started' ||
-    normalized === 'starting' ||
-    normalized.includes(' running') ||
-    normalized.includes(' queued') ||
-    normalized.includes('pending') ||
-    normalized.includes('started') ||
-    normalized.includes('preparing') ||
-    normalized.includes('processing') ||
-    normalized.includes('uploading')
-  );
-}
+import {
+  inferTaskStateFromStatusPayload,
+  isTransientRuntimeStatusText,
+  readTaskRuntimeStatusText as readStatusText
+} from '../../utils/taskRuntime';
 
 const PEPTIDE_RUNTIME_SETUP_KEYS = [
   'design_mode',
@@ -285,17 +270,52 @@ function mergeRowsPreferRicher(
   return merged;
 }
 
+// Runtime candidate rows accumulate across GA generations. Without a bound the merged
+// blob grows every poll and each poll's merge/stringify cost grows with it (this blob
+// is compared, re-merged and re-rendered every cycle — the growth is what eventually
+// froze the page). The terminal result always comes from the result bundle, not from
+// this accumulator, so keeping the newest PEPTIDE_RUNTIME_CANDIDATE_ROW_CAP rows is a
+// bound on scratch state, not data loss.
+const PEPTIDE_RUNTIME_CANDIDATE_ROW_CAP = 200;
+
+// Preview structure text per candidate can be hundreds of KB per row in the runtime
+// status payload. No runtime consumer reads it from the accumulator (the result bundle
+// downloaded on SUCCESS is the structure source of truth), and keeping it makes every
+// subsequent merge and equality check pay for it.
+const PEPTIDE_CANDIDATE_ROW_BULK_KEYS = [
+  'structure_text',
+  'structureText',
+  'cif_text',
+  'cifText',
+  'pdb_text',
+  'pdbText',
+  'content'
+] as const;
+
+function stripBulkStructureFieldsFromCandidateRow(row: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...row };
+  for (const key of PEPTIDE_CANDIDATE_ROW_BULK_KEYS) {
+    delete next[key];
+  }
+  return next;
+}
+
 function mergePeptideCandidateRows(
   existingRows: Array<Record<string, unknown>>,
   incomingRows: Array<Record<string, unknown>>
 ): Array<Record<string, unknown>> {
-  if (existingRows.length === 0) return incomingRows;
-  if (incomingRows.length === 0) return existingRows;
+  const normalizedIncoming = incomingRows.map(stripBulkStructureFieldsFromCandidateRow);
+  if (existingRows.length === 0) {
+    return normalizedIncoming.length > PEPTIDE_RUNTIME_CANDIDATE_ROW_CAP
+      ? normalizedIncoming.slice(-PEPTIDE_RUNTIME_CANDIDATE_ROW_CAP)
+      : normalizedIncoming;
+  }
+  if (normalizedIncoming.length === 0) return existingRows;
   const merged = new Map<string, Record<string, unknown>>();
   for (const row of existingRows) {
     merged.set(readPeptideCandidateIdentity(row), row);
   }
-  for (const row of incomingRows) {
+  for (const row of normalizedIncoming) {
     const key = readPeptideCandidateIdentity(row);
     const previous = merged.get(key);
     if (!previous) {
@@ -304,7 +324,8 @@ function mergePeptideCandidateRows(
     }
     merged.set(key, mergeRowsPreferRicher(previous, row));
   }
-  return [...merged.values()];
+  const values = [...merged.values()];
+  return values.length > PEPTIDE_RUNTIME_CANDIDATE_ROW_CAP ? values.slice(-PEPTIDE_RUNTIME_CANDIDATE_ROW_CAP) : values;
 }
 
 function pickRecordFields(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
@@ -536,6 +557,9 @@ export async function refreshTaskStatus(params: {
       | null
       | ((prev: Record<string, unknown> | null) => Record<string, unknown> | null)
   ) => void;
+  setProject: Dispatch<SetStateAction<Project | null>>;
+  setProjectTasks: Dispatch<SetStateAction<ProjectTask[]>>;
+  sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
   pullResultForViewer: (
@@ -543,13 +567,16 @@ export async function refreshTaskStatus(params: {
     options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }
   ) => Promise<void>;
   options?: { silent?: boolean; taskId?: string };
-}): Promise<void> {
+}): Promise<boolean> {
   const {
     project,
     projectTasks,
     statusRefreshInFlightRef,
     setError,
     setStatusInfo,
+    setProject,
+    setProjectTasks,
+    sortProjectTasks,
     patch,
     patchTask,
     pullResultForViewer,
@@ -561,7 +588,7 @@ export async function refreshTaskStatus(params: {
     if (!silent) {
       setError('Project is not loaded yet.');
     }
-    return;
+    return false;
   }
 
   const requestedTaskId = String(options?.taskId || '').trim();
@@ -570,9 +597,9 @@ export async function refreshTaskStatus(params: {
     if (!silent) {
       setError('No task ID yet. Submit a task first.');
     }
-    return;
+    return false;
   }
-  if (statusRefreshInFlightRef.current.has(activeTaskId)) return;
+  if (statusRefreshInFlightRef.current.has(activeTaskId)) return false;
   statusRefreshInFlightRef.current.add(activeTaskId);
 
   if (!silent) {
@@ -624,74 +651,128 @@ export async function refreshTaskStatus(params: {
             return Number.isFinite(duration) ? duration : null;
           })()
         : null;
-    const patchData: Partial<Project> = {
-      task_state: taskState,
-      status_text: statusText,
-      error_text: nextErrorText,
-    };
-    const projectConfidenceBase =
-      runtimeTask?.confidence && typeof runtimeTask.confidence === 'object'
-        ? (runtimeTask.confidence as Record<string, unknown>)
-        : project.confidence;
-    const projectConfidencePatch = isPeptideDesignWorkflow
-      ? mergePeptideRuntimeStatusIntoConfidence(projectConfidenceBase, runtimeInfo)
+
+    // Runtime progress (status text, elapsed-derived fields, peptide candidate rows)
+    // changes on every poll. It is applied to IN-MEMORY state only: polling must never
+    // PATCH the DB per tick, because each PATCH bumps updated_at, which in turn
+    // invalidates the polling signatures, the task-detail cache and the snapshot
+    // markers — the feedback loop that multiplied requests and froze the page. The DB
+    // is written only when the task STATE itself transitions (plus terminal backfill);
+    // final result payloads are persisted separately by pullResultForViewer on SUCCESS.
+    // Merged ONCE: the project patch intentionally derives from the task row's confidence
+    // when it exists (same base as the task patch), so one merge feeds both state writes.
+    const peptideConfidencePatch = isPeptideDesignWorkflow
+      ? mergePeptideRuntimeStatusIntoConfidence(
+          runtimeTask?.confidence && typeof runtimeTask.confidence === 'object'
+            ? (runtimeTask.confidence as Record<string, unknown>)
+            : project.confidence,
+          runtimeInfo
+        )
       : null;
-    if (projectConfidencePatch) {
-      patchData.confidence = projectConfidencePatch;
-    }
+    const taskPropertiesPatch =
+      isPeptideDesignWorkflow && runtimeTask && hasStoredTaskInputOptions(runtimeTask)
+        ? mergePeptidePreviewIntoProperties(runtimeTask.properties, peptideConfidencePatch || runtimeTask.confidence)
+        : null;
 
-    if (taskState === 'SUCCESS') {
-      patchData.completed_at = completedAt;
-      patchData.duration_seconds = durationSeconds;
-    }
-
-    const shouldPatchProject =
-      Boolean(project) &&
+    // Change signal for the adaptive poll cadence: true when this tick observed anything
+    // new (status text, state, terminal fields, peptide progress). Computed from the same
+    // snapshot the state updaters below compare against, so the poller learns the answer
+    // synchronously without depending on when React flushes the updaters.
+    const nextProjectCompletedAt = taskState === 'SUCCESS' ? completedAt : project.completed_at;
+    const nextProjectDurationSeconds = taskState === 'SUCCESS' ? durationSeconds : project.duration_seconds;
+    const projectChanged =
       isProjectActiveTask &&
       (
         project.task_state !== taskState ||
         (project.status_text || '') !== statusText ||
         (project.error_text || '') !== nextErrorText ||
-        (taskState === 'SUCCESS' && (!project.completed_at || project.duration_seconds === null)) ||
-        Boolean(projectConfidencePatch)
+        (project.completed_at || null) !== (nextProjectCompletedAt || null) ||
+        (project.duration_seconds ?? null) !== (nextProjectDurationSeconds ?? null) ||
+        peptideConfidencePatch !== null
       );
+    const nextTaskCompletedAt = taskState === 'SUCCESS' ? completedAt : runtimeTask?.completed_at;
+    const nextTaskDurationSeconds = taskState === 'SUCCESS' ? durationSeconds : runtimeTask?.duration_seconds;
+    const taskChanged = Boolean(runtimeTask) && (
+      runtimeTask!.task_state !== taskState ||
+      (runtimeTask!.status_text || '') !== statusText ||
+      (runtimeTask!.error_text || '') !== nextErrorText ||
+      (runtimeTask!.completed_at || null) !== (nextTaskCompletedAt || null) ||
+      (runtimeTask!.duration_seconds ?? null) !== (nextTaskDurationSeconds ?? null) ||
+      peptideConfidencePatch !== null ||
+      taskPropertiesPatch !== null
+    );
+    const hasObservedChanges = projectChanged || taskChanged;
 
-    if (shouldPatchProject) {
+    // Identity stability comes from the gating itself: when nothing changed we never
+    // touch state, so downstream `project`/`projectTasks` identities stay stable.
+    if (isProjectActiveTask && projectChanged) {
+      setProject((prev) => {
+        // Stale-write guard: the active task may have switched while this poll ran.
+        if (!prev || String(prev.task_id || '').trim() !== activeTaskId) return prev;
+        return {
+          ...prev,
+          task_state: taskState,
+          status_text: statusText,
+          error_text: nextErrorText,
+          ...(taskState === 'SUCCESS' ? { completed_at: completedAt, duration_seconds: durationSeconds } : {}),
+          ...(peptideConfidencePatch ? { confidence: peptideConfidencePatch } : {})
+        };
+      });
+    }
+
+    if (runtimeTask && taskChanged) {
+      setProjectTasks((prev) =>
+        sortProjectTasks(
+          prev.map((row) => {
+            if (row.id !== runtimeTask.id) return row;
+            return {
+              ...row,
+              task_state: taskState,
+              status_text: statusText,
+              error_text: nextErrorText,
+              ...(taskState === 'SUCCESS' ? { completed_at: completedAt, duration_seconds: durationSeconds } : {}),
+              ...(peptideConfidencePatch ? { confidence: peptideConfidencePatch } : {}),
+              ...(taskPropertiesPatch ? { properties: taskPropertiesPatch as unknown as ProjectTask['properties'] } : {})
+            };
+          })
+        )
+      );
+    }
+
+    const persistedProjectState = String(project.task_state || '').trim().toUpperCase();
+    const persistedTaskState = String(runtimeTask?.task_state || '').trim().toUpperCase();
+    const projectNeedsTerminalBackfill =
+      taskState === 'SUCCESS' && (!project.completed_at || project.duration_seconds === null);
+    const taskNeedsTerminalBackfill =
+      taskState === 'SUCCESS' && (!runtimeTask?.completed_at || runtimeTask.duration_seconds === null);
+    const shouldPersistProject =
+      isProjectActiveTask && (persistedProjectState !== taskState || projectNeedsTerminalBackfill);
+    const shouldPersistTask = Boolean(runtimeTask) && (persistedTaskState !== taskState || taskNeedsTerminalBackfill);
+
+    if (shouldPersistProject) {
+      const patchData: Partial<Project> = {
+        task_state: taskState,
+        status_text: statusText,
+        error_text: nextErrorText,
+      };
+      if (taskState === 'SUCCESS') {
+        patchData.completed_at = completedAt;
+        patchData.duration_seconds = durationSeconds;
+      }
       await patch(patchData);
     }
 
-    if (runtimeTask) {
+    if (runtimeTask && shouldPersistTask) {
       const taskPatch: Partial<ProjectTask> = {
         task_state: taskState,
         status_text: statusText,
         error_text: nextErrorText,
       };
-      const taskConfidencePatch = isPeptideDesignWorkflow
-        ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask.confidence, runtimeInfo)
-        : null;
-      const taskPropertiesPatch = isPeptideDesignWorkflow && hasStoredTaskInputOptions(runtimeTask)
-        ? mergePeptidePreviewIntoProperties(runtimeTask.properties, taskConfidencePatch || runtimeTask.confidence)
-        : null;
-      if (taskConfidencePatch) {
-        taskPatch.confidence = taskConfidencePatch;
-      }
-      if (taskPropertiesPatch) {
-        taskPatch.properties = taskPropertiesPatch as unknown as ProjectTask['properties'];
-      }
       if (taskState === 'SUCCESS') {
         taskPatch.completed_at = completedAt;
         taskPatch.duration_seconds = durationSeconds;
       }
-      const shouldPatchTask =
-        runtimeTask.task_state !== taskState ||
-        (runtimeTask.status_text || '') !== statusText ||
-        (runtimeTask.error_text || '') !== nextErrorText ||
-        (taskState === 'SUCCESS' && (!runtimeTask.completed_at || runtimeTask.duration_seconds === null)) ||
-        Boolean(taskConfidencePatch) ||
-        Boolean(taskPropertiesPatch);
-      if (shouldPatchTask) {
-        await patchTask(runtimeTask.id, taskPatch);
-      }
+      await patchTask(runtimeTask.id, taskPatch);
     }
 
     if (
@@ -706,10 +787,12 @@ export async function refreshTaskStatus(params: {
         resultMode
       });
     }
+    return hasObservedChanges;
   } catch (err) {
     if (!silent) {
       setError(err instanceof Error ? err.message : 'Failed to refresh task status.');
     }
+    return false;
   } finally {
     statusRefreshInFlightRef.current.delete(activeTaskId);
   }

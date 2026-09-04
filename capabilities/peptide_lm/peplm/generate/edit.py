@@ -156,8 +156,17 @@ def edit_candidates(agent, vocab, parent: Candidate, n: int, device,
 
 
 def mutate_candidate(parent: Candidate, rng: random.Random,
-                     ncaa_pool: list[str] | None = None) -> Candidate:
-    """One point move: conservative aa swap, or NCAA swap (either direction)."""
+                     ncaa_pool: list[str] | None = None,
+                     ncaa_max: int | None = None) -> Candidate:
+    """One point move: conservative aa swap, or NCAA swap (either direction).
+
+    NCAA legality follows the CALLER's pool exactly: an explicitly passed (or
+    parent-attribute) empty pool means the user restricted the design to
+    natural residues — no NCAA move may happen. Only when no pool information
+    exists at all (standalone use) does the full preset catalog apply.
+    ``ncaa_max`` additionally caps the natural->NCAA channel at the user's
+    non-natural count budget, mirroring the decode-time constraint plan.
+    """
     res = list(parent.residues)
     if not res:
         return parent
@@ -166,16 +175,22 @@ def mutate_candidate(parent: Candidate, rng: random.Random,
     if not idxs:
         return parent
     idx = rng.choice(idxs)
-    pool = getattr(parent, "ncaa_pool", None)
-    if not pool:
-        from peplm.residues import USER_RESIDUES
-        pool = list(NCAA_TOKENS) + [f"[{c}]" for c in USER_RESIDUES]
-    ncaa_pool = ncaa_pool or pool
+    if ncaa_pool is None:
+        parent_pool = getattr(parent, "ncaa_pool", None)
+        if parent_pool is not None:
+            ncaa_pool = list(parent_pool)
+        else:
+            from peplm.residues import USER_RESIDUES
+            ncaa_pool = list(NCAA_TOKENS) + [f"[{c}]" for c in USER_RESIDUES]
+    else:
+        ncaa_pool = list(ncaa_pool)
+    ncaa_count = sum(1 for tok in res if len(tok) > 1)
+    at_ncaa_cap = ncaa_max is not None and ncaa_count >= max(0, int(ncaa_max))
     move = rng.random()
     if move < 0.45 and len(res[idx]) == 1:
         candidates = CONSERVATIVE.get(res[idx], "ACDEFGHIKLMNPQRSTVWY")
         res[idx] = rng.choice(candidates)
-    elif move < 0.75:
+    elif move < 0.75 and ncaa_pool and not at_ncaa_cap:
         # natural -> NCAA (placement-legality checked against position)
         cands = [t for t in ncaa_pool
                  if placement_of(t) in ("any", "n_term" if idx == 0 else
@@ -186,6 +201,8 @@ def mutate_candidate(parent: Candidate, rng: random.Random,
                  and not (placement_of(t) == "n_term" and idx != 0)]
         if cands:
             res[idx] = rng.choice(cands)
+        elif len(res[idx]) == 1:
+            res[idx] = rng.choice(CONSERVATIVE.get(res[idx], "ACDEFGHIKLMNPQRSTVWY"))
     elif len(res[idx]) > 1:
         # NCAA -> its base or another NCAA sharing the base
         base = res[idx][1:-1]

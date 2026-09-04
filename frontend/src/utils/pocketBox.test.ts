@@ -8,6 +8,7 @@ import {
   extractResidueCAPoints,
   parseStructureAtomCoords,
   pocketTargetChanged,
+  combineLigandAndBoxOverlay,
   type PocketBox
 } from './pocketBox';
 
@@ -296,5 +297,58 @@ describe('pocketTargetChanged', () => {
   it('ignores resets through the empty-target state', () => {
     expect(pocketTargetChanged({ name: 'a.pdb', length: 100 }, { name: '', length: 0 })).toBe(false);
     expect(pocketTargetChanged({ name: '', length: 0 }, { name: 'b.pdb', length: 0 })).toBe(false);
+  });
+});
+
+describe('combineLigandAndBoxOverlay', () => {
+  const box = buildPocketBoxPdb({ centerX: 5, centerY: 5, centerZ: 5, sizeX: 20, sizeY: 20, sizeZ: 20 });
+  const ligandPdb = [
+    'HEADER    LIGAND',
+    'HETATM    1  C1  LIG L   1       2.000   2.000   2.000  1.00 50.00           C',
+    'HETATM    2  N1  LIG L   1       3.000   2.000   2.000  1.00 50.00           N',
+    'CONECT    1    2',
+    'END'
+  ].join('\n');
+
+  it('merges pdb ligand + box into one pdb text with both present', () => {
+    const merged = combineLigandAndBoxOverlay(ligandPdb, 'pdb', box);
+    expect(merged.format).toBe('pdb');
+    const atoms = parseStructureAtomCoords(merged.text, 'pdb');
+    // 2 ligand atoms + 8 box corners
+    expect(atoms).toHaveLength(10);
+    expect(atoms.filter((a) => a.residueName === 'LIG')).toHaveLength(2);
+    expect(atoms.filter((a) => a.residueName === 'BOX')).toHaveLength(8);
+    // Original CONECT survives; boundary records do not leak duplicates
+    expect(merged.text.split('\n').filter((l) => l.startsWith('CONECT')).length).toBeGreaterThanOrEqual(1);
+    expect(merged.text.trim().endsWith('END')).toBe(true);
+  });
+
+  it('rebuilds a cif ligand as pdb records and merges the box', () => {
+    const ligandCif = [
+      'data_lig',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'HETATM 1 CL1 LIG L . 1 1.0 1.0 1.0',
+      'HETATM 2 C2 LIG L . 1 2.0 2.0 2.0',
+      '#'
+    ].join('\n');
+    const merged = combineLigandAndBoxOverlay(ligandCif, 'cif', box);
+    const atoms = parseStructureAtomCoords(merged.text, 'pdb');
+    expect(atoms).toHaveLength(10);
+    expect(atoms[0]).toMatchObject({ residueName: 'LIG', atomName: 'CL1', x: 1, y: 1, z: 1 });
+  });
+
+  it('falls back to the box alone when the ligand overlay is empty', () => {
+    const merged = combineLigandAndBoxOverlay('', 'pdb', box);
+    expect(parseStructureAtomCoords(merged.text, 'pdb')).toHaveLength(8);
   });
 });

@@ -52,6 +52,26 @@ def _first_msa_seq_stripped(a3m_text: str) -> str:
     return ""
 
 
+MSA_ENV_MIN_AA = 50
+
+
+def auto_msa_mode(sequence: str, min_env_aa: int = MSA_ENV_MIN_AA) -> str:
+    """Length-predicted search tier (the a-priori cost model).
+
+    The env-db cost sits in the CPU result2msa stage and scales with the
+    weak-hit count, which explodes for SHORT queries: measured 2026-09-04 —
+    a 20-aa designed peptide ran 30-60 min while a 22-aa protein-like
+    sequence took 20 s and an 83-aa receptor minutes (long chains have
+    specific k-mer matches, so the env stage stays well-behaved). Length is
+    the best predictor available before running the search; explicit tiers
+    override it when the caller knows better.
+    """
+    seq = "".join(
+        aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A"
+        for aa in str(sequence or "").strip().upper())
+    return "env" if len(seq) >= int(min_env_aa) else "uniref"
+
+
 def resolve_msa(
     sequence: str,
     chain_label: str,
@@ -59,48 +79,66 @@ def resolve_msa(
     msa_server_url: str | None,
     msa_dir: Path,
     timeout: int = 600,
+    msa_mode: str = "auto",
 ) -> str:
     """Return the path of an a3m MSA for the sequence (cache-first).
 
-    The sequence is normalized to the standard 20 amino acids (non-standard
-    letters, e.g. U from SEC, map to A) before hashing — the same rule
-    boltz2score applies — so both engines derive the same shared cache key.
-    
+    Official contract (AF3 / ColabFold / Boltz): the MSA is OPTIONAL input.
+      - search completes with no homologs -> the a3m keeps the query row only
+        (N_msa=1); the engine featurizes it natively. This is the requested
+        input, not a degraded run.
+      - no MSA server configured      -> same representation (query-only a3m);
+        the caller opted out of external MSA generation.
+      - transport failure / timeout with a server configured -> raises:
+        infrastructure errors must surface, never masquerade as "no hits".
 
-    The scratch file is keyed by chain label + sequence hash: crystal
-    complexes reuse labels (A/B/C) across unrelated proteins, so a
-    label-only key made later samples read the first protein's MSA and
-    fail the vendor's query-length check.  Sourced MSAs are validated
-    (first aligned sequence must match the query length).
+    Two search tiers (efficiency policy, both real searches — never a stub):
+      env     UniRef30 (3 iterations) + metagenome env-db. Minutes for
+              proteins; 30-60 min for designed short peptides (thousands of
+              weak env hits make the CPU result2msa stage explode — the GPU
+              prefilter is not the bottleneck).
+      uniref  UniRef30 only. Seconds; the screening tier for peptide chains.
 
-    An unavailable MSA raises rather than degrading to a self-sequence stub.
+    The sequence is normalized to the standard 20 amino acids before hashing
+    (same rule boltz2score applies) so both engines share cache keys. The
+    scratch file is keyed by chain label + sequence hash + tier: label-only
+    keys made later samples read the first protein's MSA, and tier-blind keys
+    would serve a uniref screening MSA to an env request.
     """
     msa_dir.mkdir(parents=True, exist_ok=True)
-    sequence = "".join(aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A" for aa in sequence.strip().upper())
+    sequence = "".join(
+        aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A"
+        for aa in sequence.strip().upper())
+    msa_mode = (msa_mode or "auto").strip().lower() or "auto"
+    if msa_mode == "auto":
+        msa_mode = auto_msa_mode(sequence)
     h = _md5(sequence)
-    out = msa_dir / f"{chain_label}_{h}_msa.a3m"
-    if out.exists():
-        return str(out)
+    cache_name = f"msa_{h}.a3m" if msa_mode == "env" else f"msa_{h}_{msa_mode}.a3m"
+    out = msa_dir / f"{chain_label}_{h}_{msa_mode}_msa.a3m"
 
     def _first_seq_len(text: bytes) -> int:
         return len(_first_msa_seq_stripped(text.decode("utf-8", "replace")))
 
     query_len = len((sequence or "").strip())
     if msa_cache_dir:
-        cached = msa_cache_dir / f"msa_{h}.a3m"
+        cached = msa_cache_dir / cache_name
         if cached.exists():
             if _first_seq_len(cached.read_bytes()) != query_len:
                 raise ValueError(
                     f"cached MSA {cached} does not match the query length "
                     f"({query_len}); purge the cache entry")
             _atomic_write(out, cached.read_bytes())
-            print(f"[Info] MSA cache hit for chain {chain_label} ({h}).")
+            print(f"[Info] MSA cache hit for chain {chain_label} "
+                  f"({h}, tier={msa_mode}).")
             return str(out)
     if not msa_server_url:
-        raise RuntimeError(
-            f"no MSA server configured for chain {chain_label}; docking "
-            "without an MSA is disabled (set --msa_server_url)")
-    a3m = _fetch_msa_from_server(sequence, msa_server_url, timeout)
+        # Official semantics: MSA is optional input. No server == the caller
+        # opted out; represent it exactly like a completed no-hits search.
+        _atomic_write(out, f">query\n{sequence}\n".encode("utf-8"))
+        print(f"[Info] no MSA server configured for chain {chain_label}; "
+              "using the query-only MSA (official N_msa=1 contract).")
+        return str(out)
+    a3m = _fetch_msa_from_server(sequence, msa_server_url, timeout, msa_mode)
     if _first_seq_len(a3m.encode("utf-8")) != query_len:
         raise ValueError(
             f"MSA server returned a mismatched alignment for chain "
@@ -109,10 +147,11 @@ def resolve_msa(
     if msa_cache_dir:
         # 回写共享缓存，避免各链路重复拉取
         try:
-            _atomic_write((msa_cache_dir / f"msa_{h}.a3m"), a3m.encode("utf-8"))
+            _atomic_write((msa_cache_dir / cache_name), a3m.encode("utf-8"))
         except OSError as exc:
             print(f"[Warn] could not write back shared MSA cache ({exc}); continuing.")
-    print(f"[Info] MSA fetched from server for chain {chain_label}.")
+    print(f"[Info] MSA fetched from server for chain {chain_label} "
+          f"(tier={msa_mode}).")
     return str(out)
 
 
@@ -142,7 +181,9 @@ def _merge_a3m(first: str, second: str) -> str:
     return "".join(f"{h}\n{s}\n" for h, s in out)
 
 
-def _fetch_msa_from_server(sequence: str, server_url: str, timeout: int) -> str:
+def _fetch_msa_from_server(
+    sequence: str, server_url: str, timeout: int, msa_mode: str = "env",
+) -> str:
     """ColabFold-compatible MSA fetch: submit ticket, poll, download, extract
     and merge the uniref + metagenome a3m (mode=env enables the server's
     environmental database stage — metagenome hits raise interface
@@ -157,11 +198,21 @@ def _fetch_msa_from_server(sequence: str, server_url: str, timeout: int) -> str:
 
     base = server_url.rstrip("/")
     q = sequence if sequence.startswith(">") else f">query\n{sequence}"
-    resp = requests.post(
-        f"{base}/ticket/msa", data={"q": q, "mode": "env"}, timeout=30
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"MSA submit failed: HTTP {resp.status_code}")
+    # 提交对瞬时故障（服务器恰在重启/网络抖动）做有限重试：一次连接错误直接失败
+    # 会把一个本可正常完成的候选降级成无 MSA。
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f"{base}/ticket/msa", data={"q": q, "mode": "env"}, timeout=30
+            )
+            break
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
+    if resp is None or resp.status_code != 200:
+        raise RuntimeError(f"MSA submit failed: HTTP {getattr(resp, 'status_code', 'no response')}")
     ticket = resp.json().get("id")
     if not ticket:
         raise RuntimeError("MSA submit returned no ticket id")
@@ -169,8 +220,15 @@ def _fetch_msa_from_server(sequence: str, server_url: str, timeout: int) -> str:
     deadline = time.time() + timeout
     download_url = None
     while time.time() < deadline:
-        st = requests.get(f"{base}/ticket/{ticket}", timeout=30).json()
-        status = st.get("status")
+        # 轮询途中的瞬时故障（服务器重启、502、非 JSON 响应）不立即失败，
+        # 继续在同一个 deadline 内重试——deadline 本身就是总超时上限。
+        try:
+            st = requests.get(f"{base}/ticket/{ticket}", timeout=30).json()
+            status = st.get("status")
+        except (requests.RequestException, ValueError) as exc:
+            print(f"[Warn] MSA ticket {ticket} poll hiccup ({exc}); retrying within deadline.")
+            time.sleep(5)
+            continue
         if status == "COMPLETE":
             # Prefer the server-provided result_url; the conventional
             # /result/download endpoint is the documented fallback.
@@ -180,6 +238,16 @@ def _fetch_msa_from_server(sequence: str, server_url: str, timeout: int) -> str:
             raise RuntimeError(f"MSA ticket {ticket} failed: {status}")
         time.sleep(5)
     else:
+        # Client gave up: cancel the ticket so the server does not keep
+        # burning a worker slot + GPU lease on an orphan (measured: env-db
+        # result2msa for a 20-aa designed peptide runs 30-60 min on CPU;
+        # an abandoned ticket otherwise occupies the queue long after every
+        # client is gone). Best-effort — cancellation must never mask the
+        # original timeout.
+        try:
+            requests.delete(f"{base}/ticket/{ticket}", timeout=15)
+        except requests.RequestException:
+            pass
         raise TimeoutError(f"MSA ticket {ticket} not complete after {timeout}s")
 
     r = requests.get(download_url, timeout=180)
@@ -844,7 +912,11 @@ def build_peptide_complex_input(
     mods = peptide_chain.modifications
     if mods:
         peptide["modifications"] = mods
-    # Designed peptides legitimately carry no MSA (query-only sequence).
+    peptide_msa = msa_paths.get(peptide_chain.chain_name)
+    if peptide_msa:
+        # MSA is enabled for the designed peptide too (user policy: MSA everywhere);
+        # a hit-free search degrades to a single-sequence MSA server-side.
+        peptide["unpairedMsaPath"] = peptide_msa
     sequences.append({"proteinChain": peptide})
     if linker_ccd:
         sequences.append({"ligand": {"ligand": f"CCD_{linker_ccd}", "count": 1}})

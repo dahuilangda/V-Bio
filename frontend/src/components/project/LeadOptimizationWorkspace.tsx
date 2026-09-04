@@ -1,8 +1,19 @@
-import { useCallback, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent
+} from 'react';
+import { Box, RotateCcw } from 'lucide-react';
 import type { AffinityDockPocket, PredictionOptions } from '../../types/models';
 import type { LeadOptPersistedUploads } from './leadopt/hooks/useLeadOptReferenceFragment';
 import { useLeadOptReferenceFragment } from './leadopt/hooks/useLeadOptReferenceFragment';
 import { resolveVariableSelection } from './leadopt/hooks/fragmentVariableSelection';
+import { useLeadOptPocketBox } from './leadopt/hooks/useLeadOptPocketBox';
 import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
 import { LeadOptFragmentPanel } from './leadopt/LeadOptFragmentPanel';
 import {
@@ -11,7 +22,8 @@ import {
   LeadOptHaloProgressPanel
 } from './leadopt/LeadOptHaloPanels';
 import { useLeadOptHaloRun, type LeadOptHaloCandidate } from './leadopt/hooks/useLeadOptHaloRun';
-import { LeadOptPocketPicker } from '../../pages/projectDetail/LeadOptPocketPicker';
+import type { LeadOptHaloMode } from '../../api/backendLeadOptimizationApi';
+import { PocketBoxControls } from './PocketBoxControls';
 
 export interface LeadOptHaloSnapshot {
   taskId: string | null;
@@ -62,10 +74,19 @@ function detectStructureFormat(fileName: string): 'pdb' | 'cif' {
   return fileName.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
 }
 
+// Docking-style resizable split: 3D reference on the left, fragments + run
+// parameters on the right (mmpdb-era layout).
+const LEFT_PANEL_MIN = 360;
+const RIGHT_PANEL_MIN = 300;
+const RESIZER_WIDTH = 10;
+const LEFT_PANEL_KEY_STEP = 24;
+const LEFT_PANEL_DEFAULT = 720;
+
 /**
  * HALO lead-optimization workspace (mmpdb retrieval flow retired):
- * Build tab — reference uploads + fragment selection (preserved), docking-style
- * pocket box on the target (remembered; clear = blind), iteration params.
+ * Build tab — docking-style reference viewer (uploads + pocket box on the
+ * target, remembered; clear = blind) on the left, fragment selection
+ * (2D RDKit click-select, auto-split) + iteration params on the right.
  * Design tab — per-round progress + ranked candidates from the RL loop.
  */
 export function LeadOptimizationWorkspace({
@@ -89,7 +110,10 @@ export function LeadOptimizationWorkspace({
   onNavigateToResults
 }: LeadOptimizationWorkspaceProps) {
   const [error, setError] = useState('');
-  const [oracleConcurrency, setOracleConcurrency] = useState(8);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(LEFT_PANEL_DEFAULT);
+  const [isResizing, setIsResizing] = useState(false);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
+  const resizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const reference = useLeadOptReferenceFragment({
     ligandSmiles,
@@ -111,7 +135,6 @@ export function LeadOptimizationWorkspace({
     onTaskFailed: onHaloTaskFailed
   });
 
-  const mode = options.leadOptMode || 'fragment';
   const backend = options.leadOptBackend || 'protenix2dock';
 
   const selectedFragmentItems = useMemo(
@@ -138,6 +161,16 @@ export function LeadOptimizationWorkspace({
     [targetUpload]
   );
 
+  const pocket = useLeadOptPocketBox({
+    targetStructure,
+    referenceOverlayText: reference.previewOverlayStructureText,
+    referenceOverlayFormat: reference.previewOverlayStructureFormat,
+    referenceReady: reference.referenceReady,
+    dockPocket: options.leadOptDockPocket ?? null,
+    onDockPocketChange,
+    onPocketCenterChange: (center) => onOptionChange('leadOptPocketCenter', center)
+  });
+
   const pocketLabel = options.leadOptPocketCenter
     ? `center ${options.leadOptPocketCenter}`
     : 'empty — blind docking over the whole target';
@@ -148,16 +181,19 @@ export function LeadOptimizationWorkspace({
     ? selectedAtomIndices.join(',')
     : '');
 
+  // Mode is inferred from what the user selected, not chosen: a reference
+  // ligand / selected fragments means fragment replacement; without any
+  // reference the run generates de novo inside the pocket box.
+  const hasReference = Boolean(referenceSmiles || keepFragment);
+  const mode: LeadOptHaloMode = hasReference ? 'fragment' : 'denovo';
+
   const runDisabledReason = useMemo(() => {
     if (!targetUpload) return 'Upload a target structure first.';
-    if (!referenceSmiles && !keepFragment && mode === 'denovo' && !options.leadOptPocketCenter) {
-      return 'De novo needs a pocket box (or a reference ligand) for placement.';
-    }
-    if (mode !== 'denovo' && !referenceSmiles && !keepFragment) {
+    if (!hasReference && !options.leadOptPocketCenter) {
       return 'Upload a reference ligand or select fragments first.';
     }
     return '';
-  }, [targetUpload, mode, options.leadOptPocketCenter, referenceSmiles, keepFragment]);
+  }, [targetUpload, hasReference, options.leadOptPocketCenter]);
 
   const runOptimization = useCallback(async () => {
     if (!targetUpload) {
@@ -188,7 +224,6 @@ export function LeadOptimizationWorkspace({
       scaffold_hop_ratio: options.leadOptScaffoldHopRatio ?? 0.4,
       rounds: options.leadOptRounds ?? 6,
       budget_per_round: options.leadOptBudgetPerRound ?? 48,
-      oracle_concurrency: oracleConcurrency,
       target_chain: targetChain,
       priority: 'default'
     };
@@ -207,7 +242,6 @@ export function LeadOptimizationWorkspace({
     options.leadOptScaffoldHopRatio,
     options.leadOptRounds,
     options.leadOptBudgetPerRound,
-    oracleConcurrency,
     targetChain,
     halo.submit,
     onNavigateToResults
@@ -219,6 +253,74 @@ export function LeadOptimizationWorkspace({
   const designRoundsLog = halo.runState.roundsLog.length > 0
     ? halo.runState.roundsLog
     : haloSnapshot?.roundsLog || [];
+
+  const computeLeftBounds = useCallback((containerWidth: number): { min: number; max: number } => {
+    const minWidth = LEFT_PANEL_MIN;
+    const maxWidth = containerWidth - RIGHT_PANEL_MIN - RESIZER_WIDTH - 12;
+    return { min: minWidth, max: Math.max(minWidth, maxWidth) };
+  }, []);
+
+  const handleResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1100px)').matches) return;
+    if (!layoutRef.current) return;
+    resizeStateRef.current = { startX: event.clientX, startWidth: leftPanelWidth };
+    setIsResizing(true);
+    event.preventDefault();
+  };
+
+  const handleResizerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const container = layoutRef.current;
+    if (!container) return;
+    const bounds = computeLeftBounds(container.clientWidth);
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setLeftPanelWidth((current) => Math.max(bounds.min, current - LEFT_PANEL_KEY_STEP));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setLeftPanelWidth((current) => Math.min(bounds.max, current + LEFT_PANEL_KEY_STEP));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setLeftPanelWidth(LEFT_PANEL_DEFAULT);
+    }
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const handleMove = (moveEvent: PointerEvent) => {
+      const state = resizeStateRef.current;
+      const container = layoutRef.current;
+      if (!state || !container) return;
+      const delta = moveEvent.clientX - state.startX;
+      const bounds = computeLeftBounds(container.clientWidth);
+      setLeftPanelWidth(Math.max(bounds.min, Math.min(bounds.max, state.startWidth + delta)));
+    };
+    const handleUp = () => {
+      setIsResizing(false);
+      resizeStateRef.current = null;
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [computeLeftBounds, isResizing]);
+
+  const layoutStyle = useMemo(
+    () => ({ '--lead-opt-left-width': `${leftPanelWidth}px` }) as CSSProperties,
+    [leftPanelWidth]
+  );
 
   if (viewMode === 'design') {
     return (
@@ -236,10 +338,35 @@ export function LeadOptimizationWorkspace({
     );
   }
 
+  const pocketToolbar = targetStructure ? (
+    <div className="lead-opt-pocket-toolbar">
+      <button
+        type="button"
+        className={`btn pocket-box-btn ${pocket.drawerOpen ? 'active' : ''}`}
+        onClick={pocket.toggleDrawer}
+        disabled={!canEdit}
+        title="Show the box controls (center/size sliders, ligand presets)"
+      >
+        <Box size={12} />
+        {pocket.drawerOpen ? 'Hide box' : 'Box'}
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost btn-compact"
+        onClick={pocket.clearPocket}
+        disabled={!canEdit}
+        title="Remove the box — optimization runs blind over the whole target"
+      >
+        <RotateCcw size={11} />
+        Clear
+      </button>
+    </div>
+  ) : null;
+
   return (
-    <div className="lead-opt-layout">
-      <div className="lead-opt-main">
-        {error ? <div className="alert error">{error}</div> : null}
+    <div className="lead-opt-workspace">
+      {error ? <div className="alert error">{error}</div> : null}
+      <div ref={layoutRef} className="lead-opt-layout lead-opt-layout--resizable" style={layoutStyle}>
         <LeadOptReferencePanel
           canEdit={canEdit}
           loading={reference.busy}
@@ -249,6 +376,23 @@ export function LeadOptimizationWorkspace({
           previewStructureFormat={reference.previewStructureFormat}
           previewOverlayStructureText={reference.previewOverlayStructureText}
           previewOverlayStructureFormat={reference.previewOverlayStructureFormat}
+          boxOverlayText={pocket.boxWireframe}
+          pocketToolbar={pocketToolbar}
+          pocketControls={
+            pocket.drawerOpen && targetStructure ? (
+              <PocketBoxControls
+                pocket={options.leadOptDockPocket ?? null}
+                onPocketChange={onDockPocketChange}
+                proteinStructureText={targetStructure.content}
+                proteinStructureFormat={targetStructure.format}
+                pickedResidues={[]}
+                onBoxWireframeChange={pocket.applyBoxWireframe}
+                onCollapse={pocket.toggleDrawer}
+                canEdit={canEdit}
+                submitting={false}
+              />
+            ) : null
+          }
           ligandChain={reference.referenceLigandChainId || ligandChain}
           highlightedLigandAtoms={reference.highlightedLigandAtoms}
           highlightedPocketResidues={reference.highlightedPocketResidues}
@@ -257,44 +401,42 @@ export function LeadOptimizationWorkspace({
           onTargetFileChange={reference.handleTargetFileChange}
           onLigandFileChange={reference.handleLigandFileChange}
         />
-        <LeadOptFragmentPanel
-          effectiveLigandSmiles={reference.fragmentSourceSmiles || reference.effectiveLigandSmiles}
-          fragments={reference.fragments}
-          selectedFragmentIds={reference.selectedFragmentIds}
-          activeFragmentId={reference.activeFragmentId}
-          onAtomClick={reference.handleFragmentAtomClick}
-          onToggleFragmentSelection={reference.toggleFragmentSelection}
-          onClearFragmentSelection={reference.clearFragmentSelection}
+
+        <div
+          className={`panel-resizer lead-opt-layout-resizer ${isResizing ? 'dragging' : ''}`}
+          onPointerDown={handleResizeStart}
+          onKeyDown={handleResizerKeyDown}
+          role="separator"
+          aria-label="Resize 3D and fragments panels"
+          aria-orientation="vertical"
+          tabIndex={0}
         />
-        <LeadOptPocketPicker
-          canEdit={canEdit}
-          targetStructure={targetStructure}
-          dockPocket={options.leadOptDockPocket ?? null}
-          onDockPocketChange={onDockPocketChange}
-          onPocketCenterChange={(center) => onOptionChange('leadOptPocketCenter', center)}
-        />
-      </div>
-      <div className="lead-opt-side">
-        <LeadOptHaloParamsPanel
-          canEdit={canEdit}
-          running={halo.running}
-          mode={mode}
-          backend={backend}
-          rounds={options.leadOptRounds ?? 6}
-          budgetPerRound={options.leadOptBudgetPerRound ?? 48}
-          scaffoldHopRatio={options.leadOptScaffoldHopRatio ?? 0.4}
-          oracleConcurrency={oracleConcurrency}
-          pocketLabel={pocketLabel}
-          canRun={!runDisabledReason}
-          runDisabledReason={runDisabledReason}
-          onModeChange={(value) => onOptionChange('leadOptMode', value)}
-          onBackendChange={(value) => onOptionChange('leadOptBackend', value)}
-          onRoundsChange={(value) => onOptionChange('leadOptRounds', value)}
-          onBudgetChange={(value) => onOptionChange('leadOptBudgetPerRound', value)}
-          onScaffoldHopRatioChange={(value) => onOptionChange('leadOptScaffoldHopRatio', value)}
-          onOracleConcurrencyChange={setOracleConcurrency}
-          onRun={runOptimization}
-        />
+
+        <div className="lead-opt-side">
+          <LeadOptFragmentPanel
+            effectiveLigandSmiles={reference.fragmentSourceSmiles || reference.effectiveLigandSmiles}
+            fragments={reference.fragments}
+            selectedFragmentIds={reference.selectedFragmentIds}
+            activeFragmentId={reference.activeFragmentId}
+            onAtomClick={reference.handleFragmentAtomClick}
+            onToggleFragmentSelection={reference.toggleFragmentSelection}
+            onClearFragmentSelection={reference.clearFragmentSelection}
+          />
+          <LeadOptHaloParamsPanel
+            canEdit={canEdit}
+            running={halo.running}
+            backend={backend}
+            rounds={options.leadOptRounds ?? 6}
+            budgetPerRound={options.leadOptBudgetPerRound ?? 48}
+            pocketLabel={pocketLabel}
+            canRun={!runDisabledReason}
+            runDisabledReason={runDisabledReason}
+            onBackendChange={(value) => onOptionChange('leadOptBackend', value)}
+            onRoundsChange={(value) => onOptionChange('leadOptRounds', value)}
+            onBudgetChange={(value) => onOptionChange('leadOptBudgetPerRound', value)}
+            onRun={runOptimization}
+          />
+        </div>
       </div>
     </div>
   );

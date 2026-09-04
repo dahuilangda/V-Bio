@@ -23,6 +23,9 @@ interface UseProjectTasksDataLoaderOptions {
   sessionUserId: string | null;
   workspaceView: 'tasks' | 'api';
   priorityTaskRowIds?: string[];
+  /** True while a structure (SMILES/SMARTS) search is active — matches ligand data derived
+   *  from row components, which lightweight tail rows lack, so they hydrate in the background. */
+  structureSearchActive?: boolean;
 }
 
 interface UseProjectTasksDataLoaderResult {
@@ -343,6 +346,7 @@ export function useProjectTasksDataLoader({
   sessionUserId,
   workspaceView,
   priorityTaskRowIds,
+  structureSearchActive,
 }: UseProjectTasksDataLoaderOptions): UseProjectTasksDataLoaderResult {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
@@ -628,8 +632,13 @@ export function useProjectTasksDataLoader({
               if (TASK_LIST_BACKGROUND_FETCH_DELAY_MS > 0) {
                 await new Promise((resolve) => window.setTimeout(resolve, TASK_LIST_BACKGROUND_FETCH_DELAY_MS));
               }
+              // Tail chunks ship WITHOUT components: only the first screens' worth needs the
+              // ligand/target data eagerly — visible rows hydrate components on demand (see
+              // the visible-row hydration effect). For long projects this is the bulk of the
+              // background download, and merge preserves any components already in memory.
               const chunkRows = await listProjectTasksForList(projectId, {
                 ...baseTaskListOptions,
+                includeComponents: false,
                 limit: TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE,
                 offset
               });
@@ -848,7 +857,10 @@ export function useProjectTasksDataLoader({
     if (workspaceView !== 'tasks') return;
     const projectRow = projectRef.current;
     if (!projectRow) return;
-    if (normalizeWorkflowKey(projectRow.task_type) !== 'prediction') return;
+    const workflowKey = normalizeWorkflowKey(projectRow.task_type);
+    // Prediction/peptide rows render ligand/target columns from components; the list's tail
+    // chunks ship without them, so visible rows hydrate on demand here.
+    if (workflowKey !== 'prediction' && workflowKey !== 'peptide_design') return;
     const accessContext = taskListAccessContextRef.current;
     if (!accessContext) return;
 
@@ -868,7 +880,12 @@ export function useProjectTasksDataLoader({
       if (!row) return false;
       const hasConfidence = Boolean(row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence) && Object.keys(row.confidence as Record<string, unknown>).length > 0);
       const hasProperties = Boolean(row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties) && Object.keys(asRecord(row.properties)).length > 0);
-      return !(hasConfidence && hasProperties);
+      if (!(hasConfidence && hasProperties)) return true;
+      // Tail rows arrive without components (see the background chunk loop). Only submitted
+      // rows hydrate them — a submitted row always carries its snapshot components, so the
+      // fetch lands non-empty and this trigger does not re-arm on later page changes.
+      const missingComponents = !Array.isArray(row.components) && Boolean(String(row.task_id || '').trim());
+      return missingComponents;
     });
     if (taskIdsToHydrate.length === 0) return;
 
@@ -878,7 +895,7 @@ export function useProjectTasksDataLoader({
     void (async () => {
       try {
         const detailedRows = await listProjectTasksForList(projectId, {
-          includeComponents: false,
+          includeComponents: true,
           includeConfidence: true,
           includeProperties: true,
           taskRowIds: taskIdsToHydrate,
@@ -914,6 +931,94 @@ export function useProjectTasksDataLoader({
     };
   }, [priorityTaskRowIds, projectId, workspaceView]);
 
+  // Structure search (SMILES/SMARTS) matches ligand data derived from row components. The list's
+  // tail chunks ship without components, so unvisited tail rows would silently never match.
+  // While a structure search is active, backfill components for loaded rows in small chunks.
+  // Each row is attempted at most once per search session — a row that legitimately has none
+  // must not requeue forever.
+  const componentBackfillAttemptedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!structureSearchActive) {
+      componentBackfillAttemptedRef.current = new Set();
+      return;
+    }
+    if (workspaceView !== 'tasks') return;
+    const projectRow = projectRef.current;
+    if (!projectRow) return;
+    const workflowKey = normalizeWorkflowKey(projectRow.task_type);
+    if (workflowKey !== 'prediction' && workflowKey !== 'peptide_design') return;
+    const accessContext = taskListAccessContextRef.current;
+    if (!accessContext) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        for (;;) {
+          if (cancelled) return;
+          const pendingIds = sanitizeTaskRows(tasksRef.current)
+            .filter(
+              (row) =>
+                Boolean(String(row.task_id || '').trim()) &&
+                !Array.isArray(row.components) &&
+                !componentBackfillAttemptedRef.current.has(String(row.id || '').trim()) &&
+                !detailHydrationInFlightRef.current.has(String(row.id || '').trim())
+            )
+            .map((row) => String(row.id || '').trim())
+            .filter(Boolean)
+            .slice(0, 48);
+          if (pendingIds.length === 0) {
+            // Stay resident while the search is active: the background tail load may still be
+            // merging lightweight rows. The loop exits via `cancelled` on unmount or when the
+            // search flag drops (the effect re-runs its cleanup).
+            await new Promise((resolve) => window.setTimeout(resolve, 500));
+            continue;
+          }
+          pendingIds.forEach((taskRowId) => {
+            componentBackfillAttemptedRef.current.add(taskRowId);
+            detailHydrationInFlightRef.current.add(taskRowId);
+          });
+          try {
+            const componentRows = await listProjectTasksForList(projectId, {
+              includeComponents: true,
+              includeConfidence: false,
+              includeProperties: false,
+              taskRowIds: pendingIds,
+              accessScope: accessContext.scope,
+              accessLevel: accessContext.accessLevel,
+              editableTaskIds: accessContext.editableTaskIds
+            });
+            if (cancelled) return;
+            if (componentRows.length > 0) {
+              const detailById = new Map(
+                componentRows
+                  .map((row) => [String(row.id || '').trim(), row] as const)
+                  .filter(([id]) => Boolean(id))
+              );
+              setTasks((prev) =>
+                sanitizeTaskRows(
+                  prev.map((row) => {
+                    const detail = detailById.get(String(row.id || '').trim());
+                    if (!detail) return row;
+                    return mergeTaskRuntimeFields(detail, row);
+                  })
+                )
+              );
+            }
+          } finally {
+            pendingIds.forEach((taskRowId) => detailHydrationInFlightRef.current.delete(taskRowId));
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 120));
+        }
+      } catch (err) {
+        console.error('Structure-search component backfill failed; search covers hydrated rows only.', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [structureSearchActive, projectId, workspaceView]);
+
   /**
    * Continue pagination from the rows already in memory. Claims the loader
    * (loadInFlight) so page refreshes cannot start a duplicate load, and bumps
@@ -947,8 +1052,11 @@ export function useProjectTasksDataLoader({
       try {
         let offset = tasksRef.current.length;
         for (;;) {
+          // Same lightweight projection as the auto background tail (components hydrate on
+          // demand for rows the user actually looks at).
           const chunkRows = await listProjectTasksForList(projectId, {
             ...baseTaskListOptions,
+            includeComponents: false,
             limit: TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE,
             offset
           });

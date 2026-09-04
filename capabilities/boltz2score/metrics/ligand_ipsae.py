@@ -23,6 +23,14 @@ STANDARD_POLYMER_COMPS = {
     "ACE", "NMA",
 }
 
+# When the "ligand" chain is a polymer (peptide/protein binder), its tokens are
+# one representative atom (CB/CA) per residue. The atom-level heavy-atom cutoff
+# (5 A) then finds almost no interface pairs — a side-chain contact only implies
+# CA/CB < ~10 A — and the score collapses to a few tokens regardless of interface
+# quality. Residue-level contacts therefore use the standard 10 A CA/CB proxy
+# (same rationale as peplm oracle chain_ipsae.py).
+RESIDUE_LIGAND_DIST_CUTOFF = 10.0
+
 
 @dataclass
 class Token:
@@ -368,6 +376,10 @@ def compute_ligand_ipsae_from_files(
     protein_idx = np.array([token.token_index for token in protein_tokens], dtype=int)
     ligand_idx = np.array([token.token_index for token in ligand_tokens], dtype=int)
 
+    residue_level_ligand = any(token.kind == "ligand_residue" for token in ligand_tokens)
+    if residue_level_ligand:
+        dist_cutoff = max(dist_cutoff, RESIDUE_LIGAND_DIST_CUTOFF)
+
     protein_coords = np.stack([token.coord for token in protein_tokens], axis=0)
     ligand_coords = np.stack([token.coord for token in ligand_tokens], axis=0)
     distances = np.sqrt(((protein_coords[:, None, :] - ligand_coords[None, :, :]) ** 2).sum(axis=2))
@@ -445,6 +457,7 @@ def compute_ligand_ipsae_from_files(
         "ligand_token_count": len(ligand_tokens),
         "pae_cutoff": pae_cutoff,
         "dist_cutoff": dist_cutoff,
+        "ligand_token_granularity": "residue" if residue_level_ligand else "atom",
         "interface_pair_count": int(all_valid.sum()),
         "interface_protein_token_count": unique_protein,
         "interface_ligand_token_count": unique_ligand,

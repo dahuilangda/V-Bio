@@ -2,8 +2,8 @@ import { getTaskStatus } from '../../api/backendApi';
 import type { ProjectTask } from '../../types/models';
 import {
   inferTaskStateFromStatusPayload,
-  mapBackendTaskState,
-  readTaskRuntimeStatusText
+  mapBackendTaskState as mapTaskState,
+  readTaskRuntimeStatusText as readStatusText
 } from '../../utils/taskRuntime';
 import type { SortDirection, SortKey } from './taskListTypes';
 
@@ -21,10 +21,6 @@ function defaultSortDirection(key: SortKey): SortDirection {
 
 function nextSortDirection(current: SortDirection): SortDirection {
   return current === 'asc' ? 'desc' : 'asc';
-}
-
-function mapTaskState(raw: string): ProjectTask['task_state'] {
-  return mapBackendTaskState(raw);
 }
 
 async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, intervalMs = 900): Promise<ProjectTask['task_state'] | null> {
@@ -53,10 +49,6 @@ async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, inter
   }
 
   return lastState;
-}
-
-function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
-  return readTaskRuntimeStatusText(status);
 }
 
 function resolveTaskBackendValue(task: ProjectTask, fallbackBackend = ''): string {

@@ -511,7 +511,7 @@ export function ProjectsPage() {
     return registerOverlay('projects:create-dialog', 'dialog');
   }, [showCreate, registerOverlay]);
 
-  // Global ⌘K palette handoff: "新建项目" navigates here with a one-shot sessionStorage
+  // Global ⌘K palette handoff: "New project" navigates here with a one-shot sessionStorage
   // flag (survives the navigation, consumed exactly once by this mount).
   useEffect(() => {
     try {
@@ -787,7 +787,6 @@ export function ProjectsPage() {
               </label>
             </div>
             <div className="advanced-filter-actions">
-              <span className="advanced-filter-hint">Refine list with backend, activity and recency signals.</span>
               <button
                 type="button"
                 className="btn btn-ghost btn-compact"

@@ -235,7 +235,12 @@ class BackendProposer:
             c = self._cand_wrap(self.rng.choice(parents))
             c._protected = set(self.fixed_map) | set(c._bicy_anchors)
             c.ncaa_pool = list(self.ncaa_pool_tokens)
-            cand = self._mutate_candidate(c, self.rng)
+            # Explicit pool + cap: an empty user pool means pure-natural design (no
+            # natural->NCAA moves at all) and ncaa_max bounds how many the move may add.
+            cand = self._mutate_candidate(
+                c, self.rng,
+                ncaa_pool=list(self.ncaa_pool_tokens),
+                ncaa_max=self.ncaa_max)
             res = self._bicy_post_edit(cand.residues)
             anchors = list(choose_bicyclic_anchors(
                 len(res), self.fixed_map, tuple(self.cys_positions)))

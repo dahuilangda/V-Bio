@@ -7,8 +7,8 @@ Six modes with Boltz2Score-compatible semantics:
     pose       refine around the input pose        (sigma_max 0.02)
     refine     general flexible refinement         (sigma_max 0.03)
     interface  interface-weighted refinement       (sigma_max 0.04)
-    dock       place a SMILES ligand into a pocket box and refine
-                                                   (sigma_max 0.05, rigid receptor)
+    dock       native blind inpainting — receptor pinned, ligand from
+                                                   pure noise, full schedule
     peptide    receptor-fixed peptide inpainting   (mirror-space D-peptide design)
 
 Pipeline: parse inputs -> MSA -> featurize/align -> engine (docker image,
@@ -93,6 +93,10 @@ def parse_args(argv=None):
     p.add_argument("--model_name", default="protenix-v2")
     p.add_argument("--checkpoint_dir", default="/workspace/model")
     p.add_argument("--msa_server_url")
+    p.add_argument("--msa_mode", default="auto",
+                   help="MSA search tier: auto (length-predicted: env for "
+                        "chains >=50 aa, uniref below), env (UniRef30+envdb, "
+                        "slow for short peptides), uniref (UniRef30 only)")
     p.add_argument("--msa_cache_dir", default="/data/msa_cache")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sampling_steps", type=int,
@@ -107,11 +111,15 @@ def parse_args(argv=None):
     p.add_argument("--low_vram", action="store_true")
     p.add_argument("--no_guidance", action="store_true",
                    help="disable TFG guidance and contact injection")
-    p.add_argument("--blind", action="store_true",
-                   help="dock mode: full-surface blind docking — no pocket box, "
-                        "no placement ensemble, no receptor pin, no anchors; "
-                        "the engine's standard full-noise diffusion generates "
-                        "the complex (no init-coord side channels)")
+    p.add_argument("--blind_peptide", action="store_true",
+                   help="peptide mode: peptide denoises from PURE NOISE "
+                        "(receptor still pinned = blind inpainting). The "
+                        "PairFormer trunk + MSA conditioning produce the "
+                        "binding pose; staged peptide coordinates are only "
+                        "used for the chemistry (bond/angle) TFG constraints. "
+                        "Uses the FULL noise schedule (sigma_max 160, 200 "
+                        "steps) instead of the local refine schedule; pocket "
+                        "anchor pairs are pose-derived and therefore skipped.")
     # peptide mode (receptor-fixed peptide design/refinement)
     p.add_argument("--peptide_chain",
                    help="peptide chain(s) in the input complex (free, proteinChain)")
@@ -211,28 +219,24 @@ def resolve_inputs(args, work_dir: Path):
     if args.mode == "dock":
         if not args.ligand_smiles:
             raise SystemExit("dock mode requires --ligand_smiles")
-        if args.blind:
-            # blind docking: no pocket prior — the ligand conformer only
-            # identifies the molecule (the engine ignores it as a start);
-            # place it at the protein centroid
-            import gemmi
+        # Native inpainting: the ligand input pose is NOT a start — its rows
+        # are re-noised (mask=0) and only the molecular identity (tokens/
+        # ref_pos) is consumed. Any placement position works; the centroid
+        # keeps the input file geometrically sane for parsers.
+        import gemmi
 
-            st = gemmi.read_structure(str(args.protein_file))
-            st.setup_entities()
-            pts = [np.array([a.pos.x, a.pos.y, a.pos.z])
-                   for ch in st[0] for res in ch
-                   if res.entity_type == gemmi.EntityType.Polymer
-                   for a in res if a.element != gemmi.Element("H")]
-            center = tuple(np.mean(pts, axis=0).tolist()) if pts else (0, 0, 0)
-        else:
-            if args.center_x is None or args.center_y is None or args.center_z is None:
-                raise SystemExit("dock mode requires --center_x/--center_y/--center_z "
-                                 "(or --blind for a full-surface search)")
-            center = (args.center_x, args.center_y, args.center_z)
+        st = gemmi.read_structure(str(args.protein_file))
+        st.setup_entities()
+        pts = [np.array([a.pos.x, a.pos.y, a.pos.z])
+               for ch in st[0] for res in ch
+               if res.entity_type == gemmi.EntityType.Polymer
+               for a in res if a.element != gemmi.Element("H")]
+        center = tuple(np.mean(pts, axis=0).tolist()) if pts else (0, 0, 0)
         ligand_sdf = work_dir / "placed_ligand.sdf"
         mol = place_dock_conformer(args.ligand_smiles, center, ligand_sdf,
                                    seed=args.seed)
-        log.info("placed conformer at %s (%d heavy atoms)", center,
+        log.info("ligand identity staged at centroid %s (%d heavy atoms) — "
+                 "pose discarded by native inpainting", center,
                  mol.GetNumAtoms())
         return Path(args.protein_file), ligand_sdf, mol
 
@@ -253,7 +257,7 @@ def build_engine_inputs(args, protein_path, ligand_sdf, ligand_mol, work_dir):
     msa_paths = {
         chain.chain_name: resolve_msa(
             chain.sequence, chain.chain_name, msa_cache,
-            args.msa_server_url, work_dir / "msa",
+            args.msa_server_url, work_dir / "msa", msa_mode=args.msa_mode,
         )
         for chain in chains
     }
@@ -378,10 +382,25 @@ def _run_peptide_engine(
     msa_paths = {
         chain.chain_name: resolve_msa(
             chain.sequence, chain.chain_name, msa_cache,
-            args.msa_server_url, work_dir / "msa",
+            args.msa_server_url, work_dir / "msa", msa_mode=args.msa_mode,
         )
         for chain in receptor_letters
     }
+    # MSA is enabled for the peptide chain too (user policy: MSA everywhere,
+    # HARD failure on miss — 2026-09-04: the env-db service returns usable
+    # alignments for designed peptides and the MSA measurably improves the
+    # refine; a no-MSA run is not an equivalent candidate and must not
+    # silently proceed).
+    # 1800s matches the measured env-db boundary: the GPU prefilter is fast,
+    # but the CPU result2msa stage on a 20-aa designed peptide runs 30-60 min
+    # (thousands of weak env hits). A shorter deadline systematically fails.
+    peptide_msa_timeout = int(os.environ.get("P2D_PEPTIDE_MSA_TIMEOUT_SECONDS", "1800"))
+    msa_paths[peptide.chain_name] = resolve_msa(
+        peptide.sequence, peptide.chain_name, msa_cache,
+        args.msa_server_url, work_dir / "msa",
+        timeout=max(60, peptide_msa_timeout),
+        msa_mode=args.msa_mode,
+    )
 
     # Bicyclic ring: peptide SG <-> linker anchor bonds.
     linker_entity = None
@@ -439,8 +458,38 @@ def _run_peptide_engine(
 
     coords, mask, info = align_complex_init_coords(
         input_json, complex_path, entity_chain_names)
+
+    # Chemistry TFG constraints (bond/angle) for the free chains are computed
+    # from the ORIGINAL mask: under --blind_peptide the peptide's init mask
+    # is zeroed below (pure-noise start), but compute_free_chain_tfg_constraints
+    # skips mask==0 rows — without this pre-computation the peptide would
+    # diffuse with no covalent-chemistry guard at all.
+    blind_peptide = bool(getattr(args, "blind_peptide", False))
+    free_entities = {
+        len(receptor_names),
+        *((len(receptor_names) + 1,) if linker_letters else ()),
+    }
+    tfg_constraints = compute_free_chain_tfg_constraints(
+        info, coords, mask, free_entities=free_entities)
+    if tfg_constraints is not None:
+        tfg_npz = work_dir / "tfg_constraints.npz"
+        np.savez(tfg_npz, **tfg_constraints)
+        os.environ["PROTENIX_TFG_CONSTRAINTS_PATH"] = str(tfg_npz)
+        n_bond = int(tfg_constraints["pairwise_distance_is_bond"].sum())
+        n_angle = int(tfg_constraints["pairwise_distance_is_angle"].sum())
+        log.info("free-chain TFG constraints: %d bonds + %d angles",
+                 n_bond, n_angle)
+
+    init_mask = mask
+    if blind_peptide:
+        pep_rows = info["entity_rows"][len(receptor_names)]
+        init_mask = mask.copy()
+        init_mask[pep_rows] = 0.0
+        log.info("blind peptide: %d peptide atoms start from pure noise "
+                 "(full schedule)", int((mask[pep_rows] > 0).sum()))
+
     init_npz = work_dir / "init_coords.npz"
-    np.savez(init_npz, coords=coords, mask=mask)
+    np.savez(init_npz, coords=coords, mask=init_mask)
     os.environ["PROTENIX_INIT_COORDS_PATH"] = str(init_npz)
 
     # Receptor pinning: receptor atoms WITH source coordinates are clamped to
@@ -488,14 +537,20 @@ def _run_peptide_engine(
             info["entity_rows"][len(receptor_names)],
         ] + ([info["entity_rows"][len(receptor_names) + 1]]
              if linker_entity is not None else []))
-        pocket = compute_contact_pairs(
-            coords, mask, free_rows,
-            float(args.pocket_cutoff), float(args.pocket_upper),
-            anchor_slack=float(args.anchor_slack),
-        )
-        if pocket is not None:
-            contact_arrays.append(pocket[0])
-            contact_uppers.append(pocket[1])
+        if not blind_peptide:
+            # pocket pairs are derived from the POSED distances (receptor
+            # atoms within pocket_cutoff of the placed peptide get a
+            # pocket_upper band). From a pure-noise peptide start those
+            # distances are meaningless — blind inpainting runs without
+            # them (the free-chain chemistry constraints still apply).
+            pocket = compute_contact_pairs(
+                coords, mask, free_rows,
+                float(args.pocket_cutoff), float(args.pocket_upper),
+                anchor_slack=float(args.anchor_slack),
+            )
+            if pocket is not None:
+                contact_arrays.append(pocket[0])
+                contact_uppers.append(pocket[1])
         if contact_arrays:
             contacts = work_dir / "tfg_contacts.npz"
             np.savez(
@@ -510,41 +565,20 @@ def _run_peptide_engine(
                 len(pocket[0]) if pocket is not None else 0,
             )
 
-    # Hard geometric anchors enforced on x_t every diffusion step by the
-    # vendored sampler (the TFG contacts above remain the soft/chemical
-    # channel). TWO families:
-    #   - pocket pairs, band [d-slack, d+slack]: keeps the peptide at the
-    #     placed geometry — neither drifting away nor penetrating the wall
-    #   - the covalent ring bonds, band [1.75, 2.05]: the deformation
-    #     happens DURING diffusion, so the bonds need the same every-step
-    #     hard treatment (TFG only projects the x0 prediction, not x_t)
-    # Skipped entirely under --no_guidance (blind docking).
-    # Physics bands for the free chains (peptide + linker), built on the
-    # assembled atom table — the coordinates the sampler actually moves:
-    #   - every intra-chain covalent bond as a tight rest-length band
-    #   - a VDW clash floor on every receptor x free heavy pair
-    # Both ride the anchor projection so a steric shove distributes over
-    # bonded neighbours instead of tearing atoms off; bonds project last
-    # (official angles-then-bonds ordering). The receptor stays pinned —
-    # the projector's free/pinned weights never move pinned atoms.
-    free_entities = {
-        len(receptor_names),
-        *((len(receptor_names) + 1,) if linker_entity is not None else ()),
-    }
-    tfg_constraints = compute_free_chain_tfg_constraints(
-        info, coords, mask, free_entities=free_entities)
-    # Clash floors ride the TFG contact set: the official
-    # PairwiseDistancePotential enforces VDW lower bounds through its clash
-    # category on x0.
-
-    if tfg_constraints is not None:
-        tfg_npz = work_dir / "tfg_constraints.npz"
-        np.savez(tfg_npz, **tfg_constraints)
-        os.environ["PROTENIX_TFG_CONSTRAINTS_PATH"] = str(tfg_npz)
-        n_bond = int(tfg_constraints["pairwise_distance_is_bond"].sum())
-        n_angle = int(tfg_constraints["pairwise_distance_is_angle"].sum())
-        log.info("free-chain TFG constraints: %d bonds + %d angles",
-                 n_bond, n_angle)
+    # Ring-bond enforcement contract (post 553c0fc0d, TFG-native):
+    #   - input.json covalent_bonds   -> featurizer bond features (the model
+    #     conditions on the ring topology)
+    #   - compute_bond_contact_pairs  -> TFG PairwiseDistancePotential pairs
+    #     (upper = --bond_upper), projected on x0 every guided step
+    #   - NO every-step x_t hard anchors: the old [1.75, 2.05] anchor family
+    #     was removed when anchor handling was replaced by TFG constraints.
+    #     TFG projects only the denoiser's clean estimate, so intermediate
+    #     high-noise states may transiently break bonds; the orchestrator's
+    #     post-refine _dpeptide_linker_bond_report gate rejects candidates
+    #     whose final structure has broken ring bonds (no silent fallback).
+    # Free-chain physics bands were computed above, right after the coords
+    # alignment, from the ORIGINAL mask (see the --blind_peptide note there);
+    # recomputing here would drop the peptide's chemistry guard under blind.
 
     return input_json, {
         "coords": coords,
@@ -554,223 +588,6 @@ def _run_peptide_engine(
         "linker_entity": (len(receptor_names) + 1) if linker_entity is not None else None,
         "entity_chain_names": entity_chain_names,
     }
-
-
-def _placement_ensemble(
-    coords: np.ndarray,
-    mask: np.ndarray,
-    lig_rows: np.ndarray,
-    protein_rows: np.ndarray,
-    n_samples: int,
-    seed: int,
-    center: np.ndarray | None = None,
-    pool: int = 256,
-    floor: float = 2.7,
-    min_separation_deg: float = 30.0,
-    conformers: list[np.ndarray] | None = None,
-    box: np.ndarray | None = None,
-) -> np.ndarray:
-    """Per-sample start coordinates for the dock mode pose search.
-
-    The local dock schedule cannot recover from a bad global placement, so
-    each diffusion sample starts from its own placement of the conformer at
-    the pocket centre. Candidates come from every conformer variant (a
-    single ETKDG minimum is not the bound conformer of a flexible ligand),
-    placed by deterministic shape alignment — the ligand's principal axes
-    rotated onto the pocket cavity's principal axes — and a seeded random
-    SO(3) pool for diversity. Every candidate is scored by steric overlap
-    against the receptor minus a contact-shell reward (a pure overlap
-    minimum points the ligand out of the pocket); the best-scoring,
-    angularly separated starts seed the diffusion and the confidence
-    ranking across samples is the pose search.
-    """
-    rng = np.random.default_rng(seed)
-    lig = coords[lig_rows]
-    center = lig.mean(axis=0) if center is None else np.asarray(center, float)
-    known_protein = protein_rows[mask[protein_rows] > 0]
-    pro = coords[known_protein]
-
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(pro)
-
-    def _score(placed: np.ndarray) -> float:
-        dist, _ = tree.query(placed, k=1)
-        overlap = float((dist < floor).sum())
-        contacts = float(((dist >= 3.0) & (dist <= 5.5)).sum())
-        return overlap * 3.0 - contacts
-
-    # pocket cavity: grid points of the search box not buried in the receptor
-    half = (np.asarray(box, dtype=float) if box is not None
-            else (lig.max(0) - lig.min(0)) / 2 + 4.0)
-    steps = [np.arange(center[k] - half[k], center[k] + half[k], 0.8)
-             for k in range(3)]
-    grid = np.stack([a.reshape(-1) for a in np.meshgrid(*steps, indexing="ij")],
-                    axis=1)
-    d_grid, _ = tree.query(grid, k=1)
-    void = grid[d_grid > 2.4]
-
-    variants = [lig] + [c for c in (conformers or [])
-                        if len(c) == len(lig)]
-    # rotation AND translation probes: the crystal pose is an orientation
-    # around the pocket centre plus a small offset from it
-    offsets = np.array([[dx, dy, dz]
-                        for dx in (-2.4, 0.0, 2.4)
-                        for dy in (-2.4, 0.0, 2.4)
-                        for dz in (-2.4, 0.0, 2.4)], dtype=np.float64)
-    candidates: list[tuple[float, np.ndarray, np.ndarray]] = []  # score, rot, placed
-    for body in variants:
-        body_c = body - body.mean(0)
-        if len(void) >= 10:
-            cavity = void - void.mean(0)
-            _, _, cavity_axes = np.linalg.svd(cavity, full_matrices=False)
-            _, _, body_axes = np.linalg.svd(body_c, full_matrices=False)
-            for signs in (np.diag([sx, sy, sz])
-                          for sx in (1, -1) for sy in (1, -1) for sz in (1, -1)):
-                rot = cavity_axes.T @ signs @ body_axes
-                if np.linalg.det(rot) < 0:
-                    continue
-                oriented = body_c @ rot.T
-                for off in offsets:
-                    placed = oriented + center + off
-                    candidates.append((_score(placed), rot, placed))
-        q, r = np.linalg.qr(rng.normal(size=(max(pool // len(variants), 32), 3, 3)))
-        rots = q * np.sign(np.diagonal(r, axis1=1, axis2=2))[:, None, :]
-        # QR column-sign correction can still yield an improper rotation;
-        # a reflected start is the wrong enantiomer and the small-sigma
-        # schedule cannot repair chirality
-        rots[np.linalg.det(rots) < 0, :, -1] *= -1.0
-        for rot in rots:
-            oriented = body_c @ rot.T
-            for off in offsets:
-                placed = oriented + center + off
-                candidates.append((_score(placed), rot, placed))
-
-    candidates.sort(key=lambda item: item[0])
-
-    def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
-        cos = np.clip((np.trace(a.T @ b) - 1.0) / 2.0, -1.0, 1.0)
-        return float(np.degrees(np.arccos(cos)))
-
-    picked: list[np.ndarray] = []
-    picked_idx: list[int] = []
-    picked_rots: list[np.ndarray] = []
-    picked_offsets: list[np.ndarray] = []
-    for idx, (_, rot, placed) in enumerate(candidates):
-        off = placed.mean(axis=0) - center
-        if any(_angle_deg(rot, other_rot) < min_separation_deg
-               and np.linalg.norm(off - other_off) < 2.0
-               for other_rot, other_off in zip(picked_rots, picked_offsets)):
-            continue
-        picked.append(placed)
-        picked_idx.append(idx)
-        picked_rots.append(rot)
-        picked_offsets.append(off)
-        if len(picked) == n_samples:
-            break
-    for idx, (_, _, placed) in enumerate(candidates):
-        # separation floor exhausted the pool: fall back to the next-best
-        # candidates not already picked
-        if len(picked) >= n_samples:
-            break
-        if idx in picked_idx:
-            continue
-        picked.append(placed)
-
-    ensemble = np.repeat(coords[None], n_samples, axis=0)
-    for s, placed in enumerate(picked[:n_samples]):
-        ensemble[s][lig_rows] = placed
-    return ensemble
-
-
-def _diverse_conformers(smiles: str, seed: int, k: int = 6) -> list[np.ndarray]:
-    """Heavy-atom conformer variants for the dock placement ensemble.
-
-    A single ETKDG minimum routinely differs from the bound conformer of a
-    flexible ligand by more than the local dock schedule can travel, so the
-    pose search seeds from several RMSD-diverse conformers. Atom order is
-    the canonical SMILES order after H removal, matching the placed SDF the
-    featurizer aligned against.
-    """
-    from rdkit import Chem
-    from rdkit.Chem import AllChem, rdMolAlign
-
-    template = Chem.MolFromSmiles(smiles)
-    if template is None:
-        return []
-    mol = Chem.AddHs(template)
-    kept_mols: list = []
-    params = AllChem.ETKDGv3()
-    for s in range(k * 6):
-        params.randomSeed = seed + s
-        cand = Chem.Mol(mol)
-        if AllChem.EmbedMolecule(cand, params) != 0:
-            continue
-        AllChem.MMFFOptimizeMolecule(cand)
-        cand = Chem.RemoveHs(cand)
-        if kept_mols and any(
-                rdMolAlign.GetBestRMS(cand, other) < 0.8
-                for other in kept_mols):
-            continue
-        kept_mols.append(cand)
-        if len(kept_mols) == k:
-            break
-    out = []
-    for m in kept_mols:
-        conf = m.GetConformer()
-        out.append(np.array(
-            [list(conf.GetAtomPosition(i)) for i in range(m.GetNumAtoms())],
-            dtype=np.float64))
-    return out
-
-
-def _steric_anchor_pairs(
-    placements: list[np.ndarray],
-    coords: np.ndarray,
-    mask: np.ndarray,
-    lig_rows: np.ndarray,
-    protein_rows: np.ndarray,
-    floor: float = 2.7,
-    select_radius: float = 11.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Hard-anchor steric floor between the ligand and the receptor.
-
-    Pair every ligand atom with every protein atom within `select_radius` of
-    ANY placement in the start ensemble, band [floor, 1e3]: the upper bound
-    never fires, so the band is pure repulsion and stays valid for every
-    ensemble start. The floor sits just under the shortest legitimate
-    heavy-atom H-bond so it removes hard clashes without fighting real
-    contacts.
-    """
-    empty_idx = np.zeros((0, 2), dtype=np.int64)
-    empty_b = np.zeros(0, dtype=np.float32)
-    if not placements or lig_rows.size == 0 or protein_rows.size == 0:
-        return empty_idx, empty_b, empty_b
-    known_protein = protein_rows[mask[protein_rows] > 0]
-    pro = coords[known_protein]
-
-    select = np.zeros(len(pro), dtype=bool)
-    for lig in placements:
-        d = np.linalg.norm(pro[:, None, :] - lig[None, :, :], axis=-1)
-        select |= (d < select_radius).any(axis=1)
-    if not select.any():
-        return empty_idx, empty_b, empty_b
-
-    pro_sel = np.where(select)[0]
-    lig_all = np.concatenate(placements, axis=0)
-    d = np.linalg.norm(pro[pro_sel][:, None, :] - lig_all[None, :, :], axis=-1)
-    pi, li = np.where(d < select_radius)
-    if pi.size == 0:
-        return empty_idx, empty_b, empty_b
-    lig_idx = lig_rows[li % len(lig_rows)]
-    index = np.stack(
-        [known_protein[pro_sel[pi]], lig_idx], axis=1).astype(np.int64)
-    # the same (protein, ligand) pair can appear once per placement; the
-    # projector's index_add would accumulate duplicate corrections
-    index = np.unique(index, axis=0)
-    lower = np.full(len(index), float(floor), dtype=np.float32)
-    upper = np.full(len(index), 1e3, dtype=np.float32)
-    return index, upper, lower
 
 
 def main(argv=None):
@@ -802,13 +619,10 @@ def main(argv=None):
             args, protein_path, ligand_sdf, ligand_mol, work_dir
         )
 
-    # Engine side-channels (env contract, see vendor patches).
-    if args.mode == "dock" and args.blind:
-        # blind docking: no init coordinates at all — the engine's standard
-        # full-noise diffusion generates the whole complex
-        os.environ.pop("PROTENIX_INIT_COORDS_PATH", None)
-    else:
-        os.environ["PROTENIX_INIT_COORDS_PATH"] = str(work_dir / "init_coords.npz")
+    # Engine side-channels (env contract, see vendor patches). The dock/
+    # peptide engines write their own init/pin npz files and set this env
+    # themselves; the ligand score path passes coordinates without diffusion.
+    os.environ["PROTENIX_INIT_COORDS_PATH"] = str(work_dir / "init_coords.npz")
     if args.mode == "score":
         os.environ["PROTENIX_SCORE_ONLY"] = "1"
     if args.mode == "peptide" and args.score_only:
@@ -821,66 +635,33 @@ def main(argv=None):
     # and pin mask inside _run_peptide_engine; the generic ligand-anchored
     # guidance below applies to the ligand modes only.
     if args.mode != "peptide":
-        guidance = (args.mode != "score" and not args.no_guidance
-                    and not (args.mode == "dock" and args.blind))
-        if args.mode == "dock" and not args.blind:
-            # Rigid-receptor docking with a placement ensemble:
-            #  - every protein atom with source coordinates is pinned to the
-            #    input structure (same inpainting contract as peptide mode;
-            #    zero-coordinate rows stay free — pinning them would clamp
-            #    atoms to the origin)
-            #  - the local dock schedule cannot recover from a bad global
-            #    placement (all samples collapse to the single placed
-            #    orientation), so each diffusion sample starts from its own
-            #    rotation of the conformer around the box centre; ranking
-            #    across samples is the engine's pose search
-            #  - steric floor: hard-anchor lower bounds (~VDW contact
-            #    distance) on ligand/protein pairs — the TFG channel only
-            #    carries upper bounds, so without this the refinement can
-            #    park the ligand 0.6 A inside the receptor wall
+        if args.mode == "dock":
+            # NATIVE blind inpainting (2026-09-04 protocol decision; the
+            # hand-rolled placement ensemble + steric anchor search removed):
+            #   - protein atoms WITH source coordinates are pinned for the
+            #     whole diffusion (true inpainting, same contract as peptide
+            #     mode; zero-coordinate rows stay free)
+            #   - the ligand denoises from PURE NOISE on the FULL schedule —
+            #     the engine's own trained docking task; no external pose
+            #     prior is invented
+            #   - ligand covalent chemistry rides the TFG channel
+            #     (RDKit topology, pose-independent)
+            #   - the user pocket box is a POST-FILTER (reported as the
+            #     ligand-centroid distance in the summary); it never
+            #     conditions the sampler
             pin = np.zeros(len(coords), dtype=np.float32)
             protein_rows = np.setdiff1d(
                 np.arange(len(coords)), info["ligand_rows"])
             pin[protein_rows] = mask[protein_rows]
-
-            n_samples = int(args.diffusion_samples) if args.diffusion_samples \
-                else int(config["diffusion_samples"])
-            init_npz = work_dir / "init_coords.npz"
             lig_rows = info["ligand_rows"]
-            placements: list[np.ndarray] = []
-            if n_samples > 1 and lig_rows.size and bool((mask[lig_rows] > 0).all()):
-                ensemble = _placement_ensemble(
-                    coords, mask, lig_rows, protein_rows,
-                    n_samples=n_samples, seed=args.seed,
-                    center=(np.array([args.center_x, args.center_y, args.center_z])
-                            if args.center_x is not None else None),
-                    conformers=_diverse_conformers(
-                        getattr(args, "ligand_smiles", "") or "", args.seed),
-                    box=(np.array([args.size_x, args.size_y, args.size_z]) / 2.0
-                         if args.size_x is not None else None))
-                np.savez(init_npz, coords=ensemble, mask=mask)
-                placements = [ensemble[s][lig_rows] for s in range(n_samples)]
-                log.info("dock mode: %d-start placement ensemble "
-                         "(conformer x orientation, overlap-scored)", n_samples)
-            else:
-                np.savez(init_npz, coords=coords, mask=mask)
-                if lig_rows.size:
-                    placements = [coords[lig_rows]]
-
-            steric = _steric_anchor_pairs(
-                placements, coords, mask, lig_rows, protein_rows)
-            anchor_npz = work_dir / "anchor_pairs.npz"
-            np.savez(
-                anchor_npz,
-                pair_index=steric[0], upper=steric[1], lower=steric[2])
-            os.environ["PROTENIX_ANCHOR_PAIRS_PATH"] = str(anchor_npz)
+            init_mask_dock = mask.copy()
+            init_mask_dock[lig_rows] = 0.0
+            init_npz = work_dir / "init_coords.npz"
+            np.savez(init_npz, coords=coords, mask=init_mask_dock)
+            os.environ["PROTENIX_INIT_COORDS_PATH"] = str(init_npz)
             pin_npz = work_dir / "pin_mask.npz"
             np.savez(pin_npz, pin=pin)
             os.environ["PROTENIX_PIN_MASK_PATH"] = str(pin_npz)
-            # Ligand covalent bonds (RDKit graph, exact topology): same
-            # every-step projection as peptide mode — the steric floor alone
-            # can shove one ligand atom off its bonded neighbour. Blind dock
-            # keeps the untouched full-noise generation path.
             lig_cov = compute_ligand_covalent_bands(lig_rows, ligand_mol)
             if lig_cov is not None:
                 lig_cov_npz = work_dir / "covalent_bonds.npz"
@@ -889,18 +670,14 @@ def main(argv=None):
                     pair_index=lig_cov[0], upper=lig_cov[1], lower=lig_cov[2])
                 os.environ["PROTENIX_COVALENT_BONDS_PATH"] = str(lig_cov_npz)
                 log.info("dock mode: %d ligand covalent bond bands", len(lig_cov[1]))
-            log.info("dock mode: pinned %d/%d protein atoms, %d steric floor pairs",
-                     int(pin.sum()), len(pin), len(steric[0]))
-        if guidance:
-            pairs = compute_contact_pairs(
-                coords, mask, info["ligand_rows"],
-                float(config["anchor_contact_cutoff"]),
-                float(config["anchor_max_distance"]),
-            )
-            if pairs is not None:
-                contacts = work_dir / "tfg_contacts.npz"
-                np.savez(contacts, pair_index=pairs[0], upper=pairs[1])
-                os.environ["PROTENIX_TFG_CONTACTS_PATH"] = str(contacts)
+            if args.center_x is not None:
+                log.info("dock mode: pocket box kept for POST-FILTER "
+                         "reporting only (native inpainting is not "
+                         "conditioned on it)")
+            log.info("dock mode: native blind inpainting — pinned %d/%d "
+                     "protein atoms, %d ligand atoms from noise",
+                     int(pin.sum()), len(pin), int((mask[lig_rows] > 0).sum()))
+        guidance = not args.no_guidance
     else:
         guidance = not args.no_guidance
 
@@ -910,6 +687,14 @@ def main(argv=None):
                     if args.diffusion_samples is not None else config["diffusion_samples"])
     sigma_max = float(args.sigma_max
                       if args.sigma_max is not None else config["sigma_max"])
+    if getattr(args, "blind_peptide", False) or args.mode == "dock":
+        # Blind inpainting needs the ORIGINAL full noise schedule — the
+        # peptide starts from pure noise, so a local-refine sigma would leave
+        # it an unfolded blob. Explicit --sigma_max/--sampling_steps win.
+        if args.sigma_max is None:
+            sigma_max = 160.0
+        if args.sampling_steps is None:
+            n_steps = 200
     log.info("mode=%s sigma_max=%.3f steps=%d samples=%d guidance=%s",
              args.mode, sigma_max, n_steps, n_samples, guidance)
 

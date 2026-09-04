@@ -76,8 +76,11 @@ export function useProjectWorkspaceRuntimeUi({
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
+    // Keyed on project.id, not the project object: saveProjectUiState reads the project id
+    // only, and the runtime overlays refresh the project object on every poll — object-keyed
+    // deps re-serialized the whole (MB-scale) template/upload blob to localStorage per tick.
   }, [
-    project,
+    project?.id,
     proteinTemplates,
     customResidueLibrary,
     taskProteinTemplates,

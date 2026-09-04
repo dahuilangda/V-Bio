@@ -79,7 +79,6 @@ def lead_optimization_halo_task(self, optimization_args: dict):
             "scaffold_hop_ratio": optimization_args.get("scaffold_hop_ratio", 0.4),
             "rounds": optimization_args.get("rounds", 6),
             "budget_per_round": optimization_args.get("budget_per_round", 48),
-            "oracle_concurrency": optimization_args.get("oracle_concurrency", 8),
             "oracle_timeout_s": optimization_args.get("oracle_timeout_s", 7200),
             "seed": optimization_args.get("seed", 0),
             "prior_dir": optimization_args.get("prior_dir", ""),

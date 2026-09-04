@@ -26,8 +26,8 @@ interface UseProjectSidebarActionsInput {
   constraintsSupported: boolean;
   isBondOnlyBackend: boolean;
   canEnableAffinityFromWorkspace: boolean;
-  workspaceTargetOptions: Array<{ componentId: string; chainId: string }>;
-  workspaceLigandSelectableOptions: Array<{ componentId: string; chainId: string }>;
+  workspaceTargetOptions: Array<{ componentId: string; chainId: string; isSmallMolecule?: boolean }>;
+  workspaceLigandSelectableOptions: Array<{ componentId: string; chainId: string; isSmallMolecule?: boolean }>;
   createInputComponent: (type: InputComponent['type']) => InputComponent;
 }
 

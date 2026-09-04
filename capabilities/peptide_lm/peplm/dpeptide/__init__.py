@@ -6,10 +6,16 @@ complex -> display frame). The production D-route lives in
 backend/runtime/run_single_prediction.py; see docs/peptide-design.md.
 """
 
-from .mirror import ChiralityReport, ca_chiral_volumes, chirality_report, mirror_structure
+from .mirror import (
+    ChiralityReport,
+    ca_chiral_volumes,
+    chirality_report,
+    chirality_violations,
+    mirror_structure,
+)
 from .pipeline import flip_product
 
 __all__ = [
     "ChiralityReport", "ca_chiral_volumes", "chirality_report",
-    "mirror_structure", "flip_product",
+    "chirality_violations", "mirror_structure", "flip_product",
 ]

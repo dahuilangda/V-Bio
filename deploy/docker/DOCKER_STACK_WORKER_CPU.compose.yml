@@ -13,5 +13,9 @@ services:
     volumes:
       - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
       - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
+      # Shared MSA cache: the peptide orchestrator prefetches binder MSAs here
+      # (user policy: MSA on for designed peptides too); without the mount the
+      # results cannot be saved and every prefetch degrades to "empty".
+      - ${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}:${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}
     command: >-
       bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint cpu-worker"

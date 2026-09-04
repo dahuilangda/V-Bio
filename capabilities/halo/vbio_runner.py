@@ -357,7 +357,6 @@ def run_halo_optimization(
             target,
             run_dir / "oracle_work",
             backend=str(payload.get("backend") or PredictOracle.DEFAULT_BACKEND),
-            concurrency=int(payload.get("oracle_concurrency") or 8),
             timeout_s=int(payload.get("oracle_timeout_s") or 7200),
             priority=str(payload.get("priority") or "default"),
             seed=cfg.seed or None,

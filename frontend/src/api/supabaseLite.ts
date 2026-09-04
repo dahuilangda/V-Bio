@@ -2186,11 +2186,43 @@ function createLocalId(prefix: string): string {
   return `local:${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
+// localStorage holds up to 200 copilot rows per key (multi-MB with long transcripts). Every
+// message insert used to re-read AND re-parse the whole blob, then re-serialize it — several
+// synchronous multi-hundred-ms stalls per turn. The parsed array stays warm behind a raw-string
+// identity check, so an insert pays only the serialize side, while an external write (another
+// tab) still invalidates the cache correctly.
+const LOCAL_ROWS_CACHE_LIMIT = 8;
+const localRowsCache = new Map<string, { raw: string; rows: unknown[] }>();
+
+function readLocalRowsCache(key: string): { raw: string; rows: unknown[] } | undefined {
+  const cached = localRowsCache.get(key);
+  if (cached) {
+    // Refresh recency for the LRU bound.
+    localRowsCache.delete(key);
+    localRowsCache.set(key, cached);
+  }
+  return cached;
+}
+
+function putLocalRowsCache(key: string, raw: string, rows: unknown[]) {
+  localRowsCache.delete(key);
+  localRowsCache.set(key, { raw, rows });
+  if (localRowsCache.size > LOCAL_ROWS_CACHE_LIMIT) {
+    const oldest = localRowsCache.keys().next().value;
+    if (oldest !== undefined) localRowsCache.delete(oldest);
+  }
+}
+
 function readLocalRows<T>(key: string): T[] {
   if (typeof window === 'undefined') return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(key) || '[]');
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
+    const raw = window.localStorage.getItem(key) || '[]';
+    const cached = readLocalRowsCache(key);
+    if (cached && cached.raw === raw) return cached.rows as T[];
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? (parsed as T[]) : [];
+    putLocalRowsCache(key, raw, rows as unknown[]);
+    return rows;
   } catch {
     return [];
   }
@@ -2198,7 +2230,10 @@ function readLocalRows<T>(key: string): T[] {
 
 function writeLocalRows<T>(key: string, rows: T[]) {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(key, JSON.stringify(rows.slice(-200)));
+  const capped = rows.slice(-200);
+  const serialized = JSON.stringify(capped);
+  window.localStorage.setItem(key, serialized);
+  putLocalRowsCache(key, serialized, capped as unknown[]);
 }
 
 function copilotLocalStorageKey(input: {
@@ -2336,6 +2371,74 @@ export async function deleteProjectCopilotState(userId: string, stateKey: string
   }
 }
 
+// Column projection for the Copilot transcript LIST query. planner_trace is deliberately
+// EXCLUDED: it is the single heaviest metadata field (dozens of steps per turn) and the UI
+// renders it inside a disclosure that starts collapsed — it is fetched per message on first
+// expand instead (fetchProjectCopilotMessageTrace). Everything else the modal reads is kept
+// so the list is one round trip.
+const COPILOT_MESSAGE_LIST_SELECT = [
+  'id',
+  'context_type',
+  'project_id',
+  'project_task_id',
+  'user_id',
+  'role',
+  'content',
+  'created_at',
+  'updated_at',
+  'meta_session_id:metadata->>session_id',
+  'meta_owner_user_id:metadata->>owner_user_id',
+  'meta_conversation_scope:metadata->>conversation_scope',
+  'meta_source_context_type:metadata->>source_context_type',
+  'meta_source_project_id:metadata->>source_project_id',
+  'meta_source_project_task_id:metadata->>source_project_task_id',
+  'meta_planner_state:metadata->>planner_state',
+  'meta_plan_id:metadata->>plan_id',
+  'meta_planner_questions:metadata->planner_questions',
+  'meta_planner_observations:metadata->planner_observations',
+  'meta_candidate_plan_actions:metadata->candidate_plan_actions',
+  'meta_action_resolutions:metadata->action_resolutions',
+  'meta_attachments:metadata->attachments'
+].join(',');
+
+// Reassemble the metadata object from the projected columns (mirrors the writers: keys are
+// dropped when the underlying value is null/absent so `planner_trace === undefined` marks a
+// lazily-loadable trace).
+function rebuildCopilotMessageMetadata(row: Partial<ProjectCopilotMessage> & Record<string, unknown>): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+  const pairs: Array<[string, unknown]> = [
+    ['session_id', row.meta_session_id],
+    ['owner_user_id', row.meta_owner_user_id],
+    ['conversation_scope', row.meta_conversation_scope],
+    ['source_context_type', row.meta_source_context_type],
+    ['source_project_id', row.meta_source_project_id],
+    ['source_project_task_id', row.meta_source_project_task_id],
+    ['planner_state', row.meta_planner_state],
+    ['plan_id', row.meta_plan_id],
+    ['planner_questions', row.meta_planner_questions],
+    ['planner_observations', row.meta_planner_observations],
+    ['candidate_plan_actions', row.meta_candidate_plan_actions],
+    ['action_resolutions', row.meta_action_resolutions],
+    ['attachments', row.meta_attachments]
+  ];
+  for (const [key, value] of pairs) {
+    if (value !== null && value !== undefined) metadata[key] = value;
+  }
+  return metadata;
+}
+
+export async function fetchProjectCopilotMessageTrace(messageId: string): Promise<unknown> {
+  const id = String(messageId || '').trim();
+  if (!id) return null;
+  const rows = await request<Array<{ planner_trace?: unknown }>>('/project_copilot_messages', undefined, {
+    select: 'planner_trace:metadata->planner_trace',
+    id: `eq.${id}`,
+    limit: '1'
+  });
+  const trace = rows[0]?.planner_trace;
+  return trace && typeof trace === 'object' ? trace : [];
+}
+
 export async function listProjectCopilotMessages(input: {
   contextType: ProjectCopilotMessage['context_type'];
   projectId?: string | null;
@@ -2348,7 +2451,7 @@ export async function listProjectCopilotMessages(input: {
   const normalizedUserId = String(input.userId || '').trim();
   if (!normalizedUserId) return [];
   const query: Record<string, string> = {
-    select: '*',
+    select: COPILOT_MESSAGE_LIST_SELECT,
     context_type: `eq.${contextType}`,
     'metadata->>owner_user_id': `eq.${normalizedUserId}`,
     order: 'created_at.desc',
@@ -2375,15 +2478,19 @@ export async function listProjectCopilotMessages(input: {
       });
   }
   rows = rows.filter((row) => {
-    return String(row.user_id || '') === normalizedUserId || String(asObjectRecord(row.metadata).owner_user_id || '') === normalizedUserId;
+    const projected = row as Partial<ProjectCopilotMessage> & Record<string, unknown>;
+    const ownerFromProjection = String(projected.meta_owner_user_id ?? asObjectRecord(row.metadata).owner_user_id ?? '').trim();
+    return String(row.user_id || '') === normalizedUserId || ownerFromProjection === normalizedUserId;
   });
   const userIds = Array.from(new Set(rows.map((row) => String(row.user_id || '').trim()).filter(Boolean)));
   const users = await listUsersByIds(userIds);
   const userById = new Map(users.map((user) => [user.id, user] as const));
   const normalizedRows = rows.map((row) => {
     const user = row.user_id ? userById.get(String(row.user_id)) : null;
+    const projected = row as Partial<ProjectCopilotMessage> & Record<string, unknown>;
     return normalizeProjectCopilotMessage({
       ...row,
+      metadata: row.metadata ?? rebuildCopilotMessageMetadata(projected),
       username: user?.username || '',
       user_name: user?.name || ''
     });

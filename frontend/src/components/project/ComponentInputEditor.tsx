@@ -1319,7 +1319,7 @@ export function ComponentInputEditor({
                                             <input
                                               value={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
                                               disabled={disabled}
-                                              placeholder="Draw or paste the complete modified residue SMILES"
+                                              placeholder="Modified residue SMILES"
                                               onChange={(e) => patchProteinModification(comp.id, mod.id, { smiles: e.target.value })}
                                             />
                                           </label>

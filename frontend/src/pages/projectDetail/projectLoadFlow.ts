@@ -8,6 +8,7 @@ import {
 } from '../../api/supabaseLite';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { CustomCcdMoleculeInput, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import { normalizeAffinityBackend } from '../apiAccessHelpers';
 import { pocketOptionsWithRestoredTemplate } from '../../utils/peptidePocket';
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
@@ -134,7 +135,11 @@ export async function loadProjectFlow(params: {
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
   const isPredictionLikeWorkflow = isPredictionLikeWorkflowKey(workflowDef.key);
-  const normalizedBackend = workflowDef.key === 'affinity' ? 'boltz' : normalizePredictionBackend(next.backend);
+  // Docking keeps its stored backend (protenix default since creation) instead of
+  // forcing 'boltz', so the user's engine choice survives a reload.
+  const normalizedBackend = workflowDef.key === 'affinity'
+    ? normalizeAffinityBackend(next.backend)
+    : normalizePredictionBackend(next.backend);
   const query = new URLSearchParams(locationSearch);
   const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
   const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
