@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   deleteProjectCopilotMessagesBySession,
   deleteProjectCopilotState,
+  fetchProjectCopilotMessageTrace,
   getProjectCopilotState,
   insertProjectCopilotMessage,
   readCachedProjectCopilotMessages,
@@ -78,28 +79,41 @@ function author(message: ProjectCopilotMessage): string {
 // Reasoning steps — plain muted text, one short phrase per step (wording in formatTraceStep).
 // The latest streaming step brightens; everything else stays quiet so the panel reads as part of
 // the message instead of a debug log.
+// Rows are memoized per step object: trace steps are append-only (identity never changes), so a
+// streaming turn that adds step N re-renders ONLY step N instead of re-formatting and reconciling
+// every earlier step on each SSE frame.
+const TraceStepRow = memo(function TraceStepRow({ step, isLast }: { step: CopilotTraceStep; isLast: boolean }) {
+  return (
+    <li className={`copilot-trace-item${isLast ? ' is-current' : ''}`}>
+      {formatTraceStep(step)}
+    </li>
+  );
+});
+
 function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; highlightLast?: boolean }) {
+  const lastIndex = steps.length - 1;
   return (
     <ol className="copilot-trace-list">
-      {steps.map((step, index) => {
-        const isLast = highlightLast && index === steps.length - 1;
-        return (
-          <li
-            key={`${step.round}-${step.event}-${index}`}
-            className={`copilot-trace-item${isLast ? ' is-current' : ''}`}
-          >
-            {formatTraceStep(step)}
-          </li>
-        );
-      })}
+      {steps.map((step, index) => (
+        <TraceStepRow
+          key={`${step.round}-${step.event}-${index}`}
+          step={step}
+          isLast={Boolean(highlightLast) && index === lastIndex}
+        />
+      ))}
     </ol>
   );
 }
 
-// Collapsible "思考过程 / 思考中" disclosure — a quiet inline section of the message: a small
+// Collapsible "thinking / thinking…" disclosure — a quiet inline section of the message: a small
 // animated sparkle toggle while live, muted step text below, smooth expand/collapse.
-function CopilotThinkingCard({ steps, live }: { steps: CopilotTraceStep[]; live?: boolean }) {
-  const [open, setOpen] = useState(live ?? true);
+// Memoized: finished messages hold a stable steps array from metadata, so parent re-renders
+// (typing, dragging, disabled flips, task-page polling) skip the whole card.
+// History cards start COLLAPSED: a long transcript otherwise mounts every trace step of every
+// message at once (thousands of <li>), which turns each layout pass — poll re-renders, the
+// per-step auto-scroll during streaming — into a full-document layout and freezes the panel.
+const CopilotThinkingCard = memo(function CopilotThinkingCard({ steps, live, pending, onExpand }: { steps: CopilotTraceStep[]; live?: boolean; pending?: boolean; onExpand?: () => void }) {
+  const [open, setOpen] = useState(Boolean(live));
   // Live with no steps yet: a bare "Thinking…" indicator. No card chrome, no divider, no empty
   // expandable body — those would float above nothing and read as a stray line / empty box.
   if (live && steps.length === 0) {
@@ -116,22 +130,33 @@ function CopilotThinkingCard({ steps, live }: { steps: CopilotTraceStep[]; live?
       <button
         type="button"
         className="copilot-thinking-head"
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          // Lazy trace: the transcript list projection omits planner_trace (the heaviest
+          // metadata field); the first expand of a finished message fetches just that
+          // message's steps instead of shipping every turn's trace with the list.
+          if (next && pending && onExpand) onExpand();
+        }}
         aria-expanded={open}
       >
         <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
         <span className="copilot-thinking-title">{label}</span>
-        <span className="copilot-thinking-meta">{steps.length} {steps.length === 1 ? 'step' : 'steps'}</span>
+        <span className="copilot-thinking-meta">
+          {pending ? '' : `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`}
+        </span>
         <ChevronRight className="copilot-thinking-chev" size={12} aria-hidden="true" />
       </button>
       <div className="copilot-thinking-body">
         <div className="copilot-thinking-body-inner">
-          <TraceStepList steps={steps} highlightLast={live} />
+          {/* Collapsed = the step tree is not mounted at all (grid 0fr still lays out the
+              children, so a long transcript's thousands of <li> keep costing every layout). */}
+          {open ? <TraceStepList steps={steps} highlightLast={live} /> : null}
         </div>
       </div>
     </div>
   );
-}
+});
 
 function readPlannerQuestions(value: unknown): CopilotPlannerQuestion[] {
   return parseCopilotQuestions(value);
@@ -287,7 +312,7 @@ function CopilotQuestionCard({
                     disabled={disabled}
                     onClick={() => setOtherOpen((prev) => ({ ...prev, [questionIndex]: !prev[questionIndex] }))}
                   >
-                    其他…
+                    Other…
                   </button>
                 ) : null}
               </div>
@@ -299,7 +324,7 @@ function CopilotQuestionCard({
                   type="text"
                   value={otherText[questionIndex] || ''}
                   disabled={disabled}
-                  placeholder="输入你的回答…"
+                  placeholder="Type your answer…"
                   onChange={(e) => setOtherText((prev) => ({ ...prev, [questionIndex]: e.target.value }))}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
@@ -314,7 +339,7 @@ function CopilotQuestionCard({
                   disabled={disabled || !String(otherText[questionIndex] || '').trim()}
                   onClick={() => submitOther(questionIndex, question.text)}
                 >
-                  提交
+                  Submit
                 </button>
               </div>
             ) : null}
@@ -342,7 +367,7 @@ function CopilotQuestionCard({
             {question.kind === 'freeform' ? (
               <p className="copilot-question-hint">Type your answer below.</p>
             ) : null}
-            {isAnswered ? <small className="copilot-question-answered">✓ 已选择</small> : null}
+            {isAnswered ? <small className="copilot-question-answered">✓ Selected</small> : null}
           </div>
         );
       })}
@@ -353,33 +378,63 @@ function CopilotQuestionCard({
           disabled={disabled || !allAnswered}
           onClick={submit}
         >
-          {allAnswered ? '提交回答' : `还需回答 ${questions.length - Object.keys(answers).length} 个问题`}
+          {allAnswered ? 'Submit answers' : `Answer ${questions.length - Object.keys(answers).length} more question(s)`}
         </button>
       ) : null}
     </div>
   );
 }
 
+// ReactMarkdown parses the full message content on every render — with a long transcript that is
+// seconds of synchronous work per pass. Content strings are immutable once a message lands, so
+// parse each distinct body exactly once and reuse the element for every other re-render.
+const CopilotMarkdown = memo(function CopilotMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 // Message rendering runs ReactMarkdown (expensive). Memoize so a message only re-renders when its
 // own content changes — not on every unrelated Copilot state update (typing, dragging, resize,
 // caret moves), which otherwise re-parsed markdown for every message and froze the panel.
+const EMPTY_TRACE: CopilotTraceStep[] = [];
 const CopilotMessageItem = memo(function CopilotMessageItem({
   message,
   disabled,
-  onAnswerQuestion
+  onAnswerQuestion,
+  onLoadTrace
 }: {
   message: ProjectCopilotMessage;
   disabled: boolean;
   onAnswerQuestion: (answer: string) => void;
+  onLoadTrace: (messageId: string) => void;
 }) {
-  const trace = message.role === 'assistant' ? readPlannerTrace(message.metadata?.planner_trace) : [];
-  const questions = message.role === 'assistant' ? readPlannerQuestions(message.metadata?.planner_questions) : [];
-  const plannerState = String(message.metadata?.planner_state || '').trim();
+  const metadata = message.metadata;
+  const trace = useMemo(
+    () => (message.role === 'assistant' ? readPlannerTrace(metadata?.planner_trace) : []),
+    [message.role, metadata]
+  );
+  // The list projection ships every transcript message WITHOUT planner_trace; an assistant
+  // row whose metadata simply lacks the key still owes its steps (fetched on first expand).
+  const tracePending = message.role === 'assistant' && Boolean(metadata) && !('planner_trace' in (metadata || {}));
+  const handleExpandTrace = useCallback(() => {
+    onLoadTrace(message.id);
+  }, [message.id, onLoadTrace]);
+  const questions = useMemo(
+    () => (message.role === 'assistant' ? readPlannerQuestions(metadata?.planner_questions) : []),
+    [message.role, metadata]
+  );
+  const plannerState = String(metadata?.planner_state || '').trim();
   const showQuestions = plannerState === 'needs_input' && questions.length > 0;
-  // Retrieved records from read skills — shown in a collapsible section so the user always sees the
-  // authoritative data even when the model's message only summarizes it (e.g. "Here is the sequence:"
+  // Retrieved records from read skills — shown in a collapsible section so the user always sees
+  // the authoritative data even when the model's message only summarizes it (e.g. "Here is the sequence:"
   // without pasting 395 chars, which models routinely truncate in structured output).
-  const observations = message.role === 'assistant' ? readObservationRecords(message.metadata?.planner_observations) : [];
+  const observations = useMemo(
+    () => (message.role === 'assistant' ? readObservationRecords(metadata?.planner_observations) : []),
+    [message.role, metadata]
+  );
   const showObservations = observations.length > 0;
   // Detect failed action receipts so they render with an error style.
   const hasFailedAction = message.role === 'system' && readActionResolutions(message).some((r) => r.status === 'failed');
@@ -390,15 +445,17 @@ const CopilotMessageItem = memo(function CopilotMessageItem({
         <span>{formatDateTime(message.created_at)}</span>
       </div>
       <div className="copilot-message-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-          {message.content}
-        </ReactMarkdown>
+        <CopilotMarkdown content={message.content} />
       </div>
       {showObservations ? <CopilotObservationCard records={observations} /> : null}
       {showQuestions ? (
         <CopilotQuestionCard questions={questions} disabled={disabled} onAnswer={onAnswerQuestion} />
       ) : null}
-      {trace.length > 0 && <CopilotThinkingCard steps={trace} />}
+      {trace.length > 0 ? (
+        <CopilotThinkingCard steps={trace} />
+      ) : tracePending ? (
+        <CopilotThinkingCard steps={EMPTY_TRACE} pending onExpand={handleExpandTrace} />
+      ) : null}
     </article>
   );
 });
@@ -496,13 +553,6 @@ function filterResolvedPlanActions(messages: ProjectCopilotMessage[], sessionId:
   if (actions.length === 0) return [];
   const resolutions = readSessionResolutionMap(messages, sessionId);
   return actions.filter((action) => !resolutions.has(planActionKey(action)));
-}
-
-function getSessionTitle(messages: ProjectCopilotMessage[], sessionId: string): string {
-  const firstUserMessage = messages.find((message) => readSessionId(message) === sessionId && message.role === 'user');
-  const content = String(firstUserMessage?.content || '').replace(/\s+/g, ' ').trim();
-  if (!content) return sessionId === 'default' ? 'Previous chat' : 'New chat';
-  return content.length > 32 ? `${content.slice(0, 32)}...` : content;
 }
 
 function copilotOpenStorageKey(): string {
@@ -688,9 +738,9 @@ const AUTO_CONTINUATION_CAP = 5;
 // after a plan's actions resolved. Applied and failed receipts carry very different duties:
 // continue vs. diagnose-and-recover, and NEVER claim completion on failed receipts.
 const COPILOT_CONTINUATION_MESSAGE_APPLIED =
-  '已应用刚才确认的操作（见回执），无需重复；请继续完成计划。若目标已达成，请基于回执如实总结后停止。';
+  'The confirmed actions were applied (see the receipt); do not repeat them. Continue the plan. If the goal is met, summarize honestly from the receipt and stop.';
 const COPILOT_CONTINUATION_MESSAGE_FAILED =
-  '刚才确认的部分操作执行失败（见回执中的 error 字段）。请先诊断失败原因，修复前提或修正参数后重新提议对应操作；无法修复时改用合法的替代路径；确实无路可走才向用户如实说明阻塞点。不要原样重复已失败的操作，也不要在回执为 failed 时宣称任务已完成。';
+  'Some of the confirmed actions failed (see the error field in the receipt). Diagnose the failure first, fix prerequisites or parameters, then re-propose those actions; use a valid alternative if unfixable; only report the blocker honestly if no path remains. Do not repeat failed actions verbatim, and never claim success when the receipt says failed.';
 
 function copilotContinuationStorageKey(userId: string): string {
   return `${COPILOT_CONTINUATION_STORAGE_PREFIX}${userId}`;
@@ -1134,9 +1184,11 @@ export function ProjectCopilotModal({
   );
   const messageScope = useMemo(() => globalCopilotMessageScope(currentUserId), [currentUserId]);
   const { session: authSession, ensureManagementSession } = useAuth();
-  const [messages, setMessages] = useState<ProjectCopilotMessage[]>(() =>
-    readCachedProjectCopilotMessages(globalCopilotMessageScope(currentUserId))
-  );
+  // Messages hydrate lazily from the cache inside loadMessages (which runs when the panel
+  // OPENS). Initializing from the cache here meant parsing the whole multi-hundred-KB
+  // transcript synchronously on EVERY page navigation — on a phone that is a 100-300ms
+  // freeze per tab switch, paid even with the panel closed.
+  const [messages, setMessages] = useState<ProjectCopilotMessage[]>([]);
   const [activeSessionId, setActiveSessionId] = useState(() => readStoredCopilotActiveSessionLocal(currentUserId) || createSessionId());
   const [historyOpen, setHistoryOpen] = useState(Boolean(storedPanelState.historyOpen));
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1218,19 +1270,46 @@ export function ProjectCopilotModal({
     [activeSessionId, messages]
   );
 
+  // Render window: a remount (every page switch re-mounts this panel) re-parses markdown
+  // for every rendered message; a long session is seconds of phone-CPU work per navigation.
+  // Only the newest slice renders; older messages load in chunks on demand.
+  const MESSAGE_WINDOW = 40;
+  const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_WINDOW);
+  useEffect(() => {
+    setVisibleMessageCount(MESSAGE_WINDOW);
+  }, [activeSessionId]);
+  const visibleSessionMessages = useMemo(() => {
+    if (sessionMessages.length <= visibleMessageCount) return sessionMessages;
+    return sessionMessages.slice(sessionMessages.length - visibleMessageCount);
+  }, [sessionMessages, visibleMessageCount]);
+
   const chatSessions = useMemo(() => {
-    const sessionIds = Array.from(new Set(messages.map(readSessionId)));
-    return sessionIds
-      .map((sessionId) => {
-        const sessionMessagesLocal = messages.filter((message) => readSessionId(message) === sessionId);
-        const lastMessage = sessionMessagesLocal[sessionMessagesLocal.length - 1];
-        return {
-          id: sessionId,
-          title: getSessionTitle(messages, sessionId),
-          updatedAt: lastMessage?.created_at || ''
-        };
+    // Single pass over the transcript (messages arrive in chronological order). The previous
+    // shape re-filtered the whole message list once per session — O(sessions × messages) on
+    // every transcript change, which grows quadratically as history accumulates.
+    const sessions = new Map<string, { firstUserContent: string; updatedAt: string }>();
+    for (const message of messages) {
+      const sessionId = readSessionId(message);
+      const entry = sessions.get(sessionId) || { firstUserContent: '', updatedAt: '' };
+      if (!entry.firstUserContent && message.role === 'user') {
+        entry.firstUserContent = String(message.content || '');
+      }
+      entry.updatedAt = String(message.created_at || '');
+      sessions.set(sessionId, entry);
+    }
+    return Array.from(sessions.entries())
+      .map(([id, { firstUserContent, updatedAt }]) => {
+        const content = firstUserContent.replace(/\s+/g, ' ').trim();
+        const title = content
+          ? content.length > 32
+            ? `${content.slice(0, 32)}...`
+            : content
+          : id === 'default'
+            ? 'Previous chat'
+            : 'New chat';
+        return { id, title, updatedAt };
       })
-      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }, [messages]);
 
   const restoreSessionActions = useCallback((nextMessages: ProjectCopilotMessage[], sessionId: string) => {
@@ -1278,8 +1357,17 @@ export function ProjectCopilotModal({
   // old session's draft into the newly selected session's composer and storage.
   const abortReasonRef = useRef<'user' | 'session-switch' | 'close' | 'unmount'>('user');
 
+  // Latest session id without re-creating loadMessages: the load effect keyed on the callback's
+  // identity used to depend on activeSessionId, so the resolution inside the load (which often
+  // picks a different session than the random mount-time id) changed the callback identity and
+  // immediately re-fired the effect — every mount fetched the whole transcript TWICE and wrote
+  // the active-session state twice. Reading the id through a ref keeps one load per open.
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+
   const loadMessages = useCallback(async () => {
     if (!open) return;
+    const activeSessionIdNow = activeSessionIdRef.current;
     const cached = readCachedProjectCopilotMessages(messageScope);
     if (cached.length > 0) {
       setMessages(cached);
@@ -1296,14 +1384,14 @@ export function ProjectCopilotModal({
       // not change activeSessionId back to an old session.
       if (sessionSwitchRef.current) {
         sessionSwitchRef.current = false;
-        restoreSessionActions(loaded, activeSessionId);
+        restoreSessionActions(loaded, activeSessionIdRef.current);
         return;
       }
       const storedActiveSessionId = await readStoredCopilotActiveSession(currentUserId);
       // Resolve the session id OUTSIDE the setState updater.
       const sessionIds = Array.from(new Set(loaded.map(readSessionId)));
       const latestLoadedSessionId = loaded.length > 0 ? readSessionId(loaded[loaded.length - 1]) : '';
-      const currentSessionId = activeSessionId;
+      const currentSessionId = activeSessionIdNow;
       const nextSessionId =
         (storedActiveSessionId && sessionIds.includes(storedActiveSessionId) ? storedActiveSessionId : '') ||
         (sessionIds.includes(currentSessionId) ? currentSessionId : '') ||
@@ -1319,7 +1407,7 @@ export function ProjectCopilotModal({
     } finally {
       setLoading(false);
     }
-  }, [activeSessionId, currentUserId, messageScope, open, restoreSessionActions]);
+  }, [currentUserId, messageScope, open, restoreSessionActions]);
 
   useEffect(() => {
     if (!open) return;
@@ -1365,27 +1453,42 @@ export function ProjectCopilotModal({
 
   // Keep the conversation pinned to the newest content: when a message arrives, when the live
   // Thinking bubble appears, and as its trace steps stream in — but only if the user hasn't
-  // scrolled up to read earlier messages.
+  // scrolled up to read earlier messages. rAF-coalesced: reading scrollHeight forces layout, and
+  // a streaming turn fires this per trace step — several forced layouts per burst on a long
+  // transcript turned streaming into a visible stutter.
+  const scrollRafRef = useRef<number | null>(null);
+  const scheduleStickToBottom = useCallback(() => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (!stickToBottomRef.current) return;
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollTo({ top: el.scrollHeight });
+    });
+  }, []);
   useEffect(() => {
     if (!open) {
       setError(null);
       return;
     }
-    if (!stickToBottomRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    window.setTimeout(() => el.scrollTo({ top: el.scrollHeight }), 0);
-  }, [sessionMessages.length, liveTrace.length, sending, open]);
+    scheduleStickToBottom();
+  }, [sessionMessages.length, liveTrace.length, sending, open, scheduleStickToBottom]);
 
   // When the mobile soft keyboard opens the panel shrinks (visualViewport binding above); re-pin
   // the newest message into view so the composer doesn't cover it. Only fires while the modal is
   // open and the user hasn't scrolled up, so it never fights manual scrollback.
   useEffect(() => {
-    if (!open || visualViewportHeight == null || !stickToBottomRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    window.setTimeout(() => el.scrollTo({ top: el.scrollHeight }), 0);
-  }, [visualViewportHeight, open]);
+    if (!open || visualViewportHeight == null) return;
+    scheduleStickToBottom();
+  }, [visualViewportHeight, open, scheduleStickToBottom]);
+
+  useEffect(() => () => {
+    if (scrollRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+  }, []);
 
   const handleMessagesScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -1544,7 +1647,7 @@ export function ProjectCopilotModal({
       const controller = new AbortController();
       completionAbortRef.current = controller;
       // Merge the recent conversation into the completer's context so it can predict follow-up
-      // intent (e.g. after "aspirin SMILES" the user typing "它的靶点" should complete toward
+      // intent (e.g. after "aspirin SMILES" the user typing "its target" should complete toward
       // targets). The planner already gets this via copilot_conversation; the completer needs the
       // same recency window to anticipate what the user is most likely to say next.
       const conversationContext = buildCopilotConversationContext(completionConversationRef.current);
@@ -1892,6 +1995,22 @@ export function ProjectCopilotModal({
   sendMessageRef.current = sendMessage;
   const answerQuestion = useCallback((answer: string) => {
     void sendMessageRef.current(answer);
+  }, []);
+
+  // Lazy per-message trace hydration (the transcript list omits planner_trace). Patching the one
+  // message re-renders only that item — the memo on the rest of the transcript holds.
+  const loadMessageTrace = useCallback((messageId: string) => {
+    void fetchProjectCopilotMessageTrace(messageId)
+      .catch(() => [] as unknown)
+      .then((trace) => {
+        setMessages((prev) =>
+          prev.map((item) =>
+            item.id === messageId
+              ? { ...item, metadata: { ...(item.metadata || {}), planner_trace: trace ?? [] } }
+              : item
+          )
+        );
+      });
   }, []);
 
   // AUTO-CONTINUATION (pi loop alignment): confirming an action IS the "tool result" of a write
@@ -2744,14 +2863,26 @@ export function ProjectCopilotModal({
           ) : sessionMessages.length === 0 ? (
             null
           ) : (
-            sessionMessages.map((message) => (
-              <CopilotMessageItem
-                key={message.id}
-                message={message}
-                disabled={sending || Boolean(applyingActionKey || bulkAction)}
-                onAnswerQuestion={answerQuestion}
-              />
-            ))
+            <>
+              {sessionMessages.length > visibleMessageCount ? (
+                <button
+                  type="button"
+                  className="copilot-load-earlier"
+                  onClick={() => setVisibleMessageCount((prev) => prev + MESSAGE_WINDOW)}
+                >
+                  Load earlier messages ({sessionMessages.length - visibleMessageCount} more)
+                </button>
+              ) : null}
+              {visibleSessionMessages.map((message) => (
+                <CopilotMessageItem
+                  key={message.id}
+                  message={message}
+                  disabled={sending || Boolean(applyingActionKey || bulkAction)}
+                  onAnswerQuestion={answerQuestion}
+                  onLoadTrace={loadMessageTrace}
+                />
+              ))}
+            </>
           )}
           {sending ? (
             <article className="copilot-message is-assistant">
@@ -2763,10 +2894,10 @@ export function ProjectCopilotModal({
                   completion only fills the body instead of restructuring the bubble — no jitter. */}
               <div className="copilot-message-body copilot-thinking" />
               {steeredTurnTexts.length > 0 ? (
-                <div className="copilot-steered-list" aria-label="已插入的转向消息">
+                <div className="copilot-steered-list" aria-label="Inserted steering messages">
                   {steeredTurnTexts.map((text, index) => (
                     <div className="copilot-steered-item" key={`${index}-${text.slice(0, 24)}`}>
-                      <span className="copilot-steered-badge">已插入</span>
+                      <span className="copilot-steered-badge">Inserted</span>
                       <span className="copilot-steered-text">{text}</span>
                     </div>
                   ))}
@@ -2796,7 +2927,7 @@ export function ProjectCopilotModal({
                   pending step has NOT executed. This line is the UI's own statement of fact —
                   it neutralizes a model that narrates proposed operations as completed. */}
               <div className="copilot-plan-pending-hint">
-                此操作尚未执行——点击「应用」后才会生效；实际结果以确认后的回执为准。
+                Not run yet — it takes effect only after you click Apply; the returned receipt is the actual result.
               </div>
               <div className="copilot-plan-actions">
                 <div
@@ -2823,20 +2954,20 @@ export function ProjectCopilotModal({
                       type="button"
                       onClick={() => void cancelPendingActions()}
                       disabled={Boolean(applyingActionKey || bulkAction)}
-                      title="取消"
+                      title="Cancel"
                     >
                       {bulkAction === 'cancel' ? <LoaderCircle size={14} className="spin" /> : <X size={14} />}
-                      <span>取消</span>
+                      <span>Cancel</span>
                     </button>
                     <button
                       className="copilot-plan-action-apply"
                       type="button"
                       onClick={() => void applyAction(action)}
                       disabled={blocked}
-                      title="应用此步骤"
+                      title="Apply this step"
                     >
                       {isApplying ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
-                      <span>{isApplying ? '应用中' : '应用'}</span>
+                      <span>{isApplying ? 'Applying' : 'Apply'}</span>
                     </button>
                   </div>
                 </div>
@@ -2952,7 +3083,7 @@ export function ProjectCopilotModal({
               />
               <div className="copilot-input-wrap">
                 {completionPickerIndex !== null && completions.length > 0 ? (
-                  <div className="copilot-mention-menu copilot-completion-menu" role="listbox" id="copilot-completion-listbox" aria-label="候选续写">
+                  <div className="copilot-mention-menu copilot-completion-menu" role="listbox" id="copilot-completion-listbox" aria-label="Suggested completions">
                     {completions.map((suffix, index) => (
                       <button
                         key={`${index}-${suffix}`}
@@ -3143,7 +3274,7 @@ export function ProjectCopilotModal({
                   syncMentionCaretFromTextarea();
                 }}
                 onScroll={syncGhostScroll}
-                placeholder="输入消息…"
+                placeholder="Type a message…"
                 // readOnly (not disabled) while a turn/action runs: a disabled textarea immediately
                 // loses focus on mobile and dismisses the soft keyboard, causing the panel to grow
                 // back to full height and then re-shrink when focus returns — the "keyboard flicker".

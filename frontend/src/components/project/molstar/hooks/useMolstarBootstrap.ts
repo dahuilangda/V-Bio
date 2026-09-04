@@ -125,7 +125,20 @@ export function useMolstarBootstrap({
         if (cancelled || !hostRef.current) return;
 
         const bootStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        viewerRef.current = await bootstrapViewerHost(hostRef.current, showSequence);
+        const bootstrappedViewer = await bootstrapViewerHost(hostRef.current, showSequence);
+        if (cancelled) {
+          // Unmount raced the bootstrap: the cleanup below already ran while viewerRef was
+          // still null, so its dispose was a no-op. Dispose here or the plugin leaks — every
+          // fast page switch that lands in this window strands one WebGL context, and a
+          // phone caps those at ~8-16 before the whole page freezes.
+          try {
+            bootstrappedViewer?.plugin?.dispose?.();
+          } catch {
+            // no-op
+          }
+          return;
+        }
+        viewerRef.current = bootstrappedViewer;
         const bootEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
         setBootstrapMs(Math.round(bootEnd - bootStart));
         try {

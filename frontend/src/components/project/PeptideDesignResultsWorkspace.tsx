@@ -1730,6 +1730,9 @@ interface PeptideCandidateCardProps {
   selected: boolean;
   scoreMin: number | null;
   scoreMax: number | null;
+  /** Whether any candidate this run carries an ipSAE value — the pill hides entirely on runs
+   *  whose scoring backend produced none, instead of a dead "IPSAE -" chip. */
+  showIpsae: boolean;
   onSelect: (candidateId: string) => void;
 }
 
@@ -1738,6 +1741,7 @@ const PeptideCandidateCard = memo(function PeptideCandidateCard({
   selected,
   scoreMin,
   scoreMax,
+  showIpsae,
   onSelect
 }: PeptideCandidateCardProps) {
   const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreMin, scoreMax));
@@ -1820,10 +1824,12 @@ const PeptideCandidateCard = memo(function PeptideCandidateCard({
           <span className="lead-opt-card-pill-key">ipTM</span>
           <strong>{formatInterfaceMetric(candidate.iptm)}</strong>
         </span>
-        <span className={`lead-opt-card-pill conf-tone-${ipsaeTone}`}>
-          <span className="lead-opt-card-pill-key">IPSAE</span>
-          <strong>{formatInterfaceMetric(candidate.ipsae)}</strong>
-        </span>
+        {showIpsae ? (
+          <span className={`lead-opt-card-pill conf-tone-${ipsaeTone}`}>
+            <span className="lead-opt-card-pill-key">IPSAE</span>
+            <strong>{formatInterfaceMetric(candidate.ipsae)}</strong>
+          </span>
+        ) : null}
       </div>
     </article>
   );
@@ -1918,13 +1924,16 @@ export function PeptideDesignResultsWorkspace({
   const [requestingStructure, setRequestingStructure] = useState(false);
   const [structureRequestError, setStructureRequestError] = useState('');
   const requestedStructureKeyRef = useRef('');
+  const hasAnyIpsae = useMemo(
+    () => candidates.some((candidate) => candidate.interfaceMetricSource === 'ipsae' || candidate.ipsae !== null),
+    [candidates]
+  );
   const interfaceMetricHeaderLabel = useMemo(() => {
-    const hasIpsae = candidates.some((candidate) => candidate.interfaceMetricSource === 'ipsae');
     const hasIptm = candidates.some((candidate) => candidate.interfaceMetricSource === 'iptm');
-    if (hasIpsae && hasIptm) return 'Interface';
-    if (hasIpsae) return 'IPSAE';
+    if (hasAnyIpsae && hasIptm) return 'Interface';
+    if (hasAnyIpsae) return 'IPSAE';
     return 'ipTM';
-  }, [candidates]);
+  }, [candidates, hasAnyIpsae]);
 
   const sortedCandidates = useMemo(() => {
     const sorted = [...candidates];
@@ -2294,6 +2303,7 @@ export function PeptideDesignResultsWorkspace({
                 selected={candidate.id === selectedCandidateStableId}
                 scoreMin={scoreRange.min}
                 scoreMax={scoreRange.max}
+                showIpsae={hasAnyIpsae}
                 onSelect={selectCandidateCard}
               />
             ))}

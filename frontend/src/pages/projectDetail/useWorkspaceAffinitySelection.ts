@@ -107,10 +107,10 @@ export function useWorkspaceAffinitySelection(
         }
       ];
     }
-    const typedLigands = workspaceAffinityOptions.filter((item) => item.type === 'ligand');
-    // Prefer real ligand components whenever present. Falling back to every
-    // non-target component preserves protein/protein and peptide binders.
-    return typedLigands.length > 0 ? typedLigands : workspaceAffinityOptions;
+    // Every component stays selectable so a polymer binder (protein/peptide
+    // task) can be designated for IPSAE and task-list display. Affinity
+    // compute remains gated separately by the option's isSmallMolecule flag.
+    return workspaceAffinityOptions;
   }, [isPeptideDesignWorkflow, workspaceAffinityOptions]);
 
   const resolveChainFromProperty = useCallback(

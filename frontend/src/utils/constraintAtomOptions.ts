@@ -430,7 +430,7 @@ function readMolblockBonds(mol: { get_molblock?: () => string }): Array<{ a: num
 // A parse failure or a heavy-atom/SMILES-index mismatch yields _parseError rather than passing.
 export type BackboneSlotErrors = Partial<Record<keyof CustomResidueBackbone, string>> & { _parseError?: string };
 
-const BACKBONE_PARSE_ERROR = '无法解析骨架结构，请检查 SMILES 后重试。';
+const BACKBONE_PARSE_ERROR = 'Could not parse the backbone structure. Check the SMILES and try again.';
 
 export function firstBackboneSlotError(errors: BackboneSlotErrors): string | null {
   if (errors._parseError) return errors._parseError;
@@ -479,7 +479,7 @@ export function validateCustomResidueBackbone(
     // 1) Range (backend _slot_idx, lines 236-245).
     for (const slot of BACKBONE_SLOT_ORDER) {
       if (!inRange(idx[slot])) {
-        errors[slot] = `骨架 ${labelOf(slot)} 的原子索引超出范围（0..${numAtoms - 1}）。`;
+        errors[slot] = `Backbone ${labelOf(slot)} atom index is out of range (0..${numAtoms - 1}).`;
       }
     }
 
@@ -489,22 +489,22 @@ export function validateCustomResidueBackbone(
         const s1 = BACKBONE_SLOT_ORDER[i];
         const s2 = BACKBONE_SLOT_ORDER[j];
         if (idx[s1] === idx[s2] && !errors[s1] && !errors[s2]) {
-          errors[s1] = '每个骨架槽位必须指向不同的原子。';
+          errors[s1] = 'Each backbone slot must point to a different atom.';
         }
       }
     }
 
     // 3) Per-slot element (backend lines 255-272).
-    if (!errors.n && elementOf(idx.n) !== 'N') errors.n = '骨架 N 必须是氮原子。';
-    if (!errors.ca && !['C', 'N'].includes(elementOf(idx.ca))) errors.ca = '骨架 CA 必须是碳或氮原子。';
-    if (!errors.c && elementOf(idx.c) !== 'C') errors.c = '骨架 C 必须是碳原子。';
-    if (!errors.o && elementOf(idx.o) !== 'O') errors.o = '骨架 O 必须是羰基氧。';
+    if (!errors.n && elementOf(idx.n) !== 'N') errors.n = 'Backbone N must be a nitrogen atom.';
+    if (!errors.ca && !['C', 'N'].includes(elementOf(idx.ca))) errors.ca = 'Backbone CA must be a carbon or nitrogen atom.';
+    if (!errors.c && elementOf(idx.c) !== 'C') errors.c = 'Backbone C must be a carbon atom.';
+    if (!errors.o && elementOf(idx.o) !== 'O') errors.o = 'Backbone O must be a carbonyl oxygen.';
     if (!errors.oxt) {
       const want = amidated ? 'N' : 'O';
       if (elementOf(idx.oxt) !== want) {
         errors.oxt = amidated
-          ? 'C 端酰胺化模式下，第 5 个骨架槽位（NXT）必须是氮原子。'
-          : '骨架 OXT 必须是氧原子。';
+          ? 'With C-terminal amidation, the 5th backbone slot (NXT) must be a nitrogen atom.'
+          : 'Backbone OXT must be an oxygen atom.';
       }
     }
 
@@ -527,22 +527,22 @@ export function validateCustomResidueBackbone(
     if (!errors.c && !errors.o && !errors.oxt) {
       const cNeighbors = neighborsOf(idx.c);
       if (!cNeighbors.has(idx.o) || !cNeighbors.has(idx.oxt)) {
-        errors.c = '骨架 C 必须同时与 O 和末端原子（羧基/酰胺碳）成键。';
+        errors.c = 'Backbone C must bond to both O and the terminal atom (carboxyl/amide).';
       }
     }
     // 5) C=O must be a double bond (backend lines 281-288).
     if (!errors.o && !errors.c && bondOrderBetween(idx.c, idx.o) !== 2) {
-      errors.o = '骨架 O 必须是羰基氧（C=O 双键）。';
+      errors.o = 'Backbone O must be a carbonyl oxygen (C=O double bond).';
     }
     // 6) Under amidation, C-NXT must be a single bond (backend lines 290-294).
     if (amidated && !errors.oxt && !errors.c && bondOrderBetween(idx.c, idx.oxt) !== 1) {
-      errors.oxt = 'C 端酰胺化模式下，C-NXT 必须是单键（酰胺 C-N 单键）。';
+      errors.oxt = 'With C-terminal amidation, C-NXT must be a single bond (amide C–N).';
     }
     // 7) CA bonded to N or C (backend lines 298-300).
     if (!errors.ca && !errors.n && !errors.c) {
       const caNeighbors = neighborsOf(idx.ca);
       if (!caNeighbors.has(idx.n) && !caNeighbors.has(idx.c)) {
-        errors.ca = '骨架 CA 必须与 N 或 C 成键。';
+        errors.ca = 'Backbone CA must bond to N or C.';
       }
     }
 

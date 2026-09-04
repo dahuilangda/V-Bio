@@ -1,14 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { resolveEditableDraftTaskRowIdFromContext } from './projectDraftPersistence';
+import {
+  resolveEditableDraftTaskRowIdFromContext,
+  resolveTerminalTaskRowIdFromContext
+} from './projectDraftPersistence';
 import { isDraftTaskSnapshot } from './projectTaskSnapshot';
 import type { Project, ProjectTask } from '../../types/models';
 
 /**
  * Editing-isolation matrix for draft-save target resolution:
  *  - a DRAFT row is edited IN PLACE (never duplicated, never a new task);
- *  - finished/runtime rows are never written by a draft save;
- *  - viewing a finished task with an unrelated draft around still creates a
- *    NEW draft instead of silently updating that unrelated draft.
+ *  - a COMPLETED/ERRORED task being viewed is renamed IN PLACE by a
+ *    metadata-only save (terminal tasks are renamed in place, never duplicated);
+ *  - running rows never match either resolver, so a save while viewing one
+ *    still falls through to the full-save INSERT.
  */
 
 function row(partial: Partial<ProjectTask> & { id: string }): ProjectTask {
@@ -73,5 +77,51 @@ describe('resolveEditableDraftTaskRowIdFromContext', () => {
     const tasks = [draftRow('d1', '2026-01-01T00:00:00Z')];
     expect(resolve('?task_row_id=d1', PROJECT_NO_RUNTIME, tasks, true)).toBeNull();
     expect(resolve('', PROJECT_NO_RUNTIME, tasks, true)).toBeNull();
+  });
+});
+
+function resolveTerminal(locationSearch: string, project: Project, projectTasks: ProjectTask[], requestNewTask = false) {
+  return resolveTerminalTaskRowIdFromContext({
+    requestNewTask,
+    locationSearch,
+    project,
+    projectTasks
+  });
+}
+
+describe('resolveTerminalTaskRowIdFromContext', () => {
+  it('resolves the completed task named by the URL', () => {
+    const tasks = [row({ id: 'done', task_state: 'SUCCESS' })];
+    expect(resolveTerminal('?task_row_id=done', PROJECT_NO_RUNTIME, tasks)).toBe('done');
+  });
+
+  it('resolves an errored task named by the URL (FAILURE and REVOKED)', () => {
+    const failed = [row({ id: 'failed', task_state: 'FAILURE' })];
+    expect(resolveTerminal('?task_row_id=failed', PROJECT_NO_RUNTIME, failed)).toBe('failed');
+    const revoked = [row({ id: 'revoked', task_state: 'REVOKED' })];
+    expect(resolveTerminal('?task_row_id=revoked', PROJECT_NO_RUNTIME, revoked)).toBe('revoked');
+  });
+
+  it('returns null for a RUNNING task, a DRAFT row, or an unknown row id', () => {
+    const tasks = [
+      row({ id: 'running', task_state: 'RUNNING' }),
+      draftRow('d1', '2026-01-01T00:00:00Z')
+    ];
+    expect(resolveTerminal('?task_row_id=running', PROJECT_NO_RUNTIME, tasks)).toBeNull();
+    expect(resolveTerminal('?task_row_id=d1', PROJECT_NO_RUNTIME, tasks)).toBeNull();
+    expect(resolveTerminal('?task_row_id=missing', PROJECT_NO_RUNTIME, tasks)).toBeNull();
+  });
+
+  it('falls back to the project runtime row when it is terminal', () => {
+    const tasks = [row({ id: 'runtime', task_id: 'tid-runtime', task_state: 'FAILURE' })];
+    expect(resolveTerminal('', PROJECT_WITH_RUNTIME, tasks)).toBe('runtime');
+    const running = [row({ id: 'runtime', task_id: 'tid-runtime', task_state: 'RUNNING' })];
+    expect(resolveTerminal('', PROJECT_WITH_RUNTIME, running)).toBeNull();
+  });
+
+  it('new-task mode never resolves a terminal row', () => {
+    const tasks = [row({ id: 'done', task_state: 'SUCCESS' })];
+    expect(resolveTerminal('?task_row_id=done', PROJECT_NO_RUNTIME, tasks, true)).toBeNull();
+    expect(resolveTerminal('', PROJECT_WITH_RUNTIME, tasks, true)).toBeNull();
   });
 });

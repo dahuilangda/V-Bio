@@ -14,9 +14,12 @@ services:
         https_proxy: ${https_proxy:-}
         no_proxy: ${no_proxy:-}
         GO_DOWNLOAD_URL: ${GO_DOWNLOAD_URL:-}
-        GO_MODULE_PROXY: ${GO_MODULE_PROXY:-}
-        GO_SUMDB: ${GO_SUMDB:-}
-        MMSEQS_DOWNLOAD_URL: ${MMSEQS_DOWNLOAD_URL:-}
+        GO_MODULE_PROXY: ${GO_MODULE_PROXY:-https://goproxy.cn,direct}
+        GO_SUMDB: ${GO_SUMDB:-off}
+        # 注意:compose 传空字符串会覆盖 Dockerfile 的 ARG 默认值,故这里给出
+        # 非空兜底(mmseqs 下载失败会导致 GPU 索引版本漂移,见 _prebuilt/README.md)
+        MMSEQS_DOWNLOAD_URL: ${MMSEQS_DOWNLOAD_URL:-https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz}
+        MMSEQS_DOWNLOAD_PROXY: ${MMSEQS_DOWNLOAD_PROXY:-}
     image: ${COLABFOLD_SERVER_IMAGE:-vbio-colabfold-server}
     container_name: ${COLABFOLD_SERVER_CONTAINER_NAME:-vbio-colabfold-server}
     restart: unless-stopped
@@ -34,12 +37,21 @@ services:
       # Upstream MMseqs2-App scales by worker count with THREADS_PER_WORKER=1;
       # local-mode workers share this per-job thread budget (8 workers x 8 threads
       # stays well inside the host's 128 cores).
-      MMSEQS_NUM_THREADS: ${COLABFOLD_MMSEQS_THREADS:-8}
+      MMSEQS_NUM_THREADS: ${COLABFOLD_MMSEQS_THREADS:-16}
       COLABFOLD_ENABLE_GPU: ${COLABFOLD_ENABLE_GPU:-0}
       # GPU 租约：与 celery worker 共享的 redis GPU 池（gpu_manager 协议）。
       MSA_GPU_REDIS_HOST: ${MSA_GPU_REDIS_HOST:-172.17.3.200}
       MSA_GPU_REDIS_PORT: ${MSA_GPU_REDIS_PORT:-6379}
-      MSA_GPU_WAIT_SECONDS: ${MSA_GPU_WAIT_SECONDS:-1800}
+      MSA_GPU_WAIT_SECONDS: ${MSA_GPU_WAIT_SECONDS:-600}
+      # 单条 GPU search 的硬超时：卡死的 CUDA search 被击杀后租约正常归还，
+      # 防止一次死锁泄漏一张卡直至池被抽干（2026-09-04 MSA 全站停摆的根因）。
+      MMSEQS_GPU_SEARCH_TIMEOUT: ${COLABFOLD_MMSEQS_SEARCH_TIMEOUT:-1800}
+      # !! 必须与 celery worker 用同一个池（裸键）:此前 colabfold 用独立命名空间
+      # (:colabfold)与 worker 各自记账同一批物理卡,mmseqs 的 23.8GB GPU 索引把
+      # protenix 推理挤到 CUDA OOM,worker 的脏 GPU 保护又把主池租约扣住不还,
+      # 两个池相互泄漏直至全站停摆。单一账本下 BLPOP 互斥,物理上不可能双booking。
+      MSA_GPU_POOL_KEY: ${MSA_GPU_POOL_KEY:-boltz_gpu_pool:available}
+      MSA_GPU_IN_USE_KEY: ${MSA_GPU_IN_USE_KEY:-boltz_gpu_pool:in_use}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
@@ -60,3 +72,12 @@ services:
       - ${COLABFOLD_CONFIG_PATH:-../../capabilities/colabfold_server/config.json}:/app/config.json:ro
     shm_size: ${COLABFOLD_SHM_SIZE:-64gb}
     mem_limit: ${COLABFOLD_MEM_LIMIT:-96g}
+    # 只探进程/端口存活（任何 HTTP 响应都算健康，不依赖具体端点语义）。
+    # 深层卡死（GPU search 挂死、租约泄漏）由包装器的 search 硬超时 + 陈旧租约
+    # 回收自愈，健康检查只负责把彻底死掉的服务拉起来。
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

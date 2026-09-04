@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
+import { createAdaptivePollScheduler } from '../../utils/adaptivePollScheduler';
 
 interface RuntimeTaskLike {
   id: string;
@@ -23,8 +24,7 @@ function hasLeadOptMmpOnlySnapshot(task: RuntimeTaskLike | null): boolean {
 interface UseProjectRuntimeEffectsInput {
   projectTaskId: string | null;
   projectTaskState: string | null;
-  projectTasksDependency: unknown;
-  refreshStatus: (options?: { silent?: boolean; taskId?: string }) => Promise<void>;
+  refreshStatus: (options?: { silent?: boolean; taskId?: string }) => Promise<boolean>;
   statusContextTaskRow: RuntimeTaskLike | null;
   runtimeResultTask: RuntimeTaskLike | null;
   activeResultTask: RuntimeTaskLike | null;
@@ -46,7 +46,6 @@ interface UseProjectRuntimeEffectsInput {
 export function useProjectRuntimeEffects({
   projectTaskId,
   projectTaskState,
-  projectTasksDependency,
   refreshStatus,
   statusContextTaskRow,
   runtimeResultTask,
@@ -61,6 +60,9 @@ export function useProjectRuntimeEffects({
   setSelectedContactConstraintIds,
   constraintSelectionAnchorRef
 }: UseProjectRuntimeEffectsInput) {
+  // Latest refreshStatus without re-arming the poll loop (see the polling effect below).
+  const refreshStatusRef = useRef(refreshStatus);
+  refreshStatusRef.current = refreshStatus;
   useEffect(() => {
     if (isLeadOptimizationWorkflow) return;
     const pollingTaskId = String(statusContextTaskRow?.task_id || runtimeResultTask?.task_id || projectTaskId || '').trim();
@@ -70,45 +72,34 @@ export function useProjectRuntimeEffects({
     ).toUpperCase();
     if (normalizedState !== 'QUEUED' && normalizedState !== 'RUNNING') return;
 
-    let cancelled = false;
-    let inFlight = false;
-    let timer: number | null = null;
-    const computeDelayMs = () => {
-      const baseDelay = normalizedState === 'RUNNING' ? 5000 : 9000;
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-        return baseDelay * 2;
-      }
-      return baseDelay;
-    };
-    const scheduleNext = () => {
-      if (cancelled) return;
-      timer = window.setTimeout(() => {
-        void tick();
-      }, computeDelayMs());
-    };
-    const tick = async () => {
-      if (cancelled || inFlight) return;
-      inFlight = true;
-      try {
-        await refreshStatus({ silent: true, taskId: pollingTaskId });
-      } finally {
-        inFlight = false;
-        scheduleNext();
-      }
-    };
+    // The effect must restart only when the polling TARGET changes (task id or state).
+    // refreshStatus is identity-unstable (it closes over project/projectTasks, which the
+    // runtime overlays refresh on every poll) — depending on it directly re-armed this
+    // effect every poll and perpetually reset the 5s timer. The ref above always holds
+    // the latest refreshStatus.
 
-    scheduleNext();
+    // Adaptive cadence (see adaptivePollScheduler): fast while progress keeps changing,
+    // slower after three flat ticks, doubled while hidden, catch-up tick on tab return —
+    // the tick's `changed` return value drives the fast/slow switch.
+    const scheduler = createAdaptivePollScheduler({
+      resolveIntervals: () => {
+        const activeMs = normalizedState === 'RUNNING' ? 5000 : 9000;
+        return { activeMs, idleMs: Math.max(activeMs * 2, 12000) };
+      },
+      idleAfterUnchangedTicks: 3,
+      hiddenIntervalMultiplier: 2,
+      maxIntervalMs: 30000,
+      tick: () => refreshStatusRef.current({ silent: true, taskId: pollingTaskId })
+    });
+    scheduler.start();
 
     return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      scheduler.stop();
     };
   }, [
     isLeadOptimizationWorkflow,
     projectTaskId,
     projectTaskState,
-    projectTasksDependency,
-    refreshStatus,
     statusContextTaskRow?.task_id,
     statusContextTaskRow?.task_state,
     runtimeResultTask?.task_id,
@@ -118,6 +109,12 @@ export function useProjectRuntimeEffects({
   useEffect(() => {
     if (isLeadOptimizationWorkflow) return;
     if (isPeptideDesignWorkflow) return;
+    // Results-tab only: this pull downloads and unzips the FULL result archive (often MBs on
+    // large complexes). It used to fire on any tab as soon as a SUCCESS task was focused, so
+    // merely opening a project (or landing on ?tab=basics) paid the download + parse. The
+    // effect re-runs when workspaceTab changes, so the fetch lands exactly when the user
+    // opens the results tab — and 'results' IS the default tab, so landing there is unchanged.
+    if (workspaceTab !== 'results') return;
     const contextTask = statusContextTaskRow || runtimeResultTask;
     const contextTaskId = String(contextTask?.task_id || '').trim();
     if (!contextTaskId) return;

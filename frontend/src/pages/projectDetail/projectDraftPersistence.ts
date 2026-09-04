@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask } from '../../types/models';
 import { extractPrimaryProteinAndLigand } from '../../utils/projectInputs';
+import { normalizeAffinityBackend } from '../apiAccessHelpers';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { mergeTaskInputOptionsIntoProperties, mergeTaskPropertiesPreservingInputOptions } from './projectTaskSnapshot';
@@ -131,11 +132,48 @@ export function resolveEditableDraftTaskRowIdFromContext(params: {
 
   // No URL row and no runtime task: the load flow restores the draft from the
   // project's latest DRAFT row, so a save must reuse THAT row — returning null
-  // here would INSERT a duplicate draft on every save ("还是 draft 的时候修改
-  // 不会产生新 task").
+  // here would INSERT a duplicate draft on every save (edits while still a
+  // draft must never spawn a new task).
   const latestDraftRow =
     projectTasks.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
   if (latestDraftRow && isDraftTaskSnapshot(latestDraftRow)) return latestDraftRow.id;
+  return null;
+}
+
+/**
+ * Row id of the task the workspace is currently VIEWING, but only when that task
+ * already reached a terminal state (completed / errored / revoked). Editing the
+ * Basics metadata of such a task must rename the task in place — never spawn a
+ * new task row (terminal tasks are renamed in place, never duplicated).
+ */
+export function resolveTerminalTaskRowIdFromContext(params: {
+  requestNewTask: boolean;
+  locationSearch: string;
+  project: Project | null;
+  projectTasks: ProjectTask[];
+}): string | null {
+  const { requestNewTask, locationSearch, project, projectTasks } = params;
+  if (requestNewTask) return null;
+
+  const requestedTaskRowId = new URLSearchParams(locationSearch).get('task_row_id');
+  if (requestedTaskRowId && requestedTaskRowId.trim()) {
+    const requested = projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null;
+    if (!requested) return null;
+    const requestedState = String(requested.task_state || '').trim().toUpperCase();
+    return requestedState === 'SUCCESS' || requestedState === 'FAILURE' || requestedState === 'REVOKED'
+      ? requested.id
+      : null;
+  }
+
+  const activeTaskId = String(project?.task_id || '').trim();
+  if (activeTaskId) {
+    const activeRow = projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
+    if (!activeRow) return null;
+    const activeState = String(activeRow.task_state || '').trim().toUpperCase();
+    return activeState === 'SUCCESS' || activeState === 'FAILURE' || activeState === 'REVOKED'
+      ? activeRow.id
+      : null;
+  }
   return null;
 }
 
@@ -194,7 +232,10 @@ export async function persistDraftTaskSnapshotRecord(params: {
   const storedProteinSequence =
     typeof options?.proteinSequenceOverride === 'string' ? options.proteinSequenceOverride : proteinSequence;
   const storedLigandSmiles = typeof options?.ligandSmilesOverride === 'string' ? options.ligandSmilesOverride : ligandSmiles;
-  const effectiveBackend = getWorkflowDefinition(project.task_type).key === 'affinity' ? 'boltz' : draft.backend;
+  const effectiveBackend =
+    getWorkflowDefinition(project.task_type).key === 'affinity'
+      ? normalizeAffinityBackend(draft.backend)
+      : draft.backend;
 
   const basePayload: Partial<ProjectTask> = {
     project_id: project.id,

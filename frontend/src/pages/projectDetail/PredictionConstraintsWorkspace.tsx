@@ -282,7 +282,10 @@ function ResidueAtomPicker({
       const row = rows[0] || null;
       if (!row) return null;
       const smiles = component.inputMethod === 'ccd' ? '' : component.sequence || '';
-      const atomLabels = (row.atoms || []).map((_atom, index) => String(index + 1));
+      // row.atoms ({ELEMENT}{count} in SMILES order) label the depiction directly so the
+      // element stays visible (O2, not a bare index that reads as an implicit carbon) and
+      // the 2D labels match the atom grid below, as in the JSME custom-residue branch.
+      const atomLabels = [...(row.atoms || [])];
       return { chain, component, row, smiles, atomLabels, isLigand: true };
     }
 

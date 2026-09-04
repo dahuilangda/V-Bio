@@ -122,7 +122,6 @@ def register_lead_opt_halo_routes(
             'pocket': pocket,
             'rounds': rounds,
             'budget_per_round': budget,
-            'oracle_concurrency': payload.get('oracle_concurrency', 8),
             'oracle_timeout_s': payload.get('oracle_timeout_s', 7200),
             'seed': payload.get('seed', 0),
             'prior_dir': str(payload.get('prior_dir') or ''),

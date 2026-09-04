@@ -121,25 +121,25 @@ export function CommandPalette() {
     const statics: PaletteCommand[] = [
       {
         id: 'nav:projects',
-        label: '项目列表',
+        label: 'Projects',
         hint: 'projects home',
-        group: '导航',
+        group: 'Navigation',
         order: 10,
         run: () => navigate('/projects'),
       },
       {
         id: 'nav:shares',
-        label: '共享与令牌',
+        label: 'Sharing & tokens',
         hint: 'shares',
-        group: '导航',
+        group: 'Navigation',
         order: 20,
         run: () => navigate('/shares'),
       },
       {
         id: 'action:new-project',
-        label: '新建项目',
+        label: 'New project',
         hint: 'create prediction docking screening project',
-        group: '操作',
+        group: 'Actions',
         order: 30,
         run: () => {
           try {
@@ -152,9 +152,9 @@ export function CommandPalette() {
       },
       {
         id: 'action:open-copilot',
-        label: '打开 Copilot 助手',
+        label: 'Open Copilot assistant',
         hint: 'copilot assistant panel',
-        group: '操作',
+        group: 'Actions',
         order: 40,
         run: () => {
           window.dispatchEvent(new CustomEvent('vbio:open-copilot'));
@@ -164,8 +164,8 @@ export function CommandPalette() {
     const recents: PaletteCommand[] = recent.map((project, index) => ({
       id: `recent:${project.id}`,
       label: project.name,
-      hint: `最近项目 ${project.task_type}`,
-      group: '最近项目',
+      hint: `Recent project ${project.task_type}`,
+      group: 'Recent projects',
       order: 100 + index,
       run: () => navigate(`/projects/${project.id}`),
     }));
@@ -231,13 +231,13 @@ export function CommandPalette() {
         if (event.target === event.currentTarget) setOpen(false);
       }}
     >
-      <div className="palette-dialog" role="dialog" aria-modal="true" aria-label="命令面板">
+      <div className="palette-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
         <input
           ref={inputRef}
           className="palette-input"
           type="text"
           value={query}
-          placeholder="搜索命令、项目…"
+          placeholder="Search commands, projects…"
           role="combobox"
           aria-expanded
           aria-controls="palette-listbox"
@@ -246,9 +246,9 @@ export function CommandPalette() {
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={onKeyDown}
         />
-        <div className="palette-list" id="palette-listbox" role="listbox" aria-label="命令" ref={listRef}>
+        <div className="palette-list" id="palette-listbox" role="listbox" aria-label="Commands" ref={listRef}>
           {grouped.length === 0 ? (
-            <div className="palette-empty">没有匹配的命令</div>
+            <div className="palette-empty">No matching commands</div>
           ) : (
             grouped.map((bucket) => (
               <div key={bucket.group} className="palette-group" role="group" aria-labelledby={undefined}>
@@ -281,9 +281,9 @@ export function CommandPalette() {
           )}
         </div>
         <div className="palette-footer" aria-hidden>
-          <span>↑↓ 选择</span>
-          <span>↵ 执行</span>
-          <span>esc 关闭</span>
+          <span>↑↓ Navigate</span>
+          <span>↵ Run</span>
+          <span>esc Close</span>
         </div>
       </div>
     </div>

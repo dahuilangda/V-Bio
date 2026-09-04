@@ -134,7 +134,7 @@ export function peptidePocketTargetSignature(args: {
  * invalidated. The same component gaining its uploaded structure (restored
  * tasks hydrating template uploads) is NOT a change — plain positions stay
  * valid because the backend translates sequence → author through the
- * template map ("运行后的 box 需要记忆"). Everything else — target component
+ * template map (the box submitted with a run must be remembered). Everything else — target component
  * switch, structure rebuild/removal, sequence edit — invalidates.
  */
 export function peptidePocketTargetChanged(previous: string, next: string): boolean {

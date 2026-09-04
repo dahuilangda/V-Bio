@@ -2697,9 +2697,49 @@
   align-items: start;
 }
 
-.lead-opt-side .lead-opt-panel {
-  position: sticky;
-  top: 12px;
+/* Docking-style split: 3D reference left, fragments + params right, draggable
+   divider (declared after the base rule so the var() columns win the cascade). */
+.lead-opt-layout--resizable {
+  width: 100%;
+  grid-template-columns: minmax(360px, var(--lead-opt-left-width, 720px)) 10px minmax(300px, 1fr);
+}
+
+.lead-opt-side {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+.lead-opt-reference-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lead-opt-reference-status p {
+  margin: 0;
+}
+
+.lead-opt-pocket-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.lead-opt-structure-panel {
+  position: relative;
+  /* The molstar-host clips its own corners; the panel must not clip the
+     pocket float panel so it can be dragged above/right of the viewer. */
+  overflow: visible;
+}
+
+.lead-opt-panel--reference {
+  /* Same reason — the float panel travels with the pointer across columns. */
+  overflow: visible;
 }
 
 .lead-opt-panel-title {
@@ -2798,7 +2838,14 @@
   .lead-opt-layout {
     grid-template-columns: minmax(0, 1fr);
   }
-  .lead-opt-side .lead-opt-panel {
-    position: static;
+}
+
+@media (max-width: 1100px) {
+  .lead-opt-layout--resizable {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lead-opt-layout--resizable .lead-opt-layout-resizer {
+    display: none;
   }
 }

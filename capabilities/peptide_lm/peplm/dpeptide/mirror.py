@@ -76,3 +76,37 @@ def chirality_report(structure: gemmi.Structure, chain: str) -> ChiralityReport:
         n_positive=sum(v > 0 for v in volumes),
         mean_volume=float(np.mean(volumes)),
     )
+
+
+def chirality_violations(
+    structure: gemmi.Structure,
+    chain: str,
+    expect: str,
+    min_volume: float = 0.5,
+) -> list[tuple[int, str, float]]:
+    """Per-residue chirality violations on one chain.
+
+    expect='L' requires det[N-CA, C-CA, CB-CA] > +min_volume per residue,
+    expect='D' requires < -min_volume. A residue whose |volume| falls under
+    min_volume is a violation too: a near-plane CA is distorted geometry,
+    not a chirality we can trust. Glycine (no CB) is skipped — achiral.
+
+    The mean-volume report hides inversions (an 11 L / 9 D mixture still
+    averages "L"); this per-residue form is the hard-gate primitive.
+    """
+    expect = expect.strip().upper()
+    if expect not in ("L", "D"):
+        raise ValueError(f"expect must be 'L' or 'D', got {expect!r}")
+    target = structure[0][chain]
+    violations: list[tuple[int, str, float]] = []
+    for residue in target:
+        names = {a.name: np.array([a.pos.x, a.pos.y, a.pos.z]) for a in residue}
+        if not {"N", "CA", "C", "CB"} <= names.keys():
+            continue
+        ca = names["CA"]
+        volume = float(np.linalg.det(
+            np.stack([names["N"] - ca, names["C"] - ca, names["CB"] - ca])))
+        ok = volume > min_volume if expect == "L" else volume < -min_volume
+        if not ok:
+            violations.append((int(residue.seqid.num), residue.name, volume))
+    return violations

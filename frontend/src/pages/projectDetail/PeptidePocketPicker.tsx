@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Box, RotateCcw } from 'lucide-react';
+import { Box, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react';
 import { MolstarViewer, type MolstarResiduePick } from '../../components/project/MolstarViewer';
 import { PocketBoxControls } from '../../components/project/PocketBoxControls';
 import {
@@ -7,12 +7,14 @@ import {
   formatPlainPocketPositions,
   formatPocketResiduePicks,
   parsePocketResidueTokens,
+  peptidePocketSummaryLabel,
   peptidePocketTargetChanged,
   peptidePocketTargetSignature,
   pocketSubmissionFieldsFromBox,
   togglePocketPosition
 } from '../../utils/peptidePocket';
 import type { AffinityDockPocket } from '../../types/models';
+import { InfoTip } from '../../components/common/InfoTip';
 
 /** Pocket state wired into the Binding target component (peptide design only). */
 export interface PeptideTargetPocketContext {
@@ -166,6 +168,8 @@ export function PeptidePocketPicker({
   const [picks, setPicks] = useState<MolstarResiduePick[]>([]);
   const [boxWireframe, setBoxWireframe] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Collapsed by default: the pocket stays a one-line summary until clicked.
+  const [open, setOpen] = useState(false);
   const lastTargetSignatureRef = useRef('');
 
   // Identity of what the pocket is defined against (see
@@ -255,17 +259,29 @@ export function PeptidePocketPicker({
     onPocketFieldChange('peptidePocketResidues', next.length > 0 ? formatPlainPocketPositions(next) : null);
   };
 
+  const pocketSummary = peptidePocketSummaryLabel(pocketCenter, pocketResidues);
+
   return (
     <div className="peptide-pocket-field peptide-pocket-field-component">
-      <div className="peptide-pocket-head">
-        <span className="peptide-pocket-title">
-          Binding pocket <span className="muted">(optional — empty = whole target surface)</span>
-        </span>
-        <span className="muted small">
-          {hasStructure ? 'Defined on the uploaded target structure' : 'Defined on the target sequence'}
-        </span>
+      <div className={`peptide-pocket-head ${open ? 'open' : 'collapsed'}`}>
+        <button
+          type="button"
+          className="peptide-pocket-toggle"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <span className="peptide-pocket-title">Binding pocket</span>
+          {!open ? <span className="peptide-pocket-summary">{pocketSummary}</span> : null}
+        </button>
+        <InfoTip
+          text={hasStructure
+            ? 'Optional — leave empty to design over the whole target surface. Defined on the uploaded target structure.'
+            : 'Optional — leave empty to design over the whole target surface. Defined on the target sequence.'}
+          align="end"
+        />
       </div>
-      {hasStructure && targetTemplate ? (
+      {open && hasStructure && targetTemplate ? (
         <div className="peptide-pocket-structure">
           <div className="peptide-pocket-toolbar">
             <button
@@ -316,7 +332,7 @@ export function PeptidePocketPicker({
             ) : null}
           </div>
         </div>
-      ) : (
+      ) : open ? (
         <div className="peptide-pocket-sequence">
           <PeptidePocketSequencePicker
             sequence={targetSequence}
@@ -325,7 +341,8 @@ export function PeptidePocketPicker({
             onToggle={toggleSequencePosition}
           />
         </div>
-      )}
+      ) : null}
+      {open ? (
       <details className="pocket-advanced">
         <summary className="muted small">Advanced</summary>
         <div className="pocket-box-fields">
@@ -368,6 +385,7 @@ export function PeptidePocketPicker({
           />
         </div>
       </details>
+      ) : null}
     </div>
   );
 }

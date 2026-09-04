@@ -24,6 +24,13 @@
     "local": {
         "workers": 8
     },
+    "worker": {
+        "gracefulexit": false,
+        "jobtimeoutseconds": 3600,
+        "terminategraceseconds": 30,
+        "jobretentionhours": 48,
+        "jobcleanupintervalseconds": 600
+    },
     "redis": {
         "network": "tcp",
         "address": "172.17.3.200:6379",

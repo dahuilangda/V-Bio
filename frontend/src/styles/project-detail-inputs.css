@@ -163,6 +163,12 @@
   padding-block: 4px;
 }
 
+.peptide-runtime-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .peptide-linker-field {
   grid-column: auto;
 }
@@ -410,10 +416,37 @@
 
 .peptide-pocket-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.peptide-pocket-head.collapsed {
+  padding-bottom: 2px;
+}
+
+.peptide-pocket-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.peptide-pocket-summary {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: #1f6b3f;
+  background: #eef6f0;
+  border: 1px solid #d8e7dd;
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 
 .peptide-pocket-title {
@@ -471,6 +504,7 @@
 
 /* Binding sidebar: pocket state + jump to the target component. */
 .peptide-pocket-sidebar-row {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;

@@ -681,11 +681,13 @@ function resolveTaskSelectionContext(
     if (useBindingPreference) {
       const typedLigandOptions = componentOptions.filter((item) => item.type === 'ligand' && item.chainId);
       if (typedLigandOptions.length > 0) {
+        // An explicit binder selection wins even when it is a polymer chain
+        // (protein/peptide binder tasks), mirroring the workspace dropdown.
         for (const candidate of predictionBindingCandidates) {
-          const resolved = resolveComponentFromCandidate(candidate);
+          const resolved = resolveComponentFromCandidate(candidate, { allowAnyType: true });
           if (resolved) return resolved;
         }
-        const confidenceLigand = resolveComponentFromCandidate(confidenceLigandHint);
+        const confidenceLigand = resolveComponentFromCandidate(confidenceLigandHint, { allowAnyType: true });
         if (confidenceLigand) return confidenceLigand;
         return (
           typedLigandOptions.find((item) => item.isSmiles) ||

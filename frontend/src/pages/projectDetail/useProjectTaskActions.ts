@@ -15,6 +15,7 @@ import {
   patchTaskRecord,
   persistDraftTaskSnapshotRecord,
   resolveEditableDraftTaskRowIdFromContext,
+  resolveTerminalTaskRowIdFromContext,
 } from './projectDraftPersistence';
 import { saveProjectDraftFromWorkspace, type SaveDraftFields } from './projectDraftSave';
 import { pullResultForViewerTask, refreshTaskStatus } from './projectTaskRuntime';
@@ -100,7 +101,7 @@ interface UseProjectTaskActionsOutput {
     taskId: string,
     options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string }
   ) => Promise<void>;
-  refreshStatus: (options?: { silent?: boolean; taskId?: string }) => Promise<void>;
+  refreshStatus: (options?: { silent?: boolean; taskId?: string }) => Promise<boolean>;
 }
 
 export function useProjectTaskActions(input: UseProjectTaskActionsInput): UseProjectTaskActionsOutput {
@@ -190,6 +191,17 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     [requestNewTask, locationSearch, project, projectTasks, isDraftTaskSnapshot]
   );
 
+  const resolveTerminalTaskRowId = useCallback(
+    (): string | null =>
+      resolveTerminalTaskRowIdFromContext({
+        requestNewTask,
+        locationSearch,
+        project,
+        projectTasks
+      }),
+    [requestNewTask, locationSearch, project, projectTasks]
+  );
+
   const persistDraftTaskSnapshot = useCallback(
     async (
       normalizedConfig: ProjectInputConfig,
@@ -252,6 +264,7 @@ const saveDraft = useCallback(
           addTemplatesToTaskSnapshotComponents,
           persistDraftTaskSnapshot,
           resolveEditableDraftTaskRowId,
+          resolveTerminalTaskRowId,
             patch,
           patchTask,
           rememberTemplatesForTaskRow,
@@ -293,6 +306,7 @@ const saveDraft = useCallback(
       addTemplatesToTaskSnapshotComponents,
       persistDraftTaskSnapshot,
       resolveEditableDraftTaskRowId,
+      resolveTerminalTaskRowId,
         patch,
       patchTask,
       rememberTemplatesForTaskRow,
@@ -354,19 +368,22 @@ const saveDraft = useCallback(
   );
 
   const refreshStatus = useCallback(
-    async (options?: { silent?: boolean; taskId?: string }) =>
+    async (options?: { silent?: boolean; taskId?: string }): Promise<boolean> =>
       refreshTaskStatus({
         project,
         projectTasks,
         statusRefreshInFlightRef,
         setError,
         setStatusInfo,
+        setProject,
+        setProjectTasks,
+        sortProjectTasks,
         patch,
         patchTask,
         pullResultForViewer,
         options
       }),
-    [project, projectTasks, statusRefreshInFlightRef, setError, setStatusInfo, patch, patchTask, pullResultForViewer]
+    [project, projectTasks, statusRefreshInFlightRef, setError, setStatusInfo, setProject, setProjectTasks, sortProjectTasks, patch, patchTask, pullResultForViewer]
   );
 
   return {

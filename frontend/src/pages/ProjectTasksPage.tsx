@@ -86,6 +86,9 @@ export function ProjectTasksPage() {
     writeStoredCopilotOpen({ contextType: 'task_list', projectId, userId: session?.userId || null }, copilotOpen);
   }, [copilotOpen, projectId, session?.userId]);
   const [priorityTaskRowIds, setPriorityTaskRowIds] = useState<string[]>([]);
+  // Mirrors the structure-search flag (owned by the filtering hook, which runs below) into the
+  // loader: while a SMILES/SMARTS query is active, lightweight tail rows backfill components.
+  const [structureSearchActive, setStructureSearchActive] = useState(false);
   const initialPage = useMemo(() => {
     const parsed = Number(new URLSearchParams(location.search).get('page') || '');
     if (!Number.isFinite(parsed)) return 1;
@@ -106,7 +109,8 @@ export function ProjectTasksPage() {
     projectId,
     sessionUserId: session?.userId || null,
     workspaceView,
-    priorityTaskRowIds
+    priorityTaskRowIds,
+    structureSearchActive
   });
   const canEdit = useMemo(() => Boolean(session) && canEditProject(project), [project, session]);
   const canManageShares = useMemo(
@@ -187,6 +191,10 @@ export function ProjectTasksPage() {
     initialPage,
     suspendPageNormalization: loading || !project
   });
+
+  useEffect(() => {
+    setStructureSearchActive(structureSearchQuery.trim().length > 0);
+  }, [structureSearchQuery]);
 
   // Mirrors the CURRENT filtered rows across renders so the export flow can
   // read the complete filtered set after awaiting the full list load — a

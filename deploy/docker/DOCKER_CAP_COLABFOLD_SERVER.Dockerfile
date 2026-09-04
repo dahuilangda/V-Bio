@@ -15,6 +15,8 @@ ARG GO_MIRROR=https://mirrors.aliyun.com/golang
 ARG GO_MODULE_PROXY=https://goproxy.cn,direct
 ARG GO_SUMDB=off
 ARG MMSEQS_DOWNLOAD_URL=https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz
+# mmseqs.com 常需代理而 apt/go 镜像直连更快，故单独给下载步骤配代理而不是全局 ENV
+ARG MMSEQS_DOWNLOAD_PROXY=
 ARG BACKEND_COMMIT=14e087560f309f989a5e1feb54fd1f9c988076d5
 
 ENV HTTP_PROXY=${HTTP_PROXY} \
@@ -64,22 +66,39 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 WORKDIR /app
 
+# 预置产物目录（可选）:放入 mmseqs-linux-gpu.tar.gz 后构建不再依赖外网。
+# 内容不入 git,目录本身用 .gitkeep 占位。
+COPY capabilities/colabfold_server/_prebuilt/ /tmp/mmseqs_prebuilt/
+
 RUN set -eux; \
     install_mmseqs_binary() { \
       local url="$1"; \
       local target="$2"; \
-      local archive="/tmp/$(basename "$url")"; \
+      local archive="/tmp/mmseqs-linux-gpu.tar.gz"; \
       local extract_dir="/tmp/mmseqs_extract_$(basename "$target")"; \
-      echo "Downloading MMseqs from: ${url}"; \
-      if ! curl -fL --connect-timeout 20 --max-time 1200 --retry 3 --retry-delay 2 "${url}" -o "${archive}"; then \
-        echo "Failed to download MMseqs archive: ${url}"; \
-        exit 1; \
+      rm -rf "${extract_dir}" && mkdir -p "${extract_dir}"; \
+      if [[ -s "/tmp/mmseqs_prebuilt/mmseqs.real" ]]; then \
+        echo "Using pre-seeded MMseqs binary (pinned to the version that built the local GPU indexes)"; \
+        install -Dm755 "/tmp/mmseqs_prebuilt/mmseqs.real" "${target}"; \
+        rm -rf "${extract_dir}"; \
+        return 0; \
+      fi; \
+      if [[ -s "/tmp/mmseqs_prebuilt/mmseqs-linux-gpu.tar.gz" ]]; then \
+        echo "Using pre-seeded MMseqs archive from build context"; \
+        cp /tmp/mmseqs_prebuilt/mmseqs-linux-gpu.tar.gz "${archive}"; \
+      else \
+        echo "Downloading MMseqs from: ${url}"; \
+        proxy_args=""; \
+        if [[ -n "${MMSEQS_DOWNLOAD_PROXY}" ]]; then proxy_args=(-x "${MMSEQS_DOWNLOAD_PROXY}" --http1.1); fi; \
+        if ! curl -fL "${proxy_args[@]}" --connect-timeout 20 --max-time 1200 --retry 3 --retry-delay 2 "${url}" -o "${archive}"; then \
+          echo "Failed to download MMseqs archive: ${url}"; \
+          exit 1; \
+        fi; \
       fi; \
       if ! tar -tzf "${archive}" >/dev/null 2>&1; then \
         echo "Downloaded file is not a valid MMseqs archive: ${url}"; \
         exit 1; \
       fi; \
-      rm -rf "${extract_dir}" && mkdir -p "${extract_dir}"; \
       tar -xzf "${archive}" -C "${extract_dir}"; \
       mmseqs_bin="$(find "${extract_dir}" -type f -name mmseqs | head -n 1)"; \
       if [[ -z "${mmseqs_bin}" ]]; then \
@@ -144,10 +163,11 @@ RUN chmod +x /app/mmseqs/bin/mmseqs
 
 ENV PATH="/app/mmseqs/bin:${PATH}"
 
-RUN git clone https://github.com/soedinglab/MMseqs2-App.git mmseqs-server && \
-    cd mmseqs-server && \
-    git checkout "${BACKEND_COMMIT}" && \
-    cd backend && \
+# V-Bio fork of MMseqs2-App (vendored at capabilities/colabfold_server/mmseqs-server):
+# adds DELETE /ticket/{id} cancellation (backend/cancel.go) — upstream has no way to
+# abandon a search, so a client timeout strands a full GPU until the search finishes.
+COPY capabilities/colabfold_server/mmseqs-server/backend /app/mmseqs-server-build/backend
+RUN cd /app/mmseqs-server-build/backend && \
     GOPROXY="${GO_MODULE_PROXY}" GOSUMDB="${GO_SUMDB}" go build -o /app/msa-server
 
 # --- GPU 租约包装器 ----------------------------------------------------------

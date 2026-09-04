@@ -47,7 +47,6 @@ describe('ProjectTasksHeader export progress UI', () => {
     expect(html).toContain('aria-label="Cancel export"');
     expect(html).toContain('task-export-cancel-icon');
     expect(html).toContain('task-export-progress-ring');
-    expect(html).toContain('Click the button to cancel.');
     // exporting keeps the button clickable (not disabled)
     expect(html).not.toContain('disabled=""');
   });

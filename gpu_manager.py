@@ -274,33 +274,39 @@ def initialize_gpu_pool(devices_to_use: list[int]):
     logger.info("--- GPU 池初始化 ---")
     
     pipe = client.pipeline()
-    
+
     # 1. 删除旧键，确保状态干净
     logger.info(
-        "正在删除旧键: %s, %s, %s, %s",
+        "正在删除旧键: %s, %s, %s, %s, %s",
         config.GPU_POOL_KEY,
         config.GPU_VALID_SET_KEY,
         config.GPU_IN_USE_HASH_KEY,
         config.GPU_WAITING_NON_PEPTIDE_SET_KEY,
+        config.GPU_META_HASH_KEY,
     )
     pipe.delete(
         config.GPU_POOL_KEY,
         config.GPU_VALID_SET_KEY,
         config.GPU_IN_USE_HASH_KEY,
         config.GPU_WAITING_NON_PEPTIDE_SET_KEY,
+        config.GPU_META_HASH_KEY,
     )
     
     # 2. 将给定的设备 ID 添加到 SET 和 LIST 中
     if devices_to_use:
         logger.info(f"正在将 {devices_to_use} 添加到有效 GPU 集合 '{config.GPU_VALID_SET_KEY}'")
         pipe.sadd(config.GPU_VALID_SET_KEY, *devices_to_use)
-        
+
         logger.info(f"正在将 {devices_to_use} 添加到可用池 '{config.GPU_POOL_KEY}'")
         pipe.rpush(config.GPU_POOL_KEY, *devices_to_use)
     else:
         logger.info("未提供任何设备，将创建一个空的 GPU 池。")
 
     pipe.execute()
+
+    if devices_to_use:
+        # 设备元数据（总显存）在池建立时一次性登记；任务期只读 Redis。
+        _write_gpu_meta(client, list(devices_to_use))
 
     logger.info("--- 验证 ---")
     valid_gpus = client.scard(config.GPU_VALID_SET_KEY)
@@ -360,6 +366,8 @@ def ensure_gpu_pool(devices_to_use: list[int]):
             expected_available,
             current_in_use,
         )
+        # 每次 worker 启动都补齐缺项，保证池元数据完整（任务期只读元数据）。
+        _write_gpu_meta(client, sorted(current_valid))
         return
 
     if current_in_use:
@@ -369,6 +377,8 @@ def ensure_gpu_pool(devices_to_use: list[int]):
             sorted(desired),
             current_in_use,
         )
+        # 不重置，但元数据仍要补齐：任务期只读元数据，缺项会显式报错。
+        _write_gpu_meta(client, sorted(current_valid))
         return
 
     logger.info(
@@ -513,6 +523,76 @@ def _query_gpu_used_memory_mib(gpu_id: int) -> int | None:
         except ValueError:
             continue
     return None
+
+
+def _probe_gpu_total_memory_mib(gpu_id: int) -> int | None:
+    """Total physical VRAM of a GPU via nvidia-smi; None when undetectable.
+
+    Called ONLY at pool init/ensure time — the per-device total is then kept in
+    the GPU_META_HASH_KEY hash so task-time decisions never probe hardware.
+    """
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--id={int(gpu_id)}",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning("查询 GPU %s 总显存失败: %s", gpu_id, exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("查询 GPU %s 总显存失败: %s", gpu_id, (proc.stderr or "").strip())
+        return None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return int(float(line))
+        except ValueError:
+            continue
+    return None
+
+
+def _write_gpu_meta(client: Any, devices: list[int]) -> None:
+    """Upsert total-VRAM metadata for the given devices (skips already-recorded ones)."""
+    devices = sorted({int(d) for d in devices})
+    if not devices:
+        return
+    existing = {int(k) for k in (client.hkeys(config.GPU_META_HASH_KEY) or {})}
+    for gpu_id in devices:
+        if gpu_id in existing:
+            continue
+        total_mib = _probe_gpu_total_memory_mib(gpu_id)
+        if total_mib is None:
+            logger.warning(
+                "GPU %s 总显存探测失败，元数据缺项（依赖它的判定将显式报错）。",
+                gpu_id,
+            )
+            continue
+        client.hset(config.GPU_META_HASH_KEY, gpu_id, total_mib)
+
+
+def get_gpu_total_memory_mib(gpu_id: int) -> int | None:
+    """Recorded total VRAM of a pool GPU; None when the pool metadata lacks it."""
+    client = get_redis_client()
+    raw = client.hget(config.GPU_META_HASH_KEY, int(gpu_id))
+    if raw is None:
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
 
 
 def _wait_gpu_memory_reclaimed(

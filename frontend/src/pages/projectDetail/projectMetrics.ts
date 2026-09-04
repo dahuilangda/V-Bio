@@ -1,10 +1,3 @@
-import type { TaskState } from '../../types/models';
-import {
-  inferTaskStateFromStatusPayload as inferRuntimeTaskStateFromStatusPayload,
-  mapBackendTaskState,
-  readTaskRuntimeStatusText
-} from '../../utils/taskRuntime';
-
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type InterfaceMetricSource = 'ipsae' | 'iptm' | 'none';
 export type InterfaceMetricKind = 'ligand_ipsae' | 'ipsae_dom' | 'pair_iptm' | 'iptm' | 'none';
@@ -19,21 +12,6 @@ export interface PreferredInterfaceMetric {
   iptm: number | null;
   ipsaeDom: number | null;
   ligandIpsaeMax: number | null;
-}
-
-export function mapTaskState(raw: string): TaskState {
-  return mapBackendTaskState(raw);
-}
-
-export function readStatusText(task: { info?: Record<string, unknown>; state: string }) {
-  return readTaskRuntimeStatusText(task);
-}
-
-export function inferTaskStateFromStatusPayload(
-  task: { info?: Record<string, unknown>; state: string },
-  currentStateInput?: unknown
-): TaskState {
-  return inferRuntimeTaskStateFromStatusPayload(task, currentStateInput);
 }
 
 export function findProgressPercent(data: unknown): number | null {

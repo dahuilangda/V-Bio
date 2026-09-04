@@ -307,8 +307,8 @@ export function setAffinityEnabledFromWorkspaceAction<TDraft extends DraftLike>(
 export function setAffinityComponentFromWorkspaceAction<TDraft extends DraftLike>(params: {
   field: 'target' | 'ligand';
   componentId: string | null;
-  workspaceTargetOptions: Array<{ componentId: string; chainId: string }>;
-  workspaceLigandSelectableOptions: Array<{ componentId: string; chainId: string }>;
+  workspaceTargetOptions: Array<{ componentId: string; chainId: string; isSmallMolecule?: boolean }>;
+  workspaceLigandSelectableOptions: Array<{ componentId: string; chainId: string; isSmallMolecule?: boolean }>;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
 }): void {
   const { field, componentId, workspaceTargetOptions, workspaceLigandSelectableOptions, setDraft } = params;
@@ -327,6 +327,12 @@ export function setAffinityComponentFromWorkspaceAction<TDraft extends DraftLike
               ...prev.inputConfig.properties,
               [field]: nextChain,
               binder: field === 'ligand' ? nextChain : prev.inputConfig.properties.binder,
+              // Boltz-2 affinity only accepts small-molecule binder chains, so a
+              // polymer/CCD binder selection must drop a previously checked head.
+              affinity:
+                field === 'ligand' && nextOption && !nextOption.isSmallMolecule
+                  ? false
+                  : prev.inputConfig.properties.affinity,
             },
           },
         }

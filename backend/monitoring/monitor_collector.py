@@ -127,6 +127,12 @@ class MonitorCollector:
         self.lease_sweep_seconds = max(5, int(os.environ.get("VBIO_MONITOR_LEASE_SWEEP_SECONDS", "15")))
         self.heartbeat_write_seconds = max(5, int(os.environ.get("VBIO_MONITOR_HEARTBEAT_WRITE_SECONDS", "15")))
         self.reclaim_idle_ms = max(5_000, int(os.environ.get("VBIO_MONITOR_RECLAIM_IDLE_MS", "60000")))
+        self.msa_health_sweep_seconds = max(
+            30, int(os.environ.get("VBIO_MSA_HEALTH_SWEEP_SECONDS", "300"))
+        )
+        # 与 celery worker / colabfold 包装器共用主池键（单一 GPU 账本），饥饿即告警
+        self.msa_pool_key = os.environ.get("VBIO_MSA_GPU_POOL_KEY", "boltz_gpu_pool:available")
+        self.msa_in_use_key = os.environ.get("VBIO_MSA_GPU_IN_USE_KEY", "boltz_gpu_pool:in_use")
         self._events: queue.Queue[dict[str, Any]] = queue.Queue(
             maxsize=max(1_000, int(os.environ.get("VBIO_MONITOR_EVENT_QUEUE_SIZE", "20000")))
         )
@@ -228,6 +234,50 @@ class MonitorCollector:
             for message_id, fields in messages:
                 self._retry.append((message_id, fields))
 
+    def _msa_health_sweep(self) -> None:
+        """colabfold 专用 GPU 池饥饿检测。
+
+        available 空且 in_use 里存在"租约已老 + 心跳消失"的持有者 = 泄漏租约。
+        等待中的 search 包装器会自动回收这类租约（自愈），这里负责让故障在监控
+        侧可见：每次巡检打 WARNING，事件按小时桶去重入库。"""
+        try:
+            if self.redis.lrange(self.msa_pool_key, 0, -1):
+                return
+            in_use = self.redis.hgetall(self.msa_in_use_key) or {}
+            if not in_use:
+                return
+            now = time.time()
+            dead: list[str] = []
+            for gpu, owner in in_use.items():
+                gpu_id = gpu.decode() if isinstance(gpu, bytes) else str(gpu)
+                owner_id = owner.decode() if isinstance(owner, bytes) else str(owner)
+                ts = owner_id.rsplit(":", 1)[-1]
+                if not ts.isdigit() or now - int(ts) <= 120:
+                    continue
+                if not self.redis.exists(f"task_heartbeat:{owner_id}"):
+                    dead.append(f"GPU {gpu_id} (owner {owner_id})")
+            if not dead:
+                return
+            details = (
+                f"MSA GPU 池饥饿: available 为空, 疑似泄漏租约 {len(dead)} 个 "
+                f"({'；'.join(dead)})。等待中的 MSA 任务会自动回收，无需人工干预。"
+            )
+            LOGGER.warning(details)
+            from backend.monitoring.event_transport import publish_monitor_event
+            from datetime import datetime, timezone
+
+            hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+            publish_monitor_event(self.redis, {
+                "kind": "infra",
+                "event_type": "msa-pool-starved",
+                "component": "msa-server",
+                "state": "MSA_GPU_POOL_STARVED",
+                "details_text": details,
+                "event_key": f"infra:msa-pool-starved:{hour_bucket}",
+            })
+        except Exception:
+            LOGGER.exception("MSA health sweep failed")
+
     def _gc_task(self) -> None:
         """后台执行一轮任务结果与 MSA 缓存清理，失败只记录日志，释放 _gc_in_progress。"""
         try:
@@ -257,6 +307,7 @@ class MonitorCollector:
         next_lease_sweep = time.monotonic()
         next_reclaim = time.monotonic() + (self.reclaim_idle_ms / 1000.0)
         next_result_gc = time.monotonic()  # 启动后立即触发首轮
+        next_msa_sweep = time.monotonic()
         while not self._stop.is_set():
             try:
                 while self._retry:
@@ -276,6 +327,9 @@ class MonitorCollector:
                     if expired:
                         LOGGER.info("Expired %s monitor leases", expired)
                     next_lease_sweep = now + self.lease_sweep_seconds
+                if now >= next_msa_sweep:
+                    self._msa_health_sweep()
+                    next_msa_sweep = now + self.msa_health_sweep_seconds
                 if now >= next_reclaim:
                     self._claim_pending()
                     next_reclaim = now + (self.reclaim_idle_ms / 1000.0)

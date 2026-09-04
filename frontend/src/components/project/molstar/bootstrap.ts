@@ -90,25 +90,40 @@ export async function waitForMolstarReady(timeoutMs = 12000, intervalMs = 120) {
   throw new Error('Mol* failed to initialize.');
 }
 
-let overlayRefs: string[] = [];
-let refsBeforeOverlayLoad: Set<string> | null = null;
+// Overlay bookkeeping lives ON the viewer instance, not in module state: structure loads are
+// async and outlive their component, so during a tab/page switch an outgoing viewer's queued
+// loads interleave with an incoming viewer's — module-level refs let one viewer's begin/end
+// pair clobber the other's, and a later removeOverlayOnly then deleted the wrong nodes.
+interface OverlayTracking {
+  refs: string[];
+  before: Set<string> | null;
+}
+
+function overlayTrackingFor(viewer: any): OverlayTracking {
+  const holder = viewer as { __vbioOverlayTracking?: OverlayTracking } | null;
+  if (!holder) return { refs: [], before: null };
+  if (!holder.__vbioOverlayTracking) holder.__vbioOverlayTracking = { refs: [], before: null };
+  return holder.__vbioOverlayTracking;
+}
 
 /** Call BEFORE loading the overlay — records existing refs (primary's). */
 export function beginOverlayLoad(viewer: any): void {
   const state = viewer?.plugin?.state?.data;
-  refsBeforeOverlayLoad = state?.cells ? new Set(state.cells.keys()) : new Set();
+  overlayTrackingFor(viewer).before = state?.cells ? new Set(state.cells.keys()) : new Set();
 }
 
 /** Call AFTER loading the overlay — diffs to find ONLY the new overlay refs. */
 export function endOverlayLoad(viewer: any): void {
+  const tracking = overlayTrackingFor(viewer);
   const state = viewer?.plugin?.state?.data;
-  if (!state?.cells || !refsBeforeOverlayLoad) {
-    overlayRefs = [];
+  if (!state?.cells || !tracking.before) {
+    tracking.refs = [];
+    tracking.before = null;
     return;
   }
-  const before = refsBeforeOverlayLoad;
-  overlayRefs = [...state.cells.keys()].filter(ref => !before.has(ref));
-  refsBeforeOverlayLoad = null;
+  const before = tracking.before;
+  tracking.refs = [...state.cells.keys()].filter(ref => !before.has(ref));
+  tracking.before = null;
 }
 
 /** Remove ONLY the overlay component's state nodes, preserving the primary. */
@@ -117,11 +132,12 @@ export async function removeOverlayOnly(viewer: any): Promise<void> {
   if (!state?.cells || typeof state.build !== 'function') {
     throw new Error('removeOverlayOnly: state API unavailable');
   }
-  if (overlayRefs.length === 0) return;
+  const tracking = overlayTrackingFor(viewer);
+  if (tracking.refs.length === 0) return;
 
   const builder = state.build();
   let deleted = 0;
-  for (const ref of overlayRefs) {
+  for (const ref of tracking.refs) {
     if (state.cells.has(ref)) {
       builder.delete(ref);
       deleted++;
@@ -130,12 +146,13 @@ export async function removeOverlayOnly(viewer: any): Promise<void> {
   if (deleted > 0) {
     await builder.commit();
   }
-  overlayRefs = [];
+  tracking.refs = [];
 }
 
 // Backwards-compatible aliases
-export function snapshotPrimaryLoaded(_viewer?: any): void {
-  overlayRefs = [];
+export function snapshotPrimaryLoaded(viewer?: any): void {
+  if (!viewer) return;
+  overlayTrackingFor(viewer).refs = [];
 }
 
 export function trackOverlayLoaded(viewer: any): void {
@@ -155,7 +172,7 @@ export async function clearViewerStructures(viewer: any): Promise<void> {
     );
   }
 
-  overlayRefs = [];
+  overlayTrackingFor(viewer).refs = [];
   const rootRef = '-=root=-';
   const builder = state.build();
   let deleted = 0;
@@ -180,6 +197,16 @@ export async function loadStructure(
   const clearBefore = options?.clearBefore !== false;
   if (clearBefore) {
     await clearViewerStructures(viewer);
+  }
+  // gemmi-serialized PDB previews carry SEQRES whose non-standard caps (ACE etc.)
+  // break this Mol* build's polymer entity mapping — the whole protein then
+  // falls back to an all-atom ball-and-stick instead of cartoon. SEQRES is
+  // display-redundant here (Mol* derives the sequence from ATOM records).
+  if (format === 'pdb' && /^SEQRES /m.test(text)) {
+    text = text
+      .split('\n')
+      .filter((line) => !line.startsWith('SEQRES '))
+      .join('\n');
   }
   const formats = format === 'cif' ? ['mmcif', 'pdb'] : ['pdb', 'mmcif'];
   const errors: string[] = [];

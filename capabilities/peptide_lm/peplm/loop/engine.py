@@ -267,7 +267,10 @@ class PeptideLoop:
                     p._protected |= {a for a in choose_bicyclic_anchors(
                         len(p.residues), fixed_abs,
                         tuple(cfg.cys_positions)) if a is not None}
-                out.append(mutate_candidate(p, self.rng))
+                out.append(mutate_candidate(
+                    p, self.rng,
+                    ncaa_pool=pool_tokens,
+                    ncaa_max=cfg.ncaa_range[1]))
         return out
 
     # ---------------------------------------------------------------- gate

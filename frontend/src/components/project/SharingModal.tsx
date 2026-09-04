@@ -12,6 +12,7 @@ import {
 } from '../../api/supabaseLite';
 import { searchUsers as searchUsersServer, toAppUser } from '../../api/authServerApi';
 import type { AppUser, ProjectShareRecord, ProjectTaskShareRecord, ShareAccessLevel } from '../../types/models';
+import { InfoTip } from '../../components/common/InfoTip';
 
 interface SharingModalProps {
   open: boolean;
@@ -447,9 +448,13 @@ export function SharingModal({
 
         <div className="share-modal-foot muted small">
           <Share2 size={14} />
-          {mode === 'task'
-            ? 'Task viewers can open the shared task. Task editors can update that task entry without managing the whole project.'
-            : 'Project viewers can browse the project. Project editors can collaborate on project content and task runs.'}
+          <span>Viewer = read-only · Editor = can edit</span>
+          <InfoTip
+            text={mode === 'task'
+              ? 'Task viewers can open the shared task; task editors can update that task entry without managing the whole project.'
+              : 'Project viewers can browse the project; project editors can collaborate on project content and task runs.'}
+            align="end"
+          />
         </div>
       </div>
     </div>

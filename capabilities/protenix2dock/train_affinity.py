@@ -185,6 +185,22 @@ def train(args: argparse.Namespace) -> Path:
     ]
     if before_structured_guard != len(samples):
         print(f"[filter] dropped {before_structured_guard - len(samples)} structured records with tokens > {args.max_seq_len}")
+    # Cache-only mode: rows without precomputed features would take the online
+    # trunk path, whose OOM failures poison the error budget. In cache mode the
+    # tail of oversized complexes is intentionally out of scope.
+    if getattr(args, "feature_cache", None):
+        cache_dir = Path(args.feature_cache)
+        token_map_path = cache_dir / "n_token_map.json"
+        true_tokens = json.loads(token_map_path.read_text()) if token_map_path.exists() else {}
+        before_cache = len(samples)
+        samples = [
+            r for r in samples
+            if (cache_dir / f"{r.get('name','')}_msa0.npz").exists()
+            and (cache_dir / f"{r.get('name','')}_msa1.npz").exists()
+            and int(true_tokens.get(r.get('name', ''), 0)) <= args.max_seq_len
+        ]
+        print(f"[filter] cache-only: kept {len(samples)}/{before_cache} rows with full feature cache "
+              f"(true n_token <= {args.max_seq_len})")
     if len(samples) < before_guard:
         print(f"[filter] dropped {before_guard - len(samples)} records with sequence > {args.max_seq_len} aa")
 
@@ -308,7 +324,9 @@ def train(args: argparse.Namespace) -> Path:
                         global_step, errors, contradictions, work_dir / "protenix_affinity_head.pt",
                     )
                 if si % 10 == 0:
-                    print(f"[progress] epoch={epoch}/{args.epochs} sample={si}/{len(samples)} step={global_step} loss={loss.item():.4f}", flush=True)
+                    mem = torch.cuda.memory_allocated()/2**20 if torch.cuda.is_available() else 0
+                    maxmem = torch.cuda.max_memory_allocated()/2**20 if torch.cuda.is_available() else 0
+                    print(f"[progress] epoch={epoch}/{args.epochs} sample={si}/{len(samples)} step={global_step} loss={loss.item():.4f} mem={mem:.0f}M peak={maxmem:.0f}M", flush=True)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception as exc:  # noqa: BLE001
@@ -440,7 +458,9 @@ def _cached_or_repr(trunk, row, args, work_dir, device, use_msa, msa_dataset_fn=
                         z.to(dev), ed.to(dev) if ed is not None else None,
                         float(d["h_pl"]), coords)
             except Exception as exc:  # noqa: BLE001
-                print(f"[cache-miss-corrupt] {name} msa{int(use_msa)}: {exc}", flush=True)
+                # no online fallback in cache mode: the trunk forward for these
+                # rows is what OOMs; fail fast so the sample is skipped cheaply
+                raise RuntimeError(f"cache load failed: {exc}") from exc
     job, chains, ligand_ref, structured = _sample_job(
         row, args, work_dir, use_msa=use_msa)
     feats, s_inputs, s, z, expected_dist, h_pl = trunk.representations(job, device)

@@ -92,7 +92,6 @@ export interface LeadOptHaloOptimizeInput {
   scaffold_hop_ratio?: number;
   rounds?: number;
   budget_per_round?: number;
-  oracle_concurrency?: number;
   target_chain?: string;
   priority?: string;
 }

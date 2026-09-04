@@ -146,7 +146,6 @@ export function ProjectTasksHeader({
                   />
                 </div>
                 <div className="task-export-popover-sub">{exportSubText}</div>
-                <div className="task-export-popover-hint">Click the button to cancel.</div>
               </div>
             ) : null}
           </span>

@@ -1,6 +1,7 @@
 import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { extractPrimaryProteinAndLigand, saveProjectInputConfig } from '../../utils/projectInputs';
+import { normalizeAffinityBackend } from '../apiAccessHelpers';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
@@ -54,6 +55,7 @@ export interface SaveDraftDeps {
     }
   ) => Promise<ProjectTask>;
   resolveEditableDraftTaskRowId: () => string | null;
+  resolveTerminalTaskRowId: () => string | null;
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
   rememberTemplatesForTaskRow: (taskRowId: string | null, templates: Record<string, ProteinTemplateUpload>) => void;
@@ -90,6 +92,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     addTemplatesToTaskSnapshotComponents,
     persistDraftTaskSnapshot,
     resolveEditableDraftTaskRowId,
+    resolveTerminalTaskRowId,
     patch,
     patchTask,
     rememberTemplatesForTaskRow,
@@ -104,7 +107,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   } = deps;
 
   const workflowDef = getWorkflowDefinition(project.task_type);
-  const persistedBackend = workflowDef.key === 'affinity' ? 'boltz' : draft.backend;
+  const persistedBackend = workflowDef.key === 'affinity' ? normalizeAffinityBackend(draft.backend) : draft.backend;
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
   const activeComponents = nonEmptyComponents(normalizedConfig.components);
   const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
@@ -139,12 +142,13 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   };
 
   if (metadataOnlyDraftDirty) {
-    // Metadata-only saves may rename the user's own editable DRAFT row and
-    // nothing else. Viewing a finished task puts its row id in the URL — a
-    // rename saved there would rewrite the finished task ("始终不要影响现在的
-    // 任务"); with no editable draft row the save falls through to the
-    // full-save INSERT below, creating a NEW draft that carries the rename.
-    const metadataTaskRowId = resolveEditableDraftTaskRowId();
+    // Metadata-only saves rename exactly one existing row and never insert another:
+    //  - the user's own editable DRAFT row, when one exists;
+    //  - the COMPLETED or ERRORED task being viewed, otherwise (terminal tasks
+    //    are renamed in place, never duplicated) — the rename patches that task
+    //    in place, the
+    //    same way the task list's inline rename does.
+    const metadataTaskRowId = resolveEditableDraftTaskRowId() || resolveTerminalTaskRowId();
     if (metadataTaskRowId) {
       await patchTask(metadataTaskRowId, {
         name: nextDraft.taskName,
@@ -158,8 +162,9 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
       setRunMenuOpen(false);
       return;
     }
-    // No editable draft row (e.g. viewing a finished task): fall through to the
-    // full-save INSERT, which creates a NEW draft carrying the rename.
+    // No editable draft row and no terminal task in view (e.g. a RUNNING task):
+    // fall through to the full-save INSERT, which creates a NEW draft carrying
+    // the rename.
   }
 
   const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();

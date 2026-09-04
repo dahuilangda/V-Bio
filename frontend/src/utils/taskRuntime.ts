@@ -28,6 +28,32 @@ function resolveNonRegressiveTaskState(currentStateInput: unknown, incomingState
   return incomingState;
 }
 
+/**
+ * True for Celery-style in-flight status copy ("Running…", "queued", "uploading dataset").
+ * Used to tell runtime progress text apart from a real terminal summary: a row that claims
+ * SUCCESS/FAILURE but still carries transient text needs one more status refresh before its
+ * terminal message is trusted. Single source of truth — two diverging copies of this check
+ * used to live in projectTaskRuntime and the runtime context.
+ */
+export function isTransientRuntimeStatusText(value: unknown): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'running' ||
+    normalized === 'queued' ||
+    normalized === 'pending' ||
+    normalized === 'started' ||
+    normalized === 'starting' ||
+    normalized.includes(' running') ||
+    normalized.includes(' queued') ||
+    normalized.includes('pending') ||
+    normalized.includes('started') ||
+    normalized.includes('preparing') ||
+    normalized.includes('processing') ||
+    normalized.includes('uploading')
+  );
+}
+
 export function readTaskRuntimeStatusText(status: Pick<TaskStatusResponse, 'state' | 'info'>): string {
   const info = asRecord(status.info);
   if (Object.keys(info).length === 0) return status.state;

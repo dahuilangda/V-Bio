@@ -237,7 +237,7 @@ export interface PocketTargetSignature {
  * structure only counts as seen once its preview text actually loaded
  * (length > 0): restoring a saved task walks through {name, 0} while the 3D
  * preview is in flight, and treating that step as a change would wipe the box
- * persisted with the submission ("运行后的 box 需要记忆").
+ * persisted with the submission (the box submitted with a run must be remembered).
  */
 export function pocketTargetChanged(
   previous: PocketTargetSignature | null,
@@ -256,8 +256,7 @@ export function pocketTargetChanged(
  * Wireframe box as a PDB string: 8 corner pseudo-atoms joined by 12 CONECT
  * edges. Loaded as a MolStar overlay structure, ball-and-stick rendering of
  * the bonds draws the box edges.
- */
-export function buildPocketBoxPdb(box: PocketBox): string {
+ */export function buildPocketBoxPdb(box: PocketBox): string {
   const hx = box.sizeX / 2;
   const hy = box.sizeY / 2;
   const hz = box.sizeZ / 2;
@@ -353,4 +352,70 @@ export function computeAutoPocketBox(
   const caBox = boundsOf(atoms);
   if (!caBox) return null;
   return { box: caBox, method: 'manual', ligandLabel: null };
+}
+
+function stripPdbBoundaryRecords(text: string): string {
+  return text
+    .split('\n')
+    .filter((line) => {
+      const record = line.slice(0, 6).trim().toUpperCase();
+      return record !== 'END' && record !== 'ENDMDL' && record !== 'TER' && record !== 'HEADER' && record !== 'COMPND';
+    })
+    .join('\n')
+    .trim();
+}
+
+function inferElementFromAtomName(atomName: string): string {
+  const letters = String(atomName || '').replace(/[^A-Za-z]/g, '');
+  if (!letters) return 'C';
+  if (
+    letters.length >= 2 &&
+    letters[0] === letters[0].toUpperCase() &&
+    letters[1] === letters[1].toLowerCase()
+  ) {
+    return letters.slice(0, 2);
+  }
+  return letters.slice(0, 1).toUpperCase();
+}
+
+/** Rebuild HETATM records (no CONECT — Mol* infers bonds by distance) from a parsed structure. */
+function ligandToPdbRecords(structureText: string, format: 'pdb' | 'cif'): string {
+  const fmt = (v: number): string => (Number.isFinite(v) ? v.toFixed(3) : '0.000');
+  return parseStructureAtomCoords(structureText, format)
+    .map((atom, index) => {
+      const serial = index + 1;
+      const name = String(atom.atomName || 'C').slice(0, 4).padEnd(4);
+      const resName = String(atom.residueName || 'LIG').slice(0, 3).padEnd(3);
+      const chain = (String(atom.chainId || '').replace(/\s+/g, '') || 'L').slice(0, 1);
+      const residue = Number.isFinite(atom.residue) ? Math.floor(atom.residue) : 1;
+      const element = inferElementFromAtomName(atom.atomName).padStart(2);
+      return (
+        'HETATM' + String(serial).padStart(5) + ' ' + name + ' ' + resName + ' ' + chain +
+        String(residue).padStart(4) + '    ' +
+        fmt(atom.x).padStart(8) + fmt(atom.y).padStart(8) + fmt(atom.z).padStart(8) +
+        '  1.00  0.00          ' + element
+      );
+    })
+    .join('\n');
+}
+
+/**
+ * One MolStar overlay slot must carry BOTH the reference ligand and the pocket
+ * box wireframe, so the ligand stays visible once the box is drawn. Merged into
+ * a single PDB text (box is always PDB); a cif ligand is rebuilt as HETATM
+ * records. Returns '' unchanged inputs guard: empty ligand falls back to the
+ * box alone.
+ */
+export function combineLigandAndBoxOverlay(
+  ligandText: string,
+  ligandFormat: 'pdb' | 'cif',
+  boxPdb: string
+): { text: string; format: 'pdb' } {
+  const box = stripPdbBoundaryRecords(boxPdb || '');
+  if (!String(ligandText || '').trim()) return { text: boxPdb || '', format: 'pdb' };
+  const ligand = ligandFormat === 'pdb'
+    ? stripPdbBoundaryRecords(ligandText)
+    : ligandToPdbRecords(ligandText, 'cif');
+  if (!ligand.trim()) return { text: boxPdb || '', format: 'pdb' };
+  return { text: `${ligand}\n${box}\nEND`, format: 'pdb' };
 }
