@@ -18,6 +18,7 @@ import {
   isTransientRuntimeStatusText,
   readTaskRuntimeStatusText as readStatusText
 } from '../../utils/taskRuntime';
+import { asRecord, asRecordArray } from '../projectTasks/recordReaders';
 
 const PEPTIDE_RUNTIME_SETUP_KEYS = [
   'design_mode',
@@ -62,9 +63,6 @@ const PEPTIDE_RUNTIME_PROGRESS_KEYS = [
 
 const PEPTIDE_CANDIDATE_ROW_KEYS = ['current_best_sequences', 'best_sequences', 'candidates'] as const;
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 function readFiniteNumber(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
@@ -86,10 +84,6 @@ function readStatusScopeTaskId(value: unknown): string {
   return normalizeTaskId(peptide.task_id ?? peptide.taskId);
 }
 
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
-}
 
 function summarizeLeadOptTerminalPredictions(task: ProjectTask | null): { total: number; success: number; failure: number } {
   const properties = asRecord(task?.properties);

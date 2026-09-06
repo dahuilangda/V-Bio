@@ -117,14 +117,21 @@ h3 {
   height: 64px;
   padding: 0 var(--gutter);
   border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.93);
-  backdrop-filter: blur(8px);
+  /* Opaque-ish white on purpose: a frosted-glass (backdrop-filter) variant here
+   * trips WebKit compositing bugs — after heavy SPA updates on the components tab
+   * Safari froze the header's paint AND hit-testing (Chrome unaffected). At 93%
+   * alpha the blur was barely visible anyway, so the header is a plain painted
+   * surface now. */
+  background: #f7fbf9;
   display: flex;
   align-items: center;
   justify-content: space-between;
   position: sticky;
   top: 0;
-  z-index: 9;
+  /* App chrome ladder: nav (500) < modal-mask (600) < command palette (1200).
+   * Must stay above JSME's GWT widget layers (z-index 100/200) — they cover the
+   * nav strip otherwise and swallow all header clicks on the components tab. */
+  z-index: 500;
 }
 
 .top-nav-left,
@@ -1433,7 +1440,7 @@ select:focus {
   background: rgba(23, 34, 29, 0.35);
   display: grid;
   place-items: center;
-  z-index: 99;
+  z-index: 600;
   padding: 20px;
 }
 

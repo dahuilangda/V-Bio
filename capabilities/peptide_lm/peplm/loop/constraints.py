@@ -49,6 +49,7 @@ class ConstraintPlan:
     post_edit: tuple = ()  # (positions to set AFTER decode, token) — terminal
                            # Cys for adaptive length; interior anchor likewise
     cys_positions: tuple = ()                        # user-specified interior anchors
+    cys_layout: dict = field(default=None, compare=False, hash=False)
     allow_extra_cys: bool = False                    # keep non-anchor Cys
     ban_cys: bool = False                            # ban "C" outside anchors at decode
 
@@ -149,6 +150,77 @@ def choose_bicyclic_anchors(length: int, fixed: dict | None = None,
     return (0, interior, length - 1)
 
 
+def _ratio_anchor(length: int, pct: float) -> int:
+    """Scale one percentage to a 0-based position, mirroring the 1-based
+    frontend math in peptideCysLayout.ts exactly: p1 = clamp(round-half-up,
+    1..L), then shift to 0-based. floor(x + 0.5) on BOTH sides (Python
+    round() is banker's rounding and drifts from JS Math.round)."""
+    one_based = max(1, min(length, int((pct / 100.0) * length + 0.5)))
+    return one_based - 1
+
+
+def resolve_bicyclic_anchors(length: int, fixed: dict | None = None,
+                             cys_positions: tuple = (),
+                             cys_layout: dict | None = None) -> tuple:
+    """Resolve the 3 anchors (0-based) for one candidate of this length.
+
+    cys_layout (optional) supersedes cys_positions and makes the anchors a
+    FUNCTION of the candidate length, so manual topologies survive adaptive
+    design lengths:
+
+      * {"mode": "ring", "ring1": r1, "ring2": r2} — C-terminus-anchored
+        rigid block: cys3 rides the last residue, ring sizes stay exactly
+        r1/r2 at every length, the N-flank absorbs the range. None when the
+        candidate is shorter than the core (r1 + r2 + 3).
+      * {"mode": "ratio", "pct1", "pct2", "pct3"} — percentage-scaled
+        anchors (shape preserved, ring sizes flex), forward-fixed so
+        adjacent anchors keep >= 2 residues between them; None when even
+        the fix cannot fit three anchors.
+
+    Without a layout dict this falls back to choose_bicyclic_anchors
+    (explicit absolute positions / auto first-interior-last).
+    """
+    layout = cys_layout if isinstance(cys_layout, dict) else None
+    mode = str(layout.get("mode") or "") if layout else ""
+    if mode == "ring":
+        try:
+            ring1 = max(1, int(layout["ring1"]))
+            ring2 = max(1, int(layout["ring2"]))
+        except (KeyError, TypeError, ValueError):
+            return choose_bicyclic_anchors(length, fixed, cys_positions)
+        cys3 = length - 1
+        cys2 = cys3 - ring2 - 1
+        cys1 = cys2 - ring1 - 1
+        if cys1 < 0:
+            return None
+        return (cys1, cys2, cys3)
+    if mode == "ratio":
+        try:
+            pct1 = float(layout["pct1"])
+            pct2 = float(layout["pct2"])
+            pct3 = float(layout["pct3"])
+        except (KeyError, TypeError, ValueError):
+            return choose_bicyclic_anchors(length, fixed, cys_positions)
+        cys1 = _ratio_anchor(length, pct1)
+        cys2 = max(_ratio_anchor(length, pct2), cys1 + 2)
+        cys3 = max(_ratio_anchor(length, pct3), cys2 + 2)
+        if cys3 > length - 1:
+            return None
+        return (cys1, cys2, cys3)
+    return choose_bicyclic_anchors(length, fixed, cys_positions)
+
+
+def min_feasible_length_ratio(pct1: float, pct2: float, pct3: float,
+                              lo: int = 5, hi: int = 120) -> int:
+    """Shortest length at which a ratio layout fits three anchors."""
+    for length in range(lo, hi + 1):
+        if resolve_bicyclic_anchors(
+                length, None, (), {"mode": "ratio", "pct1": pct1,
+                                   "pct2": pct2, "pct3": pct3}) is not None:
+            return length
+    return hi + 1
+
+
 def build_plan(cfg, vocab: Vocab, length: int | None = None,
                fixed: dict | None = None,
                ncaa_pool_tokens: list[str] | None = None) -> ConstraintPlan:
@@ -167,16 +239,20 @@ def build_plan(cfg, vocab: Vocab, length: int | None = None,
     anchors: tuple = ()
     post_edit: tuple = ()
     allow_extra = bool(cfg.allow_extra_cys)
+    cys_layout = dict(getattr(cfg, "cys_layout", None) or None) \
+        if getattr(cfg, "cys_layout", None) else None
+    layout_is_length_fn = bool(cys_layout) and str(cys_layout.get("mode")) in ("ring", "ratio")
     if cfg.design_mode == "bicyclic":
         if length is not None:
-            if cfg.bicyclic_layout == "first_last":
-                anchors = choose_bicyclic_anchors(length, fixed,
-                                                  tuple(cfg.cys_positions))
-            else:
-                anchors = (length - 1,)
+            resolved = resolve_bicyclic_anchors(length, fixed,
+                                                tuple(cfg.cys_positions),
+                                                cys_layout)
+            anchors = resolved if resolved is not None else ()
         else:
-            # adaptive: position 0 decodable; interior+terminal via post-edit
-            anchors = (0,)
+            # adaptive: length-function layouts resolve fully in the
+            # post-edit (nothing is known yet); auto keeps the position-0
+            # decode-time anchor
+            anchors = () if layout_is_length_fn else (0,)
             post_edit = ("interior_terminal", "C")
     return ConstraintPlan(
         vocab=vocab, fixed=fixed, anchors=anchors, ncaa_pool=pool,
@@ -185,17 +261,20 @@ def build_plan(cfg, vocab: Vocab, length: int | None = None,
         ncaa_bias=float(getattr(cfg, "ncaa_decode_bias", 0.0)),
         min_len=min_len, max_len=max_len, post_edit=post_edit,
         cys_positions=tuple(cfg.cys_positions),
+        cys_layout=cys_layout,
         allow_extra_cys=allow_extra,
         ban_cys=(cfg.design_mode == "bicyclic" and not allow_extra))
 
 
 def plan_for_post_edit(fixed: dict, vocab: Vocab,
                        cys_positions: tuple = (),
-                       allow_extra_cys: bool = False) -> ConstraintPlan:
+                       allow_extra_cys: bool = False,
+                       cys_layout: dict | None = None) -> ConstraintPlan:
     """Minimal plan for the bounded bicycle post-edit (fixed map + the
     user-specified interior anchors)."""
     return ConstraintPlan(vocab=vocab, fixed=dict(fixed),
                           cys_positions=tuple(cys_positions),
+                          cys_layout=cys_layout,
                           allow_extra_cys=allow_extra_cys,
                           post_edit=("bicyclic",))
 
@@ -213,8 +292,9 @@ def apply_post_edit(tokens: list[str], plan: ConstraintPlan,
     L = len(out)
     if L < 1:
         return out
-    anchor_set = {a for a in choose_bicyclic_anchors(
-        L, plan.fixed, plan.cys_positions) if a is not None}
+    resolved = resolve_bicyclic_anchors(
+        L, plan.fixed, plan.cys_positions, plan.cys_layout)
+    anchor_set = {a for a in (resolved or ()) if a is not None}
     for a in anchor_set:
         out[a] = "C"
     if not plan.allow_extra_cys:

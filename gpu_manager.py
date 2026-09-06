@@ -390,7 +390,12 @@ def ensure_gpu_pool(devices_to_use: list[int]):
 
 
 def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
-    """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；超时抛 TimeoutError。"""
+    """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；超时抛 TimeoutError。
+
+    拿到池成员后先做池外占用准入检查（acquire_gpu_external_occupancy）：被外部
+    计算进程（如绕过 Celery 直接 docker run 的训练任务）占用的 GPU 会被放回队尾
+    并换下一块，而不是分配出去导致 CUDA OOM。
+    """
     client = get_redis_client()
     pool_key = config.GPU_POOL_KEY
     timeout_seconds = max(0, int(timeout))
@@ -400,14 +405,27 @@ def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
     logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout_seconds}s)...")
 
     last_reconcile = 0.0
+    rejected_gpu_ids: set[int] = set()
     while True:
         last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError(f"任务 {task_id}: 在 {timeout_seconds}s 内未能获取 GPU。")
+            hint = ""
+            if rejected_gpu_ids:
+                hint = (
+                    f"（其中 GPU {sorted(rejected_gpu_ids)} 存在池外计算型占用，"
+                    "已被跳过——请清理外部进程或释放对应 GPU）"
+                )
+            raise TimeoutError(f"任务 {task_id}: 在 {timeout_seconds}s 内未能获取 GPU。{hint}")
         result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
         if result is not None:
             gpu_id = int(result[1])
+            admitted, detail = _gpu_admission_check(gpu_id, task_id)
+            if not admitted:
+                rejected_gpu_ids.add(gpu_id)
+                client.rpush(pool_key, gpu_id)
+                time.sleep(0.5)
+                continue
             client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
             logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
             return gpu_id
@@ -487,6 +505,12 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
 
         _, gpu_id_str = result
         gpu_id = int(gpu_id_str)
+        admitted, detail = _gpu_admission_check(gpu_id, task_id)
+        if not admitted:
+            # 池外计算型占用：放回队尾换下一块，等待语义由外层循环与 deadline 保证。
+            client.rpush(config.GPU_POOL_KEY, gpu_id)
+            time.sleep(min(sleep_step, 0.5))
+            continue
         client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
         logger.info(f"✅ 任务 {task_id}: 多肽子任务已获取 GPU {gpu_id}。")
         return gpu_id
@@ -523,6 +547,104 @@ def _query_gpu_used_memory_mib(gpu_id: int) -> int | None:
         except ValueError:
             continue
     return None
+
+
+# 准入判定阈值：与 _wait_gpu_memory_reclaimed 的回收阈值保持同一口径——
+# 池内空闲卡经释放回收后计算占用应为 ~0，任何超过该值的计算进程都是池外占用者。
+GPU_ADMISSION_COMPUTE_THRESHOLD_MIB = 200
+# compute-apps 查询不可用时的回退判据：按总显存占用区分"桌面型"（浏览器等
+# 图形进程，几百 MB ~ 2GB，不阻断任务）与"计算型"（训练/推理，远超此值）。
+GPU_ADMISSION_DESKTOP_FALLBACK_MIB = 2048
+GPU_ADMISSION_FALLBACK_TOTAL_RATIO = 0.20
+
+
+def _query_gpu_compute_memory_mib(gpu_id: int) -> int | None:
+    """Sum of CUDA compute processes' memory on a GPU; None when undetectable.
+
+    `--query-compute-apps` 只列出 CUDA 计算上下文——训练/推理进程都会出现，
+    而 Firefox/Chrome 等浏览器的图形（GL/Vulkan）上下文不会出现，因此这是
+    区分"计算型占用"与"桌面型占用"的精确信号。
+    """
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--id={int(gpu_id)}",
+                "--query-compute-apps=used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning("查询 GPU %s 计算进程占用失败: %s", gpu_id, exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("查询 GPU %s 计算进程占用失败: %s", gpu_id, (proc.stderr or "").strip())
+        return None
+    total = 0
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            total += int(float(line))
+        except ValueError:
+            continue
+    return total
+
+
+def _gpu_admission_check(gpu_id: int, task_id: str) -> tuple[bool, str]:
+    """Acquire 准入检查：拒绝被池外计算进程占用的 GPU。
+
+    返回 (是否放行, 说明)。判定顺序：
+    1. compute-apps 合计（精确信号）：> 200MiB 即存在外部计算进程，拒绝；
+       浏览器等桌面图形进程天然不出现在此列表，不会被误杀。
+    2. compute-apps 查询不可用时回退到总显存启发式：used > 2GiB 且
+       (占比 >= 20% 或总显存未知) 视为计算型占用；少量/桌面占用放行。
+    3. 两个查询都失败（NVML 盲区，如 cgroup v2 授权失效）：与释放路径一致，
+       乐观放行并告警——不因监控盲区锁死整个池。
+    """
+    compute_mem = _query_gpu_compute_memory_mib(gpu_id)
+    if compute_mem is not None:
+        if compute_mem <= GPU_ADMISSION_COMPUTE_THRESHOLD_MIB:
+            return True, f"无池外计算占用 (compute={compute_mem}MiB)"
+        logger.warning(
+            "任务 %s: GPU %s 被池外计算进程占用 (compute=%sMiB > %sMiB)，跳过该卡。",
+            task_id,
+            gpu_id,
+            compute_mem,
+            GPU_ADMISSION_COMPUTE_THRESHOLD_MIB,
+        )
+        return False, f"compute={compute_mem}MiB"
+
+    used = _query_gpu_used_memory_mib(gpu_id)
+    if used is None:
+        logger.warning(
+            "任务 %s: GPU %s 占用状态不可探测（NVML 盲区），按既有策略乐观放行。",
+            task_id,
+            gpu_id,
+        )
+        return True, "unknown"
+    total = get_gpu_total_memory_mib(gpu_id)
+    heavy = used > GPU_ADMISSION_DESKTOP_FALLBACK_MIB and (
+        total is None or used >= GPU_ADMISSION_FALLBACK_TOTAL_RATIO * total
+    )
+    if not heavy:
+        return True, f"轻量占用 (used={used}MiB)"
+    logger.warning(
+        "任务 %s: GPU %s 疑似被池外任务占用 (used=%sMiB, total=%s)，跳过该卡。",
+        task_id,
+        gpu_id,
+        used,
+        total,
+    )
+    return False, f"used={used}MiB"
 
 
 def _probe_gpu_total_memory_mib(gpu_id: int) -> int | None:

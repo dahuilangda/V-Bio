@@ -421,7 +421,15 @@ def protenix2dock_task(self, score_args: dict):
             sample_no = os.path.basename(best_path).rsplit("_model_", 1)[1][:-4]
             payload = {"iptm": best_iptm, "structure_dir": structure_dir,
                        "best_cif": best_path, "docked_mode": "fixed",
-                       "engine": "protenix-v2"}
+                       "engine": "protenix-v2",
+                       # execution echo: the design loop compares this against
+                       # what it requested — a missing/mismatched echo means
+                       # the worker task code predates the flag (stale worker
+                       # process) and silently dropped it, which is exactly the
+                       # 2026-09-04 demo failure (blind refine downgraded to a
+                       # clashing staged-local refine, every candidate
+                       # chirality-rejected).
+                       "blind_peptide": bool(score_args.get("blind_peptide"))}
             try:
                 # IPSAE for the best sample: the engine writes
                 # {sample_name}_ipsae_sample_{n}.json next to its own

@@ -1,4 +1,5 @@
 import { readObjectPath } from '../../pages/projectDetail/projectMetrics';
+import { stripCifTokenQuotes } from '../../utils/structureParser';
 
 export interface ExactLigandAtomLink {
   chainId: string;
@@ -157,15 +158,6 @@ function tokenizeCifRow(row: string): string[] {
     match = matcher.exec(row);
   }
   return tokens;
-}
-
-function stripCifTokenQuotes(value: string): string {
-  if (value.length >= 2) {
-    if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
 }
 
 function findHeaderIndex(headers: string[], names: string[]): number {

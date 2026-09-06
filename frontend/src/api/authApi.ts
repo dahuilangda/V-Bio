@@ -88,10 +88,6 @@ export async function renewManagementSession(managementToken: string): Promise<s
   return refreshed;
 }
 
-export function getAuthHeaders(): Record<string, string> {
-  return ENV.apiToken ? { 'X-API-Token': ENV.apiToken } : {};
-}
-
 function validateRegistration(input: AuthRegisterInput): void {
   if (input.username.trim().length < 3) {
     throw new Error('Username must be at least 3 characters.');

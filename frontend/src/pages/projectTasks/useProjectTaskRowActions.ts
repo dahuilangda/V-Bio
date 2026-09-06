@@ -14,6 +14,7 @@ import {
   waitForRuntimeTaskToStop,
 } from './taskDataUtils';
 import { inferTaskStateFromStatusPayload } from './taskRuntimeUiUtils';
+import { hasObjectContent } from '../../pages/projectTasks/recordReaders';
 
 interface UseProjectTaskRowActionsOptions {
   project: Project | null;
@@ -22,6 +23,9 @@ interface UseProjectTaskRowActionsOptions {
   navigate: NavigateFunction;
   setError: Dispatch<SetStateAction<string | null>>;
   setTasks: Dispatch<SetStateAction<ProjectTask[]>>;
+  /** Server-confirmed row deletion entry point from the data loader: records the
+   *  tombstone so in-flight writers cannot merge the row back into the list. */
+  removeTaskRow: (taskRowId: string) => void;
   terminateBackendTask: (taskId: string) => Promise<{ terminated?: boolean }>;
 }
 
@@ -42,9 +46,6 @@ interface UseProjectTaskRowActionsResult {
   removeTask: (task: ProjectTask) => Promise<void>;
 }
 
-function hasObjectContent(value: unknown): boolean {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
-}
 
 export function useProjectTaskRowActions({
   project,
@@ -53,6 +54,7 @@ export function useProjectTaskRowActions({
   navigate,
   setError,
   setTasks,
+  removeTaskRow,
   terminateBackendTask,
 }: UseProjectTaskRowActionsOptions): UseProjectTaskRowActionsResult {
   const [openingTaskId, setOpeningTaskId] = useState<string | null>(null);
@@ -342,7 +344,10 @@ export function useProjectTaskRowActions({
         }
       }
       await deleteProjectTask(task.id);
-      setTasks((prev) => sanitizeTaskRows(prev).filter((row) => row.id !== task.id));
+      // Tombstone + filter in one synchronous step: any writer still holding a
+      // pre-deletion snapshot (poll tick, pagination chunk, hydration) will drop
+      // the row instead of merging it back.
+      removeTaskRow(task.id);
       if (editingTaskNameId === task.id) {
         setEditingTaskNameId(null);
         setEditingTaskNameValue('');
@@ -352,7 +357,7 @@ export function useProjectTaskRowActions({
     } finally {
       setDeletingTaskId(null);
     }
-  }, [editingTaskNameId, resolveEffectiveRuntimeState, setError, setTasks, terminateBackendTask]);
+  }, [editingTaskNameId, removeTaskRow, resolveEffectiveRuntimeState, setError, terminateBackendTask]);
 
   return {
     openingTaskId,

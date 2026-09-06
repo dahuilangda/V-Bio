@@ -155,10 +155,6 @@ export function snapshotPrimaryLoaded(viewer?: any): void {
   overlayTrackingFor(viewer).refs = [];
 }
 
-export function trackOverlayLoaded(viewer: any): void {
-  endOverlayLoad(viewer);
-}
-
 /**
  * Remove ALL loaded structures from the MolStar plugin state.
  */

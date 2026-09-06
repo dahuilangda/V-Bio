@@ -21,6 +21,8 @@ interface WorkflowDescriptor {
 export interface ProjectDetailLayoutProps {
   projectName: string;
   canDownloadResult: boolean;
+  /** True while the result archive blob is being fetched — button shows progress. */
+  downloadingResult?: boolean;
   workflow: WorkflowDescriptor;
   workspaceTab: WorkspaceTab;
   componentStepLabel: string;
@@ -84,6 +86,7 @@ export interface ProjectDetailLayoutProps {
 export function ProjectDetailLayout({
   projectName,
   canDownloadResult,
+  downloadingResult = false,
   workflow,
   workspaceTab,
   componentStepLabel,
@@ -161,6 +164,7 @@ export function ProjectDetailLayout({
           onOpenTaskHistory={onOpenTaskHistory}
           onDownloadResult={onDownloadResult}
           canDownloadResult={canDownloadResult}
+          downloadingResult={downloadingResult}
           onSaveDraft={onSaveDraft}
           canEdit={canEdit}
           saving={saving}

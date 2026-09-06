@@ -334,13 +334,15 @@ export function AdminMonitorPage() {
     recentTaskPageStart + RECENT_TASK_PAGE_SIZE
   );
 
-  useEffect(() => {
+  // Render-time clamp (not an effect) when the recent-task list shrinks below
+  // the current page; the page reset on window switch lives in the button
+  // handler below, where the event originates.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevRecentTaskPageCount, setPrevRecentTaskPageCount] = useState(recentTaskPageCount);
+  if (recentTaskPageCount !== prevRecentTaskPageCount) {
+    setPrevRecentTaskPageCount(recentTaskPageCount);
     setRecentTaskPage((current) => Math.min(current, recentTaskPageCount));
-  }, [recentTaskPageCount]);
-
-  useEffect(() => {
-    setRecentTaskPage(1);
-  }, [windowHours]);
+  }
 
   const workers = useMemo(
     () => Object.values(cluster?.workers || {}).sort((left, right) => left.server.localeCompare(right.server)),
@@ -380,7 +382,12 @@ export function AdminMonitorPage() {
                 key={option.value}
                 className={windowHours === option.value ? 'active' : ''}
                 aria-pressed={windowHours === option.value}
-                onClick={() => setWindowHours(option.value)}
+                onClick={() => {
+                  setWindowHours(option.value);
+                  // The window switch refetches the task list; page reset belongs
+                  // to this event, not to an effect watching windowHours.
+                  setRecentTaskPage(1);
+                }}
               >
                 {option.label}
               </button>

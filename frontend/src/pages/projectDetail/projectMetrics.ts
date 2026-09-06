@@ -1,6 +1,9 @@
+import { toFiniteNumber } from '../projectTasks/recordReaders';
+import { isNumericToken } from '../projectTasks/taskDataConfidence';
+import { normalizeProbability } from '../projectTasks/taskDataCore';
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type InterfaceMetricSource = 'ipsae' | 'iptm' | 'none';
-export type InterfaceMetricKind = 'ligand_ipsae' | 'ipsae_dom' | 'pair_iptm' | 'iptm' | 'none';
+export type InterfaceMetricKind = 'ligand_ipsae' | 'ipsae_dom' | 'interface_metric' | 'pair_iptm' | 'iptm' | 'none';
 
 export interface PreferredInterfaceMetric {
   label: 'IPSAE' | 'ipTM';
@@ -12,6 +15,7 @@ export interface PreferredInterfaceMetric {
   iptm: number | null;
   ipsaeDom: number | null;
   ligandIpsaeMax: number | null;
+  interfaceMetric: number | null;
 }
 
 export function findProgressPercent(data: unknown): number | null {
@@ -138,23 +142,12 @@ export function splitChainTokens(value: string): string[] {
     .filter(Boolean);
 }
 
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return value;
-}
-
-function normalizeProbability(value: number | null): number | null {
-  if (value === null) return null;
-  if (value > 1 && value <= 100) return value / 100;
-  return value;
-}
-
 export function readProbabilityMetric(data: Record<string, unknown> | null, paths: string[]): number | null {
   if (!data) return null;
   return normalizeProbability(readFirstFiniteMetric(data, paths));
 }
 
-function normalizeChainToken(value: string): string {
+export function normalizeChainToken(value: string): string {
   return String(value || '').trim().toUpperCase();
 }
 
@@ -179,10 +172,6 @@ function chainTokenEquals(a: string, b: string): boolean {
     }
   }
   return false;
-}
-
-function isNumericToken(value: string): boolean {
-  return /^\d+$/.test(String(value || '').trim());
 }
 
 function readPairValueFromNestedMap(
@@ -338,6 +327,22 @@ export function readLigandIpsaeMaxMetric(confidence: Record<string, unknown> | n
   return readProbabilityMetric(confidence, ['ligand_ipsae_max', 'ligandIpsaeMax']);
 }
 
+/**
+ * Unified `interface_metric` channel: prediction engines that report a single
+ * interface score (e.g. the D-peptide design loop's refined ipSAE) write
+ * interface_metric + interface_metric_label/source instead of the legacy
+ * ligand_ipsae_max / ipsae_dom pair. Only counts as IPSAE when the declared
+ * label/source says so — the same task-confidence contract the task list
+ * resolver already implements (taskDataConfidence.readInterfaceIpsaeMetric).
+ */
+export function readInterfaceMetricIpsaeChannel(confidence: Record<string, unknown> | null): number | null {
+  if (!confidence) return null;
+  const source = readFirstNonEmptyStringMetric(confidence, ['interface_metric_source', 'interfaceMetricSource']).toLowerCase();
+  const label = readFirstNonEmptyStringMetric(confidence, ['interface_metric_label', 'interfaceMetricLabel']).toLowerCase();
+  if (source !== 'ipsae' && label !== 'ipsae') return null;
+  return readProbabilityMetric(confidence, ['interface_metric', 'interface_metric_value', 'interfaceMetricValue']);
+}
+
 export function readChainMeanPlddtForChain(confidence: Record<string, unknown> | null, chainId: string | null): number | null {
   if (!confidence || !chainId) return null;
   const map = readObjectPath(confidence, 'chain_mean_plddt');
@@ -396,8 +401,10 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
   iptm: number | null;
   ipsaeDom: number | null;
   ligandIpsaeMax: number | null;
+  interfaceMetric?: number | null;
 }): PreferredInterfaceMetric {
   const { pairIptm, iptm, ipsaeDom, ligandIpsaeMax } = params;
+  const interfaceMetric = params.interfaceMetric ?? null;
 
   if (ligandIpsaeMax !== null) {
     return {
@@ -409,7 +416,8 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
       pairIptm,
       iptm,
       ipsaeDom,
-      ligandIpsaeMax
+      ligandIpsaeMax,
+      interfaceMetric
     };
   }
 
@@ -423,7 +431,23 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
       pairIptm,
       iptm,
       ipsaeDom,
-      ligandIpsaeMax
+      ligandIpsaeMax,
+      interfaceMetric
+    };
+  }
+
+  if (interfaceMetric !== null) {
+    return {
+      label: 'IPSAE',
+      source: 'ipsae',
+      kind: 'interface_metric',
+      value: interfaceMetric,
+      tone: toneForProbability(interfaceMetric),
+      pairIptm,
+      iptm,
+      ipsaeDom,
+      ligandIpsaeMax,
+      interfaceMetric
     };
   }
 
@@ -438,7 +462,8 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
       pairIptm,
       iptm,
       ipsaeDom,
-      ligandIpsaeMax
+      ligandIpsaeMax,
+      interfaceMetric
     };
   }
 
@@ -451,7 +476,8 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
     pairIptm,
     iptm,
     ipsaeDom,
-    ligandIpsaeMax
+    ligandIpsaeMax,
+    interfaceMetric
   };
 }
 
@@ -467,11 +493,13 @@ export function resolvePreferredInterfaceMetric(
     : null;
   const ipsaeDom = readIpsaeDomMetric(confidence);
   const ligandIpsaeMax = readLigandIpsaeMaxMetric(confidence);
+  const interfaceMetric = readInterfaceMetricIpsaeChannel(confidence);
   return resolvePreferredInterfaceMetricFromValues({
     pairIptm,
     iptm,
     ipsaeDom,
-    ligandIpsaeMax
+    ligandIpsaeMax,
+    interfaceMetric
   });
 }
 

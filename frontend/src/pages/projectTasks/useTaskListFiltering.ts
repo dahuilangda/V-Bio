@@ -267,9 +267,13 @@ export function useTaskListFiltering(
     }
   }, [taskFiltersStorageKey]);
 
-  useEffect(() => {
+  // Render-time adjustment (not an effect) when the URL's page param changes:
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevInitialPage, setPrevInitialPage] = useState(initialPage);
+  if (initialPage !== prevInitialPage) {
+    setPrevInitialPage(initialPage);
     setPage((prev) => (prev === initialPage ? prev : initialPage));
-  }, [initialPage]);
+  }
 
   const setSortKeyWithPageReset = useCallback<Dispatch<SetStateAction<SortKey>>>((value) => {
     setPage(1);

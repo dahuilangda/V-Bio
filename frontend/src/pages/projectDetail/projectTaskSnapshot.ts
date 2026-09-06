@@ -15,6 +15,7 @@ import {
   normalizeInputComponents,
 } from '../../utils/projectInputs';
 import { normalizeWorkflowKey } from '../../utils/workflows';
+import { asRecord } from '../projectTasks/recordReaders';
 
 export const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
 export const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
@@ -49,6 +50,12 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'peptideNonNaturalMax',
   'peptideBicyclicLinkerCcd',
   'peptideBicyclicCysPositionMode',
+  'peptideBicyclicCysLayout',
+  'peptideBicyclicRing1',
+  'peptideBicyclicRing2',
+  'peptideBicyclicRatio1',
+  'peptideBicyclicRatio2',
+  'peptideBicyclicRatio3',
   'peptideBicyclicFixTerminalCys',
   'peptideBicyclicIncludeExtraCys',
   'peptideBicyclicCys1Pos',
@@ -85,9 +92,6 @@ function normalizeComponents(components: InputComponent[]): InputComponent[] {
   return normalizeInputComponents(components);
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 function normalizeTaskInputOptions(value: unknown): Partial<PredictionOptions> {
   const raw = asRecord(value);
@@ -308,12 +312,6 @@ function extractLeadOptUploadFromRawComponent(component: Record<string, unknown>
   const content = (contentFromMeta || contentFromSequence || '').trim();
   if (!content) return null;
   return { role, fileName, content };
-}
-
-export function readTaskLeadOptUploads(task: ProjectTask | null): LeadOptPersistedUploads {
-  const empty: LeadOptPersistedUploads = { target: null, ligand: null };
-  if (!task) return empty;
-  return readLeadOptUploadsFromComponents(task.components);
 }
 
 export function readLeadOptUploadsFromComponents(components: unknown): LeadOptPersistedUploads {

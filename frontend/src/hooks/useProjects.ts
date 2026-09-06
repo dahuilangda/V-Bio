@@ -24,20 +24,13 @@ import { removeProjectInputConfig, removeProjectUiState } from '../utils/project
 import {
   buildTaskRuntimeFailureMessage,
   inferTaskStateFromStatusPayload,
-  readTaskRuntimeStatusText
+  readTaskRuntimeStatusText,
+  taskStatePriority
 } from '../utils/taskRuntime';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
 const DEFAULT_TASK_TYPE = 'prediction';
 
-const TASK_STATE_PRIORITY: Record<string, number> = {
-  DRAFT: 0,
-  QUEUED: 1,
-  RUNNING: 2,
-  SUCCESS: 3,
-  FAILURE: 3,
-  REVOKED: 3
-};
 const PROJECT_DELETE_TERMINATE_CONCURRENCY = 6;
 const PROJECT_DELETE_STOP_POLL_INTERVAL_MS = 700;
 const PROJECT_DELETE_STOP_POLL_TIMEOUT_MS = 12000;
@@ -80,10 +73,6 @@ function buildProjectListSignature(rows: Project[]): string {
         .join('|');
     })
     .join('\n');
-}
-
-function taskStatePriority(value: unknown): number {
-  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
 }
 
 function mergeProjectRuntimeFields(next: Project, prev: Project | null): Project {

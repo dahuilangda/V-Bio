@@ -1,5 +1,6 @@
 import { ExternalLink, LoaderCircle, Share2, Square, Trash2 } from 'lucide-react';
-import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
+import { memo } from 'react';
+import { MemoLigand2DPreview as Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import type { InputComponent, ProjectTask } from '../../types/models';
 import { canEditTask } from '../../utils/accessControl';
 import { formatDateTime } from '../../utils/date';
@@ -28,6 +29,9 @@ interface ProjectTaskRowProps {
   mode: 'default' | 'lead_opt' | 'peptide';
   visibleMetricColumns: TaskMetricColumnKey[];
   canManageShares: boolean;
+  /** Null when no row is being renamed; non-editing rows receive '' (see
+   *  ProjectTasksTable) so memo comparison is not invalidated for every row on
+   *  each keystroke in the rename input. */
   editingTaskNameId: string | null;
   editingTaskNameValue: string;
   savingTaskNameId: string | null;
@@ -44,7 +48,11 @@ interface ProjectTaskRowProps {
   onEditingTaskNameValueChange: (value: string) => void;
 }
 
-export function ProjectTaskRow({
+// Memoized: the page re-renders on every poll tick, filter keystroke and
+// rename keystroke; rows whose data did not change must not re-render (each
+// one hosts a ligand preview subtree). Props are stable identities from the
+// parent (useCallback handlers, memoized row arrays, useState column list).
+function ProjectTaskRowImpl({
   row,
   mode,
   visibleMetricColumns,
@@ -366,3 +374,5 @@ export function ProjectTaskRow({
     </tr>
   );
 }
+
+export const ProjectTaskRow = memo(ProjectTaskRowImpl);

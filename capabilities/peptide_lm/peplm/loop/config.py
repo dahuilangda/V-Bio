@@ -36,6 +36,10 @@ class LoopConfig:
     # (the terminal residue is always the third Cys)
     design_mode: str = "linear"          # linear | cyclic | bicyclic
     cys_positions: tuple = ()            # e.g. (2, 7, 14) — 0-based anchors
+    # length-function anchor layout ({"mode": "ring"|"ratio", ...}) that
+    # supersedes cys_positions when set; keeps manual topologies valid
+    # across adaptive design lengths
+    cys_layout: dict | None = None
     allow_extra_cys: bool = False        # keep non-anchor Cys unlinked
     linker_ccd: str = "SEZ"
     bicyclic_layout: str = "first_last"  # first_last | interior_terminal

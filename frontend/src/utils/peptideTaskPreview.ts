@@ -1,18 +1,15 @@
 import {
   asRecord,
-  readFiniteNumber,
+  asRecordArray,
   readFirstFinite as firstFiniteMetric,
   readFirstText as firstTextMetric,
+  readFiniteNumber,
   readObjectPath,
-  readText,
+  readText
 } from '../pages/projectTasks/recordReaders';
 
 export const PEPTIDE_TASK_PREVIEW_KEY = 'peptide_preview';
 
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
-}
 
 function normalizePlddtValue(value: number | null): number | null {
   if (value === null || !Number.isFinite(value)) return null;

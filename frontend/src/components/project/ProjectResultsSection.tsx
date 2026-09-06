@@ -1,4 +1,5 @@
-import { memo, useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { memo, useMemo, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { useTabsKeyboard } from '../ui/useTabsKeyboard';
 import { AffinityResultsWorkspace } from './AffinityWorkspace';
 import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
@@ -114,9 +115,24 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
     initialPredictionColorMode
   );
 
-  useEffect(() => {
+  // Render-time adjustment (no effect pass): the viewer reverts to the task's
+  // default color mode whenever the opened task or its default changes.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevPredictionColorModeKey, setPrevPredictionColorModeKey] = useState({
+    initialPredictionColorMode,
+    projectTaskId
+  });
+  if (initialPredictionColorMode !== prevPredictionColorModeKey.initialPredictionColorMode || projectTaskId !== prevPredictionColorModeKey.projectTaskId) {
+    setPrevPredictionColorModeKey({ initialPredictionColorMode, projectTaskId });
     setPredictionViewerColorMode(initialPredictionColorMode);
-  }, [initialPredictionColorMode, projectTaskId]);
+  }
+
+  // APG tabs keyboard behaviour for the 3D color mode switch.
+  const colorModeTabs = useTabsKeyboard<'default' | 'alphafold'>(
+    predictionViewerColorMode,
+    setPredictionViewerColorMode,
+    ['alphafold', 'default']
+  );
 
   const predictionViewerStructureText = useMemo(
     () => displayStructureConfidenceText,
@@ -210,11 +226,17 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
               <div className="result-aside-head">
                 <div className="result-aside-title">Ligand</div>
                 {!isAffinityOnlyPrediction && (
-                  <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
+                  <div
+                    className="prediction-render-mode-switch"
+                    role="tablist"
+                    aria-label="3D color mode"
+                    {...colorModeTabs.props}
+                  >
                   <button
                     type="button"
                     role="tab"
                     aria-selected={predictionViewerColorMode === 'alphafold'}
+                    tabIndex={colorModeTabs.tabTabIndex(predictionViewerColorMode === 'alphafold')}
                     className={`prediction-render-mode-btn ${
                       predictionViewerColorMode === 'alphafold' ? 'active' : ''
                     }`}
@@ -227,6 +249,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                     type="button"
                     role="tab"
                     aria-selected={predictionViewerColorMode === 'default'}
+                    tabIndex={colorModeTabs.tabTabIndex(predictionViewerColorMode === 'default')}
                     className={`prediction-render-mode-btn ${
                       predictionViewerColorMode === 'default' ? 'active' : ''
                     }`}

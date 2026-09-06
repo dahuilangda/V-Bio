@@ -32,6 +32,7 @@ import type {
 import { MemoLigand2DPreview } from './Ligand2DPreview';
 import { MolstarViewer } from './MolstarViewer';
 import { useVirtualScreeningPredictions } from './useVirtualScreeningPredictions';
+import { asRecord } from '../../pages/projectTasks/recordReaders';
 
 interface VirtualScreeningResultsSectionProps {
   screening: Record<string, unknown>;
@@ -87,9 +88,6 @@ function readFinite(value: unknown): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
 
 function parseRows(screening: Record<string, unknown>): ScreeningRow[] {
   const compounds = Array.isArray(screening.compounds) ? screening.compounds : [];
@@ -255,13 +253,21 @@ export function VirtualScreeningResultsSection({
   const clampedPage = Math.min(page, totalPages);
   const pageRows = filteredRows.slice((clampedPage - 1) * PAGE_SIZE, clampedPage * PAGE_SIZE);
 
-  useEffect(() => {
-    if (page !== clampedPage) setPage(clampedPage);
-  }, [clampedPage, page]);
-
-  useEffect(() => {
+  // Render-time state adjustment instead of effects — no extra render pass and
+  // no post-paint wrong-page frame: clamp the page when the filtered set
+  // shrinks, and keep the go-to-page input mirroring the effective page when
+  // it changes from elsewhere (prev/next buttons, filter changes).
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevTotalPages, setPrevTotalPages] = useState(totalPages);
+  if (totalPages !== prevTotalPages) {
+    setPrevTotalPages(totalPages);
+    if (page > totalPages) setPage(totalPages);
+  }
+  const [prevClampedPage, setPrevClampedPage] = useState(clampedPage);
+  if (clampedPage !== prevClampedPage) {
+    setPrevClampedPage(clampedPage);
     setPageInput(String(clampedPage));
-  }, [clampedPage]);
+  }
 
   useEffect(() => {
     if (!isViewerResizing) return;

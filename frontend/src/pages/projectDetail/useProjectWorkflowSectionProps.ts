@@ -186,10 +186,15 @@ interface UseProjectWorkflowSectionPropsInput {
   peptideNonNaturalMin: number;
   peptideNonNaturalMax: number;
   peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'BS3';
-  peptideBicyclicCysPositionMode: 'auto' | 'manual';
   peptideBicyclicFixTerminalCys: boolean;
   peptideBicyclicIncludeExtraCys: boolean;
   peptideBicyclicCys1Pos: number;
+  peptideBicyclicCysLayout: 'auto' | 'ring' | 'ratio' | 'absolute';
+  peptideBicyclicRing1: number;
+  peptideBicyclicRing2: number;
+  peptideBicyclicRatio1: number;
+  peptideBicyclicRatio2: number;
+  peptideBicyclicRatio3: number;
   peptideBicyclicCys2Pos: number;
   peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
@@ -208,10 +213,12 @@ interface UseProjectWorkflowSectionPropsInput {
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
   onPeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
-  onPeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
   onPeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
   onPeptideBicyclicIncludeExtraCysChange: (value: boolean) => void;
   onPeptideBicyclicCys1PosChange: (value: number) => void;
+  onPeptideBicyclicCysLayoutChange: (value: 'auto' | 'ring' | 'ratio' | 'absolute') => void;
+  onPeptideBicyclicRingChange: (ring1: number, ring2: number) => void;
+  onPeptideBicyclicRatioChange: (pct1: number, pct2: number, pct3?: number) => void;
   onPeptideBicyclicCys2PosChange: (value: number) => void;
   onPeptideBicyclicCys3PosChange: (value: number) => void;
 }
@@ -376,10 +383,15 @@ export function useProjectWorkflowSectionProps({
   peptideNonNaturalMin,
   peptideNonNaturalMax,
   peptideBicyclicLinkerCcd,
-  peptideBicyclicCysPositionMode,
   peptideBicyclicFixTerminalCys,
   peptideBicyclicIncludeExtraCys,
   peptideBicyclicCys1Pos,
+  peptideBicyclicCysLayout,
+  peptideBicyclicRing1,
+  peptideBicyclicRing2,
+  peptideBicyclicRatio1,
+  peptideBicyclicRatio2,
+  peptideBicyclicRatio3,
   peptideBicyclicCys2Pos,
   peptideBicyclicCys3Pos,
   onPeptideDesignModeChange,
@@ -395,10 +407,12 @@ export function useProjectWorkflowSectionProps({
   onPeptideResiduePoolChange,
   onPeptideNonNaturalRangeChange,
   onPeptideBicyclicLinkerCcdChange,
-  onPeptideBicyclicCysPositionModeChange,
   onPeptideBicyclicFixTerminalCysChange,
   onPeptideBicyclicIncludeExtraCysChange,
   onPeptideBicyclicCys1PosChange,
+  onPeptideBicyclicCysLayoutChange,
+  onPeptideBicyclicRingChange,
+  onPeptideBicyclicRatioChange,
   onPeptideBicyclicCys2PosChange,
   onPeptideBicyclicCys3PosChange
 }: UseProjectWorkflowSectionPropsInput): UseProjectWorkflowSectionPropsResult {
@@ -638,10 +652,15 @@ export function useProjectWorkflowSectionProps({
         peptideCustomResidueLibrary: customResidueLibrary,
         onCustomResidueLibraryChange,
         peptideBicyclicLinkerCcd,
-        peptideBicyclicCysPositionMode,
         peptideBicyclicFixTerminalCys,
         peptideBicyclicIncludeExtraCys,
         peptideBicyclicCys1Pos,
+        peptideBicyclicCysLayout,
+        peptideBicyclicRing1,
+        peptideBicyclicRing2,
+        peptideBicyclicRatio1,
+        peptideBicyclicRatio2,
+        peptideBicyclicRatio3,
         peptideBicyclicCys2Pos,
         peptideBicyclicCys3Pos,
         onBackendChange,
@@ -659,10 +678,12 @@ export function useProjectWorkflowSectionProps({
               onPeptideResiduePoolChange,
         onPeptideNonNaturalRangeChange,
         onPeptideBicyclicLinkerCcdChange,
-        onPeptideBicyclicCysPositionModeChange,
         onPeptideBicyclicFixTerminalCysChange,
         onPeptideBicyclicIncludeExtraCysChange,
         onPeptideBicyclicCys1PosChange,
+        onPeptideBicyclicCysLayoutChange,
+        onPeptideBicyclicRingChange,
+        onPeptideBicyclicRatioChange,
         onPeptideBicyclicCys2PosChange,
         onPeptideBicyclicCys3PosChange
       })

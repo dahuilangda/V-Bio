@@ -28,22 +28,6 @@ export function normalizeCustomResidueBackbone(value: unknown): CustomResidueBac
   return backbone;
 }
 
-export function normalizeCustomResidueDefinition(value: unknown): NormalizedCustomResidueDefinition | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const raw = value as Record<string, unknown>;
-  const ccd = normalizeCustomResidueCode(raw.ccd ?? raw.code);
-  const smiles = String(raw.smiles || '').trim();
-  if (!ccd || !smiles) return null;
-  return {
-    ccd,
-    smiles,
-    baseResidue: String(raw.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
-    label: String(raw.label || '').trim().slice(0, 80) || undefined,
-    backbone: normalizeCustomResidueBackbone(raw.backbone) || undefined,
-    cTerminalAmidated: Boolean(raw.cTerminalAmidated) || undefined
-  };
-}
-
 // Copy a drawn SMILES onto any selected custom pool entry that is missing one. This is a
 // load-time migration, not a submit-time fallback: once the SMILES is on the pool entry it
 // persists with the config and the submit path still reads the pool entry only. Pre-fix

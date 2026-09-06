@@ -26,6 +26,7 @@ import {
   Download,
   Info,
   KeyRound,
+  LoaderCircle,
   Plus,
   Search,
   ShieldCheck,
@@ -34,6 +35,7 @@ import {
   X
 } from 'lucide-react';
 import { InfoTip } from '../components/common/InfoTip';
+import { useModalDialog } from '../components/ui/useModalDialog';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   AffinityScoringMode,
@@ -1571,6 +1573,15 @@ ${submitTaskIdCapture}`;
     setRegistryScopeProjectId(isProjectScoped ? scopedProjectId : null);
   };
 
+  // WAI-ARIA dialog behaviour (Escape / focus management / containment) for the
+  // three modal-mask dialogs this page hosts.
+  const yamlBuilderDialogProps = useModalDialog(yamlBuilderOpen, () => setYamlBuilderOpen(false));
+  const projectTokenDialogProps = useModalDialog(
+    projectTokenPanelProjectId !== null,
+    () => setProjectTokenPanelProjectId(null)
+  );
+  const tokenRegistryDialogProps = useModalDialog(registryOpen, closeTokenRegistry);
+
   const openTokenRegistryForProject = (projectId: string) => {
     openTokenRegistry(projectId);
   };
@@ -2864,7 +2875,12 @@ ${submitTaskIdCapture}`;
 
       {yamlBuilderOpen && (
         <div className="modal-mask" onClick={() => setYamlBuilderOpen(false)}>
-          <div className="modal modal-wide api-yaml-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal modal-wide api-yaml-modal"
+            onClick={(e) => e.stopPropagation()}
+            {...yamlBuilderDialogProps}
+            aria-label="YAML Builder"
+          >
             <div className="api-token-modal-head">
               <h2><Info size={17} /> YAML Builder</h2>
               <button
@@ -3289,7 +3305,12 @@ ${submitTaskIdCapture}`;
 
       {projectTokenPanelProjectId && (
         <div className="modal-mask" onClick={() => setProjectTokenPanelProjectId(null)}>
-          <div className="modal api-project-token-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal api-project-token-modal"
+            onClick={(e) => e.stopPropagation()}
+            {...projectTokenDialogProps}
+            aria-label="Project tokens"
+          >
             <div className="api-token-modal-head">
               <h2><KeyRound size={17} /> {projectTokenPanelProject?.name || 'Project'} Tokens</h2>
               <button
@@ -3337,9 +3358,10 @@ ${submitTaskIdCapture}`;
                             title="Revoke token"
                             aria-label="Revoke token"
                             disabled={tokenRevokingId === token.id}
+                            aria-busy={tokenRevokingId === token.id}
                             onClick={() => { void revokeToken(token.id); }}
                           >
-                            <ShieldOff size={13} />
+                            {tokenRevokingId === token.id ? <LoaderCircle size={13} className="spin" /> : <ShieldOff size={13} />}
                           </button>
                         )}
                         <button
@@ -3348,9 +3370,10 @@ ${submitTaskIdCapture}`;
                           title="Delete token"
                           aria-label="Delete token"
                           disabled={tokenDeletingId === token.id}
+                          aria-busy={tokenDeletingId === token.id}
                           onClick={() => { void removeToken(token.id); }}
                         >
-                          <Trash2 size={13} />
+                          {tokenDeletingId === token.id ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={13} />}
                         </button>
                       </div>
                     </article>
@@ -3378,7 +3401,12 @@ ${submitTaskIdCapture}`;
 
       {registryOpen && (
         <div className="modal-mask" onClick={closeTokenRegistry}>
-          <div className="modal modal-wide api-token-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal modal-wide api-token-modal"
+            onClick={(e) => e.stopPropagation()}
+            {...tokenRegistryDialogProps}
+            aria-label="Token registry"
+          >
             <div className="api-token-modal-head">
               <h2><ShieldCheck size={17} /> Token Registry{registryScopeProject ? ` · ${registryScopeProject.name}` : ''}</h2>
               <button
@@ -3560,11 +3588,12 @@ ${submitTaskIdCapture}`;
                                     title="Revoke"
                                     aria-label="Revoke token"
                                     disabled={!token.is_active || tokenRevokingId === token.id}
+                                    aria-busy={tokenRevokingId === token.id}
                                     onClick={() => {
                                       void revokeToken(token.id);
                                     }}
                                   >
-                                    <ShieldOff size={14} />
+                                    {tokenRevokingId === token.id ? <LoaderCircle size={14} className="spin" /> : <ShieldOff size={14} />}
                                   </button>
                                   <button
                                     className="icon-btn danger"
@@ -3572,11 +3601,12 @@ ${submitTaskIdCapture}`;
                                     title="Delete"
                                     aria-label="Delete token"
                                     disabled={tokenDeletingId === token.id}
+                                    aria-busy={tokenDeletingId === token.id}
                                     onClick={() => {
                                       void removeToken(token.id);
                                     }}
                                   >
-                                    <Trash2 size={14} />
+                                    {tokenDeletingId === token.id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}
                                   </button>
                                 </div>
                               </td>

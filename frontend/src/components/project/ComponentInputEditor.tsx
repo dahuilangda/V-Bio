@@ -543,7 +543,12 @@ export function ComponentInputEditor({
     }
   }, [selectedComponentId]);
 
-  useEffect(() => {
+  // Render-time adjustment (not an effect): prune stale collapse flags as soon
+  // as the component list changes instead of after paint.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevComponents, setPrevComponents] = useState(components);
+  if (components !== prevComponents) {
+    setPrevComponents(components);
     setCollapsedById((prev) => {
       const next: Record<string, boolean> = {};
       let changed = false;
@@ -560,7 +565,7 @@ export function ComponentInputEditor({
       }
       return changed ? next : prev;
     });
-  }, [components]);
+  }
 
   const patchOne = (id: string, patch: Partial<InputComponent>) => {
     onChange(

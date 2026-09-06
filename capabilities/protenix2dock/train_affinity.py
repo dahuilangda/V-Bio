@@ -250,6 +250,13 @@ def train(args: argparse.Namespace) -> Path:
     end_epoch = start_epoch + max(1, args.epochs)
     for epoch in range(start_epoch, end_epoch):
         random.shuffle(samples)
+        # Giant complexes OOM-cascade; sinking them to the epoch tail maximizes
+        # progress before any hard tail and lets empty_cache keep pace.
+        if getattr(args, "feature_cache", None):
+            _tok_map_p = Path(args.feature_cache) / "n_token_map.json"
+            if _tok_map_p.exists():
+                _tm = json.loads(_tok_map_p.read_text())
+                samples.sort(key=lambda r: _tm.get(r.get("name", ""), 0))
         # Nesso-style assay-grouped pairing: with probability, draw a second
         # sample from the same assay for the relative-difference loss.
         by_assay = defaultdict(list)
@@ -333,7 +340,7 @@ def train(args: argparse.Namespace) -> Path:
                 errors += 1
                 if errors <= 20:
                     print(f"[skip] sample {si} failed: {exc}", flush=True)
-                if errors > max(50, len(samples) // 5):
+                if errors > max(50, len(samples) // 2):
                     raise RuntimeError(f"too many sample failures ({errors})")
                 # Crystal complexes vary wildly in token count; without this the
                 # caching allocator fragments across shapes and later samples OOM.

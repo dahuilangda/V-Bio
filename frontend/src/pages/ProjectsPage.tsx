@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useOverlayHost } from '../components/ui/OverlayContext';
+import { useModalDialog } from '../components/ui/useModalDialog';
 import {
   Activity,
   Atom,
@@ -13,6 +14,7 @@ import {
   FolderOpen,
   FlaskConical,
   Hash,
+  LoaderCircle,
   Plus,
   RefreshCcw,
   Search,
@@ -107,6 +109,7 @@ export function ProjectsPage() {
   const [filtersHydrated, setFiltersHydrated] = useState(false);
   const [sharedProject, setSharedProject] = useState<Project | null>(null);
   const [cancellingProjectId, setCancellingProjectId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'project_list', userId: session?.userId || null }));
   useEffect(() => {
     writeStoredCopilotOpen({ contextType: 'project_list', userId: session?.userId || null }, copilotOpen);
@@ -457,13 +460,20 @@ export function ProjectsPage() {
     }
   };
 
-  useEffect(() => {
+  // Render-time adjustment (not effects): reset to page 1 when any filter
+  // changes, and clamp the page when the filtered total shrinks below it.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const filtersSignature = `${search}\u001f${typeFilter}\u001f${stateFilter}\u001f${sortBy}\u001f${pageSize}\u001f${backendFilter}\u001f${activityFilter}\u001f${updatedWithinDays}\u001f${minTaskCount}`;
+  const [prevFiltersSignature, setPrevFiltersSignature] = useState(filtersSignature);
+  if (filtersSignature !== prevFiltersSignature) {
+    setPrevFiltersSignature(filtersSignature);
     setPage(1);
-  }, [search, typeFilter, stateFilter, sortBy, pageSize, backendFilter, activityFilter, updatedWithinDays, minTaskCount]);
-
-  useEffect(() => {
+  }
+  const [prevTotalPages, setPrevTotalPages] = useState(totalPages);
+  if (totalPages !== prevTotalPages) {
+    setPrevTotalPages(totalPages);
     if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
+  }
 
   useEffect(() => {
     const onFocus = () => {
@@ -510,6 +520,12 @@ export function ProjectsPage() {
     if (!showCreate) return;
     return registerOverlay('projects:create-dialog', 'dialog');
   }, [showCreate, registerOverlay]);
+
+  // WAI-ARIA dialog behaviour (Escape / focus management / containment).
+  const createDialogProps = useModalDialog(showCreate, () => {
+    setShowCreate(false);
+    setCreateError(null);
+  });
 
   // Global ⌘K palette handoff: "New project" navigates here with a one-shot sessionStorage
   // flag (survives the navigation, consumed exactly once by this mount).
@@ -632,6 +648,16 @@ export function ProjectsPage() {
     }
   };
 
+  const handleDeleteProject = (projectId: string) => {
+    if (deletingProjectId) return;
+    setDeletingProjectId(projectId);
+    softDeleteProject(projectId).catch((err) => {
+      setRenameError(err instanceof Error ? err.message : 'Failed to delete project.');
+    }).finally(() => {
+      setDeletingProjectId(null);
+    });
+  };
+
   return (
     <div className="page-grid">
       <section className="page-header">
@@ -642,7 +668,7 @@ export function ProjectsPage() {
           </p>
         </div>
         <div className="row gap-8">
-          <button className="btn btn-primary" onClick={() => openCreateModal()}>
+          <button type="button" className="btn btn-primary" onClick={() => openCreateModal()}>
             <Plus size={16} />
             New Project
           </button>
@@ -1002,21 +1028,22 @@ export function ProjectsPage() {
                               <Share2 size={15} />
                             </button>
                           ) : null}
-                          <button
+                          <button type="button"
                             className="icon-btn danger"
-                            disabled={!canRemoveProject}
+                            disabled={!canRemoveProject || Boolean(deletingProjectId)}
                             onClick={() => {
                               if (window.confirm(`Delete project "${project.name}"?`)) {
                                 if (editingProjectNameId === project.id) {
                                   setEditingProjectNameId(null);
                                   setEditingProjectNameValue('');
                                 }
-                                void softDeleteProject(project.id);
+                                handleDeleteProject(project.id);
                               }
                             }}
+                            aria-busy={deletingProjectId === project.id}
                             title={canRemoveProject ? 'Delete project' : 'Only the project owner can delete this project'}
                           >
-                            <Trash2 size={15} />
+                            {deletingProjectId === project.id ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />}
                           </button>
                         </div>
                       </td>
@@ -1084,11 +1111,13 @@ export function ProjectsPage() {
                         className="btn btn-ghost btn-compact danger"
                         onClick={() => {
                           if (window.confirm(`Delete project "${project.name}"?`)) {
-                            void softDeleteProject(project.id);
+                            handleDeleteProject(project.id);
                           }
                         }}
+                        aria-busy={deletingProjectId === project.id}
+                        disabled={Boolean(deletingProjectId)}
                       >
-                        <Trash2 size={14} /> Delete
+                        {deletingProjectId === project.id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />} Delete
                       </button>
                     ) : null}
                   </div>
@@ -1117,20 +1146,20 @@ export function ProjectsPage() {
                   <option value="50">50</option>
                 </select>
               </label>
-              <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage(1)}>
+              <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage(1)}>
                 First
               </button>
-              <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+              <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
                 Prev
               </button>
-              <button
+              <button type="button"
                 className="btn btn-ghost btn-compact"
                 disabled={currentPage >= totalPages}
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               >
                 Next
               </button>
-              <button className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage(totalPages)}>
+              <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage(totalPages)}>
                 Last
               </button>
               <label className="project-page-size">
@@ -1157,7 +1186,12 @@ export function ProjectsPage() {
             setCreateError(null);
           }}
         >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            {...createDialogProps}
+            aria-label="New Project"
+          >
             <h2>New Project</h2>
             <div className="workflow-grid">
               {WORKFLOWS.map((item) => (

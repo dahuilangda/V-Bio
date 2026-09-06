@@ -116,7 +116,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <Settings size={14} />
                   Settings
                 </Link>
-                <button className="user-menu-item danger" role="menuitem" onClick={signOut}>
+                <button type="button" className="user-menu-item danger" role="menuitem" onClick={signOut}>
                   <LogOut size={14} />
                   Sign out
                 </button>

@@ -7,6 +7,7 @@ interface ProjectHeaderActionsProps {
   onOpenTaskHistory: (event: MouseEvent<HTMLElement>) => void;
   onDownloadResult: () => void;
   canDownloadResult: boolean;
+  downloadingResult?: boolean;
   onSaveDraft: () => void;
   canEdit: boolean;
   saving: boolean;
@@ -37,6 +38,7 @@ interface ProjectHeaderActionsProps {
 export function ProjectHeaderActions({
   onOpenTaskHistory,
   onDownloadResult,
+  downloadingResult = false,
   canDownloadResult,
   onSaveDraft,
   canEdit,
@@ -95,14 +97,15 @@ export function ProjectHeaderActions({
       >
         <ArrowLeft size={14} />
       </button>
-      <button
+      <button type="button"
         className="task-row-action-btn"
         onClick={onDownloadResult}
-        disabled={!canDownloadResult}
-        title="Download result"
-        aria-label="Download result"
+        disabled={!canDownloadResult || downloadingResult}
+        title={downloadingResult ? 'Downloading result' : 'Download result'}
+        aria-label={downloadingResult ? 'Downloading result' : 'Download result'}
+        aria-busy={downloadingResult}
       >
-        <Download size={14} />
+        {downloadingResult ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
       </button>
       <button
         className="task-row-action-btn"

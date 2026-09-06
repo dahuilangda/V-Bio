@@ -105,6 +105,7 @@ export function ProjectTasksPage() {
     setTasks,
     setError,
     ensureAllTasksLoaded,
+    removeTaskRow,
   } = useProjectTasksDataLoader({
     projectId,
     sessionUserId: session?.userId || null,
@@ -192,9 +193,17 @@ export function ProjectTasksPage() {
     suspendPageNormalization: loading || !project
   });
 
-  useEffect(() => {
+  // Derived from structureSearchQuery, but computed with the render-time
+  // adjust pattern instead of an effect: the loader (which consumes the flag)
+  // is upstream of the filtering hook that owns the query, so plain derivation
+  // during render is not possible. Setting state here re-renders immediately
+  // BEFORE the tree commits — no effect pass, no post-paint flash.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevStructureSearchQuery, setPrevStructureSearchQuery] = useState(structureSearchQuery);
+  if (structureSearchQuery !== prevStructureSearchQuery) {
+    setPrevStructureSearchQuery(structureSearchQuery);
     setStructureSearchActive(structureSearchQuery.trim().length > 0);
-  }, [structureSearchQuery]);
+  }
 
   // Mirrors the CURRENT filtered rows across renders so the export flow can
   // read the complete filtered set after awaiting the full list load — a
@@ -258,6 +267,7 @@ export function ProjectTasksPage() {
     navigate,
     setError,
     setTasks,
+    removeTaskRow,
     terminateBackendTask,
   });
 

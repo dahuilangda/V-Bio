@@ -492,13 +492,20 @@ export function SharesPage() {
     return groupedProjects.slice(start, start + pageSize);
   }, [currentPage, groupedProjects, pageSize]);
 
-  useEffect(() => {
+  // Render-time adjustment (not effects): reset to page 1 when any filter
+  // changes, and clamp the page when the filtered total shrinks below it.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const filtersSignature = `${search}\u001f${directionFilter}\u001f${kindFilter}\u001f${accessFilter}\u001f${sortBy}\u001f${pageSize}`;
+  const [prevFiltersSignature, setPrevFiltersSignature] = useState(filtersSignature);
+  if (filtersSignature !== prevFiltersSignature) {
+    setPrevFiltersSignature(filtersSignature);
     setPage(1);
-  }, [search, directionFilter, kindFilter, accessFilter, sortBy, pageSize]);
-
-  useEffect(() => {
+  }
+  const [prevTotalPages, setPrevTotalPages] = useState(totalPages);
+  if (totalPages !== prevTotalPages) {
+    setPrevTotalPages(totalPages);
     if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
+  }
 
   const jumpToPage = (rawValue: string) => {
     const parsed = Number(rawValue);
@@ -682,16 +689,16 @@ export function SharesPage() {
                     ))}
                   </select>
                 </label>
-                <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage(1)}>
+                <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage(1)}>
                   First
                 </button>
-                <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+                <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
                   Prev
                 </button>
-                <button className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
+                <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
                   Next
                 </button>
-                <button className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage(totalPages)}>
+                <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage(totalPages)}>
                   Last
                 </button>
                 <label className="project-page-size">

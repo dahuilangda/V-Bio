@@ -49,6 +49,13 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     build: {
       chunkSizeWarningLimit: 1000,
+      // No <link rel="modulepreload"> injection. WebKit (Safari) has a bug where
+      // dynamic import() of a modulepreload-ed but unused URL never settles: the
+      // route transition then freezes the previous view forever while the URL bar
+      // has already changed (observed on the components tab -> nav navigation).
+      // On-demand imports fetch reliably in every browser; the preloads were
+      // also flagged as wasted by Safari itself.
+      modulePreload: false,
       rollupOptions: {
         output: {
           manualChunks(id) {

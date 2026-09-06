@@ -7490,6 +7490,19 @@ def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
     return ";".join(pairs)
 
 
+class DpeptideStaleWorkerError(RuntimeError):
+    """A refine dispatch flag was silently dropped by the executing worker.
+
+    The worker task contract echoes the flags it honored into the dpeptide
+    contract; a missing/mismatched echo means the celery process predates the
+    flag (long-running worker, code updated on disk after its start) — the
+    2026-09-04 demo failure: ``blind_peptide`` was dropped, the run silently
+    downgraded to a clashing staged-local refine and every candidate was
+    chirality-rejected. Raised task-level (not per-candidate) so the run fails
+    fast with the actionable fix: restart the GPU worker container.
+    """
+
+
 def _dpeptide_dispatch_refine(
     staged_path: Path, seed: int, queue: str, blind: bool = False,
 ) -> Any:
@@ -7633,12 +7646,19 @@ def _dpeptide_collect_refine(
     async_result: Any,
     staged_path: Path,
     refined_cif: Path,
+    expect_blind: bool = False,
 ) -> Dict[str, Any]:
     """Wait for a dispatched refine task, then rank its diffusion samples.
 
     The confidence head scores the refined coordinates; the best sample (by
     ipTM, gated on covalent integrity + clash-freedom) is copied to
     refined_cif and its metrics returned.
+
+    expect_blind: the dispatch asked for the blind-inpainting route — verify
+    the worker's contract echo agrees. A stale worker process silently drops
+    the flag (fork children inherit the parent's imports, so respawns do not
+    reload the file); fail the task loudly instead of letting a downgraded
+    staged-local refine chirality-reject every candidate for hours.
     """
     task_tmp = Path("/data/boltz_central_results/_runtime_tmp") / \
         f"dpeptide_task_{async_result.id}"
@@ -7662,6 +7682,12 @@ def _dpeptide_collect_refine(
         time.sleep(4.0)
 
     metrics = json.loads(conf_path.read_text())
+    if expect_blind and not metrics.get("blind_peptide"):
+        raise DpeptideStaleWorkerError(
+            "protenix worker 未执行 blind_peptide 契约回显不符(期望 blind=True, "
+            f"实际 echo={metrics.get('blind_peptide')!r}) — protenix GPU worker 进程"
+            "运行的是旧任务代码(更新代码后未重启,fork 子进程不会重新加载文件)。"
+            "请重启 protenix GPU worker 容器后重跑任务。")
     # Interface objective is ipSAE (published Mirror-Peptidizer BO fitness
     # uses ipsae_dom; the engine's own ranking weights default to ipsae too).
     # The per-sample confidence jsons carry raw engine numbers only — the
@@ -8035,6 +8061,7 @@ def _pocket_collect_refine(
     pocket_sequence_contacts: List[Tuple[str, int]],
     require_bonds: bool,
     chirality_label: str,
+    expect_blind: bool = False,
 ) -> Dict[str, Any]:
     """GPU-result half of the pocket route (pairs with
     :func:`_pocket_place_for_refine` + dispatch): collect the dispatched
@@ -8042,7 +8069,8 @@ def _pocket_collect_refine(
 
     Raises ValueError when a gate fails; the caller rejects the candidate.
     """
-    metrics = _dpeptide_collect_refine(async_result, staged_path, refined_cif)
+    metrics = _dpeptide_collect_refine(
+        async_result, staged_path, refined_cif, expect_blind=expect_blind)
     refined_path = str(refined_cif)
 
     # Quality TELEMETRY, not filtering: the staged strain relief upstream
@@ -8495,11 +8523,57 @@ def run_peptide_design_backend(
         design_params["cyclic_binder"] = True
     allow_extra_cys = False
     bicyclic_manual_anchors = False
+    cys_layout_spec: Optional[Dict[str, Any]] = None
     if design_mode == "bicyclic":
         cys_position_mode = str(options.get("peptideBicyclicCysPositionMode") or "auto").strip().lower()
         fix_terminal_cys = _read_bool_option(options, "peptideBicyclicFixTerminalCys", True)
         allow_extra_cys = _read_bool_option(options, "peptideBicyclicIncludeExtraCys", False)
-        if cys_position_mode == "manual":
+        # Anchor layout semantics (2026-09-06): the peptide length is a range,
+        # so absolute Cys positions alone cannot express the user's intent.
+        # `peptideBicyclicCysLayout` selects how anchors follow the length:
+        #   ring     — pin the two ring sizes; Cys3 rides the C-terminus and
+        #              the N-flank absorbs the range (rigid topology).
+        #   ratio    — pin percentages of the length; anchors scale with
+        #              every candidate (shape preserved, rings flex).
+        #   absolute — literal positions; only valid when min == max.
+        #   auto     — engine layout (first / interior / last).
+        # Legacy option mapping: mode=manual == absolute.
+        layout_raw = str(options.get("peptideBicyclicCysLayout") or "").strip().lower()
+        cys_layout_mode = layout_raw if layout_raw in {"auto", "ring", "ratio", "absolute"} else (
+            "absolute" if cys_position_mode == "manual" else "auto")
+
+        def _reject_mask_conflicts(layout_label: str) -> None:
+            """Length-function anchors move with the candidate length, so a
+            mask can only pin X (free) or C (extra cysteine) residues."""
+            if not sequence_mask:
+                return
+            bad = [(idx + 1, ch) for idx, ch in enumerate(sequence_mask)
+                   if ch not in ("X", "C")]
+            if bad:
+                pos, ch = bad[0]
+                raise ValueError(
+                    f"{layout_label}模式下 Cys 锚点随长度自适应移动，序列掩码不能固定具体氨基酸："
+                    f"第 {pos} 位为 {ch!r}。请将该位设为 X，或改用绝对位置模式（min=max）。")
+            if not allow_extra_cys and any(ch == "C" for ch in sequence_mask):
+                raise ValueError(
+                    f"{layout_label}模式下掩码固定的 C 可能不是 Cys 锚点：请开启 Allow Extra Cys，"
+                    "或去掉掩码中的 C。")
+
+        if cys_layout_mode == "ring":
+            ring1 = _read_int_option(options, "peptideBicyclicRing1", 4, min_value=1, max_value=100)
+            ring2 = _read_int_option(options, "peptideBicyclicRing2", 6, min_value=1, max_value=100)
+            cys_layout_spec = {"mode": "ring", "ring1": ring1, "ring2": ring2}
+            design_params["cys_layout"] = cys_layout_spec
+            _reject_mask_conflicts("环拓扑")
+        elif cys_layout_mode == "ratio":
+            pct1 = _read_int_option(options, "peptideBicyclicRatio1", 15, min_value=0, max_value=100)
+            pct2 = _read_int_option(options, "peptideBicyclicRatio2", 50, min_value=0, max_value=100)
+            pct3 = (100 if fix_terminal_cys else _read_int_option(
+                options, "peptideBicyclicRatio3", 100, min_value=0, max_value=100))
+            cys_layout_spec = {"mode": "ratio", "pct1": pct1, "pct2": pct2, "pct3": pct3}
+            design_params["cys_layout"] = cys_layout_spec
+            _reject_mask_conflicts("按比例")
+        elif cys_layout_mode == "absolute":
             bicyclic_manual_anchors = True
             cys1_pos = _read_int_option(options, "peptideBicyclicCys1Pos", 3, min_value=1, max_value=binder_length)
             cys2_pos = _read_int_option(options, "peptideBicyclicCys2Pos", 8, min_value=1, max_value=binder_length)
@@ -8623,10 +8697,43 @@ def run_peptide_design_backend(
         if bicyclic_manual_anchors:
             if _plm_range is not None and _plm_range[0] != _plm_range[1]:
                 raise ValueError(
-                    "手动 Cys 位置要求固定的肽长度：请将长度范围设为同一个值，或改用 Auto 模式。"
+                    "绝对位置 Cys 要求固定的肽长度（min = max）：请锁定长度范围，"
+                    "或改用环拓扑 / 按比例模式以适配长度区间。"
                 )
             _plm_range = None
             _plm_len = binder_length
+        # length-function layouts (ring / ratio) keep working across the open
+        # range — they only raise the effective minimum length
+        if cys_layout_spec is not None:
+            if _plm_range is not None:
+                _lo, _hi = _plm_range
+                if cys_layout_spec["mode"] == "ring":
+                    core = int(cys_layout_spec["ring1"]) + int(cys_layout_spec["ring2"]) + 3
+                    if core > _hi:
+                        raise ValueError(
+                            f"环 1 ({cys_layout_spec['ring1']}) + 环 2 ({cys_layout_spec['ring2']}) "
+                            f"+ 3 个 Cys 至少需要 {core} aa，超过长度上限 {_hi}。")
+                    _plm_range = (max(_lo, core), _hi)
+                else:
+                    from peplm.loop.constraints import min_feasible_length_ratio
+                    feasible = min_feasible_length_ratio(
+                        float(cys_layout_spec["pct1"]),
+                        float(cys_layout_spec["pct2"]),
+                        float(cys_layout_spec["pct3"]))
+                    if feasible > _hi:
+                        raise ValueError(
+                            "当前比例即使拉到最大长度也放不下三个 Cys（相邻锚点至少间隔 2 个残基）；"
+                            "请调开比例或提高长度上限。")
+                    _plm_range = (max(_lo, feasible), _hi)
+            else:
+                # fixed length: resolve the layout once at that length
+                from peplm.loop.constraints import resolve_bicyclic_anchors
+                resolved = resolve_bicyclic_anchors(
+                    binder_length, {}, (), cys_layout_spec)
+                if resolved is None:
+                    raise ValueError(
+                        f"肽长度 {binder_length} aa 放不下当前 Cys 布局：请减小环大小或调整比例。")
+                design_params["cys_positions"] = sorted(resolved)
         # user NCAA pool: preset selections + custom drawn CCDs
         _plm_pool = [str(row.get("ccd") or "").strip().upper()
                      for row in (unnatural_pool or []) if row.get("ccd")]
@@ -8639,6 +8746,7 @@ def run_peptide_design_backend(
             cyclic=(design_mode == "cyclic"),
             design_mode=design_mode,
             cys_positions=list(design_params.get("cys_positions") or []),
+            cys_layout=cys_layout_spec,
             allow_extra_cys=allow_extra_cys,
             fixed_residues=_plm_fixed,
             ncaa_decode_bias=float(options.get("peptideNcaaDecodeBias") or 0.5),
@@ -8646,10 +8754,21 @@ def run_peptide_design_backend(
                 "cuda" if _torch_cuda_available() else "cpu"),
             log=lambda m: print(f"[peptidelm] {m}", file=sys.stderr),
         )
+        layout_hint = ""
+        if cys_layout_spec is not None:
+            layout_hint = (
+                f", cys={cys_layout_spec['mode']}"
+                + (f"(ring {cys_layout_spec['ring1']}/{cys_layout_spec['ring2']})"
+                   if cys_layout_spec["mode"] == "ring" else
+                   (f"(pct {cys_layout_spec['pct1']}/{cys_layout_spec['pct2']}/{cys_layout_spec['pct3']})"
+                    if cys_layout_spec["mode"] == "ratio" else ""))
+            )
+        elif design_params.get("cys_positions"):
+            layout_hint = f", cys=absolute{[p + 1 for p in design_params['cys_positions']]}"
         print(
             f"[peptidelm] 提案引擎已启用（length={'自适应' if _plm_len is None else _plm_len}, "
             f"NCAA 池 {len(_plm_pool)} 个, 固定残基 {len(_plm_fixed)} 个, "
-            f"mode={design_mode}）",
+            f"mode={design_mode}{layout_hint}）",
             file=sys.stderr,
         )
     except Exception as exc:
@@ -9087,6 +9206,7 @@ def run_peptide_design_backend(
                             pocket_sequence_contacts=pocket_sequence_contacts,
                             require_bonds=(design_mode == "bicyclic"),
                             chirality_label="d",
+                            expect_blind=blind_linear_route,
                         )
                         d_space_refined = gate_result["refined"]
                         d_space_metrics = gate_result["metrics"]
@@ -9097,6 +9217,7 @@ def run_peptide_design_backend(
                             ctx["async_result"],
                             Path(ctx["staged_path"]),
                             Path(ctx["refined_cif"]),
+                            expect_blind=blind_linear_route,
                         )
                         d_space_refined = str(ctx["refined_cif"])
                         if design_mode == "bicyclic":
@@ -9115,6 +9236,11 @@ def run_peptide_design_backend(
                         f"D-space ipTM={d_space_metrics.get('iptm')}",
                         file=sys.stderr,
                     )
+                except DpeptideStaleWorkerError:
+                    # infrastructure failure, not a candidate defect — fail
+                    # the whole task now with the actionable message instead
+                    # of rejecting every candidate for the rest of the run
+                    raise
                 except (RuntimeError, ValueError) as d_exc:
                     print(
                         f"[d-peptide] candidate {candidate_sequence[:12]}… "

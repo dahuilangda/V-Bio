@@ -1,4 +1,5 @@
 import { compactResultConfidenceForStorage, mergePeptideCandidateRowsPreferRicher } from '../api/backendResultParserApi';
+import { asRecord } from '../pages/projectTasks/recordReaders';
 
 const PEPTIDE_RUNTIME_SETUP_KEYS = [
   'design_mode',
@@ -86,9 +87,6 @@ const PEPTIDE_REQUEST_OPTION_KEYS = [
   'peptide_bicyclic_cys3_pos'
 ] as const;
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 function asRecordArray(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];

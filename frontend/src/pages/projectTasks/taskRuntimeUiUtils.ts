@@ -2,7 +2,6 @@ import { getTaskStatus } from '../../api/backendApi';
 import type { ProjectTask } from '../../types/models';
 import {
   inferTaskStateFromStatusPayload,
-  mapBackendTaskState as mapTaskState,
   readTaskRuntimeStatusText as readStatusText
 } from '../../utils/taskRuntime';
 import type { SortDirection, SortKey } from './taskListTypes';
@@ -115,7 +114,6 @@ export {
   compareNullableNumber,
   defaultSortDirection,
   nextSortDirection,
-  mapTaskState,
   inferTaskStateFromStatusPayload,
   waitForRuntimeTaskToStop,
   readStatusText,

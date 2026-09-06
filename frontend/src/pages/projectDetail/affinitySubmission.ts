@@ -6,8 +6,6 @@ import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { normalizeAffinityBackend } from '../apiAccessHelpers';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
-export type AffinityWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
-
 export interface AffinityDraftFields {
   taskName: string;
   taskSummary: string;

@@ -288,3 +288,17 @@ export function selectByChainHints<T>(
 
   return byChain;
 }
+
+/** Split one CIF loop row into tokens, honoring single/double-quoted fields.
+ *  Identical to the local copies that used to live in cifConfidenceColoring and
+ *  resultBundleParser. */
+export function tokenizeCifRow(row: string): string[] {
+  const matcher = /'(?:[^']*)'|"(?:[^"]*)"|[^\s]+/g;
+  const tokens: string[] = [];
+  let match: RegExpExecArray | null = matcher.exec(row);
+  while (match) {
+    tokens.push(match[0]);
+    match = matcher.exec(row);
+  }
+  return tokens;
+}

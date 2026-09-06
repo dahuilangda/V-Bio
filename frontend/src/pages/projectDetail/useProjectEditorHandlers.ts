@@ -12,6 +12,9 @@ import {
   handleRuntimePeptideBicyclicCys1PosChangeAction,
   handleRuntimePeptideBicyclicCys2PosChangeAction,
   handleRuntimePeptideBicyclicCys3PosChangeAction,
+  handleRuntimePeptideBicyclicCysLayoutChangeAction,
+  handleRuntimePeptideBicyclicRingChangeAction,
+  handleRuntimePeptideBicyclicRatioChangeAction,
   handleRuntimePeptideBicyclicCysPositionModeChangeAction,
   handleRuntimePeptideBicyclicFixTerminalCysChangeAction,
   handleRuntimePeptideBicyclicIncludeExtraCysChangeAction,
@@ -90,6 +93,9 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimePeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
   handleRuntimePeptideBicyclicIncludeExtraCysChange: (value: boolean) => void;
   handleRuntimePeptideBicyclicCys1PosChange: (value: number) => void;
+  handleRuntimePeptideBicyclicCysLayoutChange: (value: 'auto' | 'ring' | 'ratio' | 'absolute') => void;
+  handleRuntimePeptideBicyclicRingChange: (ring1: number, ring2: number) => void;
+  handleRuntimePeptideBicyclicRatioChange: (pct1: number, pct2: number, pct3?: number) => void;
   handleRuntimePeptideBicyclicCys2PosChange: (value: number) => void;
   handleRuntimePeptideBicyclicCys3PosChange: (value: number) => void;
   handleTaskNameChange: (value: string) => void;
@@ -299,6 +305,30 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   };
 
+  const handleRuntimePeptideBicyclicCysLayoutChange = (value: 'auto' | 'ring' | 'ratio' | 'absolute') => {
+    handleRuntimePeptideBicyclicCysLayoutChangeAction({
+      peptideBicyclicCysLayout: value,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideBicyclicRingChange = (ring1: number, ring2: number) => {
+    handleRuntimePeptideBicyclicRingChangeAction({
+      peptideBicyclicRing1: ring1,
+      peptideBicyclicRing2: ring2,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideBicyclicRatioChange = (pct1: number, pct2: number, pct3?: number) => {
+    handleRuntimePeptideBicyclicRatioChangeAction({
+      peptideBicyclicRatio1: pct1,
+      peptideBicyclicRatio2: pct2,
+      peptideBicyclicRatio3: pct3,
+      setDraft
+    });
+  };
+
   const handleRuntimePeptideBicyclicCys2PosChange = (value: number) => {
     handleRuntimePeptideBicyclicCys2PosChangeAction({
       peptideBicyclicCys2Pos: value,
@@ -356,6 +386,9 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handleRuntimePeptideBicyclicFixTerminalCysChange,
     handleRuntimePeptideBicyclicIncludeExtraCysChange,
     handleRuntimePeptideBicyclicCys1PosChange,
+    handleRuntimePeptideBicyclicCysLayoutChange,
+    handleRuntimePeptideBicyclicRingChange,
+    handleRuntimePeptideBicyclicRatioChange,
     handleRuntimePeptideBicyclicCys2PosChange,
     handleRuntimePeptideBicyclicCys3PosChange,
     handleTaskNameChange,
