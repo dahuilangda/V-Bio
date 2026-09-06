@@ -13,6 +13,7 @@ import {
 import { searchUsers as searchUsersServer, toAppUser } from '../../api/authServerApi';
 import type { AppUser, ProjectShareRecord, ProjectTaskShareRecord, ShareAccessLevel } from '../../types/models';
 import { InfoTip } from '../../components/common/InfoTip';
+import { useModalDialog } from '../ui/useModalDialog';
 
 interface SharingModalProps {
   open: boolean;
@@ -54,6 +55,8 @@ export function SharingModal({
     }
     return `Access for ${projectName}`;
   }, [mode, projectName, projectTaskId, taskLabel]);
+
+  const dialogProps = useModalDialog(open, onClose);
 
   const loadShares = useCallback(async () => {
     if (!open) return;
@@ -259,7 +262,12 @@ export function SharingModal({
 
   return (
     <div className="modal-mask share-modal-mask" onClick={onClose}>
-      <div className="modal share-modal" onClick={(event) => event.stopPropagation()}>
+      <div
+        className="modal share-modal"
+        onClick={(event) => event.stopPropagation()}
+        {...dialogProps}
+        aria-label={title}
+      >
         <div className="share-modal-head">
           <div className="share-modal-heading">
             <h2>{title}</h2>
@@ -312,7 +320,7 @@ export function SharingModal({
             </div>
             <div className="field share-modal-role-field">
               <label>Access</label>
-              <div className="share-role-toggle" role="radiogroup" aria-label="Share access level">
+              <div className="share-role-toggle" role="group" aria-label="Share access level">
                 {accessOptions.map((option) => {
                   const Icon = option.icon;
                   const active = shareAccessLevel === option.value;
@@ -407,7 +415,7 @@ export function SharingModal({
                       {grantedBy ? <span className="muted small">Granted by {grantedBy}</span> : null}
                     </div>
                     <div className="share-modal-item-actions">
-                      <div className="share-role-toggle share-role-toggle-compact" role="radiogroup" aria-label="Update share access level">
+                      <div className="share-role-toggle share-role-toggle-compact" role="group" aria-label="Update share access level">
                         {accessOptions.map((option) => {
                           const Icon = option.icon;
                           const active = item.access_level === option.value;

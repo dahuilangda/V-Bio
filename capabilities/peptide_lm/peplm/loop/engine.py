@@ -30,7 +30,12 @@ from peplm.candidate import Candidate
 from peplm.generate.edit import edit_candidates, mutate_candidate
 from peplm.generate.grpo import GRPOUpdater
 from peplm.loop.config import LoopConfig
-from peplm.loop.constraints import build_plan, choose_bicyclic_anchors
+from peplm.loop.constraints import (
+    build_plan,
+    choose_bicyclic_anchors,
+    resolve_bicyclic_anchors,
+    plan_for_post_edit as _plan_for_post_edit_import,
+)
 from peplm.props.descriptors import compute_props
 from peplm.score.production import production_composite
 from peplm.score.reward import PeptideReward
@@ -91,8 +96,15 @@ class PeptideLoop:
         if cfg.design_mode == "bicyclic" and cfg.fixed_residues:
             fixed = self._fixed_map()
             Lmax = cfg.len_range[1]
-            anchors = {a for a in choose_bicyclic_anchors(
-                Lmax, fixed, tuple(cfg.cys_positions)) if a is not None}
+            resolved_max = resolve_bicyclic_anchors(
+                Lmax, fixed, tuple(cfg.cys_positions),
+                getattr(cfg, "cys_layout", None))
+            anchors = {a for a in (resolved_max
+                                   if resolved_max is not None
+                                   else choose_bicyclic_anchors(
+                                       Lmax, fixed,
+                                       tuple(cfg.cys_positions)))
+                       if a is not None}
             for pos, tok in fixed.items():
                 if not (0 <= pos < Lmax):
                     raise ValueError(
@@ -151,7 +163,8 @@ class PeptideLoop:
                 cand.residues,
                 plan_for_post_edit(self._fixed_map(), self.vocab,
                                    tuple(self.cfg.cys_positions),
-                                   allow_extra_cys=self.cfg.allow_extra_cys),
+                                   allow_extra_cys=self.cfg.allow_extra_cys,
+                                   cys_layout=getattr(self.cfg, "cys_layout", None)),
                 self.cfg.bicyclic_layout)
             cand.tokens = ([self._struct_token()] + res)
         res = cand.residues
@@ -171,8 +184,14 @@ class PeptideLoop:
                 return False
         # bicyclic layout invariants
         if self.cfg.design_mode == "bicyclic":
-            anchors = {a for a in choose_bicyclic_anchors(
-                L, fixed, tuple(self.cfg.cys_positions)) if a is not None}
+            resolved = resolve_bicyclic_anchors(
+                L, fixed, tuple(self.cfg.cys_positions),
+                getattr(self.cfg, "cys_layout", None))
+            anchors = {a for a in (resolved if resolved is not None
+                                   else choose_bicyclic_anchors(
+                                       L, fixed,
+                                       tuple(self.cfg.cys_positions)))
+                       if a is not None}
             if any(res[p] != "C" for p in anchors):
                 return False
             if not self.cfg.allow_extra_cys and res.count("C") != 3:
@@ -249,6 +268,7 @@ class PeptideLoop:
                 "ncaa_decode_bias": cfg.ncaa_decode_bias,
                 "cys_positions": tuple(cfg.cys_positions),
                 "allow_extra_cys": cfg.allow_extra_cys,
+                "cys_layout": getattr(cfg, "cys_layout", None),
             }
             out.extend(edit_candidates(
                 self.agent, self.vocab, p,
@@ -264,9 +284,15 @@ class PeptideLoop:
                 p.ncaa_pool = pool_tokens
                 p._protected = set(fixed_abs)
                 if cfg.design_mode == "bicyclic":
-                    p._protected |= {a for a in choose_bicyclic_anchors(
-                        len(p.residues), fixed_abs,
-                        tuple(cfg.cys_positions)) if a is not None}
+                    resolved = resolve_bicyclic_anchors(
+                        len(p.residues), fixed_abs, tuple(cfg.cys_positions),
+                        getattr(cfg, "cys_layout", None))
+                    p._protected |= {a for a in (
+                        resolved if resolved is not None
+                        else choose_bicyclic_anchors(
+                            len(p.residues), fixed_abs,
+                            tuple(cfg.cys_positions)))
+                        if a is not None}
                 out.append(mutate_candidate(
                     p, self.rng,
                     ncaa_pool=pool_tokens,

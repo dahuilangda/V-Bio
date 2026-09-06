@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { MouseEvent, ReactNode } from 'react';
 import { ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
 import type {
@@ -155,7 +155,12 @@ export function ConstraintEditor({
   const collapsedCount = useMemo(() => constraints.filter((item) => collapsedById[item.id]).length, [constraints, collapsedById]);
   const allCollapsed = constraints.length > 0 && collapsedCount === constraints.length;
 
-  useEffect(() => {
+  // Render-time adjustment (not an effect): prune stale collapse flags as soon
+  // as the constraint list changes instead of after paint.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevConstraints, setPrevConstraints] = useState(constraints);
+  if (constraints !== prevConstraints) {
+    setPrevConstraints(constraints);
     setCollapsedById((prev) => {
       const next: Record<string, boolean> = {};
       let changed = false;
@@ -172,7 +177,7 @@ export function ConstraintEditor({
       }
       return changed ? next : prev;
     });
-  }, [constraints]);
+  }
 
   const replaceAt = (id: string, next: PredictionConstraint) => {
     onConstraintsChange(constraints.map((item) => (item.id === id ? next : item)));

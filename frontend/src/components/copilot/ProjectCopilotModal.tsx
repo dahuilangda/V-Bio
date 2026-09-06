@@ -889,16 +889,21 @@ export function writeStoredCopilotOpen(
   }
 }
 
+// Height of the sticky .top-nav: the floating panel (and its header with the close
+// button) must never slide underneath it, on mobile or desktop.
+const TOP_CHROME_PX = 64;
+
 function clampPanelPosition(pos: { x: number; y: number }): { x: number; y: number } {
   // Keep the panel reachable on ANY viewport: a position persisted on a large screen (or
   // synced from another device) can otherwise land entirely off-screen on a smaller one,
-  // with the close button unreachable and no way to dismiss the open panel.
+  // with the close button unreachable and no way to dismiss the open panel. The y floor
+  // is TOP_CHROME_PX + 8 so the header can never hide under the app top-nav.
   if (typeof window === 'undefined') return pos;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   return {
     x: Math.min(Math.max(8, pos.x), Math.max(8, vw - 280)),
-    y: Math.min(Math.max(8, pos.y), Math.max(8, vh - 180))
+    y: Math.min(Math.max(TOP_CHROME_PX + 8, pos.y), Math.max(TOP_CHROME_PX + 8, vh - 180))
   };
 }
 
@@ -2668,9 +2673,9 @@ export function ProjectCopilotModal({
               // these reduce to the CSS full-screen rules (top:0, height:100dvh).
               visualViewportHeight != null
                 ? {
-                    top: visualViewportTop,
-                    height: visualViewportHeight,
-                    maxHeight: visualViewportHeight,
+                    top: TOP_CHROME_PX + Math.max(0, visualViewportTop),
+                    height: Math.max(240, visualViewportHeight - TOP_CHROME_PX),
+                    maxHeight: Math.max(240, visualViewportHeight - TOP_CHROME_PX)
                   }
                 : undefined
             : {

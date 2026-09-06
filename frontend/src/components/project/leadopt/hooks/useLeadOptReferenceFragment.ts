@@ -6,6 +6,7 @@ import {
 import { type LigandFragmentItem } from '../../LigandFragmentSketcher';
 import { type MolstarAtomHighlight, type MolstarResidueHighlight, type MolstarResiduePick } from '../../MolstarViewer';
 import { resolveVariableSelection, type LigandAtomBond } from './fragmentVariableSelection';
+import { asString } from '../../../../pages/projectTasks/recordReaders';
 
 type PocketResidue = {
   chain_id: string;
@@ -56,11 +57,6 @@ export interface LeadOptPersistedUploads {
   ligand: LeadOptPersistedUpload | null;
 }
 
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value);
-}
-
 function readNumber(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -84,9 +80,9 @@ function normalizeFragments(rows: unknown): LigandFragmentItem[] {
       .map((value) => Number(value))
       .filter((value) => Number.isFinite(value) && value >= 0)
       .map((value) => Math.floor(value));
-    const fragmentId = readText(row.fragment_id);
-    const displaySmiles = readText(row.display_smiles) || readText(row.smiles);
-    const querySmiles = readText(row.query_smiles) || readText(row.smiles);
+    const fragmentId = asString(row.fragment_id);
+    const displaySmiles = asString(row.display_smiles) || asString(row.smiles);
+    const querySmiles = asString(row.query_smiles) || asString(row.smiles);
     if (!fragmentId || !displaySmiles) return;
     result.push({
       fragment_id: fragmentId,
@@ -96,8 +92,8 @@ function normalizeFragments(rows: unknown): LigandFragmentItem[] {
       heavy_atoms: readNumber(row.heavy_atoms),
       attachment_count: readNumber(row.attachment_count),
       num_frags: readNumber(row.num_frags || row.attachment_count || 0),
-      recommended_action: readText(row.recommended_action) || 'unassigned',
-      color: readText(row.color) || '#95a5a6',
+      recommended_action: asString(row.recommended_action) || 'unassigned',
+      color: asString(row.color) || '#95a5a6',
       rule_coverage: readNumber(row.rule_coverage),
       quality_score: readNumber(row.quality_score)
     });
@@ -110,16 +106,16 @@ function normalizePocketResidues(rows: unknown): PocketResidue[] {
   const result: PocketResidue[] = [];
   rows.forEach((item) => {
     const row = (item as Record<string, unknown>) || {};
-    const chainId = readText(row.chain_id);
+    const chainId = asString(row.chain_id);
     const residueNumber = Math.floor(readNumber(row.residue_number));
     if (!chainId || residueNumber <= 0) return;
     result.push({
       chain_id: chainId,
-      residue_name: readText(row.residue_name),
+      residue_name: asString(row.residue_name),
       residue_number: residueNumber,
       min_distance: readNumber(row.min_distance),
       interaction_types: Array.isArray(row.interaction_types)
-        ? row.interaction_types.map((x) => readText(x)).filter(Boolean)
+        ? row.interaction_types.map((x) => asString(x)).filter(Boolean)
         : []
     });
   });
@@ -136,10 +132,10 @@ function normalizeAtomContacts(rows: unknown): LigandAtomContact[] {
     const residues = normalizePocketResidues(row.residues);
     result.push({
       atom_index: atomIndex,
-      chain_id: readText(row.chain_id),
-      residue_name: readText(row.residue_name),
+      chain_id: asString(row.chain_id),
+      residue_name: asString(row.residue_name),
       residue_number: Math.floor(readNumber(row.residue_number)),
-      atom_name: readText(row.atom_name),
+      atom_name: asString(row.atom_name),
       residues
     });
   });
@@ -155,10 +151,10 @@ function normalizeAtomMap(rows: unknown): LigandAtomContact[] {
     if (atomIndex < 0) return;
     result.push({
       atom_index: atomIndex,
-      chain_id: readText(row.chain_id),
-      residue_name: readText(row.residue_name),
+      chain_id: asString(row.chain_id),
+      residue_name: asString(row.residue_name),
       residue_number: Math.floor(readNumber(row.residue_number)),
-      atom_name: readText(row.atom_name),
+      atom_name: asString(row.atom_name),
       residues: []
     });
   });
@@ -439,7 +435,7 @@ export function useLeadOptReferenceFragment({
 
     const requestedIds = uniqueFragmentIds(Array.isArray(initialSelection.fragmentIds) ? initialSelection.fragmentIds : []);
     const variableQueries = Array.isArray(initialSelection.variableQueries)
-      ? initialSelection.variableQueries.map((value) => readText(value).trim()).filter(Boolean)
+      ? initialSelection.variableQueries.map((value) => asString(value).trim()).filter(Boolean)
       : [];
     const selectedAtoms = normalizeAtomIndexList(initialSelection.atomIndices);
     const selectedAtomKey = selectedAtoms.join(',');
@@ -448,8 +444,8 @@ export function useLeadOptReferenceFragment({
           .map((item) => {
             const row = item && typeof item === 'object' ? item : {};
             return {
-              fragmentId: readText((row as { fragmentId?: unknown }).fragmentId).trim(),
-              query: readText((row as { query?: unknown }).query).trim(),
+              fragmentId: asString((row as { fragmentId?: unknown }).fragmentId).trim(),
+              query: asString((row as { query?: unknown }).query).trim(),
               atomIndices: normalizeAtomIndexList((row as { atomIndices?: unknown }).atomIndices)
             };
           })
@@ -496,8 +492,8 @@ export function useLeadOptReferenceFragment({
       }
       if (item.query) {
         const matched = fragments.find((fragment) => {
-          const query = readText(fragment.smiles).trim();
-          const display = readText(fragment.display_smiles).trim();
+          const query = asString(fragment.smiles).trim();
+          const display = asString(fragment.display_smiles).trim();
           return query === item.query || display === item.query;
         });
         if (matched) pushFragmentId(matched.fragment_id);
@@ -519,8 +515,8 @@ export function useLeadOptReferenceFragment({
         if (!token) return [];
         return fragments
           .filter((fragment) => {
-            const query = readText(fragment.smiles).trim();
-            const display = readText(fragment.display_smiles).trim();
+            const query = asString(fragment.smiles).trim();
+            const display = asString(fragment.display_smiles).trim();
             if (query !== token && display !== token) return false;
             const fragmentId = String(fragment.fragment_id || '').trim();
             if (!fragmentId || used.has(fragmentId)) return false;
@@ -580,9 +576,9 @@ export function useLeadOptReferenceFragment({
   const ligandAtomPickMap = useMemo(() => {
     const map = new Map<string, number>();
     ligandAtomContacts.forEach((contact) => {
-      const chainId = readText(contact.chain_id).trim();
+      const chainId = asString(contact.chain_id).trim();
       const residueNumber = Math.floor(readNumber(contact.residue_number));
-      const atomName = normalizeAtomName(readText(contact.atom_name));
+      const atomName = normalizeAtomName(asString(contact.atom_name));
       if (!chainId || residueNumber <= 0 || !atomName) return;
       map.set(`${chainId}:${residueNumber}:${atomName}`, contact.atom_index);
     });
@@ -595,9 +591,9 @@ export function useLeadOptReferenceFragment({
       fragment.atom_indices.forEach((atomIndex) => {
         const contact = atomContactDetailMap.get(atomIndex) || ligandAtomsByOrdinal[atomIndex] || null;
         if (!contact) return;
-        const chainId = readText(contact.chain_id).trim();
+        const chainId = asString(contact.chain_id).trim();
         const residueNumber = Math.floor(readNumber(contact.residue_number));
-        const atomName = readText(contact.atom_name).trim();
+        const atomName = asString(contact.atom_name).trim();
         if (!chainId || residueNumber <= 0) return;
         const normalizedAtomIndex = Number.isFinite(atomIndex) && atomIndex >= 0 ? Math.floor(atomIndex) : undefined;
         const atomKey = atomName || (normalizedAtomIndex !== undefined ? `idx-${normalizedAtomIndex}` : '');
@@ -621,9 +617,9 @@ export function useLeadOptReferenceFragment({
 
   const defaultLigandFocusAtom = useMemo(() => {
     for (const atom of ligandAtomContacts) {
-      const chainId = readText(atom.chain_id).trim();
+      const chainId = asString(atom.chain_id).trim();
       const residueNumber = Math.floor(readNumber(atom.residue_number));
-      const atomName = readText(atom.atom_name).trim();
+      const atomName = asString(atom.atom_name).trim();
       if (!chainId || residueNumber <= 0 || !atomName) continue;
       return {
         chainId,
@@ -648,7 +644,7 @@ export function useLeadOptReferenceFragment({
         const contact = atomContactDetailMap.get(atomIndex) || ligandAtomsByOrdinal[atomIndex] || null;
         if (!contact) return;
         (contact.residues || []).forEach((residue) => {
-          const chainId = readText(residue.chain_id).trim();
+          const chainId = asString(residue.chain_id).trim();
           const residueNumber = Math.floor(readNumber(residue.residue_number));
           if (!chainId || residueNumber <= 0) return;
           const minDistance = readNumber(residue.min_distance) || 99;
@@ -676,12 +672,12 @@ export function useLeadOptReferenceFragment({
 
   const fetchFragmentPreview = async (smilesValue: string) => {
     const response = await previewLeadOptimizationFragments(smilesValue.trim());
-    setFragmentSourceSmiles(readText(response.smiles).trim() || smilesValue.trim());
+    setFragmentSourceSmiles(asString(response.smiles).trim() || smilesValue.trim());
     setLigandAtomBonds(normalizeAtomBonds(response.atom_bonds));
     const nextFragments = normalizeFragments(response.fragments);
     setFragments(nextFragments);
     const recommendedIds = Array.isArray(response.recommended_variable_fragment_ids)
-      ? response.recommended_variable_fragment_ids.map((id) => readText(id)).filter(Boolean)
+      ? response.recommended_variable_fragment_ids.map((id) => asString(id)).filter(Boolean)
       : [];
     const defaultFragmentId = pickReasonableDefaultFragment(nextFragments);
     const defaultIds = uniqueFragmentIds([
@@ -739,23 +735,23 @@ export function useLeadOptReferenceFragment({
         const raw = response.target_chain_sequences;
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
         for (const [chainIdRaw, seqRaw] of Object.entries(raw as Record<string, unknown>)) {
-          const chainId = readText(chainIdRaw).trim();
-          const sequence = readText(seqRaw).replace(/\s+/g, '').trim();
+          const chainId = asString(chainIdRaw).trim();
+          const sequence = asString(seqRaw).replace(/\s+/g, '').trim();
           if (!chainId || !sequence) continue;
           out[chainId] = sequence;
         }
         return out;
       })();
       const responseTargetChainIds = Array.isArray(response.target_chain_ids)
-        ? response.target_chain_ids.map((value) => readText(value).trim()).filter(Boolean)
+        ? response.target_chain_ids.map((value) => asString(value).trim()).filter(Boolean)
         : [];
-      const responseLigandChains = readText(response.ligand_chain_id)
+      const responseLigandChains = asString(response.ligand_chain_id)
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean);
       const residueCountByChain = new Map<string, number>();
       nextPocket.forEach((item) => {
-        const chainId = readText(item.chain_id).trim();
+        const chainId = asString(item.chain_id).trim();
         if (!chainId) return;
         residueCountByChain.set(chainId, (residueCountByChain.get(chainId) || 0) + 1);
       });
@@ -793,10 +789,10 @@ export function useLeadOptReferenceFragment({
         const prev = mergedAtomMap.get(item.atom_index);
         mergedAtomMap.set(item.atom_index, {
           atom_index: item.atom_index,
-          chain_id: readText(item.chain_id) || readText(prev?.chain_id),
-          residue_name: readText(item.residue_name) || readText(prev?.residue_name),
+          chain_id: asString(item.chain_id) || asString(prev?.chain_id),
+          residue_name: asString(item.residue_name) || asString(prev?.residue_name),
           residue_number: Math.floor(readNumber(item.residue_number)) || Math.floor(readNumber(prev?.residue_number)),
-          atom_name: readText(item.atom_name) || readText(prev?.atom_name),
+          atom_name: asString(item.atom_name) || asString(prev?.atom_name),
           residues: item.residues
         });
       });
@@ -806,17 +802,17 @@ export function useLeadOptReferenceFragment({
       setReferenceLigandChainId(resolvedLigandChain);
       setLigandAtomContacts(Array.from(mergedAtomMap.values()).sort((a, b) => a.atom_index - b.atom_index));
 
-      const structureText = readText(response.structure_text);
-      const structureFormat = readText(response.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
-      const overlayText = readText(response.overlay_structure_text);
-      const overlayFormat = readText(response.overlay_structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
+      const structureText = asString(response.structure_text);
+      const structureFormat = asString(response.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
+      const overlayText = asString(response.overlay_structure_text);
+      const overlayFormat = asString(response.overlay_structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
       setPreviewStructureText(structureText);
       setPreviewStructureFormat(structureFormat);
       setPreviewOverlayStructureText(overlayText);
       setPreviewOverlayStructureFormat(overlayFormat);
       setReferenceReady(true);
 
-      const referenceSmiles = readText(response.ligand_smiles).trim();
+      const referenceSmiles = asString(response.ligand_smiles).trim();
       if (referenceSmiles) setReferenceLigandSmilesResolved(referenceSmiles);
       const nextSmiles = referenceSmiles || effectiveLigandSmiles;
       if (referenceSmiles && referenceSmiles !== ligandSmiles.trim()) {
@@ -825,12 +821,12 @@ export function useLeadOptReferenceFragment({
       if (nextSmiles) {
         const fragmentResponse = await previewLeadOptimizationFragments(nextSmiles.trim());
         if (referencePreviewSeqRef.current !== currentRequestId) return;
-        setFragmentSourceSmiles(readText(fragmentResponse.smiles).trim() || nextSmiles.trim());
+        setFragmentSourceSmiles(asString(fragmentResponse.smiles).trim() || nextSmiles.trim());
         setLigandAtomBonds(normalizeAtomBonds(fragmentResponse.atom_bonds));
         const nextFragments = normalizeFragments(fragmentResponse.fragments);
         setFragments(nextFragments);
         const recommendedIds = Array.isArray(fragmentResponse.recommended_variable_fragment_ids)
-          ? fragmentResponse.recommended_variable_fragment_ids.map((id) => readText(id)).filter(Boolean)
+          ? fragmentResponse.recommended_variable_fragment_ids.map((id) => asString(id)).filter(Boolean)
           : [];
         const defaultFragmentId = pickReasonableDefaultFragment(nextFragments);
         const defaultIds = uniqueFragmentIds([

@@ -183,6 +183,18 @@ export interface PredictionOptions {
     chainId: string;
   } | null;
   peptideBicyclicCysPositionMode?: 'auto' | 'manual';
+  /**
+   * How the three Cys anchors follow the (possibly ranged) peptide length:
+   * ring = pinned ring sizes with a rigid C-terminal block; ratio =
+   * percentage-scaled anchors; absolute = literal positions (fixed length
+   * only); auto = engine layout. Legacy `manual` mode maps to `absolute`.
+   */
+  peptideBicyclicCysLayout?: 'auto' | 'ring' | 'ratio' | 'absolute';
+  peptideBicyclicRing1?: number;
+  peptideBicyclicRing2?: number;
+  peptideBicyclicRatio1?: number;
+  peptideBicyclicRatio2?: number;
+  peptideBicyclicRatio3?: number;
   peptideBicyclicFixTerminalCys?: boolean;
   peptideBicyclicIncludeExtraCys?: boolean;
   peptideBicyclicCys1Pos?: number;

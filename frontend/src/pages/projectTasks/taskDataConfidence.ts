@@ -12,13 +12,9 @@ import {
   chainKeysMatch,
   resolveTaskSelectionContext
 } from './taskDataCore';
+import { toFiniteNumber } from './recordReaders';
 
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return value;
-}
-
-function isNumericToken(value: string): boolean {
+export function isNumericToken(value: string): boolean {
   return /^\d+$/.test(String(value || '').trim());
 }
 
@@ -626,7 +622,6 @@ function hasTaskSummaryMetrics(task: ProjectTask): boolean {
 
 export {
   toFiniteNumber,
-  isNumericToken,
   readPairValueFromNestedMap,
   readPairValueFromNumericMap,
   readPairValueFromAnyTwoKeyMap,
@@ -650,3 +645,14 @@ export {
   hasNessoAffinitySummary,
   hasTaskSummaryMetrics
 };
+
+/**
+ * Normalize a pLDDT expressed on the 0-1 scale to the 0-100 convention; values
+ * already on the 0-100 scale pass through. Identical to the local copies that
+ * used to live in MetricsPanel and PeptideDesignResultsWorkspace.
+ */
+export function normalizePlddt(value: number | null): number | null {
+  if (value === null) return null;
+  if (value >= 0 && value <= 1) return value * 100;
+  return value;
+}

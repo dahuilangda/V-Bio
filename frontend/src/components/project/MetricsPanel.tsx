@@ -3,8 +3,13 @@ import { useMemo } from 'react';
 import {
   readIpsaeDomMetric,
   readLigandIpsaeMaxMetric,
+  readInterfaceMetricIpsaeChannel,
   resolvePreferredInterfaceMetricFromValues
 } from '../../pages/projectDetail/projectMetrics';
+import { isNumericToken } from '../../pages/projectTasks/taskDataConfidence';
+import { normalizeProbability } from '../../pages/projectTasks/taskDataCore';
+import { normalizeChainToken } from '../../pages/projectDetail/projectMetrics';
+import { normalizePlddt } from '../../pages/projectTasks/taskDataConfidence';
 
 interface MetricsPanelProps {
   title: string;
@@ -71,12 +76,6 @@ function pickNumber(data: Record<string, unknown>, keys: string[]): number | nul
 }
 
 type Tone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
-
-function normalizePlddt(value: number | null): number | null {
-  if (value === null) return null;
-  if (value >= 0 && value <= 1) return value * 100;
-  return value;
-}
 
 function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'iptm' | 'pae' | 'fraction'): Tone {
   if (value === null) return 'neutral';
@@ -155,16 +154,6 @@ function pickNumberArray(data: Record<string, unknown>, keys: string[]): number[
   return [];
 }
 
-function normalizeProbability(value: number | null): number | null {
-  if (value === null) return null;
-  if (value > 1 && value <= 100) return value / 100;
-  return value;
-}
-
-function normalizeChainToken(value: string): string {
-  return String(value || '').trim().toUpperCase();
-}
-
 function chainTokenEquals(a: string, b: string): boolean {
   const left = normalizeChainToken(a);
   const right = normalizeChainToken(b);
@@ -186,10 +175,6 @@ function chainTokenEquals(a: string, b: string): boolean {
     }
   }
   return false;
-}
-
-function isNumericToken(value: string): boolean {
-  return /^\d+$/.test(String(value || '').trim());
 }
 
 function readPairValueFromNestedMap(
@@ -500,11 +485,13 @@ function ConfidencePanel({
   const pae = pickNumber(data, ['complex_pde', 'complex_pae', 'pair_pae', 'pairPae', 'pair_pde', 'pair_gpde', 'gpde', 'pae']);
   const ipsaeDom = readIpsaeDomMetric(data);
   const ligandIpsaeMax = readLigandIpsaeMaxMetric(data);
+  const interfaceMetric = readInterfaceMetricIpsaeChannel(data);
   const preferredInterfaceMetric = resolvePreferredInterfaceMetricFromValues({
     pairIptm: selectedPairIptm,
     iptm: selectedPairIptm ?? normalizeProbability(pickNumber(data, ['iptm', 'ligand_iptm', 'protein_iptm'])),
     ipsaeDom,
-    ligandIpsaeMax
+    ligandIpsaeMax,
+    interfaceMetric
   });
   const preferredInterfaceMetricScale: 'probability' | 'iptm' =
     preferredInterfaceMetric.source === 'ipsae' ? 'probability' : 'iptm';

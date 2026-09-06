@@ -424,7 +424,7 @@ function resolveChainFromPool(candidate: string, pool: string[]): string | null 
   return null;
 }
 
-function normalizeProbability(value: number | null): number | null {
+export function normalizeProbability(value: number | null): number | null {
   if (value === null) return null;
   if (value > 1 && value <= 100) return value / 100;
   return value;
@@ -835,7 +835,6 @@ export {
   readFirstFiniteMetric,
   readFirstNonEmptyStringMetric,
   readStringListMetric,
-  normalizeProbability,
   normalizeChainKey,
   chainKeysMatch
 };
@@ -857,7 +856,6 @@ export {
 } from './taskDataPeptide';
 
 export {
-  mapTaskState,
   inferTaskStateFromStatusPayload,
   readStatusText,
   resolveTaskBackendValue,

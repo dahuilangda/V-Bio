@@ -675,3 +675,15 @@ export function rcsbCifUrl(pdbId: string): string {
 export function isRcsbEntryId(value: string): boolean {
   return /^[0-9A-Za-z]{4}$/.test(value.trim());
 }
+
+/** Strip surrounding single/double quotes from a CIF field token. Identical to the
+ *  local copies that used to live in cifConfidenceColoring, resultBundleParser and
+ *  affinityAtomLinking. */
+export function stripCifTokenQuotes(value: string): string {
+  if (value.length >= 2) {
+    if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}

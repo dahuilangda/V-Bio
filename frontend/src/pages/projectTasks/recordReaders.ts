@@ -15,6 +15,28 @@ export function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * Coerce an unknown value to an array of records, dropping non-object entries (including
+ * nested arrays). Identical to the filter-variant local copies in projectTaskRuntime,
+ * PeptideDesignResultsWorkspace, peptideTaskPreview and resultBundleParser.
+ * (resultConfidenceStorage keeps its own plain-cast variant by design: it must preserve
+ * array element identity without filtering.)
+ */
+export function asRecordArray(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
+}
+
+/**
+ * True when the value is a non-array object with at least one key — the shared
+ * "has meaningful payload" check used by task-row merge logic. Identical to the local
+ * copies in useProjectTasksDataLoader, useProjectTaskRowActions and
+ * useProjectDetailRuntimeContext.
+ */
+export function hasObjectContent(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+}
+
+/**
  * Read a value as a trimmed string, returning `''` for null/undefined.
  * Identical to the local copies in useResultSnapshot and peptideTaskPreview.
  */
@@ -52,6 +74,17 @@ export function readFiniteNumber(value: unknown): number | null {
 }
 
 /**
+ * Parse an array value into finite numbers, dropping non-finite entries.
+ * Identical to the local copy in taskRowSync.
+ */
+export function readFiniteNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => readFiniteNumber(item))
+    .filter((item): item is number => item !== null);
+}
+
+/**
  * Scan multiple payloads for the first finite number found at any of the given dotted paths.
  * Identical in logic to `readFirstFinite` (useResultSnapshot) and `firstFiniteMetric` (peptideTaskPreview).
  */
@@ -77,4 +110,26 @@ export function readFirstText(payloads: Record<string, unknown>[], paths: string
     }
   }
   return '';
+}
+
+/**
+ * Coerce any non-null value to its string form WITHOUT trimming — the semantic
+ * shared by the result-parsing copies in resultBundleParser,
+ * PeptideDesignResultsWorkspace, leadOptPredictionHelpers,
+ * useLeadOptReferenceFragment and projectLoadFlow. (recordReaders' `readText`
+ * trims; the two must not be conflated.)
+ */
+export function asString(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+/**
+ * Strict numeric coercion: numbers pass through only if finite; strings are NOT
+ * parsed. Identical to the local copies in resultBundleParser, projectMetrics
+ * and taskDataConfidence. (String inputs go through `readFiniteNumber` instead.)
+ */
+export function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return value;
 }

@@ -5,6 +5,7 @@ import {
   type LeadOptPredictionRecord
 } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
+import { asRecordArray } from '../projectTasks/recordReaders';
 
 export function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -63,7 +64,7 @@ export function summarizePeptideDesignCandidates(confidence: Record<string, unkn
       generation: toFiniteNumber(row.generation ?? row.iteration ?? row.iter),
       score: toFiniteNumber(row.score ?? row.composite_score ?? row.fitness ?? row.objective),
       plddt: normalizePlddtMetric(row.plddt ?? row.binder_avg_plddt ?? row.ligand_mean_plddt ?? row.mean_plddt),
-      interfaceMetric: toFiniteNumber(row.ligand_ipsae_max ?? row.ipsae_dom ?? row.pair_iptm ?? row.pairIptm ?? row.iptm),
+      interfaceMetric: toFiniteNumber(row.ligand_ipsae_max ?? row.ipsae_dom ?? row.interface_metric ?? row.pair_iptm ?? row.pairIptm ?? row.iptm),
       sequenceLength: readText(row.peptide_sequence ?? row.binder_sequence ?? row.candidate_sequence ?? row.designed_sequence ?? row.sequence).trim().length,
       structureName: readText(row.structureName ?? row.structure_name ?? row.structure_file ?? row.structure_path).trim()
     }))
@@ -657,10 +658,6 @@ export function summarizeLeadOptPredictions(records: Record<string, LeadOptPredi
   };
 }
 
-export function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Array<Record<string, unknown>>;
-}
 
 export function toFiniteNumber(value: unknown): number | null {
   const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
@@ -686,16 +683,6 @@ export function compactLigandAtomPlddts(values: unknown): number[] {
     if (out.length >= 256) break;
   }
   return out;
-}
-
-export function readBooleanToken(value: unknown): boolean | null {
-  if (value === true) return true;
-  if (value === false) return false;
-  const token = readText(value).trim().toLowerCase();
-  if (!token) return null;
-  if (token === '1' || token === 'true' || token === 'yes' || token === 'on') return true;
-  if (token === '0' || token === 'false' || token === 'no' || token === 'off') return false;
-  return null;
 }
 
 export function normalizePredictionBackendStrict(value: unknown): string {
@@ -772,76 +759,6 @@ export function compactLeadOptPredictionMap(
     out[key] = merged;
   }
   return out;
-}
-
-export function compactLeadOptEnumeratedCandidateRow(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  const smiles = readText(row.smiles || row.candidate_smiles || row.predicted_smiles).trim();
-  if (!smiles) return null;
-  const nPairs = toFiniteNumber(row.n_pairs);
-  const medianDelta = toFiniteNumber(row.median_delta);
-  const propertiesRaw = asRecord(row.properties);
-  const propertyDeltasRaw = asRecord(row.property_deltas);
-  const properties: Record<string, unknown> = {};
-  const propertyDeltas: Record<string, unknown> = {};
-  const mw = toFiniteNumber(propertiesRaw.molecular_weight);
-  const logp = toFiniteNumber(propertiesRaw.logp);
-  const tpsa = toFiniteNumber(propertiesRaw.tpsa);
-  const deltaMw = toFiniteNumber(propertyDeltasRaw.mw);
-  const deltaLogp = toFiniteNumber(propertyDeltasRaw.logp);
-  const deltaTpsa = toFiniteNumber(propertyDeltasRaw.tpsa);
-  if (mw !== null) properties.molecular_weight = mw;
-  if (logp !== null) properties.logp = logp;
-  if (tpsa !== null) properties.tpsa = tpsa;
-  if (deltaMw !== null) propertyDeltas.mw = deltaMw;
-  if (deltaLogp !== null) propertyDeltas.logp = deltaLogp;
-  if (deltaTpsa !== null) propertyDeltas.tpsa = deltaTpsa;
-  const highlightAtomIndices = Array.isArray(row.final_highlight_atom_indices)
-    ? Array.from(
-        new Set(
-          row.final_highlight_atom_indices
-            .map((item) => Number(item))
-            .filter((item) => Number.isFinite(item) && item >= 0)
-            .map((item) => Math.floor(item))
-        )
-      )
-    : [];
-  const constantSmiles = readText(row.constant_smiles).trim();
-  return {
-    smiles,
-    ...(nPairs === null ? {} : { n_pairs: nPairs }),
-    ...(medianDelta === null ? {} : { median_delta: medianDelta }),
-    properties,
-    property_deltas: propertyDeltas,
-    final_highlight_atom_indices: highlightAtomIndices,
-    ...(constantSmiles ? { constant_smiles: constantSmiles } : {})
-  };
-}
-
-export function readLeadOptPersistRecordUpdatedAt(value: unknown): number {
-  const record = asRecord(value);
-  const raw = record.updatedAt ?? record.updated_at;
-  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-export function mergeLeadOptPersistRecordMap(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
-  const next = asRecord(nextValue);
-  const prev = asRecord(prevValue);
-  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
-  const merged: Record<string, unknown> = { ...prev };
-  for (const [key, nextRecord] of Object.entries(next)) {
-    const prevRecord = merged[key];
-    if (!prevRecord) {
-      merged[key] = nextRecord;
-      continue;
-    }
-    const nextUpdatedAt = readLeadOptPersistRecordUpdatedAt(nextRecord);
-    const prevUpdatedAt = readLeadOptPersistRecordUpdatedAt(prevRecord);
-    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
-  }
-  return merged;
 }
 
 export function resolveLeadOptSnapshotFromTask(taskInput: unknown): Record<string, unknown> {
@@ -942,30 +859,6 @@ export function readLeadOptTaskRowTimestamp(taskInput: unknown): number {
   ).getTime() || 0;
 }
 
-export function readLeadOptSnapshotPriority(taskInput: unknown): number {
-  const task = taskInput as any;
-  const snapshot = resolveLeadOptSnapshotFromTask(task);
-  if (Object.keys(snapshot).length === 0) return -1;
-  const summary = readLeadOptTaskSummary(task);
-  if (!summary) return 0;
-  const queued = Math.max(0, Number(summary.predictionQueued || 0));
-  const running = Math.max(0, Number(summary.predictionRunning || 0));
-  const success = Math.max(0, Number(summary.predictionSuccess || 0));
-  const failure = Math.max(0, Number(summary.predictionFailure || 0));
-  const stage = readText(summary.stage).trim().toLowerCase();
-  const hasMaterializedQuery = Boolean(
-    summary.transformCount !== null ||
-    summary.candidateCount !== null ||
-    summary.databaseId ||
-    summary.databaseLabel ||
-    summary.databaseSchema
-  );
-  if (success > 0 || failure > 0 || hasMaterializedQuery || stage === 'prediction_completed' || stage === 'completed') return 4;
-  if (running > 0 || stage === 'prediction_running' || stage === 'running') return 3;
-  if (queued > 0 || stage === 'prediction_queued' || stage === 'queued') return 2;
-  return 1;
-}
-
 export function readLeadOptListPriority(taskInput: unknown): number {
   const task = taskInput as any;
   const snapshot = resolveLeadOptSnapshotFromTask(taskInput);
@@ -1029,8 +922,3 @@ export function pickPreferredLeadOptTask(projectTasks: ProjectTask[]): ProjectTa
   return preferred;
 }
 
-export function readLeadOptQueryIdFromSnapshot(snapshotInput: unknown): string {
-  const snapshot = asRecord(snapshotInput);
-  const queryResult = asRecord(snapshot.query_result);
-  return readText(snapshot.query_id || queryResult.query_id).trim();
-}

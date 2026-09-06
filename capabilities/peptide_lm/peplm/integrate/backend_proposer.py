@@ -65,6 +65,7 @@ class BackendProposer:
                  fixed_residues: list[dict] | None = None,
                  design_mode: str = "linear",
                  cys_positions: list[int] | None = None,
+                 cys_layout: dict | None = None,
                  allow_extra_cys: bool = False,
                  ncaa_decode_bias: float = 0.5,
                  log=print):
@@ -72,6 +73,9 @@ class BackendProposer:
         non-natural entries); empty = pure natural design (ncaa_max forced 0).
         design_mode/cys_positions: bicyclic layout — cys_positions are the
         0-based anchor indices (exactly 3 in manual mode; empty = auto).
+        cys_layout: optional length-function layout dict
+        ({"mode": "ring"|"ratio", ...}) that supersedes cys_positions and
+        keeps manual topologies valid across adaptive design lengths.
         allow_extra_cys: keep non-anchor Cys unlinked instead of scrubbing.
         fixed_residues: [{'position': 1-based, 'residue': 'F' | '[AIB]'}] —
         the production peptideSequenceMask letters.
@@ -121,6 +125,7 @@ class BackendProposer:
             self.L = self.len_range[1]
             self.design_mode = design_mode
             self.cys_positions = sorted({int(p) for p in (cys_positions or [])})
+            self.cys_layout = dict(cys_layout) if isinstance(cys_layout, dict) else None
             self.allow_extra_cys = bool(allow_extra_cys)
             self.ncaa_decode_bias = float(ncaa_decode_bias)
             # NCAA pool is strictly user-specified (preset catalog is a
@@ -159,7 +164,7 @@ class BackendProposer:
         pldds, composite metrics, cys_positions). Returns
         [(base_sequence, modifications, cys_anchor_positions)]."""
         from peplm.candidate import Candidate
-        from peplm.loop.constraints import choose_bicyclic_anchors
+        from peplm.loop.constraints import choose_bicyclic_anchors, resolve_bicyclic_anchors
 
         struct = self._struct_token()
         out: list[tuple[str, list[dict], list[int]]] = []
@@ -192,8 +197,7 @@ class BackendProposer:
                 if not res:
                     continue
                 res = self._bicy_post_edit(res)
-                anchors = list(choose_bicyclic_anchors(
-                    len(res), self.fixed_map, tuple(self.cys_positions)))
+                anchors = list(self._anchors_for_length(len(res)))
                 seq, mods = self._to_modifications(self._apply_fixed(res))
                 out.append((seq, mods, anchors))
             return out
@@ -215,6 +219,7 @@ class BackendProposer:
             "ncaa_decode_bias": self.ncaa_decode_bias,
             "cys_positions": tuple(self.cys_positions),
             "allow_extra_cys": self.allow_extra_cys,
+            "cys_layout": self.cys_layout,
         }
         for p in parents[:4]:
             c = self._cand_wrap(p)
@@ -227,8 +232,7 @@ class BackendProposer:
                     pool_tokens=list(self.ncaa_pool_tokens),
                     plan_kwargs=plan_kwargs)[:per_parent]:
                 res = self._bicy_post_edit(cand.residues)
-                anchors = list(choose_bicyclic_anchors(
-                    len(res), self.fixed_map, tuple(self.cys_positions)))
+                anchors = list(self._anchors_for_length(len(res)))
                 seq, mods = self._to_modifications(self._apply_fixed(res))
                 out.append((seq, mods, anchors))
         while len(out) < n and parents:
@@ -242,25 +246,34 @@ class BackendProposer:
                 ncaa_pool=list(self.ncaa_pool_tokens),
                 ncaa_max=self.ncaa_max)
             res = self._bicy_post_edit(cand.residues)
-            anchors = list(choose_bicyclic_anchors(
-                len(res), self.fixed_map, tuple(self.cys_positions)))
+            anchors = list(self._anchors_for_length(len(res)))
             seq, mods = self._to_modifications(self._apply_fixed(res))
             out.append((seq, mods, anchors))
         return out[:n]
 
+    def _anchors_for_length(self, length: int) -> tuple:
+        """Resolve anchors for one candidate length; a length-function
+        layout that cannot fit degrades to the auto layout so the candidate
+        still ships a consistent (sequence, anchors) pair."""
+        from peplm.loop.constraints import choose_bicyclic_anchors, resolve_bicyclic_anchors
+
+        resolved = resolve_bicyclic_anchors(
+            length, self.fixed_map, tuple(self.cys_positions), self.cys_layout)
+        if resolved is not None:
+            return resolved
+        return choose_bicyclic_anchors(
+            length, self.fixed_map, tuple(self.cys_positions))
+
     def _row_anchors(self, row) -> tuple:
         """Anchor positions for an elite row: recorded when the caller kept
         them, else recomputed from the sequence length by the shared rule."""
-        from peplm.loop.constraints import choose_bicyclic_anchors
-
         if self.design_mode != "bicyclic":
             return ()
         recorded = row.get("cys_positions") if isinstance(row, dict) else None
         if recorded and len(recorded) == 3:
             return tuple(int(p) for p in recorded)
         seq = str(row.get("sequence") or "")
-        return choose_bicyclic_anchors(len(seq), self.fixed_map,
-                                       tuple(self.cys_positions))
+        return self._anchors_for_length(len(seq))
 
 
 
@@ -274,7 +287,7 @@ class BackendProposer:
     class _PlanCfg:
         def __init__(self, len_range, design_mode, bicyclic_layout,
                      ncaa_range, ncaa_decode_bias, cys_positions=(),
-                     allow_extra_cys=False):
+                     allow_extra_cys=False, cys_layout=None):
             self.len_range = len_range
             self.design_mode = design_mode
             self.bicyclic_layout = bicyclic_layout
@@ -282,13 +295,15 @@ class BackendProposer:
             self.ncaa_decode_bias = ncaa_decode_bias
             self.cys_positions = tuple(cys_positions)
             self.allow_extra_cys = bool(allow_extra_cys)
+            self.cys_layout = dict(cys_layout) if isinstance(cys_layout, dict) else None
 
     def _plan_cfg(self):
         return self._PlanCfg(tuple(self.len_range), self.design_mode,
                              "first_last", (self.ncaa_min, self.ncaa_max),
                              self.ncaa_decode_bias,
                              cys_positions=tuple(self.cys_positions),
-                             allow_extra_cys=self.allow_extra_cys)
+                             allow_extra_cys=self.allow_extra_cys,
+                             cys_layout=self.cys_layout)
 
     def _bicy_post_edit(self, res: list[str]) -> list[str]:
         """Bounded post-edit for adaptive-length bicyclic anchors (terminal +
@@ -299,7 +314,8 @@ class BackendProposer:
 
         return apply_post_edit(res, plan_for_post_edit(
             dict(self.fixed_map), self.vocab, tuple(self.cys_positions),
-            allow_extra_cys=self.allow_extra_cys),
+            allow_extra_cys=self.allow_extra_cys,
+            cys_layout=self.cys_layout),
             "first_last")
 
     @property

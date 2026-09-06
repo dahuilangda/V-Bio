@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { buildResidueLoci } from '../loci';
 import { tryFocusLikelyLigand } from '../theme';
+import { normalizeChainToken } from '../../../../pages/projectDetail/projectMetrics';
 
 interface UseMolstarFocusArgs {
   format: 'cif' | 'pdb';
@@ -13,10 +14,6 @@ interface UseMolstarFocusArgs {
 interface SmallMoleculeFocusStats {
   chainHasSmallMolecule: Map<string, boolean>;
   hasAnySmallMolecule: boolean;
-}
-
-function normalizeChainToken(value: string): string {
-  return String(value || '').trim().toUpperCase();
 }
 
 function isLikelyWaterResidue(residueName: string): boolean {

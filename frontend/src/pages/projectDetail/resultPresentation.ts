@@ -74,7 +74,9 @@ export function buildSnapshotCards(params: {
           ? 'Best ligand contact IPSAE'
           : preferredInterfaceMetric.kind === 'ipsae_dom'
             ? 'Interface IPSAE'
-            : preferredInterfaceMetric.pairIptm !== null && selectedResultTargetLabel !== selectedResultLigandLabel
+            : preferredInterfaceMetric.kind === 'interface_metric'
+              ? 'Interface IPSAE'
+              : preferredInterfaceMetric.pairIptm !== null && selectedResultTargetLabel !== selectedResultLigandLabel
           ? selectedResultPairLabel
             : 'Interface conf',
       tone: preferredInterfaceMetric.tone

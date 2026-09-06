@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Clipboard, KeyRound, Power, PowerOff, Trash2 } from 'lucide-react';
+import { Clipboard, KeyRound, LoaderCircle, Power, PowerOff, Trash2 } from 'lucide-react';
 import {
   createJwtClient,
   deleteJwtClient,
@@ -15,6 +15,7 @@ export function JwtClientsPage() {
   const [managementToken, setManagementToken] = useState('');
   const canManage = Boolean(managementToken);
   const [clients, setClients] = useState<JwtClientRecord[]>([]);
+  const [busyClientId, setBusyClientId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -81,6 +82,8 @@ export function JwtClientsPage() {
   };
 
   const toggleClient = async (client: JwtClientRecord) => {
+    if (busyClientId) return;
+    setBusyClientId(client.client_id);
     setError(null);
     setNotice(null);
     setVisibleToken(null);
@@ -90,10 +93,14 @@ export function JwtClientsPage() {
       setClients((prev) => prev.map((item) => (item.client_id === next.client_id ? next : item)));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update integration.');
+    } finally {
+      setBusyClientId(null);
     }
   };
 
   const issueToken = async (client: JwtClientRecord) => {
+    if (busyClientId) return;
+    setBusyClientId(client.client_id);
     setError(null);
     setNotice(null);
     setVisibleToken(null);
@@ -107,6 +114,8 @@ export function JwtClientsPage() {
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to issue JWT.');
+    } finally {
+      setBusyClientId(null);
     }
   };
 
@@ -122,7 +131,9 @@ export function JwtClientsPage() {
   };
 
   const removeClient = async (client: JwtClientRecord) => {
+    if (busyClientId) return;
     if (!window.confirm(`Delete integration "${client.name}"?`)) return;
+    setBusyClientId(client.client_id);
     setError(null);
     setNotice(null);
     setVisibleToken(null);
@@ -132,6 +143,8 @@ export function JwtClientsPage() {
       setClients((prev) => prev.filter((item) => item.client_id !== client.client_id));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete JWT client.');
+    } finally {
+      setBusyClientId(null);
     }
   };
 
@@ -210,28 +223,33 @@ export function JwtClientsPage() {
                         type="button"
                         title="Issue new JWT"
                         aria-label={`Issue new JWT for ${client.name}`}
-                        disabled={!client.active}
+                        disabled={!client.active || busyClientId === client.client_id}
+                        aria-busy={busyClientId === client.client_id}
                         onClick={() => void issueToken(client)}
                       >
-                        <KeyRound size={14} />
+                        {busyClientId === client.client_id ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />}
                       </button>
                       <button
                         className="icon-btn"
                         type="button"
                         title={client.active ? 'Disable integration' : 'Enable integration'}
                         aria-label={`${client.active ? 'Disable' : 'Enable'} ${client.name}`}
+                        disabled={busyClientId === client.client_id}
+                        aria-busy={busyClientId === client.client_id}
                         onClick={() => void toggleClient(client)}
                       >
-                        {client.active ? <PowerOff size={14} /> : <Power size={14} />}
+                        {busyClientId === client.client_id ? <LoaderCircle size={14} className="spin" /> : client.active ? <PowerOff size={14} /> : <Power size={14} />}
                       </button>
                       <button
                         className="icon-btn danger"
                         type="button"
                         title="Delete integration"
                         aria-label={`Delete ${client.name}`}
+                        disabled={busyClientId === client.client_id}
+                        aria-busy={busyClientId === client.client_id}
                         onClick={() => void removeClient(client)}
                       >
-                        <Trash2 size={14} />
+                        {busyClientId === client.client_id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}
                       </button>
                     </div>
                   </td>

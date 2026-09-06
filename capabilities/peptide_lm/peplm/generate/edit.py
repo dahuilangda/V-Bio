@@ -53,7 +53,7 @@ class _PlanCfg:
 
     def __init__(self, len_range, design_mode, bicyclic_layout, ncaa_range,
                  ncaa_decode_bias=0.0, cys_positions=(),
-                 allow_extra_cys=False):
+                 allow_extra_cys=False, cys_layout=None):
         self.len_range = len_range
         self.design_mode = design_mode
         self.bicyclic_layout = bicyclic_layout
@@ -61,6 +61,7 @@ class _PlanCfg:
         self.ncaa_decode_bias = ncaa_decode_bias
         self.cys_positions = tuple(cys_positions)
         self.allow_extra_cys = bool(allow_extra_cys)
+        self.cys_layout = dict(cys_layout) if isinstance(cys_layout, dict) else None
 
 
 def cond_prefix(residues: list[str], cyclic: bool,

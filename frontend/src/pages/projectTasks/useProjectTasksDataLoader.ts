@@ -16,7 +16,12 @@ import {
   sortProjectTasks,
   type LoadTaskDataOptions,
 } from './taskDataUtils';
+import { TaskRowDeletionLedger } from './taskRowDeletionLedger';
 import { hydrateTaskMetricsFromResultRows, syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
+import { asRecord, hasObjectContent } from '../../pages/projectTasks/recordReaders';
+import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
+import { mergeConfidencePreservingPeptideCandidates } from './taskDataPeptide';
+import { taskStatePriority } from '../../utils/taskRuntime';
 
 interface UseProjectTasksDataLoaderOptions {
   projectId: string;
@@ -42,6 +47,12 @@ interface UseProjectTasksDataLoaderResult {
   loadData: (options?: LoadTaskDataOptions) => Promise<void>;
   /** Await the fully-loaded task list; reports merged row count per chunk. */
   ensureAllTasksLoaded: (onProgress?: (loaded: number) => void) => Promise<void>;
+  /**
+   * Record a server-confirmed task-row deletion. Writers that captured their
+   * rows before the deletion (in-flight list fetches, pagination chunks,
+   * runtime-status polls, result hydration) must never merge the row back in.
+   */
+  removeTaskRow: (taskRowId: string) => void;
 }
 
 interface TaskListAccessContext {
@@ -50,14 +61,6 @@ interface TaskListAccessContext {
   editableTaskIds: string[];
 }
 
-const TASK_STATE_PRIORITY: Record<string, number> = {
-  DRAFT: 0,
-  QUEUED: 1,
-  RUNNING: 2,
-  SUCCESS: 3,
-  FAILURE: 3,
-  REVOKED: 3,
-};
 const TASK_LIST_RUNTIME_CACHE_TTL_MS = 5000;
 const LEGACY_TASK_LIST_RUNTIME_CACHE_KEY_PREFIX = 'vbio:project-tasks-runtime:';
 const TASK_LIST_INITIAL_FETCH_LIMIT = 120;
@@ -75,66 +78,7 @@ interface TaskListRuntimeCacheEntry {
 const taskListRuntimeCache = new Map<string, TaskListRuntimeCacheEntry>();
 let legacyRuntimeCacheCleanupDone = false;
 
-function taskStatePriority(value: unknown): number {
-  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
-}
 
-function hasObjectContent(value: unknown): boolean {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function hasPeptideCandidateRows(value: unknown): boolean {
-  const confidence = asRecord(value);
-  if (Object.keys(confidence).length === 0) return false;
-  const peptide = asRecord(confidence.peptide_design);
-  const progress = asRecord(confidence.progress);
-  const peptideProgress = asRecord(peptide.progress);
-  const sources = [confidence, peptide, progress, peptideProgress];
-  return sources.some(
-    (source) =>
-      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
-      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
-      (Array.isArray(source.candidates) && source.candidates.length > 0)
-  );
-}
-
-function mergeConfidencePreservingPeptideCandidates(nextValue: unknown, prevValue: unknown): unknown {
-  const next = asRecord(nextValue);
-  const prev = asRecord(prevValue);
-  if (Object.keys(next).length === 0) return prevValue;
-  if (Object.keys(prev).length === 0) return nextValue;
-  if (hasPeptideCandidateRows(prev) && !hasPeptideCandidateRows(next)) return prevValue;
-  return nextValue;
-}
-
-function readRecordUpdatedAt(value: unknown): number {
-  const record = asRecord(value);
-  const raw = record.updatedAt ?? record.updated_at;
-  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
-  const next = asRecord(nextValue);
-  const prev = asRecord(prevValue);
-  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
-  const merged: Record<string, unknown> = { ...prev };
-  for (const [key, nextRecord] of Object.entries(next)) {
-    const prevRecord = merged[key];
-    if (!prevRecord) {
-      merged[key] = nextRecord;
-      continue;
-    }
-    const nextUpdatedAt = readRecordUpdatedAt(nextRecord);
-    const prevUpdatedAt = readRecordUpdatedAt(prevRecord);
-    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
-  }
-  return merged;
-}
 
 function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): ProjectTask['properties'] | null {
   const next = asRecord(nextValue);
@@ -233,7 +177,10 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   };
 }
 
-function mergeTaskRowPages(nextRows: ProjectTask[], prevRows: ProjectTask[]): ProjectTask[] {
+// Exported for the deletion-ledger regression test: the merge is add-only, so
+// without the ledger filter any writer holding a pre-deletion snapshot would
+// resurrect a deleted row (the exact bug the test pins down).
+export function mergeTaskRowPages(nextRows: ProjectTask[], prevRows: ProjectTask[]): ProjectTask[] {
   const mergedById = new Map<string, ProjectTask>();
   for (const row of sanitizeTaskRows(prevRows)) {
     mergedById.set(row.id, row);
@@ -381,6 +328,17 @@ export function useProjectTasksDataLoader({
   const pendingForceRefetchRef = useRef(false);
   const loadDataRef = useRef<((options?: LoadTaskDataOptions) => Promise<void>) | null>(null);
 
+  // Deletion ledger — see TaskRowDeletionLedger. Every writer that merges rows
+  // captured before a deletion (in-flight list fetches, pagination chunks,
+  // runtime-status polls, result hydration) filters through it before touching
+  // state or the runtime cache.
+  const taskRowDeletionsRef = useRef<TaskRowDeletionLedger>(new TaskRowDeletionLedger());
+
+  const dropDeletedTaskRows = useCallback(
+    (rows: ProjectTask[]): ProjectTask[] => taskRowDeletionsRef.current.apply(rows),
+    []
+  );
+
   const taskListRuntimeCacheKey = useMemo(() => {
     const sessionIdentity = String(sessionUserId || '').trim().toLowerCase() || '__anonymous__';
     const normalizedProjectId = String(projectId || '').trim();
@@ -411,6 +369,7 @@ export function useProjectTasksDataLoader({
     taskListAccessContextRef.current = null;
     runtimeSnapshotTaskIdsRef.current = new Set();
     pendingForceRefetchRef.current = false;
+    taskRowDeletionsRef.current.reset();
   }, [projectId]);
 
   const persistRuntimeCache = useCallback(
@@ -421,11 +380,11 @@ export function useProjectTasksDataLoader({
       taskListRuntimeCache.set(taskListRuntimeCacheKey, {
         savedAt: now,
         project: projectRow,
-        tasks: pickRuntimeCacheTaskRows(taskRows)
+        tasks: pickRuntimeCacheTaskRows(dropDeletedTaskRows(sanitizeTaskRows(taskRows)))
       });
       pruneRuntimeCache(now);
     },
-    [taskListRuntimeCacheKey]
+    [dropDeletedTaskRows, taskListRuntimeCacheKey]
   );
 
   const hydrateRuntimeCache = useCallback(() => {
@@ -435,7 +394,7 @@ export function useProjectTasksDataLoader({
     pruneRuntimeCache(now);
     const cached = taskListRuntimeCache.get(taskListRuntimeCacheKey);
     if (!cached) return false;
-    const cachedTasks = sanitizeTaskRows(cached.tasks);
+    const cachedTasks = dropDeletedTaskRows(sanitizeTaskRows(cached.tasks));
     if (cachedTasks.length === 0) {
       taskListRuntimeCache.delete(taskListRuntimeCacheKey);
       return false;
@@ -445,7 +404,30 @@ export function useProjectTasksDataLoader({
     setProject(cached.project);
     setTasks(cachedTasks);
     return true;
-  }, [taskListRuntimeCacheKey]);
+  }, [dropDeletedTaskRows, taskListRuntimeCacheKey]);
+
+  /**
+   * Server-confirmed deletion of a task row. Runs synchronously after the
+   * DELETE resolves (single-threaded JS: no writer can interleave between the
+   * await and this bookkeeping), so every later writer sees the tombstone.
+   * Also splices the row out of the module-level runtime cache in place: a
+   * remount within the cache TTL must not restore the pre-deletion snapshot.
+   */
+  const removeTaskRow = useCallback(
+    (taskRowId: string) => {
+      const rowId = String(taskRowId || '').trim();
+      if (!rowId) return;
+      taskRowDeletionsRef.current.markDeleted(rowId);
+      setTasks((prev) => sanitizeTaskRows(prev).filter((row) => String(row.id || '').trim() !== rowId));
+      if (taskListRuntimeCacheKey) {
+        const cached = taskListRuntimeCache.get(taskListRuntimeCacheKey);
+        if (cached) {
+          cached.tasks = sanitizeTaskRows(cached.tasks).filter((row) => String(row.id || '').trim() !== rowId);
+        }
+      }
+    },
+    [taskListRuntimeCacheKey]
+  );
 
   // Read via ref inside syncRuntimeTasks so its identity (and therefore
   // loadData's, which the mount auto-effect depends on) stays stable while the
@@ -480,7 +462,10 @@ export function useProjectTasksDataLoader({
           : collectPendingRuntimeTaskIds(cachedTasks);
 
       const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
-      const nextPendingTaskIds = collectPendingRuntimeTaskIds(synced.taskRows);
+      // The sync awaited several network calls; a deletion may have committed
+      // meanwhile. synced.taskRows still carries the pre-deletion snapshot.
+      const syncedRows = dropDeletedTaskRows(sortProjectTasks(sanitizeTaskRows(synced.taskRows)));
+      const nextPendingTaskIds = collectPendingRuntimeTaskIds(syncedRows);
       runtimeSnapshotTaskIdsRef.current = nextPendingTaskIds;
       if (
         previousPendingTaskIds.size > 0 &&
@@ -491,10 +476,10 @@ export function useProjectTasksDataLoader({
       setProject(synced.project);
       // Functional merge: rows fetched by a concurrent pagination loop during
       // the sync's network awaits must survive this write.
-      setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(sortProjectTasks(synced.taskRows), prev)));
+      setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(syncedRows, prev)));
       persistRuntimeCache(
         synced.project,
-        sanitizeTaskRows(mergeTaskRowPages(sortProjectTasks(synced.taskRows), cachedTasks))
+        sanitizeTaskRows(mergeTaskRowPages(syncedRows, dropDeletedTaskRows(cachedTasks)))
       );
       if (pendingForceRefetchRef.current) {
         pendingForceRefetchRef.current = false;
@@ -503,7 +488,7 @@ export function useProjectTasksDataLoader({
         }, 0);
       }
     },
-    [persistRuntimeCache, syncRuntimeTasks]
+    [dropDeletedTaskRows, persistRuntimeCache, syncRuntimeTasks]
   );
 
   const markFullLoadComplete = useCallback(() => {
@@ -613,7 +598,9 @@ export function useProjectTasksDataLoader({
                 editable_task_ids: accessInfo.editableTaskIds
               };
         let nextProject = cachedProject ? mergeProjectRuntimeFields(accessibleProjectBase, cachedProject) : accessibleProjectBase;
-        let nextRows = mergeTaskRowPages(sortedTaskRows, cachedTasks);
+        // The fetch and cachedTasks were both captured before any deletion that
+        // landed during the awaits above — tombstoned rows must not re-enter.
+        let nextRows = dropDeletedTaskRows(mergeTaskRowPages(sortedTaskRows, cachedTasks));
         runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(nextRows);
 
         if (loadSeqRef.current !== loadSeq) return;
@@ -647,7 +634,9 @@ export function useProjectTasksDataLoader({
                 markFullLoadComplete();
                 return;
               }
-              const sortedChunkRows = sortProjectTasks(sanitizeTaskRows(chunkRows));
+              // The chunk was requested before any concurrent deletion could be
+              // observed server-side; tombstoned rows in it are stale.
+              const sortedChunkRows = dropDeletedTaskRows(sortProjectTasks(sanitizeTaskRows(chunkRows)));
               const optimisticMerged = sanitizeTaskRows(mergeTaskRowPages(sortedChunkRows, tasksRef.current));
               const projectForChunk = projectRef.current || nextProject;
               runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(optimisticMerged);
@@ -686,7 +675,7 @@ export function useProjectTasksDataLoader({
               const initialSynced = await syncInitialRuntimeTasks(runtimeSettledProject, runtimeSettledRows);
               if (loadSeqRef.current !== loadSeq) return;
               runtimeSettledProject = initialSynced.project;
-              runtimeSettledRows = sanitizeTaskRows(initialSynced.taskRows);
+              runtimeSettledRows = dropDeletedTaskRows(sanitizeTaskRows(initialSynced.taskRows));
               runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(runtimeSettledRows);
               setProject(runtimeSettledProject);
               setTasks(runtimeSettledRows);
@@ -695,7 +684,7 @@ export function useProjectTasksDataLoader({
               const fullySynced = await syncRuntimeTasks(runtimeSettledProject, runtimeSettledRows);
               if (loadSeqRef.current !== loadSeq) return;
               runtimeSettledProject = fullySynced.project;
-              runtimeSettledRows = sanitizeTaskRows(fullySynced.taskRows);
+              runtimeSettledRows = dropDeletedTaskRows(sanitizeTaskRows(fullySynced.taskRows));
               runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(runtimeSettledRows);
               setProject(runtimeSettledProject);
               setTasks(runtimeSettledRows);
@@ -722,7 +711,7 @@ export function useProjectTasksDataLoader({
         loadInFlightRef.current = false;
       }
     },
-    [hydrateRuntimeCache, persistRuntimeCache, projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks, markFullLoadComplete]
+    [dropDeletedTaskRows, hydrateRuntimeCache, persistRuntimeCache, projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks, markFullLoadComplete]
   );
 
   useEffect(() => {
@@ -771,7 +760,9 @@ export function useProjectTasksDataLoader({
           resultHydrationAttemptsRef
         });
         if (cancelled) return;
-        const nextRows = sanitizeTaskRows(hydrated.taskRows);
+        // currentRows was captured before the (slow) result-bundle downloads; a
+        // row deleted meanwhile must not ride the hydration write back in.
+        const nextRows = dropDeletedTaskRows(sanitizeTaskRows(hydrated.taskRows));
         const nextProject = hydrated.project;
         const projectChanged = JSON.stringify(nextProject) !== memoSignature(projectRef.current, projectRef.current, currentProjectSigRef.current);
         const rowsChanged = JSON.stringify(nextRows) !== memoSignature(tasksRef.current, currentRows, currentRowsSigRef.current);
@@ -790,7 +781,7 @@ export function useProjectTasksDataLoader({
     return () => {
       cancelled = true;
     };
-  }, [persistRuntimeCache, tasks, workspaceView]);
+  }, [dropDeletedTaskRows, persistRuntimeCache, tasks, workspaceView]);
 
   const runtimePollState = useMemo(() => {
     let hasActiveRuntime = false;
@@ -1065,7 +1056,9 @@ export function useProjectTasksDataLoader({
             markFullLoadComplete();
             return;
           }
-          const sortedChunkRows = sortProjectTasks(sanitizeTaskRows(chunkRows));
+          // Same staleness rule as the auto background tail: a chunk requested
+          // before a concurrent deletion can still carry the deleted row.
+          const sortedChunkRows = dropDeletedTaskRows(sortProjectTasks(sanitizeTaskRows(chunkRows)));
           const optimisticMerged = sanitizeTaskRows(mergeTaskRowPages(sortedChunkRows, tasksRef.current));
           runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(optimisticMerged);
           // Functional write: concurrent writers must not lose their rows.
@@ -1088,7 +1081,7 @@ export function useProjectTasksDataLoader({
         loadInFlightRef.current = false;
       }
     },
-    [projectId, markFullLoadComplete, rejectFullLoadWaiters]
+    [dropDeletedTaskRows, projectId, markFullLoadComplete, rejectFullLoadWaiters]
   );
 
   const resumeTailLoadRef = useRef<(() => Promise<void>) | null>(null);
@@ -1140,5 +1133,6 @@ export function useProjectTasksDataLoader({
     setError,
     loadData,
     ensureAllTasksLoaded,
+    removeTaskRow,
   };
 }

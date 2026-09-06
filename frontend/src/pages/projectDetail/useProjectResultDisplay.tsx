@@ -5,6 +5,7 @@ import type { InputComponent } from '../../types/models';
 import {
   readIpsaeDomMetric,
   readLigandIpsaeMaxMetric,
+  readInterfaceMetricIpsaeChannel,
   resolvePreferredInterfaceMetricFromValues,
   type MetricTone
 } from './projectMetrics';
@@ -182,15 +183,17 @@ export function useProjectResultDisplay({
   const selectedResultPairLabel = `${selectedResultTargetLabel} ↔ ${selectedResultLigandLabel}`;
   const snapshotIpsaeDom = useMemo(() => readIpsaeDomMetric(snapshotConfidence), [snapshotConfidence]);
   const snapshotLigandIpsaeMax = useMemo(() => readLigandIpsaeMaxMetric(snapshotConfidence), [snapshotConfidence]);
+  const snapshotInterfaceMetric = useMemo(() => readInterfaceMetricIpsaeChannel(snapshotConfidence), [snapshotConfidence]);
   const preferredInterfaceMetric = useMemo(
     () =>
       resolvePreferredInterfaceMetricFromValues({
         pairIptm: snapshotSelectedPairIptm,
         iptm: snapshotIptm,
         ipsaeDom: snapshotIpsaeDom,
-        ligandIpsaeMax: snapshotLigandIpsaeMax
+        ligandIpsaeMax: snapshotLigandIpsaeMax,
+        interfaceMetric: snapshotInterfaceMetric
       }),
-    [snapshotIptm, snapshotIpsaeDom, snapshotLigandIpsaeMax, snapshotSelectedPairIptm]
+    [snapshotIptm, snapshotIpsaeDom, snapshotLigandIpsaeMax, snapshotInterfaceMetric, snapshotSelectedPairIptm]
   );
 
   const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> = useMemo(

@@ -6,7 +6,12 @@ import {
   readPairIptmForChains,
   resolvePreferredInterfaceMetricFromValues
 } from '../../../../pages/projectDetail/projectMetrics';
+import {
+  asRecord as asRecordStrict,
+  asString
+} from '../../../../pages/projectTasks/recordReaders';
 import type { ParsedResultBundle } from '../../../../types/models';
+import { isNumericToken } from '../../../../pages/projectTasks/taskDataConfidence';
 
 interface LeadOptPredictionRenderPayload {
   ligandRenderSmiles: string;
@@ -15,18 +20,6 @@ interface LeadOptPredictionRenderPayload {
 
 type PredictionState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
 const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
-const RESULT_HYDRATION_RETRY_BASE_MS = 1200;
-const RESULT_HYDRATION_RETRY_MAX_MS = 10000;
-const RESULT_HYDRATION_MAX_RETRIES = 8;
-const ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION = true;
-const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = true;
-const RUNTIME_STATUS_RUNNING_POLL_DELAY_MS = 3500;
-const RUNTIME_STATUS_QUEUED_POLL_DELAY_MS = 6500;
-const RUNTIME_STATUS_IDLE_POLL_DELAY_MS = 12000;
-const RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER = 2;
-const RUNTIME_STATUS_CANDIDATE_BATCH_SIZE = 1;
-const RUNTIME_STATUS_REFERENCE_BATCH_SIZE = 1;
-const RUNTIME_STATUS_MIN_TASK_REPOLL_GAP_MS = 2000;
 
 export interface LeadOptPredictionRecord {
   taskId: string;
@@ -48,36 +41,6 @@ export interface LeadOptPredictionRecord {
   resultBundleHydrated?: boolean;
   error: string;
   updatedAt: number;
-}
-
-function hasExactPredictionRenderContract(
-  value: { ligandRenderSmiles?: string; ligandRenderAtomPlddts?: number[] } | null | undefined
-): boolean {
-  if (!value) return false;
-  const renderSmiles = readText(value.ligandRenderSmiles).trim();
-  return renderSmiles.length > 0 && Array.isArray(value.ligandRenderAtomPlddts) && value.ligandRenderAtomPlddts.length > 0;
-}
-
-function pickPredictionRenderContract(
-  primary: { ligandRenderSmiles?: string; ligandRenderAtomPlddts?: number[] } | null | undefined,
-  secondary: { ligandRenderSmiles?: string; ligandRenderAtomPlddts?: number[] } | null | undefined
-): LeadOptPredictionRenderPayload {
-  if (hasExactPredictionRenderContract(primary)) {
-    return {
-      ligandRenderSmiles: readText(primary?.ligandRenderSmiles).trim(),
-      ligandRenderAtomPlddts: Array.isArray(primary?.ligandRenderAtomPlddts) ? primary!.ligandRenderAtomPlddts : []
-    };
-  }
-  if (hasExactPredictionRenderContract(secondary)) {
-    return {
-      ligandRenderSmiles: readText(secondary?.ligandRenderSmiles).trim(),
-      ligandRenderAtomPlddts: Array.isArray(secondary?.ligandRenderAtomPlddts) ? secondary!.ligandRenderAtomPlddts : []
-    };
-  }
-  return {
-    ligandRenderSmiles: '',
-    ligandRenderAtomPlddts: []
-  };
 }
 
 function resolveLeadOptPreferredInterfaceMetric(params: {
@@ -117,13 +80,13 @@ function resolveLeadOptPreferredInterfaceMetric(params: {
 export function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
   const backendKey = normalizePredictionBackendStrict(backendInput);
   if (!backendKey) return '';
-  const normalizedSmiles = readText(candidateSmilesInput).trim();
+  const normalizedSmiles = asString(candidateSmilesInput).trim();
   if (!normalizedSmiles) return '';
   return `${backendKey}${LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR}${encodeURIComponent(normalizedSmiles)}`;
 }
 
 export function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: string; smiles: string } {
-  const key = readText(keyInput).trim();
+  const key = asString(keyInput).trim();
   if (!key) return { backend: '', smiles: '' };
   const separatorIndex = key.indexOf(LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR);
   if (separatorIndex < 0) {
@@ -148,119 +111,7 @@ export function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: s
   }
 }
 
-function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | null {
-  if (!value || typeof value !== 'object') return null;
-  const raw = value as Record<string, unknown>;
-  const taskId = readText(raw.taskId || raw.task_id).trim();
-  if (!taskId) return null;
-  const state = readText(raw.state).toUpperCase();
-  const normalizedState: PredictionState =
-    state === 'QUEUED' || state === 'RUNNING' || state === 'SUCCESS' || state === 'FAILURE' ? state : 'QUEUED';
-  const structureText = readText(raw.structureText ?? raw.structure_text);
-  const structureFormat = readText(raw.structureFormat ?? raw.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
-  const structureName = readText(raw.structureName ?? raw.structure_name);
-  const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm);
-  const normalizedPreferredInterfaceMetric = resolveLeadOptPreferredInterfaceMetric({
-    compact: raw,
-    pairIptm
-  });
-  const pairPae = normalizePae(
-    raw.pairPae ?? raw.pair_pae ?? raw.pair_pde ?? raw.pair_gpde ?? raw.complex_pde ?? raw.complex_pae ?? raw.gpde ?? raw.pae
-  );
-  const ligandPlddtRaw = Number(raw.ligandPlddt ?? raw.ligand_plddt);
-  const ligandPlddt = Number.isFinite(ligandPlddtRaw) ? normalizePlddtValue(ligandPlddtRaw) : null;
-  const ligandAtomPlddts = normalizePlddtArray(raw.ligandAtomPlddts ?? raw.ligand_atom_plddts);
-  const ligandRenderSmiles = readText(raw.ligandRenderSmiles ?? raw.ligand_render_smiles ?? raw.ligand_display_smiles).trim();
-  const ligandRenderAtomPlddts = normalizePlddtArray(
-    raw.ligandRenderAtomPlddts ?? raw.ligand_render_atom_plddts ?? raw.ligand_display_atom_plddts
-  );
-  const hasExactRenderContract = ligandRenderSmiles.length > 0 && ligandRenderAtomPlddts.length > 0;
-  const hasResolvedMetrics = pairIptm !== null || pairPae !== null || ligandPlddt !== null || ligandAtomPlddts.length > 0;
-  const pairIptmResolvedRaw = raw.pairIptmResolved ?? raw.pair_iptm_resolved;
-  const resultBundleHydratedRaw = raw.resultBundleHydrated ?? raw.result_bundle_hydrated;
-  return {
-    taskId,
-    state: normalizedState,
-    backend: readText(raw.backend).trim().toLowerCase(),
-    pairIptm,
-    interfaceMetricValue:
-      normalizeIptm(raw.interfaceMetricValue ?? raw.interface_metric_value) ?? normalizedPreferredInterfaceMetric.interfaceMetricValue,
-    interfaceMetricLabel:
-      readText(raw.interfaceMetricLabel ?? raw.interface_metric_label).trim() === 'ipTM'
-        ? 'ipTM'
-        : normalizedPreferredInterfaceMetric.interfaceMetricLabel,
-    interfaceMetricSource:
-      readText(raw.interfaceMetricSource ?? raw.interface_metric_source).trim().toLowerCase() === 'ipsae'
-        ? 'ipsae'
-        : readText(raw.interfaceMetricSource ?? raw.interface_metric_source).trim().toLowerCase() === 'iptm'
-          ? 'iptm'
-          : normalizedPreferredInterfaceMetric.interfaceMetricSource,
-    pairPae,
-    pairIptmResolved: pairIptmResolvedRaw === true && hasResolvedMetrics ? true : hasResolvedMetrics,
-    ligandPlddt,
-    ligandAtomPlddts,
-    ...(hasExactRenderContract ? { ligandRenderSmiles, ligandRenderAtomPlddts } : {}),
-    ...(structureText.trim()
-      ? {
-          structureText,
-          structureFormat,
-          structureName
-        }
-      : {}),
-    resultBundleHydrated: resultBundleHydratedRaw === true || structureText.trim().length > 0,
-    error: readText(raw.error),
-    updatedAt: Number.isFinite(Number(raw.updatedAt ?? raw.updated_at))
-      ? Number(raw.updatedAt ?? raw.updated_at)
-      : 0
-  };
-}
 
-function normalizePredictionMap(value: unknown): Record<string, LeadOptPredictionRecord> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  const out: Record<string, LeadOptPredictionRecord> = {};
-  for (const [rawKey, rawRecord] of Object.entries(value as Record<string, unknown>)) {
-    const parsedKey = parseLeadOptPredictionRecordKey(rawKey);
-    const normalizedSmiles = readText(parsedKey.smiles).trim();
-    if (!normalizedSmiles) continue;
-    const record = normalizePredictionRecord(rawRecord);
-    if (!record) continue;
-    const backendFromKey = normalizePredictionBackendStrict(parsedKey.backend);
-    // Candidate predictions are strictly keyed by `backend::smiles`.
-    const normalizedBackend = backendFromKey;
-    if (!normalizedBackend) continue;
-    const canonicalKey = buildLeadOptPredictionRecordKey(normalizedBackend, normalizedSmiles);
-    if (!canonicalKey) continue;
-    const nextRecord: LeadOptPredictionRecord = {
-      ...record,
-      backend: normalizedBackend
-    };
-    const merged = mergePredictionRecordNonRegressive(out[canonicalKey], nextRecord);
-    if (!merged) continue;
-    out[canonicalKey] = merged;
-  }
-  return out;
-}
-
-function normalizeReferencePredictionMap(value: unknown): Record<string, LeadOptPredictionRecord> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  const out: Record<string, LeadOptPredictionRecord> = {};
-  for (const [rawKey, rawRecord] of Object.entries(value as Record<string, unknown>)) {
-    const record = normalizePredictionRecord(rawRecord);
-    if (!record) continue;
-    const backendFromKey = normalizePredictionBackendStrict(rawKey);
-    // Reference predictions are strictly keyed by backend token only.
-    const normalizedBackend = backendFromKey;
-    if (!normalizedBackend) continue;
-    const nextRecord: LeadOptPredictionRecord = {
-      ...record,
-      backend: normalizedBackend
-    };
-    const merged = mergePredictionRecordNonRegressive(out[normalizedBackend], nextRecord);
-    if (!merged) continue;
-    out[normalizedBackend] = merged;
-  }
-  return out;
-}
 
 function mapPredictionRuntimeState(raw: unknown): PredictionState | null {
   const token = String(raw || '').trim().toUpperCase();
@@ -287,13 +138,13 @@ function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown;
   const direct = mapPredictionRuntimeState(status?.state);
   if (direct === 'SUCCESS' || direct === 'FAILURE') return direct;
   const info = asRecord(status?.info);
-  const resultFile = readText(info.result_file || info.resultFile).trim();
+  const resultFile = asString(info.result_file || info.resultFile).trim();
   if (resultFile) return 'SUCCESS';
   if (info.result && typeof info.result === 'object') return 'SUCCESS';
-  const explicitError = readText(info.error || info.exc_message || info.exc_type).trim();
+  const explicitError = asString(info.error || info.exc_message || info.exc_type).trim();
   if (explicitError) return 'FAILURE';
   const tracker = asRecord(info.tracker);
-  const statusText = readText(info.status || info.message || tracker.details || tracker.status).trim().toLowerCase();
+  const statusText = asString(info.status || info.message || tracker.details || tracker.status).trim().toLowerCase();
   if (statusText) {
     if (
       statusText.includes('non-existent') ||
@@ -331,125 +182,38 @@ function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown;
   return direct;
 }
 
-function normalizePredictionStateToken(value: unknown): PredictionState | null {
-  const token = String(value || '').trim().toUpperCase();
-  if (token === 'QUEUED' || token === 'RUNNING' || token === 'SUCCESS' || token === 'FAILURE') return token;
-  return null;
+function readRecordUpdatedAt(value: unknown): number {
+  const record = asRecordStrict(value);
+  const raw = record.updatedAt ?? record.updated_at;
+  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
-function resolveNonRegressiveRuntimeState(
-  currentStateInput: unknown,
-  incomingState: PredictionState | null
-): PredictionState | null {
-  if (!incomingState) return null;
-  const currentState = normalizePredictionStateToken(currentStateInput);
-  if (!currentState) return incomingState;
-  if (currentState === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
-  if (currentState === 'SUCCESS' && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
-    return currentState;
-  }
-  return incomingState;
-}
-
-function predictionStatePriority(value: unknown): number {
-  const state = normalizePredictionStateToken(value);
-  if (state === 'SUCCESS' || state === 'FAILURE') return 3;
-  if (state === 'RUNNING') return 2;
-  if (state === 'QUEUED') return 1;
-  return 0;
-}
-
-function readPredictionUpdatedAt(record: LeadOptPredictionRecord | null | undefined): number {
-  const value = Number(record?.updatedAt ?? 0);
-  return Number.isFinite(value) ? value : 0;
-}
-
-function mergePredictionRecordNonRegressive(
-  currentInput: LeadOptPredictionRecord | null | undefined,
-  incomingInput: LeadOptPredictionRecord | null | undefined
-): LeadOptPredictionRecord | null {
-  const current = currentInput || null;
-  const incoming = incomingInput || null;
-  if (!current && !incoming) return null;
-  if (!current) return incoming;
-  if (!incoming) return current;
-  const currentTaskId = readText(current.taskId).trim();
-  const incomingTaskId = readText(incoming.taskId).trim();
-  if (currentTaskId && incomingTaskId && currentTaskId !== incomingTaskId) {
-    const currentPriority = predictionStatePriority(current.state);
-    const incomingPriority = predictionStatePriority(incoming.state);
-    if (currentPriority !== incomingPriority) {
-      return incomingPriority > currentPriority ? incoming : current;
+/**
+ * Merge two prediction-record maps keyed by `backend::smiles`, keeping the newer
+ * record per key (updatedAt/updated_at wins; ties keep the incoming record).
+ * Single shared implementation replacing the byte-identical local copies that
+ * used to live in taskRowSync, useProjectTasksDataLoader and
+ * useProjectDetailRuntimeContext.
+ */
+export function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
+  const next = asRecordStrict(nextValue);
+  const prev = asRecordStrict(prevValue);
+  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
+  const merged: Record<string, unknown> = { ...prev };
+  for (const [key, nextRecord] of Object.entries(next)) {
+    const prevRecord = merged[key];
+    if (!prevRecord) {
+      merged[key] = nextRecord;
+      continue;
     }
-    const currentHasMetrics = hasResolvedPredictionMetrics(current) ? 1 : 0;
-    const incomingHasMetrics = hasResolvedPredictionMetrics(incoming) ? 1 : 0;
-    if (currentHasMetrics !== incomingHasMetrics) {
-      return incomingHasMetrics > currentHasMetrics ? incoming : current;
-    }
-    return readPredictionUpdatedAt(incoming) >= readPredictionUpdatedAt(current) ? incoming : current;
-  }
-  const mergedState = resolveNonRegressiveRuntimeState(current.state, incoming.state) || current.state;
-  const incomingHasMetrics = hasResolvedPredictionMetrics(incoming);
-  const currentHasMetrics = hasResolvedPredictionMetrics(current);
-  const renderContract = pickPredictionRenderContract(incoming, current);
-  return {
-    ...current,
-    ...incoming,
-    state: mergedState,
-    backend: readText(incoming.backend).trim().toLowerCase() || readText(current.backend).trim().toLowerCase(),
-    pairIptm: incoming.pairIptm ?? current.pairIptm,
-    interfaceMetricValue:
-      (current.interfaceMetricSource !== 'ipsae' && incoming.interfaceMetricSource === 'ipsae') ||
-      current.interfaceMetricSource === 'none'
-        ? incoming.interfaceMetricValue
-        : incoming.interfaceMetricValue ?? current.interfaceMetricValue,
-    interfaceMetricLabel:
-      (current.interfaceMetricSource !== 'ipsae' && incoming.interfaceMetricSource === 'ipsae') ||
-      current.interfaceMetricSource === 'none'
-        ? incoming.interfaceMetricLabel
-        : incoming.interfaceMetricLabel ?? current.interfaceMetricLabel,
-    interfaceMetricSource:
-      (current.interfaceMetricSource !== 'ipsae' && incoming.interfaceMetricSource === 'ipsae') ||
-      current.interfaceMetricSource === 'none'
-        ? incoming.interfaceMetricSource
-        : incoming.interfaceMetricSource === 'none'
-          ? current.interfaceMetricSource
-          : incoming.interfaceMetricSource ?? current.interfaceMetricSource,
-    pairPae: incoming.pairPae ?? current.pairPae,
-    ligandPlddt: incoming.ligandPlddt ?? current.ligandPlddt,
-    ligandAtomPlddts:
-      Array.isArray(incoming.ligandAtomPlddts) && incoming.ligandAtomPlddts.length > 0
-        ? incoming.ligandAtomPlddts
-        : current.ligandAtomPlddts,
-    ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
-    ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
-    structureText: readText(incoming.structureText).trim() ? incoming.structureText : current.structureText,
-    structureFormat: readText(incoming.structureText).trim() ? incoming.structureFormat : current.structureFormat,
-    structureName: readText(incoming.structureText).trim() ? incoming.structureName : current.structureName,
-    resultBundleHydrated: incoming.resultBundleHydrated === true || current.resultBundleHydrated === true,
-    error: readText(incoming.error).trim() || current.error,
-    pairIptmResolved:
-      incoming.pairIptmResolved === true ||
-      current.pairIptmResolved === true ||
-      incomingHasMetrics ||
-      currentHasMetrics,
-    updatedAt: Math.max(readPredictionUpdatedAt(current), readPredictionUpdatedAt(incoming))
-  };
-}
-
-function mergePredictionRecordMapsNonRegressive(
-  currentRecords: Record<string, LeadOptPredictionRecord>,
-  incomingRecords: Record<string, LeadOptPredictionRecord>
-): Record<string, LeadOptPredictionRecord> {
-  if (!Object.keys(currentRecords).length) return incomingRecords;
-  if (!Object.keys(incomingRecords).length) return currentRecords;
-  const merged: Record<string, LeadOptPredictionRecord> = { ...currentRecords };
-  for (const [key, incomingRecord] of Object.entries(incomingRecords)) {
-    const nextRecord = mergePredictionRecordNonRegressive(merged[key], incomingRecord);
-    if (nextRecord) merged[key] = nextRecord;
+    const nextUpdatedAt = readRecordUpdatedAt(nextRecord);
+    const prevUpdatedAt = readRecordUpdatedAt(prevRecord);
+    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
   }
   return merged;
 }
+
 
 function normalizePredictionBackendStrict(value: unknown): string {
   const token = String(value || '').trim().toLowerCase();
@@ -458,118 +222,9 @@ function normalizePredictionBackendStrict(value: unknown): string {
   return '';
 }
 
-function summarizePredictionRecords(records: Record<string, LeadOptPredictionRecord>) {
-  let queued = 0;
-  let running = 0;
-  let success = 0;
-  let failure = 0;
-  let latestTaskId = '';
-  let latestTs = -1;
-  for (const record of Object.values(records)) {
-    const state = String(record.state || '').toUpperCase();
-    if (state === 'QUEUED') queued += 1;
-    else if (state === 'RUNNING') running += 1;
-    else if (state === 'SUCCESS') success += 1;
-    else if (state === 'FAILURE') failure += 1;
-    const ts = Number(record.updatedAt || 0);
-    if (Number.isFinite(ts) && ts > latestTs) {
-      latestTs = ts;
-      latestTaskId = String(record.taskId || '').trim();
-    }
-  }
-  return {
-    total: Object.keys(records).length,
-    queued,
-    running,
-    success,
-    failure,
-    latestTaskId
-  };
-}
 
-function buildQueuedPredictionRecord(taskId: string, backend: string): LeadOptPredictionRecord {
-  const normalizedBackend = normalizePredictionBackendStrict(backend);
-  return {
-    taskId,
-    state: 'QUEUED',
-    backend: normalizedBackend,
-    pairIptm: null,
-    interfaceMetricValue: null,
-    interfaceMetricLabel: 'IPSAE',
-    interfaceMetricSource: 'none',
-    pairPae: null,
-    pairIptmResolved: false,
-    ligandPlddt: null,
-    ligandAtomPlddts: [],
-    resultBundleHydrated: false,
-    error: '',
-    updatedAt: Date.now()
-  };
-}
 
-function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
-  if (!record) return false;
-  const pairIptm = typeof record.pairIptm === 'number' && Number.isFinite(record.pairIptm);
-  const interfaceMetric = typeof record.interfaceMetricValue === 'number' && Number.isFinite(record.interfaceMetricValue);
-  const pairPae = typeof record.pairPae === 'number' && Number.isFinite(record.pairPae);
-  const ligandPlddt = typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt);
-  const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
-  const backend = normalizePredictionBackendStrict(record.backend);
-  if (backend === 'alphafold3' && !ligandAtomPlddts) {
-    return false;
-  }
-  return record.pairIptmResolved === true && (pairIptm || interfaceMetric || pairPae || ligandPlddt || ligandAtomPlddts);
-}
 
-function hasHydratedPredictionVisualization(record: LeadOptPredictionRecord | null | undefined): boolean {
-  if (!record) return false;
-  const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
-  if (!ligandAtomPlddts) return false;
-  return hasExactPredictionRenderContract(record);
-}
-
-function hasHydratedPredictionIpsae(record: LeadOptPredictionRecord | null | undefined): boolean {
-  if (!record) return false;
-  if (readText(record.interfaceMetricSource).trim().toLowerCase() !== 'ipsae') return false;
-  return typeof record.interfaceMetricValue === 'number' && Number.isFinite(record.interfaceMetricValue);
-}
-
-function hasHydratedPredictionResult(record: LeadOptPredictionRecord | null | undefined): boolean {
-  if (!record) return false;
-  return (
-    record.resultBundleHydrated === true &&
-    hasResolvedPredictionMetrics(record) &&
-    hasHydratedPredictionVisualization(record) &&
-    hasHydratedPredictionIpsae(record)
-  );
-}
-
-function shouldProbeTaskStatus(
-  tracker: Record<string, number>,
-  taskIdInput: unknown,
-  minGapMs = RUNTIME_STATUS_MIN_TASK_REPOLL_GAP_MS
-): boolean {
-  const taskId = readText(taskIdInput).trim();
-  if (!taskId) return false;
-  const now = Date.now();
-  const last = Number(tracker[taskId] || 0);
-  if (Number.isFinite(last) && now - last < minGapMs) return false;
-  tracker[taskId] = now;
-  return true;
-}
-
-function shouldHydratePredictionRecord(record: LeadOptPredictionRecord | null | undefined): boolean {
-  if (!record) return false;
-  if (String(record.state || '').toUpperCase() !== 'SUCCESS') return false;
-  const taskId = String(record.taskId || '').trim();
-  if (!taskId || taskId.startsWith('local:')) return false;
-  return !hasHydratedPredictionResult(record);
-}
-
-function isSyntheticStaleFailureMessage(error: unknown): boolean {
-  const message = readText(error).trim().toLowerCase();
-  return message.includes('runtime status became stale') || message.includes('stale after');
-}
 
 function extractPredictionMetricsFromStatusInfo(
   statusInfoInput: unknown,
@@ -591,7 +246,7 @@ function extractPredictionMetricsFromStatusInfo(
   const compact = asRecord(statusInfo.lead_opt_metrics || statusInfo.compact_metrics || statusInfo.prediction_metrics);
   const confidence = asRecord(statusInfo.confidence);
   const affinity = asRecord(statusInfo.affinity);
-  const candidateSmiles = readText(statusInfo.candidate_smiles ?? statusInfo.smiles ?? compact.smiles).trim();
+  const candidateSmiles = asString(statusInfo.candidate_smiles ?? statusInfo.smiles ?? compact.smiles).trim();
   const renderPayload = extractPredictionRenderPayload(confidence, compact, ligandChain, candidateSmiles);
   const pairIptm =
     findPairIptm(confidence, targetChain, ligandChain) ??
@@ -638,131 +293,19 @@ function extractPredictionMetricsFromStatusInfo(
   };
 }
 
-function computeHydrationRetryDelayMs(attempt: number): number {
-  const safeAttempt = Math.max(0, Math.min(6, attempt));
-  const delay = RESULT_HYDRATION_RETRY_BASE_MS * (2 ** safeAttempt);
-  return Math.min(RESULT_HYDRATION_RETRY_MAX_MS, delay);
-}
 
-function unresolvedPredictionSort(
-  left: [string, LeadOptPredictionRecord],
-  right: [string, LeadOptPredictionRecord]
-): number {
-  const leftState = String(left[1]?.state || '').toUpperCase();
-  const rightState = String(right[1]?.state || '').toUpperCase();
-  const leftPriority = leftState === 'RUNNING' ? 0 : leftState === 'QUEUED' ? 1 : leftState === 'SUCCESS' ? 2 : 3;
-  const rightPriority = rightState === 'RUNNING' ? 0 : rightState === 'QUEUED' ? 1 : rightState === 'SUCCESS' ? 2 : 3;
-  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-  return String(left[0] || '').localeCompare(String(right[0] || ''));
-}
 
-function buildPendingPredictionEntries(
-  records: Record<string, LeadOptPredictionRecord>
-): Array<[string, LeadOptPredictionRecord]> {
-  return Object.entries(records)
-    .filter(([, record]) => {
-      const state = String(record.state || '').toUpperCase();
-      const shouldPoll =
-        state === 'QUEUED' ||
-        state === 'RUNNING' ||
-        (state === 'FAILURE' && isSyntheticStaleFailureMessage(record.error));
-      if (!shouldPoll) return false;
-      const taskId = readText(record.taskId).trim();
-      return taskId.length > 0 && !taskId.startsWith('local:');
-    })
-    .sort(unresolvedPredictionSort);
-}
 
-function buildPendingPredictionSignature(entries: Array<[string, LeadOptPredictionRecord]>): string {
-  if (!Array.isArray(entries) || entries.length === 0) return '';
-  return entries
-    .map(([key, record]) => {
-      const taskId = readText(record.taskId).trim();
-      const state = readText(record.state).trim().toUpperCase();
-      return `${readText(key).trim()}|${taskId}|${state}`;
-    })
-    .join('||');
-}
 
-function computeRuntimePollDelayMs(options: { hasRunning: boolean; hasQueued: boolean }): number {
-  if (options.hasRunning) return RUNTIME_STATUS_RUNNING_POLL_DELAY_MS;
-  if (options.hasQueued) return RUNTIME_STATUS_QUEUED_POLL_DELAY_MS;
-  return RUNTIME_STATUS_IDLE_POLL_DELAY_MS;
-}
 
-function computeRuntimePollBatchSize(totalPending: number, maxBatchSize: number): number {
-  const safeTotal = Math.max(0, Math.floor(Number(totalPending) || 0));
-  if (safeTotal <= 0) return 0;
-  if (safeTotal <= 4) return 1;
-  return Math.min(Math.max(1, maxBatchSize), Math.max(1, Math.ceil(safeTotal / 8)));
-}
 
-function sliceRoundRobin<T>(
-  entries: T[],
-  limit: number,
-  cursor: number
-): { items: T[]; nextCursor: number } {
-  if (!Array.isArray(entries) || entries.length === 0 || limit <= 0) {
-    return { items: [], nextCursor: 0 };
-  }
-  if (entries.length <= limit) {
-    return { items: entries, nextCursor: 0 };
-  }
-  const safeCursor = ((cursor % entries.length) + entries.length) % entries.length;
-  const out: T[] = [];
-  for (let i = 0; i < Math.min(limit, entries.length); i += 1) {
-    out.push(entries[(safeCursor + i) % entries.length]);
-  }
-  return {
-    items: out,
-    nextCursor: (safeCursor + limit) % entries.length
-  };
-}
 
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value);
-}
 
-function readNumber(value: unknown): number {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
-}
-
-function readBoolean(value: unknown, fallback = false): boolean {
-  if (value === true) return true;
-  if (value === false) return false;
-  const token = String(value || '').trim().toLowerCase();
-  if (!token) return fallback;
-  if (token === '1' || token === 'true' || token === 'yes' || token === 'on') return true;
-  if (token === '0' || token === 'false' || token === 'no' || token === 'off') return false;
-  return fallback;
-}
-
-function formatMetric(value: unknown, digits = 2): string {
-  const numeric = readNumber(value);
-  if (!Number.isFinite(numeric)) return '-';
-  return numeric.toFixed(digits);
-}
-
-function sortScore(...values: unknown[]): number[] {
-  return values.map((value) => readNumber(value));
-}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return (value && typeof value === 'object' ? (value as Record<string, unknown>) : {});
 }
 
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item) => item && typeof item === 'object')
-    .map((item) => ({ ...(item as Record<string, unknown>) }));
-}
 
 function normalizePlddtValue(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -791,7 +334,7 @@ function readExactRenderSmiles(payload: Record<string, unknown>): string {
     readObjectPath(payload, 'ligandDisplaySmiles')
   ];
   for (const candidate of candidates) {
-    const text = readText(candidate).trim();
+    const text = asString(candidate).trim();
     if (text) return text;
   }
   return '';
@@ -805,7 +348,7 @@ function readAlignedLigandSmiles(payload: Record<string, unknown>): string {
     readObjectPath(payload, 'ligandSmiles')
   ];
   for (const candidate of candidates) {
-    const text = readText(candidate).trim();
+    const text = asString(candidate).trim();
     if (text) return text;
   }
   return '';
@@ -953,10 +496,6 @@ function chainVariants(chain: string): string[] {
 
 function chainTokenEquals(left: string, right: string): boolean {
   return String(left || '').trim().toUpperCase() === String(right || '').trim().toUpperCase();
-}
-
-function isNumericToken(value: string): boolean {
-  return /^\d+$/.test(String(value || '').trim());
 }
 
 function readPairValueFromNestedMap(
@@ -1168,7 +707,7 @@ function extractPredictionResultPayload(
 } {
   const confidence = asRecord(parsed?.confidence);
   const affinity = asRecord(parsed?.affinity);
-  const candidateSmiles = readText(candidateSmilesInput).trim();
+  const candidateSmiles = asString(candidateSmilesInput).trim();
   const renderPayload = extractPredictionRenderPayload(confidence, asRecord({}), ligandChain, candidateSmiles);
   const pairIptm = findPairIptm(confidence, targetChain, ligandChain) ?? findPairIptm(affinity, targetChain, ligandChain);
   const preferredInterfaceMetric = resolveLeadOptPreferredInterfaceMetric({
@@ -1178,7 +717,7 @@ function extractPredictionResultPayload(
   });
   const pairPae = findPairPae(confidence, targetChain, ligandChain) ?? findPairPae(affinity, targetChain, ligandChain);
   const ligandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
-  const structureText = readText(parsed?.structureText);
+  const structureText = asString(parsed?.structureText);
   return {
     pairIptm,
     interfaceMetricValue: preferredInterfaceMetric.interfaceMetricValue,
@@ -1190,51 +729,19 @@ function extractPredictionResultPayload(
     ligandRenderSmiles: renderPayload.ligandRenderSmiles,
     ligandRenderAtomPlddts: renderPayload.ligandRenderAtomPlddts,
     structureText,
-    structureFormat: readText(parsed?.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif',
-    structureName: readText(parsed?.structureName)
+    structureFormat: asString(parsed?.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif',
+    structureName: asString(parsed?.structureName)
   };
 }
 
 export {
-  hasExactPredictionRenderContract,
-  pickPredictionRenderContract,
   resolveLeadOptPreferredInterfaceMetric,
-  normalizePredictionRecord,
-  normalizePredictionMap,
-  normalizeReferencePredictionMap,
   mapPredictionRuntimeState,
   inferPredictionRuntimeStateFromStatusPayload,
-  normalizePredictionStateToken,
-  resolveNonRegressiveRuntimeState,
-  predictionStatePriority,
-  readPredictionUpdatedAt,
-  mergePredictionRecordNonRegressive,
-  mergePredictionRecordMapsNonRegressive,
   normalizePredictionBackendStrict,
-  summarizePredictionRecords,
-  buildQueuedPredictionRecord,
-  hasResolvedPredictionMetrics,
-  hasHydratedPredictionVisualization,
-  hasHydratedPredictionIpsae,
-  hasHydratedPredictionResult,
-  shouldProbeTaskStatus,
-  shouldHydratePredictionRecord,
-  isSyntheticStaleFailureMessage,
   extractPredictionMetricsFromStatusInfo,
-  computeHydrationRetryDelayMs,
-  unresolvedPredictionSort,
-  buildPendingPredictionEntries,
-  buildPendingPredictionSignature,
-  computeRuntimePollDelayMs,
-  computeRuntimePollBatchSize,
-  sliceRoundRobin,
-  readText,
-  readNumber,
-  readBoolean,
-  formatMetric,
-  sortScore,
+  asString,
   asRecord,
-  asRecordArray,
   normalizePlddtValue,
   normalizePlddtArray,
   mean,
@@ -1256,19 +763,7 @@ export {
   readPairPaeForChains,
   findPairIptm,
   findPairPae,
-  extractPredictionResultPayload,
-  RESULT_HYDRATION_RETRY_BASE_MS,
-  RESULT_HYDRATION_RETRY_MAX_MS,
-  RESULT_HYDRATION_MAX_RETRIES,
-  ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION,
-  ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION,
-  RUNTIME_STATUS_RUNNING_POLL_DELAY_MS,
-  RUNTIME_STATUS_QUEUED_POLL_DELAY_MS,
-  RUNTIME_STATUS_IDLE_POLL_DELAY_MS,
-  RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER,
-  RUNTIME_STATUS_CANDIDATE_BATCH_SIZE,
-  RUNTIME_STATUS_REFERENCE_BATCH_SIZE,
-  RUNTIME_STATUS_MIN_TASK_REPOLL_GAP_MS
+  extractPredictionResultPayload
 };
 
 export type { PredictionState, LeadOptPredictionRenderPayload };

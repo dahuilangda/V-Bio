@@ -7,26 +7,28 @@ import {
   stripStructureConfidenceColoringData
 } from './cifConfidenceColoring';
 import {
-  WATER_COMP_IDS,
   POLYMER_COMP_IDS,
-  parseJsonObject,
-  isLikelyLigandAtomRow,
-  isHydrogenLikeElement,
-  isPlainRecord,
-  hasStorageValue,
+  WATER_COMP_IDS,
   hasNonEmptyResiduePlddtByChain,
+  hasStorageValue,
+  isHydrogenLikeElement,
+  isLikelyLigandAtomRow,
+  isPlainRecord,
   normalizeChainToken,
-  selectByChainHints
+  parseJsonObject,
+  selectByChainHints,
+  tokenizeCifRow
 } from './resultBundleHelpers';
+import {
+  asRecordArray,
+  asString,
+  toFiniteNumber
+} from '../../pages/projectTasks/recordReaders';
+import { stripCifTokenQuotes } from '../../utils/structureParser';
 
 function getBaseName(path: string): string {
   const parts = path.split('/');
   return parts[parts.length - 1] || path;
-}
-
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value);
 }
 
 function normalizeProbability(value: number | null): number | null {
@@ -53,8 +55,8 @@ function readPreferredInterfaceMetric(payload: Record<string, unknown> | null): 
   if (ipsaeDom !== null) {
     return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
   }
-  const interfaceLabel = readText(payload.interface_metric_label || payload.interfaceMetricLabel).trim().toLowerCase();
-  const interfaceSource = readText(payload.interface_metric_source || payload.interfaceMetricSource).trim().toLowerCase();
+  const interfaceLabel = asString(payload.interface_metric_label || payload.interfaceMetricLabel).trim().toLowerCase();
+  const interfaceSource = asString(payload.interface_metric_source || payload.interfaceMetricSource).trim().toLowerCase();
   const interfaceMetric = normalizeProbability(
     typeof payload.interface_metric === 'number'
       ? payload.interface_metric
@@ -113,7 +115,7 @@ function normalizeStructureNameToken(value: string): string {
 }
 
 function findStructureFileByName(names: string[], preferredStructureName?: string): string | null {
-  const token = normalizeStructureNameToken(readText(preferredStructureName));
+  const token = normalizeStructureNameToken(asString(preferredStructureName));
   if (!token) return null;
   const basenameToken = normalizeStructureNameToken(getBaseName(token));
   const structureNames = names.filter((name) => /\.(cif|mmcif|pdb)$/i.test(name));
@@ -379,11 +381,6 @@ async function readZipJson(zip: JSZip, path: string | null): Promise<Record<stri
   return parseJsonObject(text);
 }
 
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return value;
-}
-
 function normalizePlddt(value: number): number {
   if (!Number.isFinite(value)) return 0;
   if (value >= 0 && value <= 1) return value * 100;
@@ -392,26 +389,6 @@ function normalizePlddt(value: number): number {
 
 function formatPlddtNumber(value: number): string {
   return normalizePlddt(value).toFixed(2);
-}
-
-function tokenizeCifRow(row: string): string[] {
-  const matcher = /'(?:[^']*)'|"(?:[^"]*)"|[^\s]+/g;
-  const tokens: string[] = [];
-  let match: RegExpExecArray | null = matcher.exec(row);
-  while (match) {
-    tokens.push(match[0]);
-    match = matcher.exec(row);
-  }
-  return tokens;
-}
-
-function stripCifTokenQuotes(value: string): string {
-  if (value.length >= 2) {
-    if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
 }
 
 function applyAtomPlddtToCifStructure(structureText: string, atomPlddts: number[]): string {
@@ -1388,10 +1365,6 @@ function extractResiduePlddtsByChainFromStructure(
 }
 
 const DESIGN_RANK_RE = /(?:^|\/)rank_(\d+)(?:_|\.|$)/i;
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Array<Record<string, unknown>>;
-}
 
 function readFirstObjectArrayPath(payload: Record<string, unknown>, paths: string[]): Array<Record<string, unknown>> {
   for (const path of paths) {
@@ -1422,7 +1395,7 @@ function readFiniteNumberLoose(value: unknown): number | null {
 
 function firstNonEmptyTextByKeys(row: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
-    const text = readText(row[key]).trim();
+    const text = asString(row[key]).trim();
     if (text) return text;
   }
   return '';
@@ -1570,7 +1543,7 @@ function resolveDesignStructurePathFromRow(
     'model_file'
   ];
   for (const key of directCandidates) {
-    const raw = readText(row[key]).trim();
+    const raw = asString(row[key]).trim();
     if (!raw) continue;
     if (structureByName.has(raw)) return raw;
     const byBaseName = structurePathByBaseName.get(getBaseName(raw).toLowerCase());
@@ -1762,15 +1735,15 @@ async function parsePeptideDesignCandidatesFromBundle(
       pair_iptm: readFiniteNumberLoose(row.pair_iptm),
       pair_iptm_target_binder: readFiniteNumberLoose(row.pair_iptm_target_binder),
       pair_iptm_target_linker: readFiniteNumberLoose(row.pair_iptm_target_linker),
-      pair_iptm_formula: readText(row.pair_iptm_formula),
+      pair_iptm_formula: asString(row.pair_iptm_formula),
       plddt:
         readFiniteNumberLoose(row.binder_avg_plddt) ??
         readFiniteNumberLoose(row.plddt) ??
         readFiniteNumberLoose(row.ligand_mean_plddt) ??
         readFiniteNumberLoose(row.mean_plddt),
-      target_chain_id: readText(row.target_chain_id),
-      binder_chain_id: readText(row.binder_chain_id),
-      linker_chain_id: readText(row.linker_chain_id),
+      target_chain_id: asString(row.target_chain_id),
+      binder_chain_id: asString(row.binder_chain_id),
+      linker_chain_id: asString(row.linker_chain_id),
       ...modificationPayload,
       ...residuePayload,
       structure_name: getBaseName(structurePath),
@@ -1783,8 +1756,8 @@ async function parsePeptideDesignCandidatesFromBundle(
   }
 
   return candidates.filter((item) => {
-    const sequence = readText(item.sequence).trim();
-    const structureName = readText(item.structure_name).trim();
+    const sequence = asString(item.sequence).trim();
+    const structureName = asString(item.structure_name).trim();
     return Boolean(sequence || structureName);
   });
 }
@@ -1851,7 +1824,7 @@ function peptideCandidateStorageIdentity(row: Record<string, unknown>, index: nu
   }
   const structureName = firstNonEmptyTextByKeys(row, ['structure_name', 'structureName', 'structure_file', 'structure_path', 'name']);
   if (structureName) return `structure:${structureName}|rank:${rank ?? ''}`;
-  const rowId = readText(row.id).trim();
+  const rowId = asString(row.id).trim();
   return rowId ? `id:${rowId}` : `row:${index}`;
 }
 
@@ -2045,7 +2018,7 @@ interface ParseResultBundleOptions {
 
 export async function parseResultBundle(blob: Blob, options?: ParseResultBundleOptions): Promise<ParsedResultBundle | null> {
   const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
-  const preferredStructureName = readText(options?.preferredStructureName).trim();
+  const preferredStructureName = asString(options?.preferredStructureName).trim();
   const { default: JSZipLib } = await import('jszip');
   const zip = await JSZipLib.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);

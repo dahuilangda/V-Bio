@@ -32,17 +32,11 @@ import {
   normalizePredictionBackend,
   sortProjectTasks,
 } from './projectDraftUtils';
+import {
+  asRecord,
+  asString
+} from '../projectTasks/recordReaders';
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value);
-}
 
 function hasLeadOptResultPayload(value: unknown): boolean {
   const row = asRecord(value);
@@ -53,8 +47,8 @@ function hasLeadOptResultPayload(value: unknown): boolean {
   const metaPredictionSummary = asRecord(leadOptMeta.prediction_summary);
 
   const queryId =
-    readText(leadOptMmp.query_id || queryResult.query_id).trim() ||
-    readText(leadOptMeta.query_id).trim();
+    asString(leadOptMmp.query_id || queryResult.query_id).trim() ||
+    asString(leadOptMeta.query_id).trim();
   if (queryId) return true;
 
   const enumeratedCandidates = Array.isArray(leadOptMmp.enumerated_candidates)

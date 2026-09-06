@@ -22,6 +22,7 @@ import type {
   VirtualScreeningPredictionRecord,
   AffinityDockPocket
 } from '../types/models';
+import { readFiniteNumber } from '../pages/projectTasks/recordReaders';
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
 const UI_STATE_KEY = 'vbio_project_ui_state_v1';
@@ -340,11 +341,6 @@ function normalizeAffinityMode(value: unknown): 'score' | 'pose' | 'refine' | 'i
   return DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface' | 'dock';
 }
 
-function readFiniteNumber(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-  if (!Number.isFinite(parsed)) return null;
-  return parsed;
-}
 
 function normalizeIntegerOption(
   value: unknown,

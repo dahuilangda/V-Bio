@@ -1,22 +1,5 @@
-function tokenizeCifRow(row: string): string[] {
-  const matcher = /'(?:[^']*)'|"(?:[^"]*)"|[^\s]+/g;
-  const tokens: string[] = [];
-  let match: RegExpExecArray | null = matcher.exec(row);
-  while (match) {
-    tokens.push(match[0]);
-    match = matcher.exec(row);
-  }
-  return tokens;
-}
-
-function stripCifTokenQuotes(value: string): string {
-  if (value.length >= 2) {
-    if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
-}
+import { stripCifTokenQuotes } from '../../utils/structureParser';
+import { tokenizeCifRow } from './resultBundleHelpers';
 
 const POLYMER_COMP_IDS = new Set([
   'ACE',

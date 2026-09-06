@@ -117,6 +117,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const { session } = useAuth();
   const copilotAvailable = useCopilotAvailability();
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
+  // Result-archive download can take seconds (full blob fetch before the save
+  // dialog); the header button must show progress instead of feeling dead.
+  const [downloadingResult, setDownloadingResult] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }));
   useEffect(() => {
     writeStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }, copilotOpen);
@@ -970,6 +973,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimePeptideBicyclicCys1PosChange,
     handleRuntimePeptideBicyclicCys2PosChange,
     handleRuntimePeptideBicyclicCys3PosChange,
+    handleRuntimePeptideBicyclicCysLayoutChange,
+    handleRuntimePeptideBicyclicRingChange,
+    handleRuntimePeptideBicyclicRatioChange,
     handleTaskNameChange,
     handleTaskSummaryChange
   } = useProjectEditorHandlers({
@@ -1302,8 +1308,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     peptideDesignMode: draft.inputConfig.options.peptideDesignMode ?? 'linear',
     peptideChirality: draft.inputConfig.options.peptideChirality ?? 'l',
     peptideBinderLength: draft.inputConfig.options.peptideBinderLength ?? 20,
-    peptideLengthMin: draft.inputConfig.options.peptideLengthMin ?? 10,
-    peptideLengthMax: draft.inputConfig.options.peptideLengthMax ?? 25,
+    // display defaults fall back to the ACTUAL submission source (the legacy
+    // single binder length) so the range inputs never show a window that
+    // would not be submitted
+    peptideLengthMin: draft.inputConfig.options.peptideLengthMin
+      ?? draft.inputConfig.options.peptideBinderLength ?? 10,
+    peptideLengthMax: draft.inputConfig.options.peptideLengthMax
+      ?? draft.inputConfig.options.peptideBinderLength ?? 25,
     peptideUseInitialSequence: draft.inputConfig.options.peptideUseInitialSequence ?? false,
     peptideInitialSequence: draft.inputConfig.options.peptideInitialSequence ?? '',
     peptideStructureUpload: draft.inputConfig.options.peptideStructureUpload ?? null,
@@ -1326,10 +1337,16 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     peptideNonNaturalMin: draft.inputConfig.options.peptideNonNaturalMin ?? 0,
     peptideNonNaturalMax: draft.inputConfig.options.peptideNonNaturalMax ?? 0,
     peptideBicyclicLinkerCcd: draft.inputConfig.options.peptideBicyclicLinkerCcd ?? 'SEZ',
-    peptideBicyclicCysPositionMode: draft.inputConfig.options.peptideBicyclicCysPositionMode ?? 'auto',
     peptideBicyclicFixTerminalCys: draft.inputConfig.options.peptideBicyclicFixTerminalCys ?? true,
     peptideBicyclicIncludeExtraCys: draft.inputConfig.options.peptideBicyclicIncludeExtraCys ?? false,
     peptideBicyclicCys1Pos: draft.inputConfig.options.peptideBicyclicCys1Pos ?? 3,
+    peptideBicyclicCysLayout: draft.inputConfig.options.peptideBicyclicCysLayout
+      ?? (draft.inputConfig.options.peptideBicyclicCysPositionMode === 'manual' ? 'absolute' : 'auto'),
+    peptideBicyclicRing1: draft.inputConfig.options.peptideBicyclicRing1 ?? 4,
+    peptideBicyclicRing2: draft.inputConfig.options.peptideBicyclicRing2 ?? 6,
+    peptideBicyclicRatio1: draft.inputConfig.options.peptideBicyclicRatio1 ?? 15,
+    peptideBicyclicRatio2: draft.inputConfig.options.peptideBicyclicRatio2 ?? 50,
+    peptideBicyclicRatio3: draft.inputConfig.options.peptideBicyclicRatio3 ?? 100,
     peptideBicyclicCys2Pos: draft.inputConfig.options.peptideBicyclicCys2Pos ?? 8,
     peptideBicyclicCys3Pos:
       draft.inputConfig.options.peptideBicyclicCys3Pos ??
@@ -1351,10 +1368,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onPeptideResiduePoolChange: handleRuntimePeptideResiduePoolChange,
     onPeptideNonNaturalRangeChange: handleRuntimePeptideNonNaturalRangeChange,
     onPeptideBicyclicLinkerCcdChange: handleRuntimePeptideBicyclicLinkerCcdChange,
-    onPeptideBicyclicCysPositionModeChange: handleRuntimePeptideBicyclicCysPositionModeChange,
     onPeptideBicyclicFixTerminalCysChange: handleRuntimePeptideBicyclicFixTerminalCysChange,
     onPeptideBicyclicIncludeExtraCysChange: handleRuntimePeptideBicyclicIncludeExtraCysChange,
     onPeptideBicyclicCys1PosChange: handleRuntimePeptideBicyclicCys1PosChange,
+    onPeptideBicyclicCysLayoutChange: handleRuntimePeptideBicyclicCysLayoutChange,
+    onPeptideBicyclicRingChange: handleRuntimePeptideBicyclicRingChange,
+    onPeptideBicyclicRatioChange: handleRuntimePeptideBicyclicRatioChange,
     onPeptideBicyclicCys2PosChange: handleRuntimePeptideBicyclicCys2PosChange,
     onPeptideBicyclicCys3PosChange: handleRuntimePeptideBicyclicCys3PosChange
   });
@@ -1962,6 +1981,20 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     return readText(project.task_id).trim();
   }, [activeResultTask?.structure_name, activeResultTask?.task_id, project.task_id, structureTaskId]);
 
+  const handleDownloadResult = useCallback(() => {
+    setError(null);
+    const taskId = defaultDownloadTaskId;
+    if (!taskId || downloadingResult) return;
+    setDownloadingResult(true);
+    downloadResultFile(taskId)
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to download result archive.');
+      })
+      .finally(() => {
+        setDownloadingResult(false);
+      });
+  }, [defaultDownloadTaskId, downloadingResult]);
+
   return (
     <>
     <ProjectDetailLayout
@@ -1969,6 +2002,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       canDownloadResult={Boolean(
         defaultDownloadTaskId
       )}
+      downloadingResult={downloadingResult}
       workflow={{
         shortTitle: workflow.shortTitle,
         runLabel: workflow.runLabel,
@@ -2020,13 +2054,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       runActionRef={runActionRef as RefObject<HTMLDivElement>}
       topRunButtonRef={topRunButtonRef as RefObject<HTMLButtonElement>}
       onOpenTaskHistory={handleOpenTaskHistory}
-      onDownloadResult={() => {
-        setError(null);
-        if (!defaultDownloadTaskId) return;
-        void downloadResultFile(defaultDownloadTaskId).catch((err) => {
-          setError(err instanceof Error ? err.message : 'Failed to download result archive.');
-        });
-      }}
+      onDownloadResult={handleDownloadResult}
       onSaveDraft={() => {
         void saveDraft();
       }}

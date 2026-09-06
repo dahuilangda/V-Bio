@@ -490,8 +490,15 @@ def compute_contact_pairs(
         [protein_rows[selected], ligand_rows[nearest_lig[selected]]], axis=1
     ).astype(np.int64)
     if anchor_slack is not None:
-        upper = np.minimum(
+        # upper floor 2.2 A: the band is derived from the PLACED geometry, so a
+        # clashing placement (measured 2026-09-04: staged peptide buried at
+        # 0.24 A) would otherwise demand sub-physical contacts and the TFG
+        # projection crushes the peptide into the receptor wall (mass CA
+        # chirality inversions). A contact pair never asks for less than a
+        # legal close contact.
+        upper = np.clip(
             nearest_dist[selected] + float(anchor_slack),
+            2.2,
             float(max_distance),
         ).astype(np.float32)
         # matching lower bound: without it the projection can push the
@@ -500,7 +507,7 @@ def compute_contact_pairs(
         print(
             f"[Info] Anchored guidance constraints prepared: {len(pairs)} pairs, "
             f"cutoff={contact_cutoff:.1f}A, per-pair band = d±{anchor_slack:.2f}A "
-            f"(upper capped {max_distance:.1f}A, lower floor 2.2A)."
+            f"(upper capped {max_distance:.1f}A, both bounds floored 2.2A)."
         )
     else:
         upper = np.full(len(pairs), max_distance, dtype=np.float32)

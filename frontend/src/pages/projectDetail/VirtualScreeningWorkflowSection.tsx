@@ -20,6 +20,7 @@ import {
   Target,
   Trash2
 } from 'lucide-react';
+import { useTabsKeyboard } from '../../components/ui/useTabsKeyboard';
 import { ComponentInputEditor } from '../../components/project/ComponentInputEditor';
 import type { InputComponent, MoleculeType } from '../../types/models';
 import { componentTypeLabel, createInputComponent } from '../../utils/projectInputs';
@@ -217,6 +218,15 @@ export function VirtualScreeningWorkflowSection({
     setSidebarTypeOpen((current) => ({ ...current, [type]: true }));
   };
 
+  // APG tabs keyboard behaviour for the ligand-library source switch.
+  const libraryTabs = useTabsKeyboard<VirtualScreeningInputMode>(
+    screeningInputMode,
+    (mode) => {
+      switchLibraryMode(mode);
+    },
+    ['upload', 'paste']
+  );
+
   const switchLibraryMode = (mode: VirtualScreeningInputMode): boolean => {
     if (!canEdit || mode === screeningInputMode) return mode === screeningInputMode;
     if (
@@ -322,11 +332,17 @@ export function VirtualScreeningWorkflowSection({
             </div>
           </div>
 
-          <div className="virtual-screening-source-switch" role="tablist" aria-label="Ligand library source">
+          <div
+            className="virtual-screening-source-switch"
+            role="tablist"
+            aria-label="Ligand library source"
+            {...libraryTabs.props}
+          >
             <button
               type="button"
               role="tab"
               aria-selected={screeningInputMode === 'upload'}
+              tabIndex={libraryTabs.tabTabIndex(screeningInputMode === 'upload')}
               className={[
                 'virtual-screening-source-tab',
                 screeningInputMode === 'upload' ? 'active' : ''
@@ -341,6 +357,7 @@ export function VirtualScreeningWorkflowSection({
               type="button"
               role="tab"
               aria-selected={screeningInputMode === 'paste'}
+              tabIndex={libraryTabs.tabTabIndex(screeningInputMode === 'paste')}
               className={[
                 'virtual-screening-source-tab',
                 screeningInputMode === 'paste' ? 'active' : ''

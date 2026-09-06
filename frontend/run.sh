@@ -208,12 +208,24 @@ start_frontend_prod() {
   echo "[V-Bio frontend] building..."
   (
     cd "${VBIO_DIR}"
-    npm run build >/dev/null
+    npm run build -- --outDir dist-new --emptyOutDir >/dev/null
+  )
+  # Accumulate assets instead of replacing them: long-lived SPA tabs keep requesting
+  # chunk files from the build they were loaded with. Wiping dist on every deploy
+  # 404s those requests and freezes navigation (URL changes, view doesn't). Serving
+  # the union of all builds keeps every already-open tab fully functional; the new
+  # index.html steers fresh loads to the latest code.
+  (
+    cd "${VBIO_DIR}"
+    mkdir -p "${VBIO_DIR}/dist-served"
+    cp -R "${VBIO_DIR}/dist-new/." "${VBIO_DIR}/dist-served/"
+    # Retention: hashed assets a tab could still reference are kept for 30 days.
+    find "${VBIO_DIR}/dist-served/assets" -type f -mtime +30 -delete 2>/dev/null || true
   )
   echo "[V-Bio frontend] starting preview on ${VBIO_FRONTEND_HOST}:${VBIO_FRONTEND_PORT}..."
   (
     cd "${VBIO_DIR}"
-    nohup npm run preview -- --host "${VBIO_FRONTEND_HOST}" --port "${VBIO_FRONTEND_PORT}" --strictPort >"${FRONTEND_LOG}" 2>&1 &
+    nohup npm run preview -- --outDir dist-served --host "${VBIO_FRONTEND_HOST}" --port "${VBIO_FRONTEND_PORT}" --strictPort >"${FRONTEND_LOG}" 2>&1 &
     echo $! >"${FRONTEND_PID_FILE}"
   )
   echo "[V-Bio frontend] started (pid: $(cat "${FRONTEND_PID_FILE}"))."

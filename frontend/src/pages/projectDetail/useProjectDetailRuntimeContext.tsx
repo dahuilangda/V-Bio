@@ -44,7 +44,8 @@ import {
 } from './projectDraftUtils';
 import {
   inferTaskStateFromStatusPayload,
-  readTaskRuntimeStatusText as readStatusText
+  readTaskRuntimeStatusText as readStatusText,
+  taskStatePriority
 } from '../../utils/taskRuntime';
 import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
 
@@ -76,6 +77,9 @@ import { useProjectConfidenceSignals } from './useProjectConfidenceSignals';
 import { useComponentTypeBuckets } from './useComponentTypeBuckets';
 import { useProjectDetailLocalState } from './useProjectDetailLocalState';
 import { hasLeadOptPredictionRuntime, readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
+import { hasObjectContent, asRecord as asObjectRecord } from '../projectTasks/recordReaders';
+import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
+import { hasPeptideCandidateRows, mergeConfidencePreservingPeptideCandidates } from '../projectTasks/taskDataPeptide';
 
 function buildTaskRuntimeSignature(
   rows: Array<{
@@ -161,14 +165,6 @@ function buildRuntimePollingSignature(rows: Array<{
     .join('\n');
 }
 
-const TASK_STATE_PRIORITY: Record<string, number> = {
-  DRAFT: 0,
-  QUEUED: 1,
-  RUNNING: 2,
-  SUCCESS: 3,
-  FAILURE: 3,
-  REVOKED: 3,
-};
 const RUNTIME_STATUS_LIGHT_POLL_MAX_TASKS = 24;
 const LEADOPT_CANDIDATE_HYDRATION_RETRY_MS = 15000;
 
@@ -237,10 +233,6 @@ function projectTaskDetailOptionsCover(
     (!need.includeAffinity || available.includeAffinity) &&
     (!need.includeProteinSequence || available.includeProteinSequence)
   );
-}
-
-function taskStatePriority(value: unknown): number {
-  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
 }
 
 function deriveLeadOptRuntimeState(row: {
@@ -354,9 +346,6 @@ function normalizeLeadOptRuntimeRow<
   };
 }
 
-function hasObjectContent(value: unknown): boolean {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
-}
 
 function normalizeCustomResidueDefinition(value: unknown): { ccd: string; smiles: string; baseResidue?: string; label?: string } | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -385,60 +374,6 @@ function hasTaskInputSnapshotPayload(
   return Array.isArray(task.components) && task.components.length > 0;
 }
 
-function asObjectRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function readRecordUpdatedAt(value: unknown): number {
-  const record = asObjectRecord(value);
-  const raw = record.updatedAt ?? record.updated_at;
-  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function hasPeptideCandidateRows(value: unknown): boolean {
-  const confidence = asObjectRecord(value);
-  if (Object.keys(confidence).length === 0) return false;
-  const peptide = asObjectRecord(confidence.peptide_design);
-  const progress = asObjectRecord(confidence.progress);
-  const peptideProgress = asObjectRecord(peptide.progress);
-  const sources = [confidence, peptide, progress, peptideProgress];
-  return sources.some(
-    (source) =>
-      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
-      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
-      (Array.isArray(source.candidates) && source.candidates.length > 0)
-  );
-}
-
-function mergeConfidencePreservingPeptideCandidates(nextValue: unknown, prevValue: unknown): unknown {
-  const next = asObjectRecord(nextValue);
-  const prev = asObjectRecord(prevValue);
-  if (Object.keys(next).length === 0) return prevValue;
-  if (Object.keys(prev).length === 0) return nextValue;
-  if (hasPeptideCandidateRows(prev) && !hasPeptideCandidateRows(next)) {
-    return prevValue;
-  }
-  return nextValue;
-}
-
-function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
-  const next = asObjectRecord(nextValue);
-  const prev = asObjectRecord(prevValue);
-  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
-  const merged: Record<string, unknown> = { ...prev };
-  for (const [key, nextRecord] of Object.entries(next)) {
-    const prevRecord = merged[key];
-    if (!prevRecord) {
-      merged[key] = nextRecord;
-      continue;
-    }
-    const nextUpdatedAt = readRecordUpdatedAt(nextRecord);
-    const prevUpdatedAt = readRecordUpdatedAt(prevRecord);
-    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
-  }
-  return merged;
-}
 
 function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): Record<string, unknown> | null {
   const next = asObjectRecord(nextValue);

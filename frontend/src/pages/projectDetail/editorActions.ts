@@ -5,6 +5,8 @@ import type { ProteinTemplateUpload } from '../../types/models';
 import { PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { limitTaskSummary } from '../../utils/taskMetadata';
 import { normalizePredictionBackend } from './projectDraftUtils';
+import type { CysLayoutMode, CysLayoutParams } from '../../utils/peptideCysLayout';
+import { convertLayoutParams } from '../../utils/peptideCysLayout';
 
 interface DraftLike {
   backend: string;
@@ -40,14 +42,24 @@ function patchDraftOptions<TDraft extends DraftLike>(
 }
 
 function clampInteger(value: number, minValue: number, maxValue: number, fallback: number): number {
-  return Math.max(minValue, Math.min(maxValue, Math.floor(Number(value) || fallback)));
+  // `Number(value) || fallback` would treat a legitimate 0 as missing (dragging the
+  // Cys 1 ratio slider to 0% snapped back to the 15% default). The fallback is for
+  // non-numeric input only.
+  const numeric = Number(value);
+  const floored = Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
+  return Math.max(minValue, Math.min(maxValue, floored));
 }
 
 function normalizeBicyclicPositions(options: NonNullable<DraftLike['inputConfig']['options']>): Pick<
   NonNullable<DraftLike['inputConfig']['options']>,
   'peptideBicyclicCys1Pos' | 'peptideBicyclicCys2Pos' | 'peptideBicyclicCys3Pos'
 > {
-  const binderLength = Math.max(8, Math.floor(Number(options.peptideBinderLength) || 15));
+  // rail reference: the explicit length range's max when set, else the
+  // legacy single binder length
+  const binderLength = Math.max(
+    8,
+    Math.floor(Number(options.peptideBinderLength ?? options.peptideLengthMax) || 15)
+  );
   const fixTerminal = options.peptideBicyclicFixTerminalCys !== false;
   const cys1Pos = clampInteger(Number(options.peptideBicyclicCys1Pos), 1, Math.max(1, binderLength - 2), 3);
   const cys2Upper = fixTerminal ? Math.max(1, binderLength - 2) : Math.max(1, binderLength - 1);
@@ -804,6 +816,125 @@ export function handleRuntimePeptideBicyclicCys3PosChangeAction<TDraft extends D
       ...normalizeBicyclicPositions(nextOptions)
     };
   });
+}
+
+const BICYCLIC_LAYOUT_PARAM_KEYS = [
+  'peptideBicyclicRing1',
+  'peptideBicyclicRing2',
+  'peptideBicyclicRatio1',
+  'peptideBicyclicRatio2',
+  'peptideBicyclicRatio3'
+] as const;
+
+function readBicyclicLayoutParams(options: NonNullable<DraftLike['inputConfig']['options']>): CysLayoutParams {
+  const referenceLength = Math.max(
+    8,
+    Math.floor(Number(options.peptideBicyclicCys3Pos) || 15)
+  );
+  return {
+    ring: {
+      ring1: clampInteger(Number(options.peptideBicyclicRing1), 1, 100, 4),
+      ring2: clampInteger(Number(options.peptideBicyclicRing2), 1, 100, 6)
+    },
+    ratio: {
+      pct1: clampInteger(Number(options.peptideBicyclicRatio1), 0, 100, 15),
+      pct2: clampInteger(Number(options.peptideBicyclicRatio2), 0, 100, 50),
+      pct3: clampInteger(Number(options.peptideBicyclicRatio3), 0, 100, 100)
+    },
+    absolute: {
+      cys1: clampInteger(Number(options.peptideBicyclicCys1Pos), 1, 999, 3),
+      cys2: clampInteger(Number(options.peptideBicyclicCys2Pos), 1, 999, 8),
+      cys3: referenceLength
+    }
+  };
+}
+
+/**
+ * Switch the Cys anchor layout. The active layout's anchors are re-expressed
+ * in the target mode at the current reference length so switching modes never
+ * silently discards what the user dialed in. Ring topology requires the
+ * terminal Cys (the block is anchored to the C-terminus).
+ */
+export function handleRuntimePeptideBicyclicCysLayoutChangeAction<TDraft extends DraftLike>(params: {
+  peptideBicyclicCysLayout: CysLayoutMode;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideBicyclicCysLayout, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => {
+    const currentLayout = readBicyclicLayoutParams(options);
+    const referenceLength = Math.max(
+      5,
+      Math.floor(Number(options.peptideLengthMax ?? options.peptideBinderLength ?? currentLayout.absolute.cys3) || 15)
+    );
+    const fixTerminal = options.peptideBicyclicFixTerminalCys !== false;
+    const from: CysLayoutMode = readBicyclicLayoutMode(options);
+    const converted = convertLayoutParams(
+      from,
+      peptideBicyclicCysLayout,
+      currentLayout,
+      referenceLength,
+      fixTerminal
+    );
+    const next: NonNullable<DraftLike['inputConfig']['options']> = {
+      ...options,
+      peptideBicyclicCysLayout
+    };
+    if (peptideBicyclicCysLayout === 'auto') {
+      for (const key of BICYCLIC_LAYOUT_PARAM_KEYS) delete next[key];
+      return next;
+    }
+    return {
+      ...next,
+      ...(peptideBicyclicCysLayout === 'ring' ? { peptideBicyclicFixTerminalCys: true } : {}),
+      peptideBicyclicRing1: converted.ring.ring1,
+      peptideBicyclicRing2: converted.ring.ring2,
+      peptideBicyclicRatio1: converted.ratio.pct1,
+      peptideBicyclicRatio2: converted.ratio.pct2,
+      peptideBicyclicRatio3: converted.ratio.pct3,
+      // keep the rail's derived positions in sync with the converted layout
+      peptideBicyclicCys1Pos: Math.min(converted.absolute.cys1, referenceLength),
+      peptideBicyclicCys2Pos: Math.min(converted.absolute.cys2, referenceLength),
+      peptideBicyclicCys3Pos: Math.min(converted.absolute.cys3, referenceLength)
+    };
+  });
+}
+
+function readBicyclicLayoutMode(options: NonNullable<DraftLike['inputConfig']['options']>): CysLayoutMode {
+  const explicit = String(options.peptideBicyclicCysLayout || '').trim();
+  if (explicit === 'ring' || explicit === 'ratio' || explicit === 'absolute' || explicit === 'auto') {
+    return explicit;
+  }
+  return options.peptideBicyclicCysPositionMode === 'manual' ? 'absolute' : 'auto';
+}
+
+export function handleRuntimePeptideBicyclicRingChangeAction<TDraft extends DraftLike>(params: {
+  peptideBicyclicRing1: number;
+  peptideBicyclicRing2: number;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideBicyclicRing1, peptideBicyclicRing2, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideBicyclicRing1: clampInteger(Number(peptideBicyclicRing1), 1, 100, 4),
+    peptideBicyclicRing2: clampInteger(Number(peptideBicyclicRing2), 1, 100, 6)
+  }));
+}
+
+export function handleRuntimePeptideBicyclicRatioChangeAction<TDraft extends DraftLike>(params: {
+  peptideBicyclicRatio1: number;
+  peptideBicyclicRatio2: number;
+  peptideBicyclicRatio3?: number;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideBicyclicRatio1, peptideBicyclicRatio2, peptideBicyclicRatio3, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideBicyclicRatio1: clampInteger(Number(peptideBicyclicRatio1), 0, 100, 15),
+    peptideBicyclicRatio2: clampInteger(Number(peptideBicyclicRatio2), 0, 100, 50),
+    ...(peptideBicyclicRatio3 !== undefined
+      ? { peptideBicyclicRatio3: clampInteger(Number(peptideBicyclicRatio3), 0, 100, 100) }
+      : {})
+  }));
 }
 
 export function handleTaskNameChangeAction<TDraft extends { taskName: string }>(params: {

@@ -33,7 +33,12 @@ import {
   sortProjectTasks
 } from './taskDataUtils';
 import { resolveTaskWorkflowKey } from './taskPresentation';
-import { asRecord } from './recordReaders';
+import {
+  asRecord,
+  readFiniteNumber,
+  readFiniteNumberArray
+} from './recordReaders';
+import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
 
 function hasLeadOptMmpOnlySnapshot(task: ProjectTask): boolean {
   const confidence =
@@ -66,18 +71,7 @@ function isTransientRuntimeStatusText(value: unknown): boolean {
 
 type LeadOptTaskSummary = NonNullable<ReturnType<typeof readLeadOptTaskSummary>>;
 
-function readFiniteNumber(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
-  if (!Number.isFinite(parsed)) return null;
-  return parsed;
-}
 
-function readFiniteNumberArray(value: unknown): number[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => readFiniteNumber(item))
-    .filter((item): item is number => item !== null);
-}
 
 function hasFiniteMetric(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value);
@@ -360,27 +354,6 @@ function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: string; 
     console.error('decodeURIComponent failed for lead-opt prediction key smiles; keeping encoded value.', err);
     return { backend, smiles: encodedSmiles };
   }
-}
-
-function mergeLeadOptPredictionMapsByKey(
-  nextValue: Record<string, unknown>,
-  prevValue: Record<string, unknown>
-): Record<string, unknown> {
-  const next = asRecord(nextValue);
-  const prev = asRecord(prevValue);
-  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
-  const merged: Record<string, unknown> = { ...prev };
-  for (const [key, nextRecord] of Object.entries(next)) {
-    const prevRecord = asRecord(merged[key]);
-    if (Object.keys(prevRecord).length === 0) {
-      merged[key] = nextRecord;
-      continue;
-    }
-    const nextUpdatedAt = readFiniteNumber(asRecord(nextRecord).updatedAt ?? asRecord(nextRecord).updated_at) || 0;
-    const prevUpdatedAt = readFiniteNumber(prevRecord.updatedAt ?? prevRecord.updated_at) || 0;
-    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
-  }
-  return merged;
 }
 
 function canonicalizeLeadOptPredictionMap(

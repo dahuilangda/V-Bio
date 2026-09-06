@@ -188,7 +188,10 @@ export function ProjectTasksTable({
                   visibleMetricColumns={visibleMetricColumns}
                   canManageShares={canManageShares}
                   editingTaskNameId={editingTaskNameId}
-                  editingTaskNameValue={editingTaskNameValue}
+                  // Only the row being edited consumes the draft value; passing the
+                  // live value to every row would invalidate each memoized row on
+                  // every keystroke.
+                  editingTaskNameValue={editingTaskNameId === row.task.id ? editingTaskNameValue : ''}
                   savingTaskNameId={savingTaskNameId}
                   openingTaskId={openingTaskId}
                   deletingTaskId={deletingTaskId}
@@ -285,20 +288,20 @@ export function ProjectTasksTable({
                 <option value="50">50</option>
               </select>
             </label>
-            <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => onPageChange(1)}>
+            <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => onPageChange(1)}>
               First
             </button>
-            <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => onPageChange((p) => Math.max(1, p - 1))}>
+            <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => onPageChange((p) => Math.max(1, p - 1))}>
               Prev
             </button>
-            <button
+            <button type="button"
               className="btn btn-ghost btn-compact"
               disabled={currentPage >= totalPages}
               onClick={() => onPageChange((p) => Math.min(totalPages, p + 1))}
             >
               Next
             </button>
-            <button className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => onPageChange(totalPages)}>
+            <button type="button" className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => onPageChange(totalPages)}>
               Last
             </button>
             <label className="project-page-size">

@@ -15,6 +15,7 @@ import {
 import type { AffinityDockPocket, AffinityScoringMode } from '../../types/models';
 import { PocketBoxControls } from './PocketBoxControls';
 import { pocketTargetChanged, type PocketTargetSignature } from '../../utils/pocketBox';
+import { useTabsKeyboard } from '../ui/useTabsKeyboard';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
@@ -405,29 +406,43 @@ export function AffinityResultsWorkspace({
   const [selectedInteraction, setSelectedInteraction] = useState<LigandInteraction | null>(null);
   const [interactionAtomHighlights, setInteractionAtomHighlights] = useState<MolstarAtomHighlight[]>([]);
   // The workspace instance is reused across task results: a selection made against task A's
-  // report must not keep highlighting residues/atoms on task B's structure.
-  useEffect(() => {
+  // report must not keep highlighting residues/atoms on task B's structure. Render-time
+  // adjustment (no effect pass): https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevInteractionsReport, setPrevInteractionsReport] = useState(interactionsReport);
+  if (interactionsReport !== prevInteractionsReport) {
+    setPrevInteractionsReport(interactionsReport);
     setSelectedInteraction(null);
     setInteractionAtomHighlights([]);
-  }, [interactionsReport]);
+  }
 
-  useEffect(() => {
+  const [prevViewerColorModeKey, setPrevViewerColorModeKey] = useState({
+    initialViewerColorMode,
+    structureText
+  });
+  if (initialViewerColorMode !== prevViewerColorModeKey.initialViewerColorMode || structureText !== prevViewerColorModeKey.structureText) {
+    setPrevViewerColorModeKey({ initialViewerColorMode, structureText });
     setViewerColorMode(initialViewerColorMode);
-  }, [initialViewerColorMode, structureText]);
+  }
 
-  useEffect(() => {
-    if (!exactLigandAtomLinks) {
-      setSelectedLigandAtomIndex(null);
-      return;
-    }
+  // APG tabs keyboard behaviour for the 3D color mode switch.
+  const colorModeTabs = useTabsKeyboard<'alphafold' | 'default'>(
+    viewerColorMode,
+    setViewerColorMode,
+    ['alphafold', 'default']
+  );
+
+  const [prevExactLigandAtomLinks, setPrevExactLigandAtomLinks] = useState(exactLigandAtomLinks);
+  if (exactLigandAtomLinks !== prevExactLigandAtomLinks) {
+    setPrevExactLigandAtomLinks(exactLigandAtomLinks);
     if (
+      !exactLigandAtomLinks ||
       selectedLigandAtomIndex === null ||
       selectedLigandAtomIndex < 0 ||
       selectedLigandAtomIndex >= exactLigandAtomLinks.atoms.length
     ) {
       setSelectedLigandAtomIndex(null);
     }
-  }, [exactLigandAtomLinks, selectedLigandAtomIndex]);
+  }
 
   const activeLigandAtom = useMemo<MolstarAtomHighlight | null>(() => {
     if (!exactLigandAtomLinks) return null;
@@ -514,11 +529,17 @@ export function AffinityResultsWorkspace({
           <section className="result-aside-block result-aside-block-ligand">
             <div className="result-aside-head">
               <div className="result-aside-title">Ligand</div>
-              <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
+              <div
+                className="prediction-render-mode-switch"
+                role="tablist"
+                aria-label="3D color mode"
+                {...colorModeTabs.props}
+              >
                 <button
                   type="button"
                   role="tab"
                   aria-selected={viewerColorMode === 'alphafold'}
+                  tabIndex={colorModeTabs.tabTabIndex(viewerColorMode === 'alphafold')}
                   className={`prediction-render-mode-btn ${viewerColorMode === 'alphafold' ? 'active' : ''}`}
                   onClick={() => setViewerColorMode('alphafold')}
                   title="Color structure by model confidence"
@@ -529,6 +550,7 @@ export function AffinityResultsWorkspace({
                   type="button"
                   role="tab"
                   aria-selected={viewerColorMode === 'default'}
+                  tabIndex={colorModeTabs.tabTabIndex(viewerColorMode === 'default')}
                   className={`prediction-render-mode-btn ${viewerColorMode === 'default' ? 'active' : ''}`}
                   onClick={() => setViewerColorMode('default')}
                   title="Use standard element colors"

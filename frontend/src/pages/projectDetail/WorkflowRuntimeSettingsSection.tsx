@@ -10,6 +10,14 @@ import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSl
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
+import { PeptideCysSpectrum } from '../../components/project/PeptideCysSpectrum';
+import {
+  resolveAnchorsAtLength,
+  validateCysLayout,
+  cysLayoutRangeNotice,
+  type CysLayoutMode,
+  type CysLayoutParams
+} from '../../utils/peptideCysLayout';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
 type BicyclicLinkerType = 'SEZ' | '29N' | 'BS3';
@@ -171,7 +179,12 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptideCustomResidueLibrary: CustomCcdMoleculeInput[];
   onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
   peptideBicyclicLinkerCcd: BicyclicLinkerType;
-  peptideBicyclicCysPositionMode: 'auto' | 'manual';
+  peptideBicyclicCysLayout: CysLayoutMode;
+  peptideBicyclicRing1: number;
+  peptideBicyclicRing2: number;
+  peptideBicyclicRatio1: number;
+  peptideBicyclicRatio2: number;
+  peptideBicyclicRatio3: number;
   peptideBicyclicFixTerminalCys: boolean;
   peptideBicyclicIncludeExtraCys: boolean;
   peptideBicyclicCys1Pos: number;
@@ -192,7 +205,9 @@ export interface WorkflowRuntimeSettingsSectionProps {
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
   onPeptideBicyclicLinkerCcdChange: (value: BicyclicLinkerType) => void;
-  onPeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
+  onPeptideBicyclicCysLayoutChange: (value: CysLayoutMode) => void;
+  onPeptideBicyclicRingChange: (ring1: number, ring2: number) => void;
+  onPeptideBicyclicRatioChange: (pct1: number, pct2: number, pct3?: number) => void;
   onPeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
   onPeptideBicyclicIncludeExtraCysChange: (value: boolean) => void;
   onPeptideBicyclicCys1PosChange: (value: number) => void;
@@ -230,7 +245,12 @@ export function WorkflowRuntimeSettingsSection({
   peptideCustomResidueLibrary,
   onCustomResidueLibraryChange,
   peptideBicyclicLinkerCcd,
-  peptideBicyclicCysPositionMode,
+  peptideBicyclicCysLayout,
+  peptideBicyclicRing1,
+  peptideBicyclicRing2,
+  peptideBicyclicRatio1,
+  peptideBicyclicRatio2,
+  peptideBicyclicRatio3,
   peptideBicyclicFixTerminalCys,
   peptideBicyclicIncludeExtraCys,
   peptideBicyclicCys1Pos,
@@ -251,7 +271,9 @@ export function WorkflowRuntimeSettingsSection({
   onPeptideResiduePoolChange,
   onPeptideNonNaturalRangeChange,
   onPeptideBicyclicLinkerCcdChange,
-  onPeptideBicyclicCysPositionModeChange,
+  onPeptideBicyclicCysLayoutChange,
+  onPeptideBicyclicRingChange,
+  onPeptideBicyclicRatioChange,
   onPeptideBicyclicFixTerminalCysChange,
   onPeptideBicyclicIncludeExtraCysChange,
   onPeptideBicyclicCys1PosChange,
@@ -323,40 +345,86 @@ export function WorkflowRuntimeSettingsSection({
       onBackendChange('protenix2dock');
     }
   }, [isPeptideDesignWorkflow, peptideDesignMode, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
-  const cys2Max = peptideBicyclicFixTerminalCys
-    ? Math.max(1, peptideBinderLength - 2)
-    : Math.max(1, peptideBinderLength - 1);
-  const cysPositionAuto = peptideBicyclicCysPositionMode === 'auto';
-  const hasDuplicatedCysPositions =
-    isBicyclicMode &&
-    !cysPositionAuto &&
-    new Set([peptideBicyclicCys1Pos, peptideBicyclicCys2Pos, peptideBicyclicCys3Pos]).size < 3;
-  const cysSlotValueMap = useMemo(
+  // Rail reference length: the length range's max when set, else the legacy
+  // single binder length. Manual Cys choices are made against this reference.
+  const cysReferenceLength = Math.max(8, peptideLengthMax || peptideBinderLength || 20);
+  const cysPositionAuto = peptideBicyclicCysLayout === 'auto';
+  const cysLayoutParams: CysLayoutParams = useMemo(
     () => ({
-      cys1: peptideBicyclicCys1Pos,
-      cys2: peptideBicyclicCys2Pos,
-      cys3: peptideBicyclicFixTerminalCys ? peptideBinderLength : peptideBicyclicCys3Pos
+      ring: { ring1: peptideBicyclicRing1, ring2: peptideBicyclicRing2 },
+      ratio: { pct1: peptideBicyclicRatio1, pct2: peptideBicyclicRatio2, pct3: peptideBicyclicRatio3 },
+      absolute: {
+        cys1: peptideBicyclicCys1Pos,
+        cys2: peptideBicyclicCys2Pos,
+        cys3: peptideBicyclicFixTerminalCys ? cysReferenceLength : peptideBicyclicCys3Pos
+      }
     }),
     [
+      peptideBicyclicRing1,
+      peptideBicyclicRing2,
+      peptideBicyclicRatio1,
+      peptideBicyclicRatio2,
+      peptideBicyclicRatio3,
       peptideBicyclicCys1Pos,
       peptideBicyclicCys2Pos,
       peptideBicyclicCys3Pos,
       peptideBicyclicFixTerminalCys,
-      peptideBinderLength
+      cysReferenceLength
     ]
+  );
+  const resolvedCysAnchors = useMemo(
+    () => resolveAnchorsAtLength(peptideBicyclicCysLayout, cysLayoutParams, cysReferenceLength, peptideBicyclicFixTerminalCys),
+    [peptideBicyclicCysLayout, cysLayoutParams, cysReferenceLength, peptideBicyclicFixTerminalCys]
+  );
+  const cysLayoutError = useMemo(
+    () => (isBicyclicMode ? validateCysLayout({
+      mode: peptideBicyclicCysLayout,
+      layout: cysLayoutParams,
+      lengthMin: peptideLengthMin,
+      lengthMax: peptideLengthMax,
+      fixTerminalCys: peptideBicyclicFixTerminalCys
+    }) : null),
+    [isBicyclicMode, peptideBicyclicCysLayout, cysLayoutParams, peptideLengthMin, peptideLengthMax, peptideBicyclicFixTerminalCys]
+  );
+  const cysLayoutNotice = useMemo(
+    () => (isBicyclicMode && !cysLayoutError ? cysLayoutRangeNotice({
+      mode: peptideBicyclicCysLayout,
+      layout: cysLayoutParams,
+      lengthMin: peptideLengthMin,
+      lengthMax: peptideLengthMax,
+      fixTerminalCys: peptideBicyclicFixTerminalCys
+    }) : null),
+    [isBicyclicMode, cysLayoutError, peptideBicyclicCysLayout, cysLayoutParams, peptideLengthMin, peptideLengthMax, peptideBicyclicFixTerminalCys]
+  );
+  const cysSlotValueMap = useMemo(
+    () => ({
+      cys1: resolvedCysAnchors?.[0] ?? peptideBicyclicCys1Pos,
+      cys2: resolvedCysAnchors?.[1] ?? peptideBicyclicCys2Pos,
+      cys3: resolvedCysAnchors?.[2]
+        ?? (peptideBicyclicFixTerminalCys ? cysReferenceLength : peptideBicyclicCys3Pos)
+    }),
+    [resolvedCysAnchors, peptideBicyclicCys1Pos, peptideBicyclicCys2Pos, peptideBicyclicCys3Pos, peptideBicyclicFixTerminalCys, cysReferenceLength]
   );
   const cysSlotMaxMap = useMemo(
     () => ({
-      cys1: Math.max(1, peptideBinderLength - 2),
-      cys2: cys2Max,
-      cys3: peptideBinderLength
+      cys1: Math.max(1, cysReferenceLength - 2),
+      cys2: peptideBicyclicFixTerminalCys
+        ? Math.max(1, cysReferenceLength - 2)
+        : Math.max(1, cysReferenceLength - 1),
+      cys3: cysReferenceLength
     }),
-    [peptideBinderLength, cys2Max]
+    [cysReferenceLength, peptideBicyclicFixTerminalCys]
   );
   const positions = useMemo(
-    () => Array.from({ length: Math.max(1, peptideBinderLength) }, (_, idx) => idx + 1),
-    [peptideBinderLength]
+    () => Array.from({ length: Math.max(1, cysReferenceLength) }, (_, idx) => idx + 1),
+    [cysReferenceLength]
   );
+  const spectrumResolver = useMemo(
+    () => (length: number) => resolveAnchorsAtLength(
+      peptideBicyclicCysLayout, cysLayoutParams, length, peptideBicyclicFixTerminalCys),
+    [peptideBicyclicCysLayout, cysLayoutParams, peptideBicyclicFixTerminalCys]
+  );
+  const rangeIsOpen = peptideLengthMin !== peptideLengthMax;
   const normalizedInitialSequence = useMemo(
     () =>
       String(peptideInitialSequence || '')
@@ -1421,19 +1489,35 @@ export function WorkflowRuntimeSettingsSection({
 
                   <div className="peptide-bicyclic-main">
                     <div className="peptide-bicyclic-top-control">
-                      <label className="field">
-                        <span>Cys Position Mode</span>
-                        <select
-                          value={peptideBicyclicCysPositionMode}
-                          onChange={(e) =>
-                            onPeptideBicyclicCysPositionModeChange((e.target.value as 'auto' | 'manual') || 'auto')
-                          }
-                          disabled={!canEdit}
-                        >
-                          <option value="auto">Auto</option>
-                          <option value="manual">Manual</option>
-                        </select>
-                      </label>
+                      <div className="field">
+                        <span>
+                          Cys Layout
+                          <InfoTip
+                            text="How the three Cys anchors follow the peptide length range."
+                            align="start"
+                          />
+                        </span>
+                        <div className="peptide-cys-mode-seg" role="group" aria-label="Cys layout mode">
+                          {([
+                            { key: 'auto' as CysLayoutMode, label: 'Auto', title: 'Engine places Cys at first / middle / last of every candidate.' },
+                            { key: 'ring' as CysLayoutMode, label: 'Ring sizes', title: 'Pin the two ring sizes - the anchor block rides the C-terminus; the N-flank absorbs the length range.' },
+                            { key: 'ratio' as CysLayoutMode, label: 'Ratio', title: 'Anchors scale with each candidate length; ring sizes flex.' },
+                            { key: 'absolute' as CysLayoutMode, label: 'Absolute', title: 'Literal positions - requires a fixed length (min = max).' }
+                          ]).map((mode) => (
+                            <button
+                              key={mode.key}
+                              type="button"
+                              className={`peptide-cys-mode-btn ${peptideBicyclicCysLayout === mode.key ? 'active' : ''}`}
+                              onClick={() => onPeptideBicyclicCysLayoutChange(mode.key)}
+                              disabled={!canEdit}
+                              aria-pressed={peptideBicyclicCysLayout === mode.key}
+                              title={mode.title}
+                            >
+                              {mode.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                     <div className="peptide-runtime-grid peptide-runtime-grid-controls">
                       <label className="switch-field peptide-runtime-switch">
@@ -1441,7 +1525,7 @@ export function WorkflowRuntimeSettingsSection({
                           type="checkbox"
                           checked={peptideBicyclicFixTerminalCys}
                           onChange={(e) => onPeptideBicyclicFixTerminalCysChange(e.target.checked)}
-                          disabled={!canEdit || cysPositionAuto}
+                          disabled={!canEdit || cysPositionAuto || peptideBicyclicCysLayout === 'ring'}
                         />
                         <span>Fix Terminal Cys</span>
                       </label>
@@ -1456,16 +1540,91 @@ export function WorkflowRuntimeSettingsSection({
                       </label>
                     </div>
 
+                    {peptideBicyclicCysLayout === 'ring' && (
+                      <div className="peptide-cys-params">
+                        <label className="field peptide-cys-param">
+                          <span>Ring 1 <em>residues between Cys 1-2</em></span>
+                          <CommitNumberInput
+                            min={1}
+                            max={40}
+                            value={peptideBicyclicRing1}
+                            onCommit={(v) => onPeptideBicyclicRingChange(v, peptideBicyclicRing2)}
+                            disabled={!canEdit}
+                          />
+                        </label>
+                        <label className="field peptide-cys-param">
+                          <span>Ring 2 <em>residues between Cys 2-3</em></span>
+                          <CommitNumberInput
+                            min={1}
+                            max={40}
+                            value={peptideBicyclicRing2}
+                            onCommit={(v) => onPeptideBicyclicRingChange(peptideBicyclicRing1, v)}
+                            disabled={!canEdit}
+                          />
+                        </label>
+                      </div>
+                    )}
+
+                    {peptideBicyclicCysLayout === 'ratio' && (
+                      <div className="peptide-cys-params peptide-cys-params-ratio">
+                        {([
+                          { key: 1, label: 'Cys 1', value: peptideBicyclicRatio1, pct3: undefined },
+                          { key: 2, label: 'Cys 2', value: peptideBicyclicRatio2, pct3: undefined },
+                          ...(peptideBicyclicFixTerminalCys
+                            ? []
+                            : [{ key: 3, label: 'Cys 3', value: peptideBicyclicRatio3, pct3: peptideBicyclicRatio3 }])
+                        ]).map((slider) => (
+                          <label className="field peptide-cys-param peptide-ratio-slider-field" key={slider.key}>
+                            <span>{slider.label} <em>at % of peptide length</em></span>
+                            <div className="peptide-ratio-slider-row">
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={slider.value}
+                                onChange={(e) => {
+                                  const v = Math.floor(Number(e.target.value) || 0);
+                                  if (slider.key === 1) onPeptideBicyclicRatioChange(v, peptideBicyclicRatio2, slider.pct3);
+                                  else if (slider.key === 2) onPeptideBicyclicRatioChange(peptideBicyclicRatio1, v, slider.pct3);
+                                  else onPeptideBicyclicRatioChange(peptideBicyclicRatio1, peptideBicyclicRatio2, v);
+                                }}
+                                disabled={!canEdit}
+                              />
+                              <strong>{slider.value}%</strong>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* The spectrum is a across-the-length-range overview: with a single
+                        candidate length (min === max) it degenerates to one column that
+                        duplicates the position preview below — render it only when the
+                        range actually spans multiple lengths. */}
+                    {!cysPositionAuto && peptideLengthMin !== peptideLengthMax && (
+                      <PeptideCysSpectrum
+                        lengthMin={Math.min(peptideLengthMin, peptideLengthMax)}
+                        lengthMax={Math.max(peptideLengthMin, peptideLengthMax)}
+                        resolve={spectrumResolver}
+                        referenceLength={cysReferenceLength}
+                      />
+                    )}
+
                     <div className={`peptide-runtime-grid peptide-runtime-grid-cys ${cysPositionAuto ? 'is-disabled' : ''}`}>
                       <div className="field peptide-cys-picker-field">
-                        <span>Cys Positions</span>
+                        <span>
+                          {peptideBicyclicCysLayout === 'absolute'
+                            ? 'Cys Positions'
+                            : `Cys Positions - preview at ${cysReferenceLength} aa`}
+                        </span>
                         <div className="peptide-cys-slot-tabs" role="tablist" aria-label="Cysteine slots">
                           {([
                             { key: 'cys1' as CysSlot, label: 'Cys 1' },
                             { key: 'cys2' as CysSlot, label: 'Cys 2' },
                             { key: 'cys3' as CysSlot, label: 'Cys 3' }
                           ]).map((slot) => {
-                            const disabled = slot.key === 'cys3' && peptideBicyclicFixTerminalCys;
+                            const disabled = peptideBicyclicCysLayout === 'absolute'
+                              && slot.key === 'cys3' && peptideBicyclicFixTerminalCys;
                             const assigned = cysSlotValueMap[slot.key];
                             return (
                               <button
@@ -1493,7 +1652,8 @@ export function WorkflowRuntimeSettingsSection({
                             const markClass = marks.length > 0 ? marks[0] : '';
                             const disabledByRange = position > cysSlotMaxMap[activeCysSlot];
                             const disabledByFixedCys3 = activeCysSlot === 'cys3' && peptideBicyclicFixTerminalCys;
-                            const disabled = !canEdit || cysPositionAuto || disabledByRange || disabledByFixedCys3;
+                            const previewOnly = peptideBicyclicCysLayout !== 'absolute';
+                            const disabled = !canEdit || cysPositionAuto || previewOnly || disabledByRange || disabledByFixedCys3;
                             return (
                               <button
                                 key={`peptide-position-${position}`}
@@ -1513,14 +1673,39 @@ export function WorkflowRuntimeSettingsSection({
                         </div>
                       </div>
                     </div>
+                    {cysLayoutError && (
+                      <p className="peptide-cys-feedback is-error" role="alert">
+                        {cysLayoutError}
+                        {peptideBicyclicCysLayout === 'absolute' && rangeIsOpen && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-compact peptide-cys-pin-length"
+                            onClick={() => onPeptideLengthRange(cysReferenceLength, cysReferenceLength)}
+                            disabled={!canEdit}
+                          >
+                            Pin length to {cysReferenceLength} aa
+                          </button>
+                        )}
+                      </p>
+                    )}
+                    {!cysLayoutError && cysLayoutNotice && (
+                      <p className="peptide-cys-feedback is-notice">{cysLayoutNotice}</p>
+                    )}
                     {cysPositionAuto && (
                       <p className="muted small">Auto mode will optimize Cys positions during design.</p>
                     )}
-                    {!cysPositionAuto && peptideBicyclicFixTerminalCys && (
-                      <p className="muted small">Cys 3 is anchored to terminal residue.</p>
+                    {peptideBicyclicCysLayout === 'ring' && (
+                      <p className="muted small">
+                        Ring sizes stay fixed at every candidate length; the N-terminal flank absorbs the range.
+                      </p>
                     )}
-                    {hasDuplicatedCysPositions && (
-                      <p className="muted small">Manual Cys positions should be different to form two valid rings.</p>
+                    {peptideBicyclicCysLayout === 'ratio' && (
+                      <p className="muted small">
+                        Cys positions scale with each candidate length; ring sizes flex between candidates.
+                      </p>
+                    )}
+                    {!cysPositionAuto && peptideBicyclicFixTerminalCys && peptideBicyclicCysLayout !== 'ring' && (
+                      <p className="muted small">Cys 3 is anchored to terminal residue.</p>
                     )}
                   </div>
                 </div>

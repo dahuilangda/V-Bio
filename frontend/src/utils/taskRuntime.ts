@@ -1,8 +1,6 @@
 import type { TaskState, TaskStatusResponse } from '../types/models';
+import { asRecord } from '../pages/projectTasks/recordReaders';
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 export function mapBackendTaskState(raw: string): TaskState {
   const normalized = String(raw || '').trim().toUpperCase();
@@ -118,4 +116,23 @@ export function inferTaskStateFromStatusPayload(
       : mapped;
 
   return resolveNonRegressiveTaskState(currentStateInput, hinted);
+}
+
+/**
+ * Terminal-state ordering used by task-row merge logic (a later state never
+ * regresses to an earlier one). Identical to the local copies + maps that used
+ * to live in useProjects, useProjectDetailRuntimeContext and
+ * useProjectTasksDataLoader.
+ */
+const TASK_STATE_PRIORITY: Record<string, number> = {
+  DRAFT: 0,
+  QUEUED: 1,
+  RUNNING: 2,
+  SUCCESS: 3,
+  FAILURE: 3,
+  REVOKED: 3
+};
+
+export function taskStatePriority(value: unknown): number {
+  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
 }

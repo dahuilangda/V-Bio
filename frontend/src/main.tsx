@@ -3,6 +3,7 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { AuthProvider } from './hooks/useAuth';
 import { OverlayProvider } from './components/ui/OverlayContext';
+import { RouteErrorBoundary } from './components/ui/RouteErrorBoundary';
 import './styles/global.css';
 
 // Main-thread jank recorder: intermittent "whole tab freezes" (e.g. task-list transitions)
@@ -47,10 +48,20 @@ try {
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+  <BrowserRouter
+    // v7_startTransition was REMOVED on purpose: it wraps navigations in a
+    // transition, and a suspended route render (slow/hung lazy chunk) then keeps
+    // the previous view committed with zero feedback — observed as "URL changes
+    // but the page never switches" on Safari. v6 default behavior shows the
+    // PageLoading fallback immediately instead; visible feedback beats a silent
+    // freeze. v7_relativeSplatPath stays enabled (unrelated fix).
+    future={{ v7_relativeSplatPath: true }}
+  >
     <AuthProvider>
       <OverlayProvider>
-        <App />
+        <RouteErrorBoundary>
+          <App />
+        </RouteErrorBoundary>
       </OverlayProvider>
     </AuthProvider>
   </BrowserRouter>

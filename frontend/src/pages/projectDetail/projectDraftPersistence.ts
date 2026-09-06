@@ -177,17 +177,6 @@ export function resolveTerminalTaskRowIdFromContext(params: {
   return null;
 }
 
-export function resolveRuntimeTaskRowIdFromContext(params: {
-  project: Project | null;
-  projectTasks: ProjectTask[];
-}): string | null {
-  const { project, projectTasks } = params;
-  const activeTaskId = String(project?.task_id || '').trim();
-  if (!activeTaskId) return null;
-  const runtimeRow = projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
-  return runtimeRow?.id || null;
-}
-
 export async function persistDraftTaskSnapshotRecord(params: {
   project: Project | null;
   draft: DraftSnapshotSource | null;

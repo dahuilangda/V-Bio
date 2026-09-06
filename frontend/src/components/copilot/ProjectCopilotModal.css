@@ -1093,11 +1093,14 @@
        keyboard (dvh alone is unreliable across browsers). The CSS values below are the keyboard-
        closed defaults; the inline visualViewport styles override them when the keyboard opens.
        left/right/bottom stay !important because those edges never change on keyboard open. */
-    top: 0;
+    /* Start below the app top-nav (64px): the panel's header — with the close button —
+       must never sit underneath the sticky nav, which would make the panel unclosable
+       (observed on phones). */
+    top: 64px;
     /* dvh is the dynamic viewport height — it shrinks when the soft keyboard opens on browsers
        that support it, keeping the input visible as a baseline. The inline visualViewport styles
        are the authoritative source and override this when available. */
-    height: 100dvh;
+    height: calc(100dvh - 64px);
     max-width: 100vw !important;
     max-height: 100dvh;
     min-width: 0 !important;

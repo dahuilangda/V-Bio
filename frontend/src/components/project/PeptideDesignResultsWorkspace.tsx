@@ -2,6 +2,12 @@ import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucid
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent, type RefObject } from 'react';
 import { ensureStructureConfidenceColoringData, stripStructureConfidenceColoringData } from '../../api/backendApi';
 import { MolstarViewer } from './MolstarViewer';
+import {
+  asRecord,
+  asRecordArray,
+  asString
+} from '../../pages/projectTasks/recordReaders';
+import { normalizePlddt } from '../../pages/projectTasks/taskDataConfidence';
 
 type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
 type RuntimeState = 'SUCCESS' | 'RUNNING' | 'QUEUED' | 'FAILURE' | 'UNSCORED';
@@ -86,19 +92,7 @@ interface PeptideRuntimeContext {
   liveCandidateRows: Array<Record<string, unknown>>;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
-function asRecordArray(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
-}
-
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value);
-}
 
 function getBaseName(path: string): string {
   const parts = path.split(/[\/\\]/);
@@ -160,7 +154,7 @@ function chainTokenEquals(a: string, b: string): boolean {
 }
 
 function chainVariants(chainId: string): string[] {
-  const token = readText(chainId).trim();
+  const token = asString(chainId).trim();
   if (!token) return [];
   const variants: string[] = [];
   const push = (value: string) => {
@@ -178,7 +172,7 @@ function toChainList(value: unknown): string[] {
   if (Array.isArray(value)) {
     const rows: string[] = [];
     for (const item of value) {
-      const text = readText(item).trim();
+      const text = asString(item).trim();
       if (!text) continue;
       rows.push(text);
     }
@@ -192,7 +186,7 @@ function toChainList(value: unknown): string[] {
       .map((item) => item.trim())
       .filter(Boolean);
   }
-  const token = readText(value).trim();
+  const token = asString(value).trim();
   return token ? [token] : [];
 }
 
@@ -455,6 +449,19 @@ function readPreferredInterfaceMetricForCandidate(
     if (ipsaeDom !== null) {
       return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
     }
+    // canonical orchestrated objective: interface_metric carries its own
+    // label (the D-route ships `interface_metric: <ipsae>`,
+    // label 'IPSAE', formula d_space_refined_ipsae)
+    const interfaceMetric = normalizeIptm(firstFiniteMetric(payload, ['interface_metric', 'interfaceMetric']));
+    if (interfaceMetric !== null) {
+      const label = firstNonEmptyText(payload, ['interface_metric_label', 'interfaceMetricLabel']).toUpperCase();
+      if (label === 'IPSAE') {
+        return { value: interfaceMetric, label: 'IPSAE', source: 'ipsae' };
+      }
+      if (label === 'IPTM') {
+        return { value: interfaceMetric, label: 'ipTM', source: 'iptm' };
+      }
+    }
   }
 
   const iptm = resolvePairIptmForCandidate(row, preferredTargetChainId, preferredLigandChainId);
@@ -501,12 +508,6 @@ function computePeptideCompositeScore(
   return wp * (plddt / 100) + wi * interfaceMetricValue;
 }
 
-function normalizePlddt(value: number | null): number | null {
-  if (value === null) return null;
-  if (value >= 0 && value <= 1) return value * 100;
-  return value;
-}
-
 function normalizeIptm(value: number | null): number | null {
   if (value === null) return null;
   if (value > 1 && value <= 100) return value / 100;
@@ -514,7 +515,7 @@ function normalizeIptm(value: number | null): number | null {
 }
 
 function detectStructureFormat(text: string, hinted: unknown): 'cif' | 'pdb' {
-  const hint = readText(hinted).trim().toLowerCase();
+  const hint = asString(hinted).trim().toLowerCase();
   if (hint === 'pdb' || hint === 'cif') return hint;
   const head = text.trim().slice(0, 20).toUpperCase();
   if (head.startsWith('ATOM') || head.startsWith('HETATM') || head.startsWith('HEADER')) return 'pdb';
@@ -523,7 +524,7 @@ function detectStructureFormat(text: string, hinted: unknown): 'cif' | 'pdb' {
 
 function firstNonEmptyText(source: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
-    const value = readText(source[key]).trim();
+    const value = asString(source[key]).trim();
     if (value) return value;
   }
   return '';
@@ -641,7 +642,7 @@ function readResiduePlddtByChainSeries(
       const raw = readObjectPath(payload, path);
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
       for (const [chainIdRaw, chainValuesRaw] of Object.entries(raw as Record<string, unknown>)) {
-        const chainId = readText(chainIdRaw).trim();
+        const chainId = asString(chainIdRaw).trim();
         if (!chainId) continue;
         const values = normalizePlddtList(parseNumberList(chainValuesRaw));
         if (values.length === 0) continue;
@@ -657,7 +658,7 @@ function readResiduePlddtByChainSeries(
   const entries = [...byChain.values()];
   if (entries.length === 0) return [];
 
-  const preferredToken = normalizeChainToken(readText(preferredChainId));
+  const preferredToken = normalizeChainToken(asString(preferredChainId));
   let best: { chainId: string; values: number[]; score: number } | null = null;
   for (const entry of entries) {
     const chainToken = normalizeChainToken(entry.chainId);
@@ -823,16 +824,16 @@ function extractPolymerChainsFromCif(structureText: string): Map<string, Map<str
         j += 1;
         continue;
       }
-      const group = groupIdx >= 0 ? readText(tokens[groupIdx]).trim().toUpperCase() : 'ATOM';
+      const group = groupIdx >= 0 ? asString(tokens[groupIdx]).trim().toUpperCase() : 'ATOM';
       if (group && group !== 'ATOM') {
         j += 1;
         continue;
       }
-      const chainId = readText(tokens[chainIdx]).trim() || '_';
-      const seqToken = readText(tokens[seqIdx]).trim();
-      const residueName = readText(tokens[compIdx]).trim().toUpperCase();
+      const chainId = asString(tokens[chainIdx]).trim() || '_';
+      const seqToken = asString(tokens[seqIdx]).trim();
+      const residueName = asString(tokens[compIdx]).trim().toUpperCase();
       const seq = Number(seqToken);
-      const ins = insIdx >= 0 ? readText(tokens[insIdx]).trim() : '';
+      const ins = insIdx >= 0 ? asString(tokens[insIdx]).trim() : '';
       if (!Number.isFinite(seq)) {
         j += 1;
         continue;
@@ -878,7 +879,7 @@ function resolvePeptideFocusChainId(
   });
 
   const peptide = candidateSequence.trim().toUpperCase();
-  const preferredToken = normalizeChainToken(readText(preferredChainId));
+  const preferredToken = normalizeChainToken(asString(preferredChainId));
 
   if (peptide) {
     let best: { chainId: string; score: number } | null = null;
@@ -988,7 +989,7 @@ function readFirstFiniteFromPaths(payloads: Record<string, unknown>[], paths: st
 function readFirstTextFromPaths(payloads: Record<string, unknown>[], paths: string[]): string {
   for (const payload of payloads) {
     for (const path of paths) {
-      const text = readText(readObjectPath(payload, path)).trim();
+      const text = asString(readObjectPath(payload, path)).trim();
       if (text) return text;
     }
   }
@@ -1006,7 +1007,7 @@ function readFirstRecordArrayFromPaths(payloads: Record<string, unknown>[], path
 }
 
 function normalizeRuntimeState(raw: unknown): RuntimeState {
-  const token = readText(raw).trim().toUpperCase();
+  const token = asString(raw).trim().toUpperCase();
   if (token === 'SUCCESS' || token === 'COMPLETED' || token === 'DONE') return 'SUCCESS';
   if (
     token === 'RUNNING' ||
@@ -1138,7 +1139,7 @@ function rawCandidateIdentity(row: Record<string, unknown>, index: number): stri
   }
   const structureName = readCandidateStructureName(row);
   if (structureName) return `structure:${structureName}`;
-  const rowId = readText(row.id).trim();
+  const rowId = asString(row.id).trim();
   return rowId ? `id:${rowId}` : `row:${index}`;
 }
 
@@ -1274,13 +1275,13 @@ function parsePeptideCandidateModifications(row: Record<string, unknown>, sequen
     if (!item || typeof item !== 'object' || Array.isArray(item)) return;
     const record = item as Record<string, unknown>;
     const position = Math.floor(Number(record.position ?? record.residue_index ?? record.residue ?? record.pos));
-    const ccd = readText(record.ccd ?? record.code ?? record.residue_name).trim().toUpperCase();
+    const ccd = asString(record.ccd ?? record.code ?? record.residue_name).trim().toUpperCase();
     if (!Number.isFinite(position) || position < 1 || position > sequenceLength || !ccd || seen.has(position)) return;
     seen.add(position);
     rows.push({
       position,
       ccd,
-      baseResidue: readText(record.baseResidue ?? record.base_residue).trim().toUpperCase().slice(0, 1)
+      baseResidue: asString(record.baseResidue ?? record.base_residue).trim().toUpperCase().slice(0, 1)
     });
   });
   return rows.sort((a, b) => a.position - b.position);
@@ -1316,8 +1317,13 @@ function parseCandidateRows(
         preferredLigandChainId
       );
       // ipSAE is the sensitive interface metric — read it independently so the
-      // card always exposes pLDDT / ipTM / ipSAE side by side.
-      const ipsae = normalizeIptm(firstFiniteMetric(row, ['ligand_ipsae_max', 'ligandIpsaeMax', 'ipsae_dom', 'ipsaeDom']));
+      // card always exposes pLDDT / ipTM / ipSAE side by side. Falls back to
+      // the canonical interface_metric when its label is ipSAE (the D-route
+      // ships `interface_metric: <ipsae>` without the *_dom components).
+      const ipsaeRaw = firstFiniteMetric(row, ['ligand_ipsae_max', 'ligandIpsaeMax', 'ipsae_dom', 'ipsaeDom']);
+      const ipsae = normalizeIptm(
+        ipsaeRaw ?? (interfaceMetric.source === 'ipsae' ? interfaceMetric.value : null)
+      );
       const iptm = normalizeIptm(firstFiniteMetric(row, ['pair_iptm', 'iptm', 'ligand_iptm', 'protein_iptm']));
       const score = computePeptideCompositeScore(row, plddt, interfaceMetric.value);
       const generation = firstFiniteMetric(row, ['generation', 'iteration', 'iter']);
@@ -1340,7 +1346,7 @@ function parseCandidateRows(
           : rowState !== 'UNSCORED'
             ? rowState
             : defaultState;
-      const idBase = readText(row.id).trim() || sequence || readText(rankRaw).trim() || `${index + 1}`;
+      const idBase = asString(row.id).trim() || sequence || asString(rankRaw).trim() || `${index + 1}`;
       return {
         id: `peptide-design-${source}-${idBase}-${index + 1}`,
         rank: rankRaw === null ? index + 1 : Math.max(1, Math.floor(rankRaw)),
@@ -1607,7 +1613,7 @@ function buildPeptideLigandViewTokens(
   const modificationByPosition = new Map<number, string>();
   for (const mod of modifications) {
     const position = Math.floor(Number(mod.position));
-    const ccd = readText(mod.ccd).trim().toUpperCase();
+    const ccd = asString(mod.ccd).trim().toUpperCase();
     if (!Number.isFinite(position) || position < 1 || !ccd) continue;
     modificationByPosition.set(position, ccd);
   }
@@ -1975,25 +1981,32 @@ export function PeptideDesignResultsWorkspace({
   );
   const cardCandidates = pagedCandidates;
 
-  useEffect(() => {
+  // Render-time adjustments (not effects — no extra pass, no post-paint flash):
+  // revert the viewer color mode to the task's default when it changes, keep a
+  // valid candidate selection, and clamp the page when the candidate set
+  // shrinks. https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevInitialViewerColorMode, setPrevInitialViewerColorMode] = useState(initialViewerColorMode);
+  if (initialViewerColorMode !== prevInitialViewerColorMode) {
+    setPrevInitialViewerColorMode(initialViewerColorMode);
     setViewerColorMode(initialViewerColorMode);
-  }, [initialViewerColorMode]);
+  }
 
-  useEffect(() => {
-    if (!sortedCandidates.length) {
-      setSelectedCandidateId('');
-      return;
-    }
-    if (!selectedCandidateId || !sortedCandidates.some((item) => item.id === selectedCandidateId)) {
-      setSelectedCandidateId(sortedCandidates[0].id);
-    }
-  }, [sortedCandidates, selectedCandidateId]);
+  // Selection invariant (render-time, replaces the effect so mount-time repair
+  // and list-change repair share one path with no extra pass): the selection
+  // must point at an existing candidate, or be empty only when the list is.
+  if (!sortedCandidates.length) {
+    if (selectedCandidateId !== '') setSelectedCandidateId('');
+  } else if (!sortedCandidates.some((item) => item.id === selectedCandidateId)) {
+    setSelectedCandidateId(sortedCandidates[0].id);
+  }
 
-  useEffect(() => {
+  const [prevClampedPage, setPrevClampedPage] = useState(clampedPage);
+  if (clampedPage !== prevClampedPage) {
+    setPrevClampedPage(clampedPage);
     if (page !== clampedPage) {
       setPage(clampedPage);
     }
-  }, [page, clampedPage]);
+  }
 
   useEffect(() => {
     setPageInput(String(clampedPage));
@@ -2021,9 +2034,9 @@ export function PeptideDesignResultsWorkspace({
   }, [projectTaskId]);
 
   const hasCandidateRows = sortedCandidates.length > 0;
-  const selectedStructureName = readText(selectedCandidate?.structureName).trim();
+  const selectedStructureName = asString(selectedCandidate?.structureName).trim();
   const loadedStructureMatchesSelected = structureNameMatches(displayStructureName, selectedStructureName);
-  const selectedCandidateStructureText = readText(selectedCandidate?.structureText).trim();
+  const selectedCandidateStructureText = asString(selectedCandidate?.structureText).trim();
   const viewerRawStructureText = cardMode
     ? selectedCandidateStructureText || (loadedStructureMatchesSelected ? displayStructureText : '')
     : '';
@@ -2048,8 +2061,8 @@ export function PeptideDesignResultsWorkspace({
   const viewerLigandFocusChainId = useMemo(() => {
     if (!cardMode) return selectedResultLigandChainId || '';
     const preferredChain = selectedResultLigandChainId || undefined;
-    const candidateSequence = readText(selectedCandidate?.sequence || '').trim().toUpperCase();
-    const structureTextForFocus = readText(viewerStructureText).trim();
+    const candidateSequence = asString(selectedCandidate?.sequence || '').trim().toUpperCase();
+    const structureTextForFocus = asString(viewerStructureText).trim();
     if (!structureTextForFocus) return selectedResultLigandChainId || '';
     const focusChain = resolvePeptideFocusChainId(
       structureTextForFocus,
@@ -2064,7 +2077,7 @@ export function PeptideDesignResultsWorkspace({
     if (!cardMode) return;
     if (!canRequestSelectedStructure) return;
     if (!hasCandidateRows) return;
-    if (readText(viewerStructureText).trim()) return;
+    if (asString(viewerStructureText).trim()) return;
     const preferredStructureName = selectedStructureName;
     if (!preferredStructureName) return;
     const requestKey = `${projectTaskId}:${selectedCandidate?.id || 'none'}:${preferredStructureName || '-'}`;

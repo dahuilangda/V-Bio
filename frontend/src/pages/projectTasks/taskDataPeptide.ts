@@ -1,6 +1,9 @@
 import type { ProjectTask, ProteinModification } from '../../types/models';
 import { readPeptidePreviewFromProperties } from '../../utils/peptideTaskPreview';
-import { asRecord } from './recordReaders';
+import {
+  asRecord,
+  readFiniteNumber
+} from './recordReaders';
 import { readObjectPath, normalizeProbability, chainKeysMatch } from './taskDataCore';
 import { toFiniteNumberArray, normalizeAtomPlddts } from './taskDataConfidence';
 
@@ -50,11 +53,6 @@ interface PeptideBestCandidatePreview {
   binderChainId: string | null;
 }
 
-function readFiniteNumber(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-  if (!Number.isFinite(parsed)) return null;
-  return parsed;
-}
 
 function readStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -1054,3 +1052,39 @@ export {
   readLeadOptTaskSummary,
   hasLeadOptPredictionRuntime
 };
+
+/**
+ * True when any of the standard peptide-design progress sources carries candidate
+ * rows (best_sequences / current_best_sequences / candidates). Shared by the task
+ * list's row merging and the detail page's runtime snapshot merging — previously
+ * byte-identical local copies in useProjectTasksDataLoader and
+ * useProjectDetailRuntimeContext.
+ */
+export function hasPeptideCandidateRows(value: unknown): boolean {
+  const confidence = asRecord(value);
+  if (Object.keys(confidence).length === 0) return false;
+  const peptide = asRecord(confidence.peptide_design);
+  const progress = asRecord(confidence.progress);
+  const peptideProgress = asRecord(peptide.progress);
+  const sources = [confidence, peptide, progress, peptideProgress];
+  return sources.some(
+    (source) =>
+      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
+      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
+      (Array.isArray(source.candidates) && source.candidates.length > 0)
+  );
+}
+
+/**
+ * Pick the fresher confidence payload while never dropping peptide candidate rows:
+ * an empty incoming payload keeps the previous one, and a payload that lost its
+ * candidate rows never replaces one that still has them.
+ */
+export function mergeConfidencePreservingPeptideCandidates(nextValue: unknown, prevValue: unknown): unknown {
+  const next = asRecord(nextValue);
+  const prev = asRecord(prevValue);
+  if (Object.keys(next).length === 0) return prevValue;
+  if (Object.keys(prev).length === 0) return nextValue;
+  if (hasPeptideCandidateRows(prev) && !hasPeptideCandidateRows(next)) return prevValue;
+  return nextValue;
+}
