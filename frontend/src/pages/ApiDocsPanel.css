@@ -1,0 +1,18 @@
+/* API docs panel styles. Moved from styles/api-access.css — rendered
+   exclusively by ApiDocsPanel.tsx (.api-section-head is shared, stayed). */
+.api-docs-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.api-doc-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.api-doc-steps li {
+  display: grid;
+  gap: 2px;
+}

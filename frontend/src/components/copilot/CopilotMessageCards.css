@@ -1,0 +1,364 @@
+/* Transcript message-card styles (trace steps, thinking disclosure,
+   observation/question cards). Moved from ProjectCopilotModal.css — the
+   families below are rendered exclusively by CopilotMessageCards.tsx.
+   Selectors keep their original `.copilot-chat-window` scoping. */
+/* Planner reasoning — a quiet inline disclosure that belongs to the message, not a boxed widget.
+   It lives inside the chat bubble; only a hairline divider and a muted toggle set it off from the
+   answer, so it reads as part of the message instead of a pasted-on card. */
+.copilot-chat-window .copilot-thinking-card {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid #edf2ef;
+}
+
+/* Bare "thinking…" indicator shown before the first trace step arrives (no chrome, no empty body). */
+.copilot-chat-window .copilot-thinking-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.9em;
+  color: #6b7d73;
+}
+
+.copilot-chat-window .copilot-thinking-inline .copilot-thinking-spark {
+  color: #5d8e74;
+  animation: copilotSparkPulse 1.5s ease-in-out infinite;
+}
+
+.copilot-chat-window .copilot-thinking-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8em;
+  color: #9aaca1;
+  text-align: left;
+  transition: color 0.14s ease;
+}
+
+.copilot-chat-window .copilot-thinking-head:hover {
+  color: #647b6f;
+}
+
+.copilot-chat-window .copilot-thinking-spark {
+  color: #a9bbaf;
+  flex: 0 0 auto;
+}
+
+.copilot-chat-window .copilot-thinking-card.is-live .copilot-thinking-spark {
+  color: #5d8e74;
+  animation: copilotSparkPulse 1.5s ease-in-out infinite;
+}
+
+.copilot-chat-window .copilot-thinking-title {
+  font-weight: 500;
+}
+
+.copilot-chat-window .copilot-thinking-meta {
+  color: #b6c2bb;
+  font-variant-numeric: tabular-nums;
+}
+
+.copilot-chat-window .copilot-thinking-chev {
+  color: #b6c2bb;
+  transition: transform 0.2s ease;
+}
+
+.copilot-chat-window .copilot-thinking-card.is-open .copilot-thinking-chev {
+  transform: rotate(90deg);
+}
+
+/* Smooth collapse via the grid 0fr→1fr trick (no height measurement needed). */
+.copilot-chat-window .copilot-thinking-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s ease;
+}
+
+.copilot-chat-window .copilot-thinking-card.is-open .copilot-thinking-body {
+  grid-template-rows: 1fr;
+}
+
+.copilot-chat-window .copilot-thinking-body-inner {
+  overflow: hidden;
+  padding-top: 5px;
+}
+
+/* Reasoning steps — a single quiet vertical rail; no per-step node markers (the dots read as
+   clutter against the line). The latest streaming step brightens; the rest stay muted for chat. */
+.copilot-chat-window .copilot-trace-list {
+  position: relative;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.copilot-chat-window .copilot-trace-list::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: #e6ece8;
+  border-radius: 2px;
+}
+
+.copilot-chat-window .copilot-trace-item {
+  position: relative;
+  padding: 4px 0 4px 12px;
+  font-size: 0.82em;
+  line-height: 1.4;
+  color: #97a89e;
+  word-break: break-word;
+}
+
+.copilot-chat-window .copilot-trace-item.is-current {
+  color: #5d7268;
+}
+
+/* Deterministic honesty line above the pending card: whatever the assistant message above
+ * says, this step has NOT executed. Muted small text, matching .copilot-question-hint. No
+ * extra margin — the parent grid's gap already sets the rhythm. */
+.copilot-chat-window .copilot-plan-pending-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/*
+ * Guided question cards: the planner asks the user to resolve an ambiguity (task type, backend)
+ * before planning. Rendered inline under the assistant message as clickable chips so the user
+ * answers with one click; a freeform question just prompts them to type below.
+ */
+/*
+ * Retrieved data card: a collapsible section under the assistant message showing the authoritative
+ * records from read skills (sequence, SMILES, accession, ...). The user always sees the real data
+ * even when the model's message only summarizes it.
+ */
+.copilot-chat-window .copilot-observation-card {
+  margin-top: 6px;
+}
+
+.copilot-chat-window .copilot-observation-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.copilot-chat-window .copilot-observation-toggle:hover {
+  color: #435b50;
+}
+
+.copilot-chat-window .copilot-observation-records {
+  margin-top: 4px;
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.copilot-chat-window .copilot-observation-record {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #e3e8e5;
+  border-radius: 6px;
+  background: #f7f9f8;
+  display: grid;
+  gap: 3px;
+}
+
+.copilot-chat-window .copilot-observation-field {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.copilot-chat-window .copilot-observation-field dt {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  min-width: 70px;
+}
+
+.copilot-chat-window .copilot-observation-field dd {
+  margin: 0;
+  min-width: 0;
+  color: #33413a;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.copilot-chat-window .copilot-observation-field dd.is-long {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.4;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/*
+ * Guided question cards: the planner asks the user to resolve an ambiguity (task type, backend)
+ * before planning. Rendered inline under the assistant message as clickable chips so the user
+ * answers with one click; a freeform question just prompts them to type below.
+ */
+.copilot-chat-window .copilot-question-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #cddbd3;
+  border-radius: 8px;
+  background: #f9fcfa;
+}
+
+.copilot-chat-window .copilot-question-text {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #243d32;
+}
+
+.copilot-chat-window .copilot-question-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.copilot-chat-window .copilot-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.copilot-chat-window .copilot-question-chip {
+  border: 1px solid #cddbd3;
+  background: #fff;
+  border-radius: 999px;
+  padding: 5px 12px;
+  color: #243d32;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.copilot-chat-window .copilot-question-chip:hover:not(:disabled) {
+  background: #eef6f1;
+  border-color: #9fc0ad;
+}
+
+.copilot-chat-window .copilot-question-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+/* Selected chip: the user clicked this option. Filled sage to show the choice is locked in. */
+.copilot-chat-window .copilot-question-chip.is-selected {
+  border-color: #1f4f3f;
+  background: #1f4f3f;
+  color: #fff;
+}
+
+.copilot-chat-window .copilot-question-chip.is-selected:hover:not(:disabled) {
+  background: #245d49;
+}
+
+/* "Other ___" free-text escape on choice questions: the chip toggles an inline input so the user
+   can always answer beyond the planner's enumerated options. */
+.copilot-chat-window .copilot-question-other-chip.is-open {
+  border-color: #1f4f3f;
+  background: #eef6f1;
+}
+
+.copilot-chat-window .copilot-question-other {
+  display: flex;
+  gap: 6px;
+}
+
+.copilot-chat-window .copilot-question-other-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #cddbd3;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: #243d32;
+  background: #fff;
+}
+
+.copilot-chat-window .copilot-question-other-input:focus {
+  outline: none;
+  border-color: #1f4f3f;
+}
+
+.copilot-chat-window .copilot-question-other-submit {
+  border: 1px solid #1f4f3f;
+  background: #1f4f3f;
+  border-radius: 6px;
+  padding: 5px 12px;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.copilot-chat-window .copilot-question-other-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.copilot-chat-window .copilot-question-answered {
+  color: #1f4f3f;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+/* Submit button for multi-question cards: appears only when there is more than one question. */
+.copilot-chat-window .copilot-question-submit {
+  margin-top: 4px;
+  width: 100%;
+  height: 34px;
+  border: 1px solid #1f4f3f;
+  border-radius: 8px;
+  background: #1f4f3f;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.copilot-chat-window .copilot-question-submit:hover:not(:disabled) {
+  background: #245d49;
+}
+
+.copilot-chat-window .copilot-question-submit:disabled {
+  border-color: #cddbd3;
+  background: #f7f9f8;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.copilot-chat-window .copilot-question {
+  display: grid;
+  gap: 6px;
+}
+
+/* Answered question: dimmed so the user's attention moves to the next unanswered question. */
+.copilot-chat-window .copilot-question.is-answered {
+  opacity: 0.7;
+}

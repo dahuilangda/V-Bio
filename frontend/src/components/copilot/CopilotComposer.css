@@ -1,0 +1,326 @@
+/* Chat-composer styles (attachment/mention menus, plus-menu, ghost completion
+   overlay, textarea shell, send button). Moved from ProjectCopilotModal.css and
+   global.css — rendered exclusively by CopilotComposer.tsx. The mobile variants
+   of the mixed panel-grid media query are restated at the bottom. */
+.copilot-chat-window.history-open .copilot-composer {
+  grid-row: 5;
+}
+
+.copilot-chat-window .copilot-composer {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  align-self: end;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px solid #edf2ef;
+}
+
+.copilot-input-shell {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  border: 1px solid #cfdcd4;
+  border-radius: 16px;
+  background: #fff;
+  padding: 7px;
+  box-shadow: 0 1px 2px rgba(20, 40, 31, 0.04);
+}
+
+.copilot-input-shell:focus-within {
+  border-color: #8fb39f;
+  box-shadow: 0 0 0 3px rgba(31, 79, 63, 0.1);
+}
+
+.copilot-input-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 6px;
+}
+
+.copilot-mention-menu {
+  display: grid;
+  gap: 3px;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid #d7e3dc;
+  border-radius: 12px;
+  background: #fbfdfc;
+  padding: 5px;
+  box-shadow: 0 10px 24px rgba(24, 50, 39, 0.12);
+}
+
+.copilot-mention-option {
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #243d32;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 5px 7px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.copilot-mention-option:hover,
+.copilot-mention-option.active {
+  background: #eef6f1;
+}
+
+.copilot-mention-file-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: #dfece5;
+  color: #1f4f3f;
+  display: inline-grid;
+  place-items: center;
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.copilot-mention-file-text {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.copilot-mention-file-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+.copilot-mention-file-text small {
+  color: var(--muted);
+  font-size: var(--text-2xs);
+}
+
+.copilot-file-input {
+  display: none;
+}
+
+.copilot-attach-btn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: #f2f6f3;
+  color: #294b3d;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+  align-self: end;
+}
+
+.copilot-attach-btn:hover:not(:disabled) {
+  background: #e7f0eb;
+}
+
+.copilot-attach-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* Plus menu wrapper — holds the + button and the popup drawer. */
+.copilot-plus-wrap {
+  position: relative;
+  align-self: end;
+}
+
+/* Popup drawer (ChatGPT-style): appears above the + button. */
+.copilot-plus-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 160px;
+  background: #fff;
+  border: 1px solid #dde3df;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copilot-plus-menu-item {
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #3c4a42;
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.copilot-plus-menu-item:hover {
+  background: #f0f4f1;
+}
+
+.copilot-plus-menu-item.is-active {
+  color: #c44;
+}
+
+/* Voice input button — kept for the listening animation if used inline elsewhere. */
+.copilot-chat-window .copilot-composer textarea {
+  width: 100%;
+  min-height: 30px;
+  height: auto;
+  max-height: 220px;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  padding: 5px 2px;
+  font: inherit;
+  line-height: 1.35;
+  outline: none;
+  overflow-y: auto;
+  transition: height 0.08s linear;
+}
+
+.copilot-chat-window .copilot-composer textarea:focus {
+  box-shadow: none;
+}
+
+/* Inline auto-complete ghost overlay. The textarea stays fully native (visible text, caret,
+   selection, IME); the overlay sits behind it with a transparent "spacer" that renders the draft
+   in invisible text so the grey suffix lands exactly at the caret. Font/padding/line-height mirror
+   the textarea rule above so wrapping aligns pixel-for-pixel. */
+.copilot-input-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.copilot-input-wrap > textarea {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  /* The wrap is a plain block (not a grid cell), so override the textarea's default inline-block,
+     whose baseline gap would push it below the top-aligned ghost overlay. */
+  display: block;
+}
+
+.copilot-ghost-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  padding: 5px 2px;
+  font: inherit;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  color: var(--muted);
+}
+
+.copilot-ghost-spacer {
+  color: transparent;
+}
+
+.copilot-ghost-suffix {
+  opacity: 0.75;
+}
+
+.copilot-send-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: #1f4f3f;
+  color: #fff;
+  display: inline-grid;
+  place-items: center;
+  align-self: end;
+  padding: 0;
+  cursor: pointer;
+}
+
+.copilot-send-btn:hover:not(:disabled) {
+  background: #245d49;
+}
+
+.copilot-send-btn:disabled {
+  cursor: not-allowed;
+  background: #d9e5de;
+  color: #7a8f84;
+}
+
+/* While a turn is running the send button shows a spinning loader ("working"). On hover the CSS
+   swaps the loader for a stop icon and reddens the button — the affordance to cancel is obvious
+   without changing the icon while the user is just watching it work. The two icons are stacked;
+   the spinner shows by default, the stop icon shows on hover/focus. */
+.copilot-send-btn.is-sending {
+  background: #1f4f3f;
+}
+
+/* Both icons occupy the same grid cell so they overlap exactly; display toggles which is visible. */
+.copilot-send-btn.is-sending .copilot-send-spin,
+.copilot-send-btn.is-sending .copilot-send-stop {
+  grid-area: 1 / 1;
+}
+
+.copilot-send-btn.is-sending .copilot-send-stop {
+  display: none;
+}
+
+.copilot-send-btn.is-sending:hover,
+.copilot-send-btn.is-sending:focus-visible {
+  background: #b42318;
+}
+
+.copilot-send-btn.is-sending:hover .copilot-send-spin,
+.copilot-send-btn.is-sending:focus-visible .copilot-send-spin {
+  display: none;
+}
+
+.copilot-send-btn.is-sending:hover .copilot-send-stop,
+.copilot-send-btn.is-sending:focus-visible .copilot-send-stop {
+  display: inline-grid;
+}
+
+@media (max-width: 767px) {
+  .copilot-chat-window .copilot-composer {
+    display: block;
+  }
+
+  .copilot-send-btn {
+    width: 30px;
+  }
+}
+
+/* Inline-completion top-10 picker: reuses the mention menu surface; the suffix preview
+ * sits in the muted small line under the typed prefix. */
+.copilot-chat-window .copilot-completion-menu {
+  bottom: calc(100% + 6px);
+}
+.copilot-completion-menu .copilot-mention-file-text strong {
+  font-weight: 500;
+  color: var(--muted, #5a6c62);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

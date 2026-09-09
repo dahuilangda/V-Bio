@@ -1,0 +1,27 @@
+/* Command column styles (cards list + history below). Moved from
+   styles/api-access.css — rendered exclusively by ApiCommandRightColumn.tsx.
+   The `.api-builder-resizable .api-command-right` compound kept its
+   selector verbatim (the resizable wrapper class stays in ApiAccessPage). */
+.api-builder-resizable .api-command-right {
+  margin-left: 12px;
+}
+
+.api-command-right {
+  display: grid;
+  gap: 10px;
+}
+
+.api-command-list {
+  display: grid;
+  gap: 10px;
+}
+
+@media (max-width: 1100px) {
+  .api-builder-resizable .api-builder-controls,
+  .api-builder-resizable .api-command-right {
+    margin: 0;
+  }
+  .api-command-right {
+    grid-template-columns: 1fr;
+  }
+}

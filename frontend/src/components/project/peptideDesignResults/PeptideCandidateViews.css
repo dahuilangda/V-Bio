@@ -1,0 +1,243 @@
+/* Candidate view styles (table row ligand preview, value chips, card pills).
+   Moved from styles/project-detail-results.css — these class families are
+   rendered exclusively by PeptideCandidateViews.tsx. */
+.peptide-result-card {
+  min-height: 236px;
+}
+
+.peptide-result-card-media {
+  min-height: 146px;
+  display: grid;
+  place-items: center;
+}
+
+.peptide-card-metric-strip {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.peptide-ligand-preview-btn {
+  width: 100%;
+  min-height: 64px;
+  height: 100%;
+  border-radius: 0;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+  appearance: none;
+  -webkit-appearance: none;
+  color: #2f5747;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  cursor: pointer;
+  transition: color 0.14s ease;
+}
+
+.peptide-ligand-preview-btn:hover {
+  color: #244b3c;
+}
+
+.peptide-ligand-preview-btn:focus,
+.peptide-ligand-preview-btn:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.peptide-ligand-preview-track {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+.peptide-ligand-preview-row {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+}
+
+.peptide-ligand-preview-node-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.peptide-ligand-preview-link {
+  width: 7px;
+  height: 3px;
+  border-radius: 999px;
+  background: #cddad4;
+}
+
+.peptide-ligand-preview-node {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 0;
+  display: inline-grid;
+  place-items: center;
+  margin-left: 0;
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: inset 0 0 0 0.5px rgba(50, 72, 61, 0.12);
+}
+
+.peptide-ligand-preview-track--card {
+  gap: 6px;
+  align-items: center;
+}
+
+.peptide-ligand-preview-row--card {
+  justify-content: center;
+}
+
+.peptide-ligand-preview-node--card {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+
+.peptide-ligand-preview-node.tone-excellent {
+  background: #e9f2ff;
+  color: #0f3f9a;
+}
+
+.peptide-ligand-preview-node.tone-good {
+  background: #ebf8fd;
+  color: #1f6b8f;
+}
+
+.peptide-ligand-preview-node.tone-medium {
+  background: #fff8df;
+  color: #8a6200;
+}
+
+.peptide-ligand-preview-node.tone-low {
+  background: #fff0ea;
+  color: #a6451d;
+}
+
+.peptide-ligand-preview-node.tone-neutral {
+  background: #f2f7f4;
+  color: #567166;
+}
+
+.peptide-ligand-preview-node.is-modified {
+  width: auto;
+  min-width: 24px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 8px;
+  letter-spacing: 0;
+  box-shadow: inset 0 0 0 1px rgba(13, 91, 72, 0.22);
+}
+
+.peptide-ligand-preview-node--card.is-modified {
+  min-width: 28px;
+}
+
+.peptide-ligand-preview-link.tone-excellent {
+  background: #8db4ff;
+}
+
+.peptide-ligand-preview-link.tone-good {
+  background: #9ed6eb;
+}
+
+.peptide-ligand-preview-link.tone-medium {
+  background: #ead48b;
+}
+
+.peptide-ligand-preview-link.tone-low {
+  background: #edb199;
+}
+
+.peptide-ligand-preview-link.tone-neutral {
+  background: #ccd9d2;
+}
+
+
+.peptide-ligand-preview-empty {
+  color: #688075;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.peptide-table-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: #4f5f69;
+}
+
+.peptide-table-value.conf-tone-vhigh {
+  color: #0053d6;
+}
+
+.peptide-table-value.conf-tone-high {
+  color: #287ca6;
+}
+
+.peptide-table-value.conf-tone-low {
+  color: #a26f00;
+}
+
+.peptide-table-value.conf-tone-vlow {
+  color: #c95f2f;
+}
+
+.peptide-table-value.conf-tone-na {
+  color: #7a7469;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-vhigh {
+  border-color: #c6d9fb;
+  background: #f0f6ff;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-high {
+  border-color: #c4dceb;
+  background: #f2f8fc;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-low {
+  border-color: #ead7b0;
+  background: #fff8e9;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-vlow {
+  border-color: #efc7ba;
+  background: #fff1ec;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-na {
+  border-color: #dcd9d3;
+  background: #f7f6f3;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-vhigh strong {
+  color: #0053d6;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-high strong {
+  color: #287ca6;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-low strong {
+  color: #a26f00;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-vlow strong {
+  color: #c95f2f;
+}
+
+.peptide-result-card .lead-opt-card-pill.conf-tone-na strong {
+  color: #7a7469;
+}

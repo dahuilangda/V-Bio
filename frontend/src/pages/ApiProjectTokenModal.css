@@ -1,0 +1,68 @@
+/* Per-project token panel styles. Moved from styles/api-access.css —
+   rendered exclusively by ApiProjectTokenModal.tsx. The shared
+   .api-token-modal-head and .badge/.icon-btn families stayed behind. */
+.api-project-token-modal {
+  width: min(840px, 95vw);
+  display: grid;
+  gap: 12px;
+}
+
+.api-project-token-modal-body {
+  display: grid;
+  gap: 10px;
+}
+
+.api-project-token-modal-empty {
+  border: 1px dashed #d4e2d9;
+  border-radius: 10px;
+  background: #f8fbf9;
+  padding: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.api-project-token-modal-list {
+  display: grid;
+  gap: 8px;
+  max-height: 56vh;
+  overflow: auto;
+}
+
+.api-project-token-modal-item {
+  border: 1px solid #dbe6df;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.api-project-token-modal-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.api-project-token-modal-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-project-token-modal-main code {
+  font-size: var(--text-xs);
+}
+
+.api-project-token-modal-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.api-project-token-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+}
