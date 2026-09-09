@@ -145,6 +145,7 @@ def sample_diffusion(
     init_mask: Optional[torch.Tensor] = None,
     init_noise_scale: float = 0.0,
     pin_mask: Optional[torch.Tensor] = None,
+    pocket_seed_rows: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
     It performances denoising steps from time 0 to time T.
@@ -244,6 +245,25 @@ def sample_diffusion(
             else:
                 keep = 1.0
             x_l = keep * (base + init_noise_scale * noise_full) + (1.0 - keep) * noise_full
+            if pocket_seed_rows is not None and init_mask is not None:
+                # Pocket-biased noise seeding (P2D): translate ONLY the free
+                # chains' noise cloud so its centroid sits on the user pocket
+                # — a one-time init translation. The denoiser still generates
+                # the pose/conformation from scratch inside that basin; no
+                # hand-rolled rotation/pose enters the sampler. Boltz2 gets
+                # the same effect through its trained contact_conditioning
+                # on z_init; protenix-v2's checkpoint lacks those weights, so
+                # this plus the PocketPotential guidance is the
+                # training-free equivalent.
+                _ps_rows = pocket_seed_rows.to(device=device, dtype=torch.long)
+                _pocket_center = init_base.index_select(0, _ps_rows).mean(dim=0)
+                _free = init_mask.to(device=device) == 0
+                if bool(_free.any()):
+                    _free_center = x_l[..., _free, :].mean(dim=-2, keepdim=True)
+                    x_l[..., _free, :] = x_l[..., _free, :] + (
+                        _pocket_center.view((1,) * (_free_center.dim() - 1) + (3,))
+                        - _free_center
+                    )
         else:
             x_l = noise_schedule[0] * torch.randn(
                 size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype

@@ -4,6 +4,7 @@ import type { AppUser } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
 import { fetchMe, toAppUser, updateProfile } from '../api/authServerApi';
 import { getAvatarOverride, setAvatarOverride } from '../utils/profilePrefs';
+import { Field } from '../components/common/Field';
 
 export function SettingsPage() {
   const { session, refreshSession } = useAuth();
@@ -136,20 +137,17 @@ export function SettingsPage() {
             <div className="muted">Loading profile...</div>
           ) : (
             <form className="form-grid" onSubmit={saveProfile}>
-              <label className="field">
-                <span>Display Name</span>
+              <Field label="Display Name">
                 <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} required />
-              </label>
+              </Field>
 
-              <label className="field">
-                <span>Email</span>
+              <Field label="Email">
                 <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-              </label>
+              </Field>
 
-              <label className="field">
-                <span>Avatar URL</span>
+              <Field label="Avatar URL">
                 <input value={avatarUrl} onChange={(e) => setAvatarUrl(e.target.value)} placeholder="https://..." />
-              </label>
+              </Field>
 
               <div className="settings-avatar-preview">
                 {avatarUrl.trim() ? (
@@ -175,8 +173,7 @@ export function SettingsPage() {
             <h2><KeyRound size={16} /> Password</h2>
           </div>
           <form className="form-grid" onSubmit={changePassword}>
-            <label className="field">
-              <span>Current Password</span>
+            <Field label="Current Password">
               <input
                 type="password"
                 value={currentPassword}
@@ -184,10 +181,9 @@ export function SettingsPage() {
                 autoComplete="current-password"
                 required
               />
-            </label>
+            </Field>
 
-            <label className="field">
-              <span>New Password</span>
+            <Field label="New Password">
               <input
                 type="password"
                 value={newPassword}
@@ -195,10 +191,9 @@ export function SettingsPage() {
                 autoComplete="new-password"
                 required
               />
-            </label>
+            </Field>
 
-            <label className="field">
-              <span>Confirm New Password</span>
+            <Field label="Confirm New Password">
               <input
                 type="password"
                 value={confirmPassword}
@@ -206,7 +201,7 @@ export function SettingsPage() {
                 autoComplete="new-password"
                 required
               />
-            </label>
+            </Field>
 
             <div className="row end">
               <button className="btn btn-primary" type="submit" disabled={passwordSaving}>

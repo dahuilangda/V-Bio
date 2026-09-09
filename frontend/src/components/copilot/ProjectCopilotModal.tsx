@@ -1,7 +1,5 @@
-import { Bot, Check, ChevronRight, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Settings, Sparkles, Square, Trash2, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, memo, type PointerEvent as ReactPointerEvent } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { Bot } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   deleteProjectCopilotMessagesBySession,
   deleteProjectCopilotState,
@@ -12,13 +10,12 @@ import {
   listProjectCopilotMessages,
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
-import { getCopilotConfig, getCopilotSettings, parseCopilotQuestions, requestCopilotCompletions, saveCopilotSettings, streamCopilotTurn, submitCopilotSteering, testCopilotSettings } from '../../api/copilotApi';
-import type { CopilotTestResult, CopilotTestSubResult } from '../../api/copilotApi';
-import type { CopilotContextType, CopilotPlanAction, CopilotPlannerQuestion, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
-import { formatDateTime } from '../../utils/date';
+import { getCopilotConfig, getCopilotSettings, requestCopilotCompletions, saveCopilotSettings, streamCopilotTurn, submitCopilotSteering, testCopilotSettings } from '../../api/copilotApi';
+import type { CopilotTestResult } from '../../api/copilotApi';
+import type { CopilotContextType, CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { useAuth } from '../../hooks/useAuth';
 import { useOverlayPresence } from '../ui/OverlayContext';
-import { collectCopilotMemory, formatTraceStep, readPlannerTrace, readSessionId } from './copilotTraceUi';
+import { collectCopilotMemory, readActionResolutions, readSessionId, type CopilotActionResolution, type CopilotActionResolutionStatus } from './copilotTraceUi';
 import {
   appendInputHistory,
   nextInputHistoryNav,
@@ -29,6 +26,9 @@ import {
 } from './copilotInputHistory';
 import './ProjectCopilotModal.css';
 import { fuzzyRank } from '../../utils/fuzzyScore';
+import { useCopilotKeymap } from './useCopilotKeymap';
+import { CopilotComposer } from './CopilotComposer';
+import { CopilotPanelShell } from './CopilotPanelShell';
 
 interface ProjectCopilotModalProps {
   open: boolean;
@@ -69,396 +69,6 @@ const COPILOT_SUMMARY_SOURCE_MESSAGES = 12;
 const COPILOT_CONTEXT_MESSAGE_CHARS = 700;
 const COPILOT_CONTEXT_SUMMARY_CHARS = 1800;
 
-function author(message: ProjectCopilotMessage): string {
-  if (message.role === 'assistant') return 'V-Bio Copilot';
-  return message.user_name || message.username || 'User';
-}
-
-// Planner trace + memory helpers live in ./copilotTraceUi (pure + unit-tested).
-
-// Reasoning steps — plain muted text, one short phrase per step (wording in formatTraceStep).
-// The latest streaming step brightens; everything else stays quiet so the panel reads as part of
-// the message instead of a debug log.
-// Rows are memoized per step object: trace steps are append-only (identity never changes), so a
-// streaming turn that adds step N re-renders ONLY step N instead of re-formatting and reconciling
-// every earlier step on each SSE frame.
-const TraceStepRow = memo(function TraceStepRow({ step, isLast }: { step: CopilotTraceStep; isLast: boolean }) {
-  return (
-    <li className={`copilot-trace-item${isLast ? ' is-current' : ''}`}>
-      {formatTraceStep(step)}
-    </li>
-  );
-});
-
-function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; highlightLast?: boolean }) {
-  const lastIndex = steps.length - 1;
-  return (
-    <ol className="copilot-trace-list">
-      {steps.map((step, index) => (
-        <TraceStepRow
-          key={`${step.round}-${step.event}-${index}`}
-          step={step}
-          isLast={Boolean(highlightLast) && index === lastIndex}
-        />
-      ))}
-    </ol>
-  );
-}
-
-// Collapsible "thinking / thinking…" disclosure — a quiet inline section of the message: a small
-// animated sparkle toggle while live, muted step text below, smooth expand/collapse.
-// Memoized: finished messages hold a stable steps array from metadata, so parent re-renders
-// (typing, dragging, disabled flips, task-page polling) skip the whole card.
-// History cards start COLLAPSED: a long transcript otherwise mounts every trace step of every
-// message at once (thousands of <li>), which turns each layout pass — poll re-renders, the
-// per-step auto-scroll during streaming — into a full-document layout and freezes the panel.
-const CopilotThinkingCard = memo(function CopilotThinkingCard({ steps, live, pending, onExpand }: { steps: CopilotTraceStep[]; live?: boolean; pending?: boolean; onExpand?: () => void }) {
-  const [open, setOpen] = useState(Boolean(live));
-  // Live with no steps yet: a bare "Thinking…" indicator. No card chrome, no divider, no empty
-  // expandable body — those would float above nothing and read as a stray line / empty box.
-  if (live && steps.length === 0) {
-    return (
-      <span className="copilot-thinking-inline">
-        <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
-        <span className="copilot-thinking-title">Thinking…</span>
-      </span>
-    );
-  }
-  const label = live ? 'Thinking' : 'Reasoning';
-  return (
-    <div className={`copilot-thinking-card${live ? ' is-live' : ''}${open ? ' is-open' : ''}`}>
-      <button
-        type="button"
-        className="copilot-thinking-head"
-        onClick={() => {
-          const next = !open;
-          setOpen(next);
-          // Lazy trace: the transcript list projection omits planner_trace (the heaviest
-          // metadata field); the first expand of a finished message fetches just that
-          // message's steps instead of shipping every turn's trace with the list.
-          if (next && pending && onExpand) onExpand();
-        }}
-        aria-expanded={open}
-      >
-        <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
-        <span className="copilot-thinking-title">{label}</span>
-        <span className="copilot-thinking-meta">
-          {pending ? '' : `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`}
-        </span>
-        <ChevronRight className="copilot-thinking-chev" size={12} aria-hidden="true" />
-      </button>
-      <div className="copilot-thinking-body">
-        <div className="copilot-thinking-body-inner">
-          {/* Collapsed = the step tree is not mounted at all (grid 0fr still lays out the
-              children, so a long transcript's thousands of <li> keep costing every layout). */}
-          {open ? <TraceStepList steps={steps} highlightLast={live} /> : null}
-        </div>
-      </div>
-    </div>
-  );
-});
-
-function readPlannerQuestions(value: unknown): CopilotPlannerQuestion[] {
-  return parseCopilotQuestions(value);
-}
-
-interface ObservationRecord {
-  source: string;
-  fields: { key: string; value: string }[];
-}
-
-// Flatten the planner_observations metadata into displayable records. Each observation may contain
-// multiple records (search results) or a single record (resolve). Only user-facing scalar fields
-// are kept; long values (SMILES, sequences) are preserved in full so the user can copy them.
-function readObservationRecords(value: unknown): ObservationRecord[] {
-  if (!Array.isArray(value)) return [];
-  const records: ObservationRecord[] = [];
-  const META_KEYS = new Set(['source', 'query', 'count', 'ok', 'error', 'metadata', 'index']);
-  for (const item of value) {
-    if (!item || typeof item !== 'object') continue;
-    const obs = item as Record<string, unknown>;
-    // Observations may carry records in a 'results' array or be the record itself.
-    const candidates: Record<string, unknown>[] = Array.isArray(obs.results)
-      ? obs.results.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
-      : [obs];
-    for (const rec of candidates.slice(0, 3)) {
-      const fields: { key: string; value: string }[] = [];
-      for (const [key, val] of Object.entries(rec)) {
-        if (!key || META_KEYS.has(key) || key.startsWith('_') || key.endsWith('Url') || key.endsWith('url')) continue;
-        if (val === null || val === undefined || typeof val === 'object') continue;
-        const text = String(val).trim();
-        if (!text) continue;
-        fields.push({ key, value: text });
-      }
-      if (fields.length > 0) {
-        records.push({ source: String(obs.source || ''), fields });
-      }
-    }
-  }
-  return records;
-}
-
-// Renders retrieved records in a collapsible section under the assistant message. The user always
-// sees the authoritative data (sequence, SMILES, accession, ...) even when the model's message
-// only summarizes it. Long values are shown in a scrollable <pre> so they don't break the layout.
-function CopilotObservationCard({ records }: { records: ObservationRecord[] }) {
-  // Auto-expand when any record contains a long field (sequence, SMILES) — the model's message
-  // often says "Here is the sequence:" but truncates the actual value due to token limits. The user
-  // needs to see the authoritative data without having to know to click "Retrieved data".
-  const hasLongField = records.some((rec) => rec.fields.some((f) => f.value.length > 60));
-  const [expanded, setExpanded] = useState(hasLongField);
-  return (
-    <div className="copilot-observation-card">
-      <button
-        type="button"
-        className="copilot-observation-toggle"
-        onClick={() => setExpanded((prev) => !prev)}
-      >
-        {expanded ? '▾' : '▸'} Retrieved data ({records.length} record{records.length === 1 ? '' : 's'})
-      </button>
-      {expanded ? (
-        <div className="copilot-observation-records">
-          {records.map((rec, i) => (
-            <dl className="copilot-observation-record" key={`obs-${i}`}>
-              {rec.fields.map((f) => (
-                <div className="copilot-observation-field" key={f.key}>
-                  <dt>{f.key}</dt>
-                  <dd className={f.value.length > 80 ? 'is-long' : ''}>{f.value}</dd>
-                </div>
-              ))}
-            </dl>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// Renders the planner's structured questions as clickable chips so the user resolves an ambiguity
-// (task type, modeling backend, ...) with one click instead of typing. A choice question lists its
-// options as chips plus an "Other ___" free-text answer (unless the planner set allowOther=false);
-// confirm is yes/no; freeform just highlights the prompt above the composer.
-function CopilotQuestionCard({
-  questions,
-  disabled,
-  onAnswer
-}: {
-  questions: CopilotPlannerQuestion[];
-  disabled: boolean;
-  onAnswer: (answer: string) => void;
-}) {
-  // For a single question, answer immediately on chip click (no local state needed). For multiple
-  // questions, accumulate answers locally so the user can fill them all in before submitting — this
-  // avoids answering one question disabling the rest mid-stream.
-  const isSingle = questions.length === 1;
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  // "Other ___" free-text state per choice question: which question has its input open, and the
-  // draft text. The user's answer may fall outside the planner's options — the free-text escape
-  // guarantees a choice question can always be answered, and the planner treats the reply as the
-  // user's own resolution.
-  const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({});
-  const [otherText, setOtherText] = useState<Record<number, string>>({});
-  const recordAnswer = (index: number, text: string) => {
-    if (isSingle) {
-      onAnswer(text);
-      return;
-    }
-    setAnswers((prev) => ({ ...prev, [index]: text }));
-  };
-  const submitOther = (index: number, questionText: string) => {
-    const text = String(otherText[index] || '').trim();
-    if (!text) return;
-    setOtherOpen((prev) => ({ ...prev, [index]: false }));
-    setOtherText((prev) => ({ ...prev, [index]: '' }));
-    recordAnswer(index, `${questionText} ${text}`);
-  };
-  const allAnswered = isSingle || questions.every((_, i) => answers[i]);
-  const submit = () => {
-    const lines = questions.map((_, i) => answers[i]).filter(Boolean);
-    if (lines.length === 0) return;
-    onAnswer(lines.join('\n'));
-  };
-  return (
-    <div className="copilot-question-stack" aria-label="Copilot questions">
-      {questions.map((question, questionIndex) => {
-        const answeredValue = answers[questionIndex];
-        const isAnswered = Boolean(answeredValue);
-        const showOther = question.kind === 'choice' && question.allowOther !== false;
-        return (
-          <div className={`copilot-question${isAnswered ? ' is-answered' : ''}`} key={`q-${questionIndex}`}>
-            <p className="copilot-question-text">{question.text}</p>
-            {question.kind === 'choice' && Array.isArray(question.options) && question.options.length > 0 ? (
-              <div className="copilot-question-options">
-                {question.options.map((option, optionIndex) => {
-                  const selected = answeredValue === `${question.text} ${option.value}`;
-                  return (
-                    <button
-                      type="button"
-                      className={`copilot-question-chip${selected ? ' is-selected' : ''}`}
-                      key={`q-${questionIndex}-o-${optionIndex}`}
-                      disabled={disabled}
-                      onClick={() => recordAnswer(questionIndex, `${question.text} ${option.value}`)}
-                      title={option.hint || option.label}
-                    >
-                      {option.label}
-                    </button>
-                  );
-                })}
-                {showOther ? (
-                  <button
-                    type="button"
-                    className={`copilot-question-chip copilot-question-other-chip${otherOpen[questionIndex] ? ' is-open' : ''}`}
-                    key={`q-${questionIndex}-other`}
-                    disabled={disabled}
-                    onClick={() => setOtherOpen((prev) => ({ ...prev, [questionIndex]: !prev[questionIndex] }))}
-                  >
-                    Other…
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-            {showOther && otherOpen[questionIndex] ? (
-              <div className="copilot-question-other">
-                <input
-                  className="copilot-question-other-input"
-                  type="text"
-                  value={otherText[questionIndex] || ''}
-                  disabled={disabled}
-                  placeholder="Type your answer…"
-                  onChange={(e) => setOtherText((prev) => ({ ...prev, [questionIndex]: e.target.value }))}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      submitOther(questionIndex, question.text);
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="copilot-question-other-submit"
-                  disabled={disabled || !String(otherText[questionIndex] || '').trim()}
-                  onClick={() => submitOther(questionIndex, question.text)}
-                >
-                  Submit
-                </button>
-              </div>
-            ) : null}
-            {question.kind === 'confirm' ? (
-              <div className="copilot-question-options">
-                {[
-                  { label: 'Yes', value: 'yes' },
-                  { label: 'No', value: 'no' },
-                ].map((opt) => {
-                  const selected = answeredValue === `${question.text} ${opt.value}`;
-                  return (
-                    <button
-                      type="button"
-                      className={`copilot-question-chip${selected ? ' is-selected' : ''}`}
-                      key={`q-${questionIndex}-${opt.value}`}
-                      disabled={disabled}
-                      onClick={() => recordAnswer(questionIndex, `${question.text} ${opt.value}`)}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
-            {question.kind === 'freeform' ? (
-              <p className="copilot-question-hint">Type your answer below.</p>
-            ) : null}
-            {isAnswered ? <small className="copilot-question-answered">✓ Selected</small> : null}
-          </div>
-        );
-      })}
-      {!isSingle ? (
-        <button
-          type="button"
-          className="copilot-question-submit"
-          disabled={disabled || !allAnswered}
-          onClick={submit}
-        >
-          {allAnswered ? 'Submit answers' : `Answer ${questions.length - Object.keys(answers).length} more question(s)`}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-// ReactMarkdown parses the full message content on every render — with a long transcript that is
-// seconds of synchronous work per pass. Content strings are immutable once a message lands, so
-// parse each distinct body exactly once and reuse the element for every other re-render.
-const CopilotMarkdown = memo(function CopilotMarkdown({ content }: { content: string }) {
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-      {content}
-    </ReactMarkdown>
-  );
-});
-
-// Message rendering runs ReactMarkdown (expensive). Memoize so a message only re-renders when its
-// own content changes — not on every unrelated Copilot state update (typing, dragging, resize,
-// caret moves), which otherwise re-parsed markdown for every message and froze the panel.
-const EMPTY_TRACE: CopilotTraceStep[] = [];
-const CopilotMessageItem = memo(function CopilotMessageItem({
-  message,
-  disabled,
-  onAnswerQuestion,
-  onLoadTrace
-}: {
-  message: ProjectCopilotMessage;
-  disabled: boolean;
-  onAnswerQuestion: (answer: string) => void;
-  onLoadTrace: (messageId: string) => void;
-}) {
-  const metadata = message.metadata;
-  const trace = useMemo(
-    () => (message.role === 'assistant' ? readPlannerTrace(metadata?.planner_trace) : []),
-    [message.role, metadata]
-  );
-  // The list projection ships every transcript message WITHOUT planner_trace; an assistant
-  // row whose metadata simply lacks the key still owes its steps (fetched on first expand).
-  const tracePending = message.role === 'assistant' && Boolean(metadata) && !('planner_trace' in (metadata || {}));
-  const handleExpandTrace = useCallback(() => {
-    onLoadTrace(message.id);
-  }, [message.id, onLoadTrace]);
-  const questions = useMemo(
-    () => (message.role === 'assistant' ? readPlannerQuestions(metadata?.planner_questions) : []),
-    [message.role, metadata]
-  );
-  const plannerState = String(metadata?.planner_state || '').trim();
-  const showQuestions = plannerState === 'needs_input' && questions.length > 0;
-  // Retrieved records from read skills — shown in a collapsible section so the user always sees
-  // the authoritative data even when the model's message only summarizes it (e.g. "Here is the sequence:"
-  // without pasting 395 chars, which models routinely truncate in structured output).
-  const observations = useMemo(
-    () => (message.role === 'assistant' ? readObservationRecords(metadata?.planner_observations) : []),
-    [message.role, metadata]
-  );
-  const showObservations = observations.length > 0;
-  // Detect failed action receipts so they render with an error style.
-  const hasFailedAction = message.role === 'system' && readActionResolutions(message).some((r) => r.status === 'failed');
-  return (
-    <article className={`copilot-message is-${message.role}${hasFailedAction ? ' is-action-failed' : ''}`}>
-      <div className="copilot-message-meta">
-        <strong>{author(message)}</strong>
-        <span>{formatDateTime(message.created_at)}</span>
-      </div>
-      <div className="copilot-message-body">
-        <CopilotMarkdown content={message.content} />
-      </div>
-      {showObservations ? <CopilotObservationCard records={observations} /> : null}
-      {showQuestions ? (
-        <CopilotQuestionCard questions={questions} disabled={disabled} onAnswer={onAnswerQuestion} />
-      ) : null}
-      {trace.length > 0 ? (
-        <CopilotThinkingCard steps={trace} />
-      ) : tracePending ? (
-        <CopilotThinkingCard steps={EMPTY_TRACE} pending onExpand={handleExpandTrace} />
-      ) : null}
-    </article>
-  );
-});
 
 function createSessionId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -482,21 +92,6 @@ function readPlanActions(value: unknown): CopilotPlanAction[] {
   return actions.sort(comparePlanActions);
 }
 
-type CopilotActionResolutionStatus = 'applied' | 'cancelled' | 'failed';
-
-interface CopilotActionResolution {
-  plan_id: string;
-  operation_id: string;
-  status: CopilotActionResolutionStatus;
-  /** The action skill id (e.g. the page operation that was confirmed). */
-  skill?: string;
-  /** The human-facing label shown on the confirmation chip. */
-  label?: string;
-  detail?: string;
-  error?: string;
-  /** The action's own arguments — what a recovery/summary turn may cite as actually applied. */
-  arguments?: Record<string, unknown>;
-}
 
 function planActionKey(action: CopilotPlanAction): string {
   const planId = String(action.plan_id || '').trim();
@@ -513,30 +108,6 @@ function comparePlanActions(left: CopilotPlanAction, right: CopilotPlanAction): 
   return planActionKey(left).localeCompare(planActionKey(right));
 }
 
-function readActionResolutions(message: ProjectCopilotMessage): CopilotActionResolution[] {
-  const value = message.metadata?.action_resolutions;
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
-    const resolution = item as Partial<CopilotActionResolution>;
-    const planId = String(resolution.plan_id || '').trim();
-    const operationId = String(resolution.operation_id || '').trim();
-    const status = resolution.status;
-    if (!planId || !operationId || (status !== 'applied' && status !== 'cancelled' && status !== 'failed')) return [];
-    return [{
-      plan_id: planId,
-      operation_id: operationId,
-      status,
-      ...(typeof resolution.skill === 'string' && resolution.skill ? { skill: resolution.skill } : {}),
-      ...(typeof resolution.label === 'string' && resolution.label ? { label: resolution.label } : {}),
-      ...(typeof resolution.detail === 'string' && resolution.detail ? { detail: resolution.detail } : {}),
-      ...(typeof resolution.error === 'string' && resolution.error ? { error: resolution.error } : {}),
-      ...(resolution.arguments && typeof resolution.arguments === 'object' && !Array.isArray(resolution.arguments)
-        ? { arguments: resolution.arguments as Record<string, unknown> }
-        : {}),
-    }];
-  });
-}
 
 function readSessionResolutionMap(messages: ProjectCopilotMessage[], sessionId: string): Map<string, CopilotActionResolutionStatus> {
   const resolutions = new Map<string, CopilotActionResolutionStatus>();
@@ -647,7 +218,7 @@ function readStoredCopilotActiveSessionLocal(userId: string): string {
 
 const COPILOT_SETTINGS_FORM_KEY = 'vbio:copilot-settings-form:v1';
 
-interface SettingsFormValues {
+export interface SettingsFormValues {
   proxy: string;
   api_url: string;
   api_key: string;
@@ -683,11 +254,6 @@ function writeStoredSettingsForm(form: SettingsFormValues): void {
 
 // Map a connectivity sub-test to its display state: skipped fields are neutral,
 // never a red failure — an unconfigured field simply isn't tested.
-function settingsTestState(result: CopilotTestSubResult): 'ok' | 'fail' | 'skipped' {
-  if (result.skipped) return 'skipped';
-  return result.ok ? 'ok' : 'fail';
-}
-
 async function readStoredCopilotActiveSession(userId: string): Promise<string> {
   const local = readStoredCopilotActiveSessionLocal(userId);
   if (local) return local;
@@ -891,7 +457,7 @@ export function writeStoredCopilotOpen(
 
 // Height of the sticky .top-nav: the floating panel (and its header with the close
 // button) must never slide underneath it, on mobile or desktop.
-const TOP_CHROME_PX = 64;
+export const TOP_CHROME_PX = 64;
 
 function clampPanelPosition(pos: { x: number; y: number }): { x: number; y: number } {
   // Keep the panel reachable on ANY viewport: a position persisted on a large screen (or
@@ -959,96 +525,11 @@ function actionMatchesContext(action: CopilotPlanAction, contextType: CopilotCon
 
 // Argument keys whose values are plumbing flags or filter tokens the label/description already
 // conveys — showing them adds noise (e.g. {"create": true}, {"workflowFilter": ...}).
-const TRIVIAL_ARGUMENT_KEYS = new Set([
-  'create',
-  'activityFilter',
-  'workflowFilter',
-  'sortBy',
-  'backendFilter',
-  'typeFilter',
-  'stateFilter',
-  'search',
-  'pageSize',
-  'updatedWithinDays',
-  'minTaskCount',
-]);
 
-// Human-readable labels for the argument keys a confirmation action commonly carries, in display
-// priority order. Drives the semantic key/value summary that replaces the old raw-JSON dump.
-const ARGUMENT_LABELS: Record<string, string> = {
-  smiles: 'SMILES',
-  structureUrl: 'Structure',
-  sequence: 'Sequence',
-  accession: 'Accession',
-  cid: 'CID',
-  projectId: 'Project',
-  projectName: 'Project',
-  taskRowId: 'Task',
-  taskName: 'Task',
-  components: 'Components',
-  screeningCompounds: 'Library',
-  metadataPatch: 'Changes',
-  parameterPatch: 'Parameters',
-};
-
-interface ActionSummaryEntry {
-  label: string;
-  value: string;
-}
 
 // Build a human-readable summary of the values an action will apply, as labeled rows instead of a
 // raw JSON dump. Long values (SMILES, sequences) are truncated so the card stays scannable. Returns
 // only entries with a meaningful value, in a stable display order.
-function formatActionSummary(action: CopilotPlanAction): ActionSummaryEntry[] {
-  const args = action.arguments;
-  if (!args || typeof args !== 'object') return [];
-  const rows: ActionSummaryEntry[] = [];
-  const seenLabels = new Set<string>();
-  for (const [key, value] of Object.entries(args)) {
-    if (TRIVIAL_ARGUMENT_KEYS.has(key)) continue;
-    const label = ARGUMENT_LABELS[key];
-    if (!label) continue;
-    let text: string;
-    if (typeof value === 'string') {
-      text = value.trim();
-    } else if (typeof value === 'number' || typeof value === 'boolean') {
-      text = String(value);
-    } else if (Array.isArray(value)) {
-      text = `${value.length} item${value.length === 1 ? '' : 's'}`;
-    } else if (value && typeof value === 'object') {
-      // For nested objects (e.g. parameterPatch), render friendly key=value
-      // pairs with display labels so engine/chirality choices are readable.
-      const FRIENDLY: Record<string, string> = {
-        backend: '',
-        boltz2dock: 'Boltz2Dock',
-        protenix2dock: 'Protenix2Dock',
-        peptideChirality: 'Chirality',
-        d: 'D-peptide',
-        l: 'L-peptide',
-        peptideDesignMode: 'Mode',
-        linear: 'Linear', cyclic: 'Cyclic', bicyclic: 'Bicyclic',
-      };
-      const parts = Object.entries(value as Record<string, unknown>).map(([k, v]) => {
-        const kl = k.replace(/_/g, '');
-        const labelEntry = Object.prototype.hasOwnProperty.call(FRIENDLY, k) ? FRIENDLY[k]
-          : Object.prototype.hasOwnProperty.call(FRIENDLY, kl) ? FRIENDLY[kl] : k;
-        const vl = typeof v === 'string' && Object.prototype.hasOwnProperty.call(FRIENDLY, v)
-          ? FRIENDLY[v]
-          : String(v);
-        return labelEntry === '' || labelEntry === undefined ? vl : `${labelEntry}: ${vl}`;
-      });
-      text = parts.filter(Boolean).join(', ') || '{}';
-    } else {
-      continue;
-    }
-    if (!text) continue;
-    const display = text.length > 64 ? `${text.slice(0, 61)}...` : text;
-    if (seenLabels.has(label)) continue;
-    seenLabels.add(label);
-    rows.push({ label, value: display });
-  }
-  return rows;
-}
 
 
 function compactCopilotText(value: unknown, limit: number): string {
@@ -2658,663 +2139,143 @@ export function ProjectCopilotModal({
     );
   }
 
+  const handleComposerKeyDown = useCopilotKeymap({
+    mentionState: attachmentMentionState,
+    mentionActiveIndex,
+    setMentionActiveIndex,
+    insertMention: (option) => insertAttachmentMentionAtCaret(option as CopilotUploadedAttachment),
+    dismissMention: () => { setMentionDismissedDraft(draft); setMentionCaret(-1); },
+    completion,
+    completions,
+    completionPickerIndex,
+    setCompletionPickerIndex,
+    setCompletions,
+    acceptCompletion,
+    shouldNavigateHistory,
+    nextHistory: (dir: 'up' | 'down') => {
+      const result = nextInputHistoryNav(inputHistoryRef.current, historyNavRef.current, draft, dir);
+      if (result) historyNavRef.current = result.nav;
+      return result ? { value: result.value } : null;
+    },
+    applyHistoryValue,
+    draft,
+    sendMessage,
+  });
+
   return (
-    <div
-      ref={panelRef}
-      className={`copilot-floating-panel${suppressedByOverlay ? ' copilot-suppressed' : ''}`}
-      style={
-        suppressedByOverlay
-          ? { right: 24, bottom: 24 }
-          : isMobileViewport
-            ? // On mobile the panel is pinned full-screen by CSS. When the soft keyboard is open,
-              // visualViewport reports the visible region above it — bind the panel to that region
-              // (height + max-height + top) so the composer sits right above the keyboard instead of
-              // being covered. When the keyboard is closed visualViewportHeight == layout height and
-              // these reduce to the CSS full-screen rules (top:0, height:100dvh).
-              visualViewportHeight != null
-                ? {
-                    top: TOP_CHROME_PX + Math.max(0, visualViewportTop),
-                    height: Math.max(240, visualViewportHeight - TOP_CHROME_PX),
-                    maxHeight: Math.max(240, visualViewportHeight - TOP_CHROME_PX)
-                  }
-                : undefined
-            : {
-                ...(position ? { left: position.x, top: position.y } : {}),
-                ...(panelSize ? { width: panelSize.width, height: panelSize.height } : {})
-              }
-      }
-      role="dialog"
-      aria-modal="false"
-      aria-hidden={suppressedByOverlay ? 'true' : undefined}
-      aria-label={title}
+    <CopilotPanelShell
+      panel={{
+        panelRef,
+        suppressedByOverlay,
+        isMobileViewport,
+        visualViewportHeight,
+        visualViewportTop,
+        position,
+        panelSize,
+        startDrag,
+        moveDrag,
+        endDrag
+      }}
+      header={{
+        title,
+        subtitle,
+        authSession,
+        onClose,
+        openSettings
+      }}
+      history={{
+        historyOpen,
+        setHistoryOpen,
+        chatSessions,
+        activeSessionId,
+        selectSession,
+        deleteSession,
+        startNewChat
+      }}
+      settings={{
+        settingsOpen,
+        setSettingsOpen,
+        settingsForm,
+        setSettingsForm,
+        settingsError,
+        settingsHasKey,
+        settingsMaskedKey,
+        settingsSaved,
+        settingsSaving,
+        settingsTestResult,
+        settingsTesting,
+        handleSaveSettings,
+        handleTestSettings
+      }}
+      messages={{
+        scrollRef,
+        handleMessagesScroll,
+        loading,
+        sessionMessages,
+        visibleMessageCount,
+        setVisibleMessageCount,
+        MESSAGE_WINDOW,
+        visibleSessionMessages,
+        answerQuestion,
+        loadMessageTrace,
+        streamStartedAt,
+        steeredTurnTexts,
+        liveTrace
+      }}
+      turn={{
+        sending,
+        applyingActionKey,
+        bulkAction
+      }}
+      plan={{
+        pendingActions,
+        applyAction,
+        cancelPendingActions
+      }}
+      error={error}
     >
-      <div className={`copilot-modal copilot-chat-window${historyOpen ? ' history-open' : ''}`}>
-        <div
-          className="copilot-head copilot-drag-handle"
-          onPointerDown={startDrag}
-          onPointerMove={moveDrag}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-        >
-          <div className="copilot-title">
-            <MessageSquareText size={18} />
-            <div>
-              <h2>{title}</h2>
-              <span>{subtitle}</span>
-            </div>
-          </div>
-          <div className="copilot-head-actions">
-            <button
-              className="task-row-action-btn"
-              type="button"
-              onClick={() => setHistoryOpen((prev) => !prev)}
-              aria-label="Chat history"
-              title="Chat history"
-            >
-              <PanelLeft size={15} />
-            </button>
-            <button className="task-row-action-btn" type="button" onClick={startNewChat} aria-label="New chat" title="New chat">
-              <MessageSquarePlus size={15} />
-            </button>
-            {authSession?.isAdmin ? (
-              <button className="task-row-action-btn" type="button" onClick={openSettings} aria-label="Copilot settings" title="Copilot settings">
-                <Settings size={15} />
-              </button>
-            ) : null}
-            <button className="task-row-action-btn" type="button" onClick={onClose} aria-label="Close Copilot" title="Close">
-              <X size={15} />
-            </button>
-          </div>
-        </div>
-
-        {error ? <div className="alert error copilot-error">{error}</div> : null}
-
-        {historyOpen ? (
-          <aside className="copilot-history">
-            <div className="copilot-history-head">
-              <span className="copilot-history-label">Chats</span>
-              <button type="button" className="copilot-history-new" onClick={startNewChat} title="New chat">
-                <MessageSquarePlus size={14} />
-              </button>
-            </div>
-            <div className="copilot-history-list">
-              {chatSessions.length === 0 ? (
-                <div className="copilot-history-empty">No previous chats</div>
-              ) : (
-                chatSessions.map((session) => (
-                  <div className={`copilot-history-item${session.id === activeSessionId ? ' active' : ''}`} key={session.id}>
-                    <button type="button" className="copilot-history-btn" onClick={() => selectSession(session.id)}>
-                      <span className="copilot-history-title">{session.title}</span>
-                      {session.updatedAt ? (
-                        <small className="copilot-history-time">{formatDateTime(session.updatedAt)}</small>
-                      ) : null}
-                    </button>
-                    <button
-                      className="copilot-history-delete"
-                      type="button"
-                      onClick={() => void deleteSession(session.id)}
-                      aria-label="Delete chat"
-                      title="Delete chat"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </aside>
-        ) : null}
-
-        {settingsOpen ? (
-          <div className="copilot-settings-overlay">
-            <div className="copilot-settings-panel" onClick={(e) => e.stopPropagation()}>
-              <div className="copilot-settings-head">
-                <span className="copilot-settings-title">
-                  <Settings size={15} />
-                  Copilot Settings
-                </span>
-                <button type="button" className="copilot-settings-close" onClick={() => setSettingsOpen(false)} aria-label="Close settings" title="Close settings">
-                  <X size={16} />
-                </button>
-              </div>
-              <div className="copilot-settings-body">
-                <label className="copilot-settings-field">
-                  <span className="copilot-settings-label">Outbound Proxy</span>
-                  <input
-                    type="text"
-                    className="copilot-settings-input"
-                    placeholder="http://172.16.34.31:2080"
-                    value={settingsForm.proxy}
-                    onChange={(e) => setSettingsForm((prev) => ({ ...prev, proxy: e.target.value }))}
-                  />
-                </label>
-                <label className="copilot-settings-field">
-                  <span className="copilot-settings-label">LLM Server URL</span>
-                  <input
-                    type="text"
-                    className="copilot-settings-input"
-                    placeholder="https://api.openai.com/v1/chat/completions"
-                    value={settingsForm.api_url}
-                    onChange={(e) => setSettingsForm((prev) => ({ ...prev, api_url: e.target.value }))}
-                  />
-                </label>
-                <label className="copilot-settings-field">
-                  <span className="copilot-settings-label">
-                    API Key{settingsHasKey ? <em className="copilot-settings-current"> (current: {settingsMaskedKey})</em> : null}
-                  </span>
-                  <input
-                    type="password"
-                    className="copilot-settings-input"
-                    placeholder={settingsHasKey ? 'Leave blank to keep current key' : 'Enter API key'}
-                    value={settingsForm.api_key}
-                    onChange={(e) => setSettingsForm((prev) => ({ ...prev, api_key: e.target.value }))}
-                  />
-                </label>
-                <label className="copilot-settings-field">
-                  <span className="copilot-settings-label">Model</span>
-                  <input
-                    type="text"
-                    className="copilot-settings-input"
-                    placeholder="e.g. gpt-4o"
-                    value={settingsForm.model}
-                    onChange={(e) => setSettingsForm((prev) => ({ ...prev, model: e.target.value }))}
-                  />
-                </label>
-                {settingsError ? <div className="copilot-settings-error">{settingsError}</div> : null}
-                {settingsSaved ? <div className="copilot-settings-success">Settings saved — applied live.</div> : null}
-                {settingsTestResult ? (
-                  <div className="copilot-settings-test-results">
-                    <div className={`copilot-settings-test-item ${settingsTestState(settingsTestResult.proxy)}`}>
-                      <span className="copilot-settings-test-name">Network</span>
-                      <span className="copilot-settings-test-detail">{settingsTestResult.proxy.detail}</span>
-                    </div>
-                    <div className={`copilot-settings-test-item ${settingsTestState(settingsTestResult.llm)}`}>
-                      <span className="copilot-settings-test-name">LLM</span>
-                      <span className="copilot-settings-test-detail">{settingsTestResult.llm.detail}</span>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-              <div className="copilot-settings-actions">
-                <button
-                  type="button"
-                  className="copilot-settings-btn secondary"
-                  onClick={() => void handleTestSettings()}
-                  disabled={settingsTesting || settingsSaving}
-                >
-                  {settingsTesting ? <LoaderCircle size={14} className="spin" /> : null}
-                  Test Connection
-                </button>
-                <button
-                  type="button"
-                  className="copilot-settings-btn primary"
-                  onClick={() => void handleSaveSettings()}
-                  disabled={settingsSaving || settingsTesting}
-                >
-                  {settingsSaving ? <LoaderCircle size={14} className="spin" /> : null}
-                  Save Settings
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="copilot-messages" ref={scrollRef} onScroll={handleMessagesScroll}>
-          {loading ? (
-            <div className="copilot-empty">
-              <LoaderCircle size={16} className="spin" />
-              Loading messages
-            </div>
-          ) : sessionMessages.length === 0 ? (
-            null
-          ) : (
-            <>
-              {sessionMessages.length > visibleMessageCount ? (
-                <button
-                  type="button"
-                  className="copilot-load-earlier"
-                  onClick={() => setVisibleMessageCount((prev) => prev + MESSAGE_WINDOW)}
-                >
-                  Load earlier messages ({sessionMessages.length - visibleMessageCount} more)
-                </button>
-              ) : null}
-              {visibleSessionMessages.map((message) => (
-                <CopilotMessageItem
-                  key={message.id}
-                  message={message}
-                  disabled={sending || Boolean(applyingActionKey || bulkAction)}
-                  onAnswerQuestion={answerQuestion}
-                  onLoadTrace={loadMessageTrace}
-                />
-              ))}
-            </>
-          )}
-          {sending ? (
-            <article className="copilot-message is-assistant">
-              <div className="copilot-message-meta">
-                <strong>V-Bio Copilot</strong>
-                <span>{formatDateTime(streamStartedAt)}</span>
-              </div>
-              {/* Same shape as a finished assistant message (meta + body + reasoning sibling) so
-                  completion only fills the body instead of restructuring the bubble — no jitter. */}
-              <div className="copilot-message-body copilot-thinking" />
-              {steeredTurnTexts.length > 0 ? (
-                <div className="copilot-steered-list" aria-label="Inserted steering messages">
-                  {steeredTurnTexts.map((text, index) => (
-                    <div className="copilot-steered-item" key={`${index}-${text.slice(0, 24)}`}>
-                      <span className="copilot-steered-badge">Inserted</span>
-                      <span className="copilot-steered-text">{text}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-              <CopilotThinkingCard steps={liveTrace} live />
-            </article>
-          ) : null}
-        </div>
-
-        {pendingActions.length > 0 ? (() => {
-          // Progressive reveal: show ONE confirmation card at a time. When the user confirms it,
-          // persistActionResolutions removes it from pendingActions, so the next step becomes
-          // pendingActions[0] on the next render — no extra state or effect needed. This keeps long
-          // plans manageable (one decision at a time) and avoids surfacing every step at once.
-          const action = pendingActions[0];
-          const actionKey = planActionKey(action);
-          const isApplying = applyingActionKey === actionKey;
-          const summary = formatActionSummary(action);
-          const isDestructive = action.payload?.destructive === true;
-          // Include `sending`: a streaming turn auto-cancels pendingActions mid-flight, so an
-          // Apply clicked during the stream races the cancel and can double-write receipts.
-          const blocked = Boolean(applyingActionKey || bulkAction || sending);
-          return (
-            <div className="copilot-action-stack" aria-label="Pending confirmation step">
-              {/* Deterministic honesty guard: whatever the assistant message above says, the
-                  pending step has NOT executed. This line is the UI's own statement of fact —
-                  it neutralizes a model that narrates proposed operations as completed. */}
-              <div className="copilot-plan-pending-hint">
-                Not run yet — it takes effect only after you click Apply; the returned receipt is the actual result.
-              </div>
-              <div className="copilot-plan-actions">
-                <div
-                  className={`copilot-plan-action${isDestructive ? ' is-destructive' : ''}${isApplying ? ' is-applying' : ''}`}
-                  key={actionKey}
-                >
-                  <div className="copilot-plan-action-main">
-                    <strong>{action.label}</strong>
-                    <small className="copilot-plan-action-desc">{action.description}</small>
-                    {summary.length > 0 ? (
-                      <dl className="copilot-plan-action-summary">
-                        {summary.map((entry) => (
-                          <div className="copilot-plan-action-summary-row" key={entry.label}>
-                            <dt>{entry.label}</dt>
-                            <dd>{entry.value}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    ) : null}
-                  </div>
-                  <div className="copilot-plan-action-buttons">
-                    <button
-                      className="copilot-plan-action-cancel"
-                      type="button"
-                      onClick={() => void cancelPendingActions()}
-                      disabled={Boolean(applyingActionKey || bulkAction)}
-                      title="Cancel"
-                    >
-                      {bulkAction === 'cancel' ? <LoaderCircle size={14} className="spin" /> : <X size={14} />}
-                      <span>Cancel</span>
-                    </button>
-                    <button
-                      className="copilot-plan-action-apply"
-                      type="button"
-                      onClick={() => void applyAction(action)}
-                      disabled={blocked}
-                      title="Apply this step"
-                    >
-                      {isApplying ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
-                      <span>{isApplying ? 'Applying' : 'Apply'}</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })() : null}
-
-        <div className="copilot-composer">
-          <div className="copilot-input-shell">
-            {uploadedAttachments.length > 0 ? (
-              <div className="copilot-attachment-tray" aria-label="Attached files">
-                {uploadedAttachments.map((attachment) => (
-                  <button
-                    className="copilot-attachment-chip"
-                    type="button"
-                    key={attachment.id}
-                    onClick={() => insertAttachmentMention(attachment)}
-                    title={`Insert @${attachment.name}`}
-                  >
-                    <span className="copilot-attachment-name">{attachment.name}</span>
-                    <small>{Math.max(1, Math.round(attachment.size / 1024))} KB</small>
-                    <span
-                      className="copilot-attachment-remove"
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Remove ${attachment.name}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        removeUploadedAttachment(attachment.id);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          removeUploadedAttachment(attachment.id);
-                        }
-                      }}
-                    >
-                      <X size={11} />
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            {attachmentMentionState ? (
-              <div
-                className="copilot-mention-menu"
-                role="listbox"
-                id="copilot-mention-listbox"
-                aria-label="File mentions"
-              >
-                {attachmentMentionState.options.map((attachment, index) => (
-                  <button
-                    key={attachment.id}
-                    id={`copilot-mention-option-${index}`}
-                    className={`copilot-mention-option${index === mentionActiveIndex ? ' active' : ''}`}
-                    type="button"
-                    role="option"
-                    aria-selected={index === mentionActiveIndex}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      insertAttachmentMentionAtCaret(attachment);
-                    }}
-                  >
-                    <span className="copilot-mention-file-icon">@</span>
-                    <span className="copilot-mention-file-text">
-                      <strong>{attachment.name}</strong>
-                      <small>{Math.max(1, Math.round(attachment.size / 1024))} KB</small>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <div className="copilot-input-row">
-              <div className="copilot-plus-wrap" ref={plusMenuRef}>
-                {plusMenuOpen ? (
-                  <div className="copilot-plus-menu">
-                    <button
-                      className="copilot-plus-menu-item"
-                      type="button"
-                      onClick={() => {
-                        setPlusMenuOpen(false);
-                        fileInputRef.current?.click();
-                      }}
-                    >
-                      <Plus size={15} />
-                      <span>Attach file</span>
-                    </button>
-                  </div>
-                ) : null}
-                <button
-                  className="copilot-attach-btn"
-                  type="button"
-                  onClick={() => setPlusMenuOpen((prev) => !prev)}
-                  disabled={Boolean(sending || applyingActionKey || bulkAction)}
-                  aria-label="Add attachment"
-                  title="Add"
-                >
-                  <Plus size={16} />
-                </button>
-              </div>
-              <input
-                ref={fileInputRef}
-                className="copilot-file-input"
-                type="file"
-                multiple
-                accept=".pdb,.ent,.cif,.mmcif,.sdf,.sd,.mol2,.mol,.txt,.csv,.tsv"
-                onChange={(event) => {
-                  if (event.target.files) addUploadedFiles(event.target.files);
-                  event.currentTarget.value = '';
-                }}
-              />
-              <div className="copilot-input-wrap">
-                {completionPickerIndex !== null && completions.length > 0 ? (
-                  <div className="copilot-mention-menu copilot-completion-menu" role="listbox" id="copilot-completion-listbox" aria-label="Suggested completions">
-                    {completions.map((suffix, index) => (
-                      <button
-                        key={`${index}-${suffix}`}
-                        id={`copilot-completion-option-${index}`}
-                        type="button"
-                        role="option"
-                        aria-selected={index === completionPickerIndex}
-                        className={`copilot-mention-option${index === completionPickerIndex ? ' active' : ''}`}
-                        onMouseDown={(event) => {
-                          event.preventDefault();
-                          acceptCompletion(suffix);
-                        }}
-                      >
-                        <span className="copilot-mention-file-icon">↵</span>
-                        <span className="copilot-mention-file-text">
-                          <strong>{draft}</strong>
-                          <small>{suffix}</small>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-                {completion ? (
-                  <div className="copilot-ghost-overlay" aria-hidden="true">
-                    <div className="copilot-ghost-overlay-inner" ref={ghostOverlayInnerRef}>
-                      <span className="copilot-ghost-spacer">{draft}</span>
-                      <span className="copilot-ghost-suffix">{completion}</span>
-                    </div>
-                  </div>
-                ) : null}
-                <textarea
-                  ref={textareaRef}
-                value={draft}
-                rows={1}
-                  role="combobox"
-                  aria-controls={attachmentMentionState ? 'copilot-mention-listbox' : 'copilot-completion-listbox'}
-                  aria-expanded={Boolean(attachmentMentionState) || completionPickerIndex !== null}
-                  aria-autocomplete="list"
-                  aria-activedescendant={
-                    attachmentMentionState && attachmentMentionState.options[mentionActiveIndex]
-                      ? `copilot-mention-option-${mentionActiveIndex}`
-                      : completionPickerIndex !== null
-                        ? `copilot-completion-option-${completionPickerIndex}`
-                        : undefined
-                  }
-                onChange={(event) => {
-                  setDraft(event.target.value);
-                  // Any manual edit exits history-recall mode so the next ↑ starts from the newest.
-                  historyNavRef.current = null;
-                  setMentionDismissedDraft(null);
-                  setMentionCaret(event.target.selectionStart ?? event.target.value.length);
-                  if (typeof window !== 'undefined') {
-                    window.requestAnimationFrame(syncMentionCaretFromTextarea);
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if (attachmentMentionState) {
-                    // cmdk-absorbed navigation: ArrowUp/Down loop (kept), Home/End jump to the
-                    // first/last option, PageUp/PageDown move in pages of 6 — the exact key
-                    // set cmdk's list handles (it has no Tab completion built in; our
-                    // Enter+Tab insert stays, it predates and exceeds it).
-                    const mentionCount = attachmentMentionState.options.length;
-                    if (event.key === 'ArrowDown') {
-                      event.preventDefault();
-                      setMentionActiveIndex((index) => (index + 1) % mentionCount);
-                      return;
-                    }
-                    if (event.key === 'ArrowUp') {
-                      event.preventDefault();
-                      setMentionActiveIndex((index) => (index - 1 + mentionCount) % mentionCount);
-                      return;
-                    }
-                    if (event.key === 'Home') {
-                      event.preventDefault();
-                      setMentionActiveIndex(0);
-                      return;
-                    }
-                    if (event.key === 'End') {
-                      event.preventDefault();
-                      setMentionActiveIndex(mentionCount - 1);
-                      return;
-                    }
-                    if (event.key === 'PageDown') {
-                      event.preventDefault();
-                      setMentionActiveIndex((index) => Math.min(mentionCount - 1, index + 6));
-                      return;
-                    }
-                    if (event.key === 'PageUp') {
-                      event.preventDefault();
-                      setMentionActiveIndex((index) => Math.max(0, index - 6));
-                      return;
-                    }
-                    if (event.key === 'Enter' || event.key === 'Tab') {
-                      event.preventDefault();
-                      insertAttachmentMentionAtCaret(attachmentMentionState.options[mentionActiveIndex] || attachmentMentionState.options[0]);
-                      return;
-                    }
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      setMentionDismissedDraft(draft);
-                      setMentionCaret(-1);
-                      return;
-                    }
-                  }
-                  // Inline-completion ghost + top-10 picker (mention menu closed, not composing).
-                  if (!event.nativeEvent.isComposing && (completion || completions.length > 0)) {
-                    if (completionPickerIndex !== null) {
-                      // Picker open: ↑/↓ move (loop), Enter/Tab accept the highlighted
-                      // candidate, Esc closes ONLY the picker (the ghost survives).
-                      if (event.key === 'ArrowDown') {
-                        event.preventDefault();
-                        setCompletionPickerIndex((index) => ((index ?? 0) + 1) % completions.length);
-                        return;
-                      }
-                      if (event.key === 'ArrowUp') {
-                        event.preventDefault();
-                        setCompletionPickerIndex((index) => ((index ?? 0) - 1 + completions.length) % completions.length);
-                        return;
-                      }
-                      if (event.key === 'Enter' || event.key === 'Tab') {
-                        event.preventDefault();
-                        acceptCompletion(completions[completionPickerIndex] ?? completion);
-                        return;
-                      }
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        setCompletionPickerIndex(null);
-                        return;
-                      }
-                    } else if (completion) {
-                      if (event.key === 'Tab') {
-                        event.preventDefault();
-                        acceptCompletion(completion);
-                        return;
-                      }
-                      if (event.key === 'ArrowDown') {
-                        // Ghost showing: ↓ opens the ranked candidates (fish-shell style);
-                        // ↑ stays with input-history recall.
-                        event.preventDefault();
-                        setCompletionPickerIndex(0);
-                        return;
-                      }
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        setCompletions([]);
-                        return;
-                      }
-                    }
-                  }
-                  // ↑/↓ sent-input history (caret on first/last line, not composing).
-                  if (
-                    !event.nativeEvent.isComposing &&
-                    (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
-                    shouldNavigateHistory(
-                      event.key === 'ArrowUp' ? 'up' : 'down',
-                      draft,
-                      event.currentTarget.selectionStart ?? draft.length
-                    )
-                  ) {
-                    const result = nextInputHistoryNav(
-                      inputHistoryRef.current,
-                      historyNavRef.current,
-                      draft,
-                      event.key === 'ArrowUp' ? 'up' : 'down'
-                    );
-                    if (result) {
-                      event.preventDefault();
-                      historyNavRef.current = result.nav;
-                      applyHistoryValue(result.value);
-                    }
-                    return;
-                  }
-                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    void sendMessage();
-                  }
-                }}
-                onInput={() => {
-                  if (typeof window !== 'undefined') {
-                    window.requestAnimationFrame(syncMentionCaretFromTextarea);
-                  }
-                }}
-                onFocus={syncMentionCaretFromTextarea}
-                onClick={syncMentionCaretFromTextarea}
-                onSelect={syncMentionCaretFromTextarea}
-                onKeyUp={(event) => {
-                  if (event.key === 'Escape') return;
-                  syncMentionCaretFromTextarea();
-                }}
-                onScroll={syncGhostScroll}
-                placeholder="Type a message…"
-                // readOnly (not disabled) while a turn/action runs: a disabled textarea immediately
-                // loses focus on mobile and dismisses the soft keyboard, causing the panel to grow
-                // back to full height and then re-shrink when focus returns — the "keyboard flicker".
-                // readOnly keeps focus and the keyboard open while still blocking user input.
-                readOnly={Boolean(sending || applyingActionKey || bulkAction)}
-              />
-              </div>
-              <button
-                className={`copilot-send-btn${sending ? ' is-sending' : ''}`}
-                type="button"
-                onClick={sending ? cancelSending : () => void sendMessage()}
-                // Prevent the button from stealing focus on tap (mousedown): on mobile, moving focus
-                // off the textarea dismisses the keyboard. preventDefault on mousedown keeps focus on
-                // the textarea so the keyboard stays open during send. The click still fires normally.
-                onMouseDown={(event) => event.preventDefault()}
-                disabled={!sending && Boolean(applyingActionKey || bulkAction || !draft.trim())}
-                aria-label={sending ? 'Stop' : 'Send'}
-                title={sending ? 'Stop' : 'Send'}
-              >
-                {sending ? (
-                  // While sending: a spinning loader shows the turn is in progress. On hover the CSS
-                  // swaps it for a stop icon (and reddens the button) so the affordance to cancel is
-                  // obvious — the spinner means "working", hover means "click to cancel".
-                  <>
-                    <LoaderCircle size={15} className="spin copilot-send-spin" />
-                    <Square size={13} className="copilot-send-stop" />
-                  </>
-                ) : (
-                  <Send size={15} />
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+      {        <CopilotComposer
+          draft={{
+            draft,
+            setDraft,
+            textareaRef,
+            syncGhostScroll,
+            historyNavRef
+          }}
+          mention={{
+            attachmentMentionState,
+            mentionActiveIndex,
+            insertAttachmentMentionAtCaret,
+            setMentionDismissedDraft,
+            setMentionCaret,
+            syncMentionCaretFromTextarea
+          }}
+          completion={{
+            completions,
+            completion,
+            completionPickerIndex,
+            acceptCompletion,
+            ghostOverlayInnerRef
+          }}
+          attachments={{
+            uploadedAttachments,
+            insertAttachmentMention,
+            removeUploadedAttachment,
+            addUploadedFiles,
+            plusMenuRef,
+            plusMenuOpen,
+            setPlusMenuOpen,
+            fileInputRef
+          }}
+          turn={{
+            sending,
+            applyingActionKey,
+            bulkAction,
+            cancelSending,
+            sendMessage
+          }}
+          onKeyDown={handleComposerKeyDown}
+        />}
+    </CopilotPanelShell>
   );
 }

@@ -153,6 +153,11 @@ _REQUIRED_FEATURES: dict[str, set[str]] = {
         "ref_element",
     },
     "InterchainBondPotential": {"interchain_bond_index"},
+    "PocketPotential": {
+        "pocket_pair_index",
+        "pocket_pair_group",
+        "pocket_pair_upper",
+    },
     "VinaStericPotential": {
         "asym_id",
         "atom_to_token_idx",

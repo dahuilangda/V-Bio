@@ -61,6 +61,7 @@ def _load_p2d_side_channels():
         os.environ.get("PROTENIX_SCORE_ONLY", ""),
         os.environ.get("PROTENIX_PIN_MASK_PATH", ""),
         os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", ""),
+        os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", ""),
     )
     if cache is not None and cache[0] == key:
         return cache[1]
@@ -105,8 +106,58 @@ def _load_p2d_side_channels():
     if tfg_const_path and os.path.exists(tfg_const_path):
         blob = np.load(tfg_const_path, allow_pickle=False)
         out["tfg_constraints"] = {k: blob[k] for k in blob.files}
+    pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
+    if pocket_path and os.path.exists(pocket_path):
+        blob = np.load(pocket_path, allow_pickle=False)
+        out["pocket_guidance"] = {
+            "index": np.asarray(blob["pair_index"], dtype=np.int64),
+            "group": np.asarray(blob["group"], dtype=np.int64),
+            "upper": np.asarray(blob["upper"], dtype=np.float32),
+        }
     _load_p2d_side_channels._cache = (key, out)
     return out
+
+
+def _p2d_pocket_augmented_guidance(guidance_cfg):
+    """Add the PocketPotential term when pocket guidance features exist.
+
+    The term is conditionally registered so that every run WITHOUT a pocket
+    npz keeps the stock term set — `validate_features` fails fast on terms
+    whose features are missing. The weight schedule mirrors boltz-2.2.1's
+    contact guidance ramp (strong while the pose is still noise, released in
+    the final refinement steps): engine-normalized time runs t=1 (early/
+    noisy) -> 0 (late/clean) and ExponentialInterpolation evaluates
+    start at t=0, end at t=1, so start=0/end=1/alpha=3 gives weight ~1 early
+    decaying to 0 late.
+    """
+    pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
+    if not pocket_path or not os.path.exists(pocket_path):
+        return guidance_cfg
+    if not isinstance(guidance_cfg, dict):
+        logger.warning(
+            "protenix2dock: pocket guidance present but guidance config is "
+            f"{type(guidance_cfg).__name__}; pocket term not activated"
+        )
+        return guidance_cfg
+    augmented = dict(guidance_cfg)
+    augmented["enable"] = True
+    # Boltz2's contact guidance keeps half strength through the middle of
+    # sampling (PiecewiseStepFunction [0.25,0.75] -> [0.0,0.5,1.0] on the
+    # same t); an alpha-warped schedule left only ~18% at t=0.5 and the
+    # diffusion prior's own site preference beat the guidance (measured
+    # 2026-09-09: candidates landed 8-13 A off the user pocket). Linear
+    # ramp (alpha=0) matches boltz2's mid-sampling strength, and a
+    # pocket-task-specific mu floor raises the x0 refinement step so the
+    # pull survives the denoiser's site preference.
+    augmented["mu"] = max(float(augmented.get("mu") or 0.0), 0.3)
+    terms = dict(augmented.get("terms") or {})
+    terms["PocketPotential"] = {
+        "interval": 1,
+        "weight": {"type": "exp_interpolation", "start": 0.0, "end": 1.0, "alpha": 0.0},
+        "enable_projection": False,
+    }
+    augmented["terms"] = terms
+    return augmented
 
 
 def _p2d_tensor(p2d: dict[str, Any], key: str) -> Any:
@@ -452,8 +503,8 @@ class Protenix(nn.Module):
         )
         _configs.update(
             {
-                "guidance_configs": self.configs.sample_diffusion.to_dict().get(
-                    "guidance"
+                "guidance_configs": _p2d_pocket_augmented_guidance(
+                    self.configs.sample_diffusion.to_dict().get("guidance")
                 )
             }
         )
@@ -829,6 +880,20 @@ class Protenix(nn.Module):
                 f"protenix2dock: injected {n_bond} bond + {n_angle} angle "
                 "constraints into TFG."
             )
+        pocket_guidance = p2d.get("pocket_guidance")
+        if pocket_guidance is not None:
+            pg_idx = torch.from_numpy(pocket_guidance["index"]).to(s_inputs.device)
+            pg_group = torch.from_numpy(pocket_guidance["group"]).to(s_inputs.device)
+            pg_upper = torch.from_numpy(pocket_guidance["upper"]).to(s_inputs.device)
+            if pg_idx.shape[0] != 2:
+                pg_idx = pg_idx.T
+            input_feature_dict["pocket_pair_index"] = pg_idx.long()
+            input_feature_dict["pocket_pair_group"] = pg_group.long()
+            input_feature_dict["pocket_pair_upper"] = pg_upper.float()
+            logger.info(
+                f"protenix2dock: pocket guidance active — {pg_idx.shape[1]} pairs "
+                f"over {int(pg_group.max().item()) + 1} pocket residue groups."
+            )
         if p2d.get("score_only") and p2d_coords is not None:
             # Score mode: skip diffusion entirely and evaluate the confidence
             # heads directly on the input coordinates. Ensembles carry no
@@ -868,6 +933,21 @@ class Protenix(nn.Module):
                 pin_mask=(
                     torch.from_numpy(p2d["pin"]).to(s_inputs.device)
                     if p2d_coords is not None and "pin" in p2d
+                    else None
+                ),
+                # Pocket-biased noise seeding: with the guidance npz present
+                # the free chains' initial noise cloud starts centred on the
+                # user pocket (atom rows = unique second column of the
+                # guidance pairs). One-time init translation only — the pose
+                # and conformation remain fully model-generated; this is the
+                # training-free counterpart of boltz2's learned trunk pocket
+                # conditioning (protenix-v2's checkpoint has no pocket
+                # embedder weights, measured 0/4174 keys).
+                pocket_seed_rows=(
+                    torch.from_numpy(
+                        np.unique(p2d["pocket_guidance"]["index"][:, 1])
+                    ).to(s_inputs.device).long()
+                    if p2d_coords is not None and p2d.get("pocket_guidance") is not None
                     else None
                 ),
                 # Free-chain covalent bonds as their OWN projection family:

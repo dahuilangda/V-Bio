@@ -40,7 +40,7 @@ from core.input_prep import (
     build_peptide_complex_input,
     compute_bond_contact_pairs,
     compute_free_chain_tfg_constraints,
-    compute_contact_pairs,
+    compute_pocket_guidance_pairs,
     compute_ligand_covalent_bands,
     load_ligand_pose,
     place_dock_conformer,
@@ -134,13 +134,15 @@ def parse_args(argv=None):
                         "(peptide SG <-> linker anchor), e.g. 'B:1:SG,L:1:CD;B:9:SG,L:1:C1'")
     p.add_argument("--bond_upper", type=float, default=2.2,
                    help="TFG upper bound for the covalent bond pairs (A)")
-    p.add_argument("--pocket_cutoff", type=float, default=9.0,
-                   help="peptide-pocket anchoring contact cutoff (A)")
-    p.add_argument("--pocket_upper", type=float, default=8.0,
-                   help="peptide-pocket anchoring upper bound cap (A)")
-    p.add_argument("--anchor_slack", type=float, default=0.3,
-                   help="per-pair anchoring slack over the placed geometry (A); "
-                        "0 disables per-pair tightening (flat pocket_upper)")
+    p.add_argument("--pocket_res",
+                   help="pocket residues as 'chain:resnum,chain:resnum,...' in the "
+                        "STAGED complex numbering — activates the native "
+                        "boltz2-style PocketPotential guidance (soft-min "
+                        "upper bound per residue on the peptide atoms); "
+                        "pose-independent, composes with --blind_peptide")
+    p.add_argument("--pocket_upper", type=float, default=6.0,
+                   help="PocketPotential per-pair upper bound (A); boltz2's "
+                        "pocket max_distance default is 6.0")
     p.add_argument("--score_only", action="store_true",
                    help="peptide mode: bypass diffusion, score the input pose "
                         "with the confidence heads (bit-exact pass-through)")
@@ -402,29 +404,38 @@ def _run_peptide_engine(
         msa_mode=args.msa_mode,
     )
 
-    # Bicyclic ring: peptide SG <-> linker anchor bonds.
+    # Covalent bonds for the peptide entity: bicyclic SG<->linker-anchor
+    # pairs AND cyclic head-tail N-C pairs both ride --bond_pairs; the
+    # former cross to a linker entity, the latter stay inside the peptide
+    # (entity1 == entity2). Both land in input.json covalent_bonds (model
+    # conditions on the topology) and in TFG contact pairs below (hard
+    # projection on x0) — pose-independent chemistry either way.
     linker_entity = None
     covalent_bonds: list[dict[str, Any]] = []
     staged_bond_pairs: list[tuple[tuple[str, int, str], tuple[str, int, str]]] = []
+    peptide_entity_no = len(receptor_names) + 1  # 1-based entity id
+    raw_pairs = [p.strip() for p in (args.bond_pairs or "").split(";") if p.strip()]
+
+    def _parse_ref(ref: str) -> tuple[str, int, str]:
+        parts = ref.strip().split(":")
+        if len(parts) != 3:
+            raise SystemExit(f"malformed bond atom reference {ref!r} (expect chain:resnum:atom)")
+        return parts[0], int(parts[1]), parts[2]
+
+    n_linker_bonds = 0
     if linker_letters:
         linker_entity = linker_letters[0]
-        peptide_entity_no = len(receptor_names) + 1  # 1-based entity id
         linker_entity_no = len(receptor_names) + 2
-        raw_pairs = [p.strip() for p in (args.bond_pairs or "").split(";") if p.strip()]
-
-        def _parse_ref(ref: str) -> tuple[str, int, str]:
-            parts = ref.strip().split(":")
-            if len(parts) != 3:
-                raise SystemExit(f"malformed bond atom reference {ref!r} (expect chain:resnum:atom)")
-            return parts[0], int(parts[1]), parts[2]
-
-        for pair in raw_pairs:
-            a1, a2 = (p.strip() for p in pair.split(","))
-            ref1, ref2 = _parse_ref(a1), _parse_ref(a2)
-            if ref1[0] in peptide_letters:
-                pep_ref, link_ref = ref1, ref2
-            else:
-                pep_ref, link_ref = ref2, ref1
+    for pair in raw_pairs:
+        a1, a2 = (p.strip() for p in pair.split(","))
+        ref1, ref2 = _parse_ref(a1), _parse_ref(a2)
+        link_refs = [r for r in (ref1, ref2) if r[0] in linker_letters]
+        if link_refs:
+            if not linker_letters:
+                raise SystemExit(
+                    f"bond pair {pair!r} references a linker chain but --linker_chain is unset")
+            pep_ref, link_ref = (
+                (ref1, ref2) if ref1[0] in peptide_letters else (ref2, ref1))
             covalent_bonds.append({
                 "entity1": peptide_entity_no,
                 "copy1": 1,
@@ -435,9 +446,25 @@ def _run_peptide_engine(
                 "position2": link_ref[1],
                 "atom2": link_ref[2],
             })
-            staged_bond_pairs.append((ref1, ref2))
-        if not covalent_bonds:
-            raise SystemExit("linker chain given but --bond_pairs defines no bonds")
+            n_linker_bonds += 1
+        elif ref1[0] in peptide_letters and ref2[0] in peptide_letters:
+            covalent_bonds.append({
+                "entity1": peptide_entity_no,
+                "copy1": 1,
+                "position1": ref1[1],
+                "atom1": ref1[2],
+                "entity2": peptide_entity_no,
+                "copy2": 1,
+                "position2": ref2[1],
+                "atom2": ref2[2],
+            })
+        else:
+            raise SystemExit(
+                f"bond pair {pair!r} does not touch the peptide chain "
+                f"{peptide_letters} or the linker {linker_letters or '<none>'}")
+        staged_bond_pairs.append((ref1, ref2))
+    if linker_letters and not n_linker_bonds:
+        raise SystemExit("linker chain given but --bond_pairs defines no linker bonds")
 
     entity_chain_names: list[str] = receptor_names + [peptide.chain_name]
     if linker_entity is not None:
@@ -533,24 +560,6 @@ def _run_peptide_engine(
                 contact_arrays.append(bonds[0])
                 contact_uppers.append(bonds[1])
                 n_bond_pairs = len(bonds[1])
-        free_rows = np.concatenate([
-            info["entity_rows"][len(receptor_names)],
-        ] + ([info["entity_rows"][len(receptor_names) + 1]]
-             if linker_entity is not None else []))
-        if not blind_peptide:
-            # pocket pairs are derived from the POSED distances (receptor
-            # atoms within pocket_cutoff of the placed peptide get a
-            # pocket_upper band). From a pure-noise peptide start those
-            # distances are meaningless — blind inpainting runs without
-            # them (the free-chain chemistry constraints still apply).
-            pocket = compute_contact_pairs(
-                coords, mask, free_rows,
-                float(args.pocket_cutoff), float(args.pocket_upper),
-                anchor_slack=float(args.anchor_slack),
-            )
-            if pocket is not None:
-                contact_arrays.append(pocket[0])
-                contact_uppers.append(pocket[1])
         if contact_arrays:
             contacts = work_dir / "tfg_contacts.npz"
             np.savez(
@@ -559,10 +568,50 @@ def _run_peptide_engine(
                 upper=np.concatenate(contact_uppers, axis=0),
             )
             os.environ["PROTENIX_TFG_CONTACTS_PATH"] = str(contacts)
+            log.info("TFG contacts: %d bond pairs", n_bond_pairs)
+        # Native pocket guidance (boltz2 semantics, 2026-09-09): the user's
+        # pocket residue list drives a soft-min upper-bound potential on the
+        # free peptide atoms — pose-independent, so it composes with the
+        # blind (pure-noise) peptide start where the removed posed-distance
+        # anchors were meaningless. The old per-pair flat bands derived from
+        # the PLACED geometry are gone entirely: they demanded simultaneous
+        # satisfaction of every pair (over-constraint) and their projection
+        # is ill-conditioned on the full schedule.
+        pocket_res_raw = str(getattr(args, "pocket_res", "") or "").strip()
+        if pocket_res_raw:
+            pocket_res: list[tuple[str, int]] = []
+            for token in pocket_res_raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                if ":" not in token:
+                    raise SystemExit(
+                        f"--pocket_res entry {token!r} must be 'chain:resnum'")
+                chain_part, num_part = token.split(":", 1)
+                pocket_res.append((chain_part.strip(), int(num_part)))
+            pocket_npz_data = compute_pocket_guidance_pairs(
+                info, pocket_res, float(args.pocket_upper),
+                peptide_entity=len(receptor_names),
+                staged_to_auto=staged_to_auto,
+            )
+            if pocket_npz_data is None:
+                raise SystemExit(
+                    f"--pocket_res resolved no atoms on the staged receptor "
+                    f"({pocket_res_raw}); check the chain letters and residue "
+                    "numbering against the staged complex")
+            pocket_npz = work_dir / "pocket_guidance.npz"
+            np.savez(
+                pocket_npz,
+                pair_index=pocket_npz_data[0],
+                group=pocket_npz_data[1],
+                upper=pocket_npz_data[2],
+            )
+            os.environ["PROTENIX_POCKET_GUIDANCE_PATH"] = str(pocket_npz)
             log.info(
-                "TFG contacts: %d bond + %d pocket pairs",
-                n_bond_pairs,
-                len(pocket[0]) if pocket is not None else 0,
+                "pocket guidance: %d pairs over %d pocket residues "
+                "(soft-min upper %.1f A)",
+                len(pocket_npz_data[1]), pocket_npz_data[1].max() + 1,
+                float(args.pocket_upper),
             )
 
     # Ring-bond enforcement contract (post 553c0fc0d, TFG-native):

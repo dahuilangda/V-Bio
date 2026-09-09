@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 /**
  * Route-level error boundary.
@@ -10,11 +11,16 @@ import type { ErrorInfo, ReactNode } from 'react';
  * 404. React Router v7 transitions then freeze the previous view while the URL
  * has already changed — the "nav click does nothing" symptom.
  *
- * Handling: on a chunk-load failure, reload the page ONCE (fresh index.html →
- * fresh chunks, navigation works again). A sessionStorage marker bounds the
- * reload to one attempt per 10s so a genuinely broken deploy cannot loop.
- * Any other render error lands on an explicit fallback with a manual reload —
- * better than a white screen, and the error still reaches the console.
+ * Recovery ladder (SPA-first — the app never does a full page refresh unless
+ * recovering from genuinely stale assets):
+ *   1. Stale-chunk errors reload the document ONCE (guarded to one attempt per
+ *      10s): a 404'd chunk cannot be re-fetched in-page, so a fresh
+ *      index.html → fresh chunks is the only real fix.
+ *   2. Any other render error shows a fallback whose primary action navigates
+ *      back to /projects inside the router (transient errors recover with zero
+ *      refresh; a cached route chunk remounts immediately).
+ *   3. A manual Reload stays available as the last resort when in-app
+ *      navigation does not clear the fault.
  */
 
 const CHUNK_ERROR_PATTERNS = [
@@ -37,6 +43,38 @@ export function isStaleChunkError(error: unknown): boolean {
   }
   const haystack = parts.join(' ').toLowerCase();
   return CHUNK_ERROR_PATTERNS.some((pattern) => haystack.includes(pattern));
+}
+
+interface FallbackProps {
+  /** Clears the boundary's error state so the route tree remounts. */
+  onRecover: () => void;
+}
+
+export function RouteErrorFallback({ onRecover }: FallbackProps) {
+  const navigate = useNavigate();
+  const backToProjects = () => {
+    // Navigate first, then clear the error: the boundary stays on the fallback
+    // until its state resets, and the reset remounts the tree at the new
+    // location (retrying a transient render error or a now-cached chunk).
+    navigate('/projects', { replace: true });
+    onRecover();
+  };
+  return (
+    <div className="centered-page">
+      <div className="alert error" role="alert">
+        This page could not finish loading. A new deployment may have replaced the app
+        assets, or the page hit an unexpected error.
+      </div>
+      <div className="row gap-8">
+        <button type="button" className="btn btn-primary" onClick={backToProjects}>
+          Back to Projects
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => window.location.reload()}>
+          Reload
+        </button>
+      </div>
+    </div>
+  );
 }
 
 interface Props {
@@ -88,17 +126,7 @@ export class RouteErrorBoundary extends Component<Props, State> {
   render(): ReactNode {
     const { error } = this.state;
     if (error) {
-      return (
-        <div className="centered-page">
-          <div className="alert error" role="alert">
-            This page could not finish loading. A new deployment may have replaced the app
-            assets, or the page hit an unexpected error.
-          </div>
-          <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
-            Reload
-          </button>
-        </div>
-      );
+      return <RouteErrorFallback onRecover={() => this.setState({ error: null })} />;
     }
     return this.props.children;
   }

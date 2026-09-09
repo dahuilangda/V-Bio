@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { MouseEvent, ReactNode } from 'react';
 import { ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
+import { Field } from '../common/Field';
 import type {
   BondConstraint,
   ContactConstraint,
@@ -263,8 +264,7 @@ export function ConstraintEditor({
         </label>
 
         {properties.affinity && (
-          <label className="field">
-            <span>Binder Chain</span>
+          <Field label="Binder Chain">
             <select
               value={properties.binder || ''}
               disabled={disabled || chainIds.length === 0}
@@ -282,7 +282,7 @@ export function ConstraintEditor({
                 </option>
               ))}
             </select>
-          </label>
+          </Field>
         )}
         </div>
       )}
@@ -366,8 +366,7 @@ export function ConstraintEditor({
                 <>
                   {isSelected && endpointTargets}
                   {isSelected && activeResiduePicker}
-                  <label className="field">
-                    <span>Constraint Type</span>
+                  <Field label="Constraint Type">
                     <select value={item.type} disabled={disabled} onChange={(e) => setType(e.target.value as PredictionConstraintType)}>
                       {typeOptions.map((type) => (
                         <option key={`constraint-type-${item.id}-${type}`} value={type}>
@@ -375,7 +374,7 @@ export function ConstraintEditor({
                         </option>
                       ))}
                     </select>
-                  </label>
+                  </Field>
 
                   {item.type === 'contact' && (
                     <ContactConstraintFields
@@ -517,8 +516,7 @@ function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus,
           onChange={(e) => onChange({ ...value, token2_residue: clampPositiveInt(Number(e.target.value)) })}
         />
       </label>
-      <label className="field">
-        <span>Max Distance (Å)</span>
+      <Field label="Max Distance (Å)">
         <input
           type="number"
           min={1}
@@ -527,7 +525,7 @@ function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus,
           disabled={disabled}
           onChange={(e) => onChange({ ...value, max_distance: Math.max(1, Number(e.target.value) || 5) })}
         />
-      </label>
+      </Field>
       <label className="switch-field switch-tight">
         <input
           type="checkbox"
@@ -677,13 +675,11 @@ function BondConstraintFields({ value, chainInfos, structureAtomOptionsByChain, 
 function PocketConstraintFields({ value, chainInfos, disabled, onChange }: SharedFieldsProps<PocketConstraint>) {
   return (
     <div className="constraint-grid constraint-grid-pocket">
-      <label className="field">
-        <span>Binder Chain</span>
+      <Field label="Binder Chain">
         <ChainSelect value={value.binder} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, binder: next })} />
-      </label>
+      </Field>
 
-      <label className="field">
-        <span>Max Distance (Å)</span>
+      <Field label="Max Distance (Å)">
         <input
           type="number"
           min={1}
@@ -692,7 +688,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
           disabled={disabled}
           onChange={(e) => onChange({ ...value, max_distance: Math.max(1, Number(e.target.value) || 6) })}
         />
-      </label>
+      </Field>
 
       <label className="switch-field switch-tight">
         <input

@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { FlaskConical, Lock, User } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { Field } from '../components/common/Field';
 
 export function LoginPage() {
   const { loginAction, session } = useAuth();
@@ -37,8 +38,7 @@ export function LoginPage() {
         <h1>Sign In</h1>
 
         <form onSubmit={onSubmit} className="form-grid">
-          <label className="field">
-            <span>Username or Email</span>
+          <Field label="Username or Email">
             <div className="input-wrap">
               <User size={16} />
               <input
@@ -49,10 +49,9 @@ export function LoginPage() {
                 required
               />
             </div>
-          </label>
+          </Field>
 
-          <label className="field">
-            <span>Password</span>
+          <Field label="Password">
             <div className="input-wrap">
               <Lock size={16} />
               <input
@@ -64,7 +63,7 @@ export function LoginPage() {
                 required
               />
             </div>
-          </label>
+          </Field>
 
           {error && <div className="alert error">{error}</div>}
 

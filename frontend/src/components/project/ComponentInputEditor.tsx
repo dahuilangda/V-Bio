@@ -11,6 +11,7 @@ import { rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
 import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
+import { Field } from '../common/Field';
 
 interface ComponentInputEditorProps {
   components: InputComponent[];
@@ -912,8 +913,7 @@ export function ComponentInputEditor({
               {!isCollapsed && (
                 <>
               <div className={`component-meta ${compact ? 'component-meta-compact' : ''}`}>
-                <label className="field">
-                  <span>Type</span>
+                <Field label="Type">
                   <select
                     value={comp.type}
                     disabled={disabled}
@@ -931,10 +931,9 @@ export function ComponentInputEditor({
                       </option>
                     ))}
                   </select>
-                </label>
+                </Field>
 
-                <label className="field">
-                  <span>Copies</span>
+                <Field label="Copies">
                   <input
                     type="number"
                     min={1}
@@ -951,19 +950,26 @@ export function ComponentInputEditor({
                       }
                     }}
                   />
-                </label>
+                </Field>
 
                 {comp.type === 'protein' && (
                   <>
                     {allowProteinMsa && (
                       <label className="switch-field switch-tight">
-                        <input
-                          type="checkbox"
-                          checked={comp.useMsa !== false}
+                        <span>MSA</span>
+                        <select
+                          className="msa-mode-select"
+                          value={comp.msaMode ?? (comp.useMsa !== false ? 'uniref' : 'none')}
                           disabled={disabled}
-                          onChange={(e) => patchOne(comp.id, { useMsa: e.target.checked })}
-                        />
-                        <span>Use MSA</span>
+                          onChange={(e) => {
+                            const mode = e.target.value as 'none' | 'uniref' | 'env';
+                            patchOne(comp.id, { msaMode: mode, useMsa: mode !== 'none' });
+                          }}
+                        >
+                          <option value="uniref">UniRef (fast)</option>
+                          <option value="env">UniRef+Env (full)</option>
+                          <option value="none">None</option>
+                        </select>
                       </label>
                     )}
                     {allowProteinCyclic && (
@@ -1021,8 +1027,7 @@ export function ComponentInputEditor({
                     </div>
 
                     {templateUpload && (
-                      <label className="field">
-                        <span>Template Chain</span>
+                      <Field label="Template Chain">
                         <select
                           value={templateUpload.chainId}
                           disabled={disabled}
@@ -1039,14 +1044,13 @@ export function ComponentInputEditor({
                             Sequence auto-filled from chain {templateUpload.chainId} ({selectedTemplateSequence.length} aa).
                           </span>
                         )}
-                      </label>
+                      </Field>
                     )}
                     </>
                     )}
 
                     {!hasProteinModifications ? (
-                      <label className="field">
-                        <span>Protein Sequence</span>
+                      <Field label="Protein Sequence">
                         <textarea
                           rows={compact ? 4 : 6}
                           placeholder="Example: MKTIIALSYIFCLVFA..."
@@ -1054,7 +1058,7 @@ export function ComponentInputEditor({
                           disabled={disabled}
                           onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                         />
-                      </label>
+                      </Field>
                     ) : null}
 
                     {allowProteinModifications ? (
@@ -1274,8 +1278,7 @@ export function ComponentInputEditor({
                                         <div className="protein-mod-custom-side">
                                           {customResidueLibrary.length > 0 && (
                                             <div className="protein-mod-library">
-                                              <label className="field">
-                                                <span>Library</span>
+                                              <Field label="Library">
                                                 <select
                                                   value=""
                                                   disabled={disabled}
@@ -1290,7 +1293,7 @@ export function ComponentInputEditor({
                                                     </option>
                                                   ))}
                                                 </select>
-                                              </label>
+                                              </Field>
                                               <div className="protein-mod-library-actions">
                                                 {customResidueLibrary.slice(0, 4).map((item) => (
                                                   <button
@@ -1310,24 +1313,22 @@ export function ComponentInputEditor({
                                               </div>
                                             </div>
                                           )}
-                                          <label className="field">
-                                            <span>Name</span>
+                                          <Field label="Name">
                                             <input
                                               value={mod.label || ''}
                                               disabled={disabled}
                                               placeholder="Custom residue"
                                               onChange={(e) => patchProteinModification(comp.id, mod.id, { label: e.target.value })}
                                             />
-                                          </label>
-                                          <label className="field">
-                                            <span>Custom Residue SMILES</span>
+                                          </Field>
+                                          <Field label="Custom Residue SMILES">
                                             <input
                                               value={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
                                               disabled={disabled}
                                               placeholder="Modified residue SMILES"
                                               onChange={(e) => patchProteinModification(comp.id, mod.id, { smiles: e.target.value })}
                                             />
-                                          </label>
+                                          </Field>
                                           <label className="switch-field protein-mod-amidation">
                                             <input
                                               type="checkbox"
@@ -1399,8 +1400,7 @@ export function ComponentInputEditor({
               )}
 
               {comp.type === 'dna' && (
-                <label className="field">
-                  <span>DNA Sequence</span>
+                <Field label="DNA Sequence">
                   <textarea
                     rows={compact ? 4 : 6}
                     placeholder="Example: ATGGCC..."
@@ -1408,12 +1408,11 @@ export function ComponentInputEditor({
                     disabled={disabled}
                     onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                   />
-                </label>
+                </Field>
               )}
 
               {comp.type === 'rna' && (
-                <label className="field">
-                  <span>RNA Sequence</span>
+                <Field label="RNA Sequence">
                   <textarea
                     rows={compact ? 4 : 6}
                     placeholder="Example: AUGGCC..."
@@ -1421,13 +1420,12 @@ export function ComponentInputEditor({
                     disabled={disabled}
                     onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                   />
-                </label>
+                </Field>
               )}
 
               {comp.type === 'ligand' && method === 'ccd' && (
                 <div className="component-content-main ligand-input-left">
-                  <label className="field">
-                    <span>Ligand Input Mode</span>
+                  <Field label="Ligand Input Mode">
                     <select
                       value={method}
                       disabled={disabled}
@@ -1439,25 +1437,23 @@ export function ComponentInputEditor({
                         </option>
                       ))}
                     </select>
-                  </label>
+                  </Field>
 
-                  <label className="field">
-                    <span>CCD Code</span>
+                  <Field label="CCD Code">
                     <input
                       placeholder="Example: ATP, NAD, HEM"
                       value={comp.sequence}
                       disabled={disabled}
                       onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                     />
-                  </label>
+                  </Field>
                 </div>
               )}
 
               {comp.type === 'ligand' && method !== 'ccd' && (
                 <div className={`component-content-split component-content-split-ligand ${hasLigandJsmeViewer ? 'has-side' : ''}`}>
                   <div className="component-content-main ligand-input-left">
-                    <label className="field">
-                      <span>Ligand Input Mode</span>
+                    <Field label="Ligand Input Mode">
                       <select
                         value={method}
                         disabled={disabled}
@@ -1469,16 +1465,15 @@ export function ComponentInputEditor({
                           </option>
                         ))}
                       </select>
-                    </label>
-                    <label className="field">
-                      <span>SMILES</span>
+                    </Field>
+                    <Field label="SMILES">
                       <input
                         placeholder="Example: CC(=O)NC1=CC=C(C=C1)O"
                         value={comp.sequence}
                         disabled={disabled}
                         onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                       />
-                    </label>
+                    </Field>
                     <div className={`ligand-live-props ${hasLigandJsmeViewer ? 'align-bottom' : ''}`}>
                       <span>Live Ligand Properties</span>
                       <LigandPropertyGrid smiles={comp.sequence} variant="radar" />

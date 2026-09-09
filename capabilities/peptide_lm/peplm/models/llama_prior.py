@@ -74,14 +74,35 @@ class ModernPrior(nn.Module):
         self.aux_props = aux_props
         if aux_props:
             self.prop_head = PropertyHeads(d_model)
+        # ESM3-style additive SS3 track (esm3.py EncodeInputs: every track
+        # gets its own nn.Embedding and is SUMMED onto the residue
+        # embedding per position). Additive tracks leave RoPE, the causal
+        # mask and the residue stream untouched, and PARTIAL prompting is
+        # native: id 0 = "no SS opinion" (free position), 1/2/3 = H/E/L.
+        # Zero-initialized so every existing checkpoint loads with exact
+        # identity behaviour until the track is trained.
+        self.ss_track = nn.Embedding(4, d_model)
+        nn.init.zeros_(self.ss_track.weight)
 
     # ---------------------------------------------------------------- core
-    def forward(self, x):
-        return self.gpt(x).logits
+    def _embed(self, x: torch.Tensor, ss_ids: torch.Tensor) -> torch.Tensor:
+        """Residue embeddings plus the additive SS track (id 0 adds zero
+        for untrained/absent conditioning)."""
+        return self.gpt.get_input_embeddings()(x) + self.ss_track(ss_ids)
 
-    def _token_logprobs(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, ss_ids: torch.Tensor | None = None):
+        if ss_ids is None:
+            return self.gpt(x).logits
+        return self.gpt(inputs_embeds=self._embed(x, ss_ids)).logits
+
+    def _token_logprobs(self, x: torch.Tensor,
+                        ss_ids: torch.Tensor | None = None) -> torch.Tensor:
         att = (~x.eq(self.pad)).long()
-        out = self.gpt(x[:, :-1], attention_mask=att[:, :-1], output_hidden_states=True)
+        if ss_ids is not None:
+            out = self.gpt(inputs_embeds=self._embed(x[:, :-1], ss_ids[:, :-1]),
+                           attention_mask=att[:, :-1], output_hidden_states=True)
+        else:
+            out = self.gpt(x[:, :-1], attention_mask=att[:, :-1], output_hidden_states=True)
         logits = out.logits
         lp = F.log_softmax(logits.float(), dim=-1)
         tgt = x[:, 1:]
@@ -155,6 +176,7 @@ class ModernPrior(nn.Module):
         uncond_anchor: list[str] | None = None,
         max_res: int | None = None,
         constraints: "ConstraintPlan | None" = None,
+        ss_track: list[int] | None = None,
     ):
         """Identical contract to GPT2Prior.sample_with_prompt (see that
         docstring): FIM-aware continuation with placement legality, min/max
@@ -185,8 +207,26 @@ class ModernPrior(nn.Module):
             bare = [self.bos] + [stoi[t] for t in anchor if t in stoi]
             uncond_x = torch.tensor([bare] * n, dtype=torch.long, device=device)
 
+        # additive SS conditioning: `ss_track[j]` applies to the j-th
+        # EMITTED residue of the de novo stream (prompt positions and
+        # non-residue tokens carry id 0). Aligned with res_emitted, so the
+        # FIM route (which counts flank residues) must not pass ss_track —
+        # de novo prompts only, by contract.
+        ss_rows = None
+        if ss_track is not None:
+            # aligned with x = [bos] + prompt_ids: prompt positions carry
+            # id 0 (no SS opinion on conditioning tokens)
+            ss_rows = torch.zeros(
+                n, 1 + len(prompt_ids), dtype=torch.long, device=device)
+            track = [int(v) for v in ss_track]
+
         for _ in range(max(4, max_len - len(prompt_ids))):
-            logits = self.gpt(x).logits[:, -1].float() / max(temperature, 1e-4)
+            if ss_rows is not None:
+                logits = self.gpt(
+                    inputs_embeds=self._embed(x, ss_rows)
+                ).logits[:, -1].float() / max(temperature, 1e-4)
+            else:
+                logits = self.gpt(x).logits[:, -1].float() / max(temperature, 1e-4)
             if uncond_x is not None:
                 u_logits = self.gpt(uncond_x).logits[:, -1].float() / max(temperature, 1e-4)
                 logits = (1.0 + guidance_alpha) * logits - guidance_alpha * u_logits
@@ -236,6 +276,11 @@ class ModernPrior(nn.Module):
                 gen_logprob += torch.where(active, chosen_lp, torch.zeros_like(chosen_lp))
                 gen_len += active.long()
             nxt_list = nxt.squeeze(1).tolist()
+            if ss_rows is not None:
+                ss_next = torch.tensor(
+                    [track[r] if r < len(track) else 0 for r in res_emitted],
+                    dtype=torch.long, device=device).clamp(0, 3)
+                ss_rows = torch.cat([ss_rows, ss_next.unsqueeze(1)], dim=1)
             for i in range(n):
                 if finished[i]:
                     continue

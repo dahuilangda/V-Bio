@@ -100,3 +100,19 @@ export interface TaskListRow {
   peptideStage: string;
   peptideStatusMessage: string;
 }
+
+/** Table chrome variant implied by the workflow filter: dedicated modes when a
+ *  lead-opt/peptide workflow is selected (or is the project's only workflow). */
+export function deriveTaskTableMode(
+  workflowFilter: TaskWorkflowFilter,
+  workflowOptions: TaskWorkflowFilter[]
+): TaskTableMode {
+  const single = workflowOptions.length === 1 ? workflowOptions[0] : null;
+  if (workflowFilter === 'lead_optimization' || (workflowFilter === 'all' && single === 'lead_optimization')) {
+    return 'lead_opt';
+  }
+  if (workflowFilter === 'peptide_design' || (workflowFilter === 'all' && single === 'peptide_design')) {
+    return 'peptide';
+  }
+  return 'default';
+}

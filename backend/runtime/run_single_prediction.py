@@ -809,15 +809,20 @@ def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int
 def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     for item in yaml_data.get("sequences", []):
-        if not isinstance(item, dict) or "protein" not in item:
+        if not isinstance(item, dict):
             continue
-        protein = item.get("protein", {})
+        # Support both "protein" (Boltz format) and "proteinChain" (V-Bio format)
+        protein = item.get("protein") or item.get("proteinChain")
+        if protein is None or not isinstance(protein, dict):
+            continue
         seq = protein.get("sequence", "")
-        ids = protein.get("id")
+        ids = protein.get("id") or protein.get("chain_id")
         if isinstance(ids, list):
             chain_ids = ids
         else:
             chain_ids = [ids] if ids is not None else []
+        if not chain_ids:
+            continue
         for chain_id in chain_ids:
             mapping[chain_id] = seq
     return mapping
@@ -7505,6 +7510,8 @@ class DpeptideStaleWorkerError(RuntimeError):
 
 def _dpeptide_dispatch_refine(
     staged_path: Path, seed: int, queue: str, blind: bool = False,
+    cyclic_headtail: bool = False,
+    pocket_res: Optional[str] = None,
 ) -> Any:
     """Dispatch one protenix2dock ``peptide`` refine task and return its
     AsyncResult immediately (pair with :func:`_dpeptide_collect_refine`).
@@ -7513,10 +7520,26 @@ def _dpeptide_dispatch_refine(
     (vendor inpainting side channel), the peptide enters the input json as a
     proteinChain, and bicyclic ring bonds (peptide SG <-> linker anchors) are
     carried both as input.json covalent_bonds and as hard TFG contacts.
+    ``cyclic_headtail`` adds the head-to-tail N-C bond of a cyclic peptide in
+    both channels — pose-independent chemistry, so it composes with the blind
+    (pure-noise peptide start) route where the placed pose never reaches the
+    sampler. Without it a cyclic peptide refines as a linear chain and the
+    ring silently opens (or worse, collapses).
+    ``pocket_res`` ("A:18,A:76,...", staged/sequence numbering) activates the
+    native boltz2-style PocketPotential guidance — the pocket conditions the
+    SAMPLER, never a hand-rolled placement.
     """
     from backend.core.celery_app import celery_app as _celery
 
     bond_pairs = _staged_bicyclic_bond_pairs(staged_path)
+    if cyclic_headtail and not bond_pairs:
+        # staged peptide chain is B, residues numbered 1..L (production
+        # writer contract, see compute_bond_contact_pairs)
+        st_len = gemmi.read_structure(str(staged_path))
+        st_len.setup_entities()
+        pep_len = sum(1 for r in st_len[0]["B"] if r.het_flag != "H")
+        if pep_len >= 4:
+            bond_pairs = f"B:1:N,B:{pep_len}:C"
     linker_ccd = "SEZ"
     if bond_pairs:
         try:
@@ -7529,6 +7552,11 @@ def _dpeptide_dispatch_refine(
                         break
         except Exception:  # noqa: BLE001
             pass
+    # linker chain only exists for bicyclic topology (SG <-> linker anchors);
+    # cyclic head-tail pairs are intra-peptide and carry no linker entity
+    has_linker = bool(
+        bond_pairs and "," in bond_pairs
+        and any(ref.startswith("L:") for ref in bond_pairs.replace(";", ",").split(",")))
     return _celery.send_task(
         "backend.worker.tasks.protenix2dock_task",
         kwargs={"score_args": {
@@ -7540,13 +7568,13 @@ def _dpeptide_dispatch_refine(
             # linker's chain pair (B-C) would drag the reported iptm
             "interface_chains": "A,B",
             "bond_pairs": bond_pairs or "",
-            "linker_chain": "L" if bond_pairs else "",
+            "linker_chain": "L" if has_linker else "",
             "linker_ccd": linker_ccd,
+            "pocket_res": pocket_res or "",
             "seed": int(seed),
-            # pocket anchor cap: the TFG/anchor upper bound must sit under
-            # the acceptance gate (POCKET_CONTACT_MAX_A) or the refined pose
-            # can legally drift out of the user pocket (measured 10-11 A with
-            # the 8.0 default) and every candidate gets rejected.
+            # PocketPotential per-pair upper bound: boltz2's pocket
+            # max_distance default is 6.0 (= POCKET_CONTACT_MAX_A + 1, so the
+            # guidance envelope strictly contains the acceptance gate)
             "pocket_upper": float(POCKET_CONTACT_MAX_A) + 1.0,
             "dpeptide_contract": True,
             "blind_peptide": bool(blind),
@@ -7968,6 +7996,62 @@ def _pocket_contact_report(
 POCKET_CONTACT_MAX_A = 5.0
 
 
+def _pocket_chemistry_demands(
+    target_sequence: str,
+    pocket_sequence_contacts: List[Tuple[str, int]],
+) -> Optional[Dict[str, int]]:
+    """Side-chain chemistry demands implied by the user pocket's composition.
+
+    Returns {"acid": n, "basic": n, "aromatic": n} anchors the peptide should
+    supply, or None when the pocket makes no strong demand (term inactive).
+    Interface physics diagnostics (2026-09-09 RANKL post-mortem): a peptide
+    can pack as well as the native ligand (Sc 0.445 vs 0.424) yet score
+    poorly when the polar lock is missing — zero salt bridges against a
+    4-Lys/1-Arg rim, zero aromatics against Y/H. A basic rim demands acidic
+    anchors (Glu > Asp: longer side chain reaches the NZ), an acidic rim
+    demands basic residues, aromatic pockets (Y/F/H/W) demand aromatic
+    partners. Anchor counts are halved with a floor of 2: a 4-Lys rim is
+    locked by 2 well-placed carboxylates, not 4."""
+    pocket_aas = "".join(
+        target_sequence[int(pos) - 1]
+        for _chain, pos in pocket_sequence_contacts
+        if 1 <= int(pos) <= len(target_sequence)
+    )
+    if len(pocket_aas) < 4:
+        return None
+    basic = sum(aa in "KR" for aa in pocket_aas)
+    acidic = sum(aa in "DE" for aa in pocket_aas)
+    aromatic = sum(aa in "FYHW" for aa in pocket_aas)
+    demands: Dict[str, int] = {}
+    if basic - acidic >= 2:
+        demands["acid"] = max(2, (basic - acidic + 1) // 2)
+    if acidic - basic >= 2:
+        demands["basic"] = max(2, (acidic - basic + 1) // 2)
+    if aromatic >= 2:
+        demands["aromatic"] = min(3, aromatic // 2)
+    return demands or None
+
+
+def _pocket_chemistry_complementarity(
+    sequence: str, demands: Optional[Dict[str, int]],
+) -> Optional[float]:
+    """Match of the peptide's side-chain supply to the pocket demands, [0, 1].
+
+    Glu counts fully toward the acid demand and Asp at half weight (side-chain
+    reach); Lys/Arg symmetrically for a basic rim; F/Y/W for aromatic stacking
+    (peptide His is pH-ambiguous and excluded)."""
+    if not demands:
+        return None
+    seq = str(sequence or "").upper()
+    supply = {
+        "acid": seq.count("E") + 0.5 * seq.count("D"),
+        "basic": seq.count("R") + 0.5 * seq.count("K"),
+        "aromatic": float(seq.count("F") + seq.count("Y") + seq.count("W")),
+    }
+    scores = [min(1.0, supply[k] / float(demands[k])) for k in demands]
+    return sum(scores) / len(scores)
+
+
 def _pocket_place_for_refine(
     staged_path: Path,
     *,
@@ -8101,6 +8185,21 @@ def _pocket_collect_refine(
         f"flags={flags or 'none'}",
         file=sys.stderr,
     )
+    # 2026-09-09: these are GATES again, not telemetry. A collapsed structure
+    # (broken CA-CB) or a pose outside the user pocket is not a shippable
+    # product even when its ipTM reads high — a jammed/collapsed contact map
+    # inflates ipTM precisely in the failure mode the integrity check catches.
+    # Rejecting loudly is the honest behavior; soft-scoring let off-pocket
+    # poses (13.7 A) top the ranking under the old composite blending.
+    if "integrity" in flags:
+        raise ValueError(
+            f"精修产物完整性破损（broken CA-CB: "
+            f"{integrity.get('broken_bonds', [])[:3]}）— 采样塌缩，拒收")
+    if "pocket" in flags:
+        raise ValueError(
+            f"精修产物未落在用户口袋（pocket_min="
+            f"{pocket_min if pocket_min is None else round(float(pocket_min), 2)}A > "
+            f"{POCKET_CONTACT_MAX_A}A）— 拒收")
     return {
         "staged": str(staged_path),
         "refined": refined_path,
@@ -8253,6 +8352,38 @@ def _append_staged_bicyclic_links(
             handle.write(line + "\n")
         handle.write("END\n")
     return len(link_lines)
+
+
+def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
+    """Measure whether a cyclic peptide's head-to-tail bond survived the
+    refine: N(residue 1) <-> C(residue L) on the second-largest polymer
+    chain (the peptide, mirror-space contract). A peptide N-C amide bond is
+    ~1.33 A; 2.5 A is the reporting cut-off — anything beyond means the ring
+    opened (or never closed) and the product is not cyclic."""
+    st = gemmi.read_structure(str(structure_path))
+    st.setup_entities()
+    polymer = sorted(
+        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
+    )
+    if len(polymer) < 2:
+        return {"chain": None, "n_c_distance": None, "all_bonded": False}
+    pep = polymer[1]
+    residues = [r for r in pep if r.het_flag != "H"]
+    if len(residues) < 4:
+        return {"chain": pep.name, "n_c_distance": None, "all_bonded": False}
+    n_atom = residues[0].find_atom("N", "*")
+    c_atom = residues[-1].find_atom("C", "*")
+    if n_atom is None or c_atom is None:
+        return {"chain": pep.name, "n_c_distance": None, "all_bonded": False}
+    dist = float(n_atom.pos.dist(c_atom.pos))
+    return {
+        "chain": pep.name,
+        "first_residue": int(residues[0].seqid.num),
+        "last_residue": int(residues[-1].seqid.num),
+        "n_c_distance": round(dist, 2),
+        "all_bonded": dist <= 2.5,
+    }
 
 
 def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
@@ -8750,6 +8881,13 @@ def run_peptide_design_backend(
             allow_extra_cys=allow_extra_cys,
             fixed_residues=_plm_fixed,
             ncaa_decode_bias=float(options.get("peptideNcaaDecodeBias") or 0.5),
+            # per-residue SS3 profile ("heee...", 's'=通配) switches the
+            # proposer to the SS-conditioned v7 prior (vocab superset) —
+            # target-appropriate structural priors, e.g. hairpin profiles
+            # for TNF-family receptor grooves
+            ss_profile=(
+                str(options.get("peptideSSProfile") or
+                    options.get("peptide_ss_profile") or "").strip() or None),
             device=os.environ.get("VBIO_PEPTIDELM_DEVICE") or (
                 "cuda" if _torch_cuda_available() else "cpu"),
             log=lambda m: print(f"[peptidelm] {m}", file=sys.stderr),
@@ -8798,6 +8936,19 @@ def run_peptide_design_backend(
         {"contacts": [[c, n] for c, n in pocket_author_contacts]}
         if pocket_author_contacts else None
     )
+    # Pocket chemistry demands (capability C): pre-folding reward shaping
+    # derived from the pocket's own composition — generalizes to any target
+    pocket_chem_demands = (
+        _pocket_chemistry_demands(
+            _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id),
+            pocket_sequence_contacts)
+        if pocket_sequence_contacts else None
+    )
+    if pocket_chem_demands:
+        print(
+            f"[peptide-design] pocket chemistry demands: {pocket_chem_demands}",
+            file=sys.stderr,
+        )
 
     dpeptide_reference_target: Optional[Path] = None
     d_target_staged: Optional[Path] = None
@@ -8835,15 +8986,30 @@ def run_peptide_design_backend(
                 binder_length=binder_length)
     else:
         d_reference_peptide = None
+    # 2026-09-09 协议修订（对齐 dock 模式 2026-09-04 决策 + boltz2 原生口袋
+    # 语义）：一切 de-novo D-肽（linear/cyclic/bicyclic，无参考肽结构）走
+    # native blind inpainting——肽纯噪声 + 完整调度，受体每步钉住，姿态由
+    # 扩散先验生成；环拓扑以 pose 无关的 TFG 键对随精修携带；用户口袋经
+    # PocketPotential 在采样期引导（不再有任何自研刚体摆位——该路由把肽
+    # Cage 在任意局部姿态，sigma_max=0.05 的局部窗口无法逃逸，精修矛盾以
+    # 塌缩收场：实测 pocket_min 0.35 A / CA-CB 断裂 / integrity=BROKEN，
+    # 16-mer 对照 bb734f9e 复现 13/16 塌缩）。参考锚定模式（用户上传初始
+    # 肽结构）是唯一保留的 staged 路径——那是真实结合模式，非发明摆位。
     blind_linear_route = (
-        peptide_chirality == 'd' and design_mode == "linear"
-        and d_reference_peptide is None)
+        peptide_chirality == 'd' and d_reference_peptide is None)
     if (peptide_chirality == 'd' and not pocket_sequence_contacts
             and not blind_linear_route):
         # 无口袋 D-肽此前静默退化到"靶点质心摆位"(2026-09-04 事故: staged 埋置
         # 0.16 A,精修全面翻手性)。BICYCLIC/参考锚定模式必须有口袋或参考;
-        # 线性模式走盲 inpainting(受体钉住+肽从噪声,姿态由 MSA 先验产生,
+        # 线性/环肽模式走盲 inpainting(受体钉住+肽从噪声,姿态由 MSA 先验产生,
         # A/B 实测红dock RMSD 1.5-2.0 A),不需要口袋。
+        # 2026-09-09 协议修订(与 dock 模式 2026-09-04 决策对齐): cyclic+D 不再
+        # 走"自研刚体摆位+局部精修"——该路由把肽 Cage 在任意局部摆位
+        # (sigma_max=0.05 ≈ ±0.8 A 活动半径),精修矛盾以塌缩收场(实测
+        # pocket_min 0.35 A、CA-CB 断裂,integrity=BROKEN)。cyclic 与 linear
+        # 同走 native blind inpainting;环头尾 N-C 键以 pose 无关的 TFG 键对
+        # 随精修携带;用户口袋退为后置过滤(_pocket_contact_report 硬门槛
+        # + composite 0.32 权重),永不条件化采样器。
         raise ValueError(
             "D-肽设计(双环/参考锚定)必须提供口袋定义或上传初始肽结构。")
 
@@ -8957,6 +9123,11 @@ def run_peptide_design_backend(
         )
 
         generation_candidates: List[Dict[str, Any]] = []
+        # Gate-rejected candidates of the current generation, kept for the
+        # GRPO update as floor-reward negative samples. Dropping rejects
+        # starved every group of variance (2/48 survival -> <4 learnable
+        # rows -> zero policy updates for the whole run).
+        generation_rejected_rows: List[Dict[str, Any]] = []
 
         # PeptideLM proposals — the single proposal source. When the user
         # supplied an initial (seed) sequence, generation 1 anchors edits on
@@ -8971,7 +9142,7 @@ def run_peptide_design_backend(
                     "modifications": [],
                     "plddts": [],
                 }]
-            for lm_base, lm_mods, lm_anchors in peptidelm_proposer.propose(
+            for lm_base, lm_mods, lm_anchors, lm_group in peptidelm_proposer.propose(
                 natural_pool,
                 unnatural_pool,
                 _proposer_elites,
@@ -8987,6 +9158,9 @@ def run_peptide_design_backend(
                     "sequence": lm_sequence,
                     "modifications": lm_mods,
                     "cys_positions": [int(p) for p in (lm_anchors or [])],
+                    # GRPO grouping key from the proposer (de novo pool /
+                    # per-parent edit cohort) — carried through to learn()
+                    "proposal_group": lm_group,
                 })
                 if len(generation_candidates) >= population_size:
                     break
@@ -9147,6 +9321,15 @@ def run_peptide_design_backend(
             nonlocal completed_tasks, generation_done
             if ctx.get("reject"):
                 print(ctx["reject"], file=sys.stderr)
+                generation_rejected_rows.append({
+                    "sequence": str(ctx.get("candidate_sequence") or ""),
+                    "generation": generation,
+                    "proposal_group": (ctx.get("proposal_group")
+                                       or (ctx.get("job") or {}).get("proposal_group")
+                                       or "ungrouped"),
+                    "gate_rejected": True,
+                    "reject_reason": str(ctx["reject"])[:200],
+                })
                 return
             job = ctx["job"]
             candidate_sequence = ctx["candidate_sequence"]
@@ -9188,7 +9371,15 @@ def run_peptide_design_backend(
                 pm = rpr.get("pocket_min_distance")
                 if not isinstance(pm, (int, float)):
                     return
-                ps = max(0.0, min(1.0, (8.0 - float(pm)) / 3.0)) if pm > 5.0 else 1.0
+                # pocket satisfaction v2 (2026-09-09): proximity alone rewards
+                # grazing contacts; half the weight now comes from the REAL
+                # interface size — heavy-atom pairs within 4.5 A of the user's
+                # pocket residues (already computed by the report). ~50 pairs
+                # is a saturated 12-16-mer epitope engagement.
+                n45 = int(rpr.get("pocket_contacts_within_4p5") or 0)
+                ps_prox = max(0.0, min(1.0, (8.0 - float(pm)) / 3.0)) if pm > 5.0 else 1.0
+                ps_contacts = min(1.0, n45 / 35.0)
+                ps = 0.5 * ps_prox + 0.5 * ps_contacts
                 composite_score = 0.68 * composite_score + 0.32 * ps
 
             # D-route (chirality=d): collect the dispatched fixed-D diffusion
@@ -9231,6 +9422,28 @@ def run_peptide_design_backend(
                                 return
                     # 硬手性门: 精修产物必须满足镜像空间契约(受体全D/肽全L)。
                     _dpeptide_refined_chirality_gate(Path(d_space_refined))
+                    if design_mode == "cyclic":
+                        # ring integrity gate: the head-tail N-C bond rides the
+                        # refine as pose-independent TFG chemistry; a product
+                        # with an open ring is not a cyclic peptide — reject
+                        # loudly instead of shipping a macrocycle that is
+                        # actually a linear chain
+                        ring = _cyclic_headtail_bond_report(Path(d_space_refined))
+                        if not ring.get("all_bonded"):
+                            print(
+                                f"[d-peptide] candidate {candidate_sequence[:12]}… "
+                                f"rejected: cyclic ring opened in refine "
+                                f"(N-C {ring.get('n_c_distance')} A)",
+                                file=sys.stderr,
+                            )
+                            generation_rejected_rows.append({
+                                "sequence": candidate_sequence,
+                                "generation": generation,
+                                "proposal_group": job.get("proposal_group") or "ungrouped",
+                                "gate_rejected": True,
+                                "reject_reason": "cyclic_ring_open",
+                            })
+                            return
                     print(
                         f"[d-peptide] candidate {candidate_sequence[:12]}… "
                         f"D-space ipTM={d_space_metrics.get('iptm')}",
@@ -9247,6 +9460,13 @@ def run_peptide_design_backend(
                         f"rejected: {d_exc}",
                         file=sys.stderr,
                     )
+                    generation_rejected_rows.append({
+                        "sequence": candidate_sequence,
+                        "generation": generation,
+                        "proposal_group": job.get("proposal_group") or "ungrouped",
+                        "gate_rejected": True,
+                        "reject_reason": str(d_exc)[:200],
+                    })
                     return
 
             # L chirality + user pocket: collect the dispatched pocket refine;
@@ -9334,6 +9554,13 @@ def run_peptide_design_backend(
                 "modifications": candidate_modifications,
                 "cys_positions": job.get("cys_positions") if isinstance(job.get("cys_positions"), list) else [],
                 "generation": generation,
+                # GRPO cohort key set by the proposer (de novo pool /
+                # per-parent edit group) — consumed by learn()
+                "proposal_group": job.get("proposal_group") or "ungrouped",
+                # pre-folding chemistry match vs the pocket's demands —
+                # consumed by learn() as the chem_comp reward part
+                "chem_comp": _pocket_chemistry_complementarity(
+                    candidate_sequence, pocket_chem_demands),
                 "iptm": pair_iptm,
                 "pair_iptm": pair_iptm,
                 "pair_iptm_target_binder": pair_iptm_target_binder,
@@ -9405,7 +9632,8 @@ def run_peptide_design_backend(
             try:
                 peptidelm_proposer.learn(
                     elite_population,
-                    [row for row in all_results if row.get("generation") == generation],
+                    [row for row in all_results if row.get("generation") == generation]
+                    + generation_rejected_rows,
                 )
             except Exception as exc:
                 raise RuntimeError(f"PeptideLM learn 失败（generation {generation}）：{exc}") from exc
@@ -9576,6 +9804,8 @@ def run_peptide_design_backend(
                         f"[d-peptide] candidate {candidate_sequence[:12]}… "
                         f"rejected: worker returned no structure"
                     ),
+                    "candidate_sequence": candidate_sequence,
+                    "proposal_group": job.get("proposal_group") or "ungrouped",
                 })
                 continue
             if peptide_chirality == 'd':
@@ -9597,9 +9827,13 @@ def run_peptide_design_backend(
                         pose_matters=not blind_linear_route,
                     )
                     refined_cif = str(Path(candidate_dir) / "d_space_refined.cif")
-                    if pocket_sequence_contacts:
-                        # Pocket placement is CPU work (mutates the staged
-                        # file); the GPU refine dispatch follows.
+                    if pocket_sequence_contacts and d_reference_peptide is not None:
+                        # mode A (reference-anchored) only: restore the
+                        # covalent LINK topology; the user's uploaded pose IS
+                        # the binding mode (never clash-searched). The de-novo
+                        # clash-free placement route was removed 2026-09-09 —
+                        # its invented pose only fed the sampler a wrong local
+                        # minimum the local refine window could not escape.
                         _pocket_place_for_refine(
                             Path(staged_path),
                             pocket_sequence_contacts=pocket_sequence_contacts,
@@ -9609,34 +9843,47 @@ def run_peptide_design_backend(
                                 job.get("cys_positions")
                                 if isinstance(job.get("cys_positions"), list) else None),
                             linker_ccd=linker_ccd,
-                            keep_pose=(d_reference_peptide is not None),
+                            keep_pose=True,
                         )
+                        route = "pocket"
+                    elif pocket_sequence_contacts:
+                        # blind de-novo + user pocket: the pocket conditions
+                        # the sampler (PocketPotential) and gates the
+                        # collected result; the pose belongs to the model
                         route = "pocket"
                     else:
                         route = "plain"
                     _staged_for_dispatch = Path(staged_path)
                     _seed_for_dispatch = _seed_v
+                    _pocket_res_for_dispatch = (
+                        ",".join(f"{c}:{n}" for c, n in pocket_sequence_contacts)
+                        if pocket_sequence_contacts else None)
 
-                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch):  # noqa: E731
+                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch, _pk: Optional[str] = _pocket_res_for_dispatch):  # noqa: E731
                         return _dpeptide_dispatch_refine(
                             _staged, _seed, build_capability_queue("protenix", "default"),
-                            blind=blind_linear_route)
+                            blind=blind_linear_route,
+                            cyclic_headtail=(design_mode == "cyclic"),
+                            pocket_res=_pk)
                 except (RuntimeError, ValueError) as d_exc:
                     stage_contexts.append({
                         "reject": (
                             f"[d-peptide] candidate {candidate_sequence[:12]}… "
                             f"rejected: {d_exc}"
                         ),
+                        "candidate_sequence": candidate_sequence,
+                        "proposal_group": job.get("proposal_group") or "ungrouped",
                     })
                     continue
 
             # L chirality + user pocket: protenix-v2 has no constraint
             # embedder, so the native prediction's peptide pose does not
-            # follow the pocket. Honor it the same way the D route does:
-            # rigidly place the free chains at the pocket on the native
-            # product's receptor, dispatch the refine under the fixed
-            # receptor (collected in _finalize_candidate); the refined
-            # structure becomes the candidate's shipped product.
+            # follow the pocket. The native product already carries a
+            # MODEL-generated pose — keep it (mode-A style, keep_pose=True)
+            # and let the refine run under the fixed receptor with native
+            # PocketPotential guidance pulling the peptide into the user
+            # pocket. The clash-search re-placement was removed 2026-09-09:
+            # it discarded the model pose in favor of an invented one.
             if (peptide_chirality == 'l' and pocket_sequence_contacts
                     and structure_file is not None):
                 try:
@@ -9663,22 +9910,29 @@ def run_peptide_design_backend(
                             job.get("cys_positions")
                             if isinstance(job.get("cys_positions"), list) else None),
                         linker_ccd=linker_ccd,
+                        keep_pose=True,
                     )
                     route = "pocket"
                     refined_cif = str(Path(candidate_dir) / "pocket_refined.cif")
                     _staged_for_dispatch = Path(staged_path)
                     _seed_for_dispatch = _seed_v
+                    _pocket_res_for_dispatch = ",".join(
+                        f"{c}:{n}" for c, n in pocket_sequence_contacts)
 
-                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch):  # noqa: E731
+                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch, _pk: Optional[str] = _pocket_res_for_dispatch):  # noqa: E731
                         return _dpeptide_dispatch_refine(
                             _staged, _seed, build_capability_queue("protenix", "default"),
-                            blind=blind_linear_route)
+                            blind=False,
+                            cyclic_headtail=(design_mode == "cyclic"),
+                            pocket_res=_pk)
                 except (RuntimeError, ValueError) as pocket_exc:
                     stage_contexts.append({
                         "reject": (
                             f"[l-peptide] candidate {candidate_sequence[:12]}… "
                             f"rejected: {pocket_exc}"
                         ),
+                        "candidate_sequence": candidate_sequence,
+                        "proposal_group": job.get("proposal_group") or "ungrouped",
                     })
                     continue
 

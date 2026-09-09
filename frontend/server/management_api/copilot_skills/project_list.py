@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from management_api.copilot_skills.workflows import WORKFLOW_KEYS
+
 
 PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "projects:create": {
@@ -14,7 +16,7 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "create": {"type": "boolean", "const": True},
-                "workflow": {"type": "string", "enum": ["prediction", "virtual_screening", "affinity", "peptide_design", "lead_optimization"], "description": "The project's workflow type."},
+                "workflow": {"type": "string", "enum": list(WORKFLOW_KEYS), "description": "The project's workflow type."},
             },
             "required": ["create"],
             "additionalProperties": False,

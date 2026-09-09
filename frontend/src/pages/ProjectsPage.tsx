@@ -35,6 +35,7 @@ import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/wor
 import type { CopilotPlanAction, Project, TaskState } from '../types/models';
 import { backendLabel } from './projectTasks/taskPresentation';
 import { readCopilotText, readCopilotNumber, isOneOf } from '../utils/copilotPayload';
+import { Field } from '../components/common/Field';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -1209,14 +1210,12 @@ export function ProjectsPage() {
             </div>
 
             <form className="form-grid" onSubmit={onCreate}>
-              <label className="field">
-                <span>Name (optional)</span>
+              <Field label="Name (optional)">
                 <input name="name" placeholder={fallbackName()} />
-              </label>
-              <label className="field">
-                <span>Summary (optional)</span>
+              </Field>
+              <Field label="Summary (optional)">
                 <textarea name="summary" rows={3} />
-              </label>
+              </Field>
 
               {createError && <div className="alert error">{createError}</div>}
 

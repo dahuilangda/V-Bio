@@ -1,250 +1,30 @@
-import { useEffect } from 'react';
-import type { ProjectTask } from '../../types/models';
-import { ProjectTasksFilters } from './ProjectTasksFilters';
-import { ProjectTasksTable } from './ProjectTasksTable';
-import type {
-  SeedFilterOption,
-  SortKey,
-  StructureSearchMode,
-  SubmittedWithinDaysOption,
-  TaskTableMode,
-  TaskListRow,
-  TaskMetricColumnKey,
-  TaskWorkflowFilter
-} from './taskListTypes';
+import { ProjectTasksFilters, type ProjectTasksFiltersProps } from './ProjectTasksFilters';
+import { ProjectTasksTable, type ProjectTasksTableProps } from './ProjectTasksTable';
+import { deriveTaskTableMode } from './taskListTypes';
 
-interface ProjectTasksWorkspaceProps {
-  totalRowCount: number;
-  canManageShares: boolean;
-  taskSearch: string;
-  onTaskSearchChange: (value: string) => void;
-  stateFilter: 'all' | ProjectTask['task_state'];
-  onStateFilterChange: (value: 'all' | ProjectTask['task_state']) => void;
-  workflowFilter: TaskWorkflowFilter;
-  onWorkflowFilterChange: (value: TaskWorkflowFilter) => void;
-  workflowOptions: TaskWorkflowFilter[];
-  backendFilter: 'all' | string;
-  onBackendFilterChange: (value: string) => void;
-  backendOptions: string[];
-  filteredCount: number;
-  showAdvancedFilters: boolean;
-  onToggleAdvancedFilters: () => void;
-  advancedFilterCount: number;
-  submittedWithinDays: SubmittedWithinDaysOption;
-  onSubmittedWithinDaysChange: (value: SubmittedWithinDaysOption) => void;
-  seedFilter: SeedFilterOption;
-  onSeedFilterChange: (value: SeedFilterOption) => void;
-  minPlddt: string;
-  onMinPlddtChange: (value: string) => void;
-  minIptm: string;
-  onMinIptmChange: (value: string) => void;
-  maxPae: string;
-  onMaxPaeChange: (value: string) => void;
-  failureOnly: boolean;
-  onFailureOnlyChange: (checked: boolean) => void;
-  structureSearchMode: StructureSearchMode;
-  onStructureSearchModeChange: (value: StructureSearchMode) => void;
-  structureSearchQuery: string;
-  onStructureSearchQueryChange: (value: string) => void;
-  structureSearchLoading: boolean;
-  structureSearchError: string | null;
-  structureSearchMatches: Record<string, boolean>;
-  visibleMetricColumns: TaskMetricColumnKey[];
-  onVisibleMetricColumnsChange: (value: TaskMetricColumnKey[]) => void;
-  onClearAdvancedFilters: () => void;
-  sortKey: SortKey;
-  sortMark: (key: SortKey) => string;
-  onNormalizeSortKey: (key: SortKey) => void;
-  onSort: (key: SortKey) => void;
-  filteredRows: TaskListRow[];
-  pagedRows: TaskListRow[];
-  editingTaskNameId: string | null;
-  editingTaskNameValue: string;
-  savingTaskNameId: string | null;
-  openingTaskId: string | null;
-  deletingTaskId: string | null;
-  terminatingTaskId: string | null;
-  onOpenTask: (task: ProjectTask) => void;
-  onTerminateTask: (task: ProjectTask) => void;
-  onRemoveTask: (task: ProjectTask) => void;
-  onOpenShareTask: (task: ProjectTask) => void;
-  onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
-  onCancelTaskNameEdit: () => void;
-  onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => void;
-  onEditingTaskNameValueChange: (value: string) => void;
-  currentPage: number;
-  totalPages: number;
-  pageSize: number;
-  onPageSizeChange: (value: number) => void;
-  onPageChange: (updater: number | ((prev: number) => number)) => void;
-  onJumpToPage: (value: string) => void;
+/**
+ * Composition root of the tasks tab. The 64 previously flat props collapsed
+ * into the two children's own prop groups; tableMode is the only derived
+ * value (from workflowFilter/workflowOptions inside the filters group).
+ */
+export interface ProjectTasksWorkspaceProps {
+  filtersProps: Omit<ProjectTasksFiltersProps, 'tableMode' | 'compactMetricsView'>;
+  tableProps: Omit<ProjectTasksTableProps, 'tableMode'>;
 }
 
-export function ProjectTasksWorkspace({
-  totalRowCount,
-  canManageShares,
-  taskSearch,
-  onTaskSearchChange,
-  stateFilter,
-  onStateFilterChange,
-  workflowFilter,
-  onWorkflowFilterChange,
-  workflowOptions,
-  backendFilter,
-  onBackendFilterChange,
-  backendOptions,
-  filteredCount,
-  showAdvancedFilters,
-  onToggleAdvancedFilters,
-  advancedFilterCount,
-  submittedWithinDays,
-  onSubmittedWithinDaysChange,
-  seedFilter,
-  onSeedFilterChange,
-  minPlddt,
-  onMinPlddtChange,
-  minIptm,
-  onMinIptmChange,
-  maxPae,
-  onMaxPaeChange,
-  failureOnly,
-  onFailureOnlyChange,
-  structureSearchMode,
-  onStructureSearchModeChange,
-  structureSearchQuery,
-  onStructureSearchQueryChange,
-  structureSearchLoading,
-  structureSearchError,
-  structureSearchMatches,
-  visibleMetricColumns,
-  onVisibleMetricColumnsChange,
-  onClearAdvancedFilters,
-  sortKey,
-  sortMark,
-  onNormalizeSortKey,
-  onSort,
-  filteredRows,
-  pagedRows,
-  editingTaskNameId,
-  editingTaskNameValue,
-  savingTaskNameId,
-  openingTaskId,
-  deletingTaskId,
-  terminatingTaskId,
-  onOpenTask,
-  onTerminateTask,
-  onRemoveTask,
-  onOpenShareTask,
-  onBeginTaskNameEdit,
-  onCancelTaskNameEdit,
-  onSaveTaskNameEdit,
-  onEditingTaskNameValueChange,
-  currentPage,
-  totalPages,
-  pageSize,
-  onPageSizeChange,
-  onPageChange,
-  onJumpToPage
-}: ProjectTasksWorkspaceProps) {
-  const hasSingleWorkflow = workflowOptions.length === 1 ? workflowOptions[0] : null;
-  const tableMode: TaskTableMode = (() => {
-    if (workflowFilter === 'lead_optimization' || (workflowFilter === 'all' && hasSingleWorkflow === 'lead_optimization')) {
-      return 'lead_opt';
-    }
-    if (workflowFilter === 'peptide_design' || (workflowFilter === 'all' && hasSingleWorkflow === 'peptide_design')) {
-      return 'peptide';
-    }
-    return 'default';
-  })();
+export function ProjectTasksWorkspace({ filtersProps, tableProps }: ProjectTasksWorkspaceProps) {
+  const tableMode = deriveTaskTableMode(filtersProps.workflowFilter, filtersProps.workflowOptions);
   const compactMetricsView = tableMode !== 'default';
-
-  useEffect(() => {
-    if (!compactMetricsView) return;
-    if (sortKey === 'submitted') return;
-    onNormalizeSortKey('submitted');
-  }, [compactMetricsView, onNormalizeSortKey, sortKey]);
-
-  useEffect(() => {
-    if (compactMetricsView) return;
-    if (sortKey === 'submitted' || sortKey === 'backend' || sortKey === 'seed' || sortKey === 'mode') return;
-    if (visibleMetricColumns.includes(sortKey as TaskMetricColumnKey)) return;
-    onNormalizeSortKey('submitted');
-  }, [compactMetricsView, onNormalizeSortKey, sortKey, visibleMetricColumns]);
 
   return (
     <section className="panel">
       <ProjectTasksFilters
-        taskSearch={taskSearch}
-        onTaskSearchChange={onTaskSearchChange}
-        stateFilter={stateFilter}
-        onStateFilterChange={onStateFilterChange}
-        workflowFilter={workflowFilter}
-        onWorkflowFilterChange={onWorkflowFilterChange}
-        workflowOptions={workflowOptions}
-        backendFilter={backendFilter}
-        onBackendFilterChange={onBackendFilterChange}
-        backendOptions={backendOptions}
+        {...filtersProps}
         tableMode={tableMode}
         compactMetricsView={compactMetricsView}
-        filteredMatchedCount={filteredRows.length}
-        showAdvancedFilters={showAdvancedFilters}
-        onToggleAdvancedFilters={onToggleAdvancedFilters}
-        advancedFilterCount={advancedFilterCount}
-        submittedWithinDays={submittedWithinDays}
-        onSubmittedWithinDaysChange={onSubmittedWithinDaysChange}
-        seedFilter={seedFilter}
-        onSeedFilterChange={onSeedFilterChange}
-        minPlddt={minPlddt}
-        onMinPlddtChange={onMinPlddtChange}
-        minIptm={minIptm}
-        onMinIptmChange={onMinIptmChange}
-        maxPae={maxPae}
-        onMaxPaeChange={onMaxPaeChange}
-        failureOnly={failureOnly}
-        onFailureOnlyChange={onFailureOnlyChange}
-        structureSearchMode={structureSearchMode}
-        onStructureSearchModeChange={onStructureSearchModeChange}
-        structureSearchQuery={structureSearchQuery}
-        onStructureSearchQueryChange={onStructureSearchQueryChange}
-        structureSearchLoading={structureSearchLoading}
-        structureSearchError={structureSearchError}
-        structureSearchMatches={structureSearchMatches}
-        visibleMetricColumns={visibleMetricColumns}
-        onVisibleMetricColumnsChange={onVisibleMetricColumnsChange}
-        onClearAdvancedFilters={onClearAdvancedFilters}
       />
 
-      <ProjectTasksTable
-        totalRowCount={totalRowCount}
-        canManageShares={canManageShares}
-        filteredCount={filteredCount}
-        tableMode={tableMode}
-        visibleMetricColumns={visibleMetricColumns}
-        sortKey={sortKey}
-        sortMark={sortMark}
-        onSort={onSort}
-        pagedRows={pagedRows}
-        editingTaskNameId={editingTaskNameId}
-        editingTaskNameValue={editingTaskNameValue}
-        savingTaskNameId={savingTaskNameId}
-        openingTaskId={openingTaskId}
-        deletingTaskId={deletingTaskId}
-        terminatingTaskId={terminatingTaskId}
-        onOpenTask={onOpenTask}
-        onTerminateTask={onTerminateTask}
-        onRemoveTask={onRemoveTask}
-        onOpenShareTask={onOpenShareTask}
-        onBeginTaskNameEdit={onBeginTaskNameEdit}
-        onCancelTaskNameEdit={onCancelTaskNameEdit}
-        onSaveTaskNameEdit={onSaveTaskNameEdit}
-        onEditingTaskNameValueChange={onEditingTaskNameValueChange}
-        currentPage={currentPage}
-        totalPages={totalPages}
-        pageSize={pageSize}
-        onPageSizeChange={onPageSizeChange}
-        onPageChange={onPageChange}
-        onJumpToPage={onJumpToPage}
-      />
+      <ProjectTasksTable {...tableProps} tableMode={tableMode} />
     </section>
   );
 }

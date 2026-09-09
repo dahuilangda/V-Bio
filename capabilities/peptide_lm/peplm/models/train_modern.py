@@ -11,6 +11,7 @@ Differences vs the GPT-2 loop:
 from __future__ import annotations
 
 import math
+import os
 import random
 
 import torch
@@ -82,9 +83,22 @@ def pretrain_modern(
     log=print,
     max_len: int | None = None,
     save_best: str | None = None,
+    ckpt_path: str | None = None,
+    ckpt_every: int = 2000,
 ) -> dict:
     max_len = max_len or model.max_len
     model.to(device)
+    # Crash-resumable training state: full (model, optimizer, scheduler
+    # step, epoch, RNG) snapshot every `ckpt_every` optimizer steps plus
+    # end-of-epoch. A 12M-row x 2-epoch run must never restart from zero
+    # on a preemption; --resume restores bit-compatible continuation
+    # (shuffle RNG + optimizer moments + cosine step counter).
+    resume_state = None
+    if isinstance(ckpt_path, str) and os.path.exists(ckpt_path):
+        resume_state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(resume_state["model"])
+        log(f"[tier1-modern] resume from {ckpt_path} "
+            f"(epoch {resume_state['epoch']}, step {resume_state['step']})")
     # hidden-states retention for the aux head roughly doubles activation
     # memory; gradient checkpointing trades ~30% compute for a large cut
     model.gpt.gradient_checkpointing_enable()
@@ -103,8 +117,37 @@ def pretrain_modern(
     rng = random.Random(0)
     best_val, best_state = math.inf, None
     step = 0
+    start_epoch = 0
+    if resume_state is not None:
+        opt.load_state_dict(resume_state["optimizer"])
+        step = int(resume_state["step"])
+        start_epoch = int(resume_state["epoch"]) + 1
+        best_val = float(resume_state.get("best_val", math.inf))
+        if resume_state.get("best_state"):
+            best_state = resume_state["best_state"]
+        rng.setstate(resume_state["py_rng"])
+        if resume_state.get("torch_rng") and device.startswith("cuda"):
+            try:
+                torch.cuda.set_rng_state_all(resume_state["torch_rng"])
+            except Exception:  # noqa: BLE001 - device-count mismatch
+                pass
     pad = model.pad
-    for epoch in range(epochs):
+
+    def _save_ckpt(ep: int, force: bool = False) -> None:
+        if not isinstance(ckpt_path, str):
+            return
+        torch.save({
+            "model": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+            "optimizer": opt.state_dict(),
+            "epoch": ep, "step": step, "best_val": best_val,
+            "best_state": best_state,
+            "py_rng": rng.getstate(),
+        }, ckpt_path + ".tmp")
+        os.replace(ckpt_path + ".tmp", ckpt_path)
+        if force:
+            log(f"[tier1-modern] checkpoint epoch {ep} step {step} -> {ckpt_path}")
+
+    for epoch in range(start_epoch, epochs):
         model.train()
         rng.shuffle(train)
         tot, nb = 0.0, 0
@@ -148,10 +191,18 @@ def pretrain_modern(
             if (i // batch_size + 1) % grad_accum == 0:
                 for g in opt.param_groups:
                     g["lr"] = lr * lr_at(step)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                gnorm = float(torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), 1.0))
                 opt.step()
                 opt.zero_grad()
                 step += 1
+                if not math.isfinite(gnorm) or not math.isfinite(float(loss_ce.detach())):
+                    log(f"[tier1-modern][WARN] non-finite grad/loss at step {step} "
+                        f"(gnorm {gnorm:.3g}) — batch skipped")
+                    opt.zero_grad()
+                    continue
+                if step % max(1, ckpt_every) == 0:
+                    _save_ckpt(epoch)
             tot += float(loss_ce.detach())
             nb += 1
         model.eval()
@@ -197,6 +248,7 @@ def pretrain_modern(
                                "n_heads": cfg.num_attention_heads,
                                "max_len": cfg.max_position_embeddings},
                 }, save_best)
+        _save_ckpt(epoch, force=True)
     if best_state is not None:
         model.load_state_dict(best_state)
     return {"best_val_loss": best_val}
@@ -210,7 +262,16 @@ def load_modern_prior(path: str, device: str = "cpu") -> tuple[ModernPrior, Voca
                         n_layers=cfg.get("n_layers", 8),
                         n_heads=cfg.get("n_heads", 8),
                         max_len=cfg.get("max_len", 128))
-    model.load_state_dict(ckpt["state_dict"])
+    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+    # Pre-track checkpoints predate the additive SS track; its zero init
+    # makes loading one an exact identity. Anything else missing or any
+    # unexpected key is a real corruption and must stay loud.
+    tolerated = {"ss_track.weight"}
+    if set(missing) - tolerated or unexpected:
+        raise RuntimeError(
+            f"checkpoint {path} incompatible: "
+            f"missing={sorted(set(missing) - tolerated)} "
+            f"unexpected={sorted(unexpected)}")
     model.to(device)
     model.eval()
     return model, vocab

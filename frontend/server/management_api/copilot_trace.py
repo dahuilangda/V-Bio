@@ -140,6 +140,33 @@ _USAGE_TOKEN_FIELDS = (
 )
 
 
+def usage_total_tokens(usage: Mapping[str, Any]) -> int:
+    """Total tokens consumed by one model call (prompt + completion + reasoning).
+
+    Providers disagree on shape: OpenAI/vLLM carry an ALREADY-AGGREGATED
+    total_tokens alongside prompt/completion parts, and DeepSeek-style servers add
+    prompt_cache_hit_tokens + prompt_cache_miss_tokens whose sum equals
+    prompt_tokens. Summing every numeric field therefore double- or triple-counts
+    those shapes. Rule: when total_tokens is present and sane it IS the answer;
+    otherwise sum the parts, excluding cache-breakdown duplicates (their sum is
+    already inside prompt_tokens).
+    """
+    if not isinstance(usage, Mapping):
+        return 0
+    explicit_total = usage.get("total_tokens")
+    if isinstance(explicit_total, (int, float)) and 0 < explicit_total < 10_000_000:
+        return int(explicit_total)
+    total = 0
+    for key, value in usage.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if "_cache_" in str(key):
+            continue
+        if 0 <= value < 10_000_000:
+            total += int(value)
+    return total
+
+
 def compact_usage(usage: Mapping[str, Any]) -> Dict[str, Any]:
     """Reduce a model-server usage object to its standard token metrics (empty when absent)."""
     if not isinstance(usage, Mapping):

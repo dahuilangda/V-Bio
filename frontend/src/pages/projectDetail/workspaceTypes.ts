@@ -7,6 +7,7 @@ export interface ProjectWorkspaceDraft {
   taskSummary: string;
   backend: string;
   use_msa: boolean;
+  msa_mode?: 'none' | 'uniref' | 'env';
   color_mode: string;
   inputConfig: ProjectInputConfig;
 }

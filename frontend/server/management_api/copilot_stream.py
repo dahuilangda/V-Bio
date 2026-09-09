@@ -60,6 +60,39 @@ def _register_steering(turn_key: str) -> "queue.Queue[str]":
     return register_steering(turn_key)
 
 
+# ── Abort registry (pi destructive-interrupt alignment) ──────────────────────────────────
+# Steering is cooperative (drained between rounds); STOP is the independent destructive
+# channel. The streaming generator registers its abort event here so an explicit
+# POST /vbio-api/copilot/stop can end the turn even while the SSE connection is still open
+# (and the in-flight round's remaining model calls are skipped at the next check point).
+_abort_lock = threading.Lock()
+_abort_events: Dict[str, threading.Event] = {}
+
+
+def register_abort_event(turn_key: str, event: threading.Event) -> None:
+    key = str(turn_key or "").strip()
+    if not key:
+        return
+    with _abort_lock:
+        _abort_events[key] = event
+
+
+def request_abort(turn_key: str) -> bool:
+    """Signal the named in-flight turn to stop. False when the key is unknown."""
+    key = str(turn_key or "").strip()
+    with _abort_lock:
+        event = _abort_events.get(key)
+    if event is None:
+        return False
+    event.set()
+    return True
+
+
+def _unregister_abort_event(turn_key: str) -> None:
+    with _abort_lock:
+        _abort_events.pop(str(turn_key or "").strip(), None)
+
+
 _FOLLOWUP_SUFFIX = "::followup"
 
 
@@ -119,6 +152,8 @@ def copilot_event_stream(
     """
     event_queue: "queue.Queue[Any]" = queue.Queue()
     abort = threading.Event()
+    if turn_key:
+        register_abort_event(turn_key, abort)
     steering_queue = _register_steering(turn_key) if turn_key else None
 
     def on_step(step: Dict[str, Any]) -> None:
@@ -180,3 +215,4 @@ def copilot_event_stream(
         if turn_key:
             _unregister_steering(turn_key)
             _unregister_steering(turn_key + "::followup")
+            _unregister_abort_event(turn_key)

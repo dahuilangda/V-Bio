@@ -153,7 +153,8 @@ def train(args: argparse.Namespace) -> Path:
 
     c_s = c_z = None  # resolved lazily on first batch
     head_kwargs = dict(num_blocks=args.num_blocks, dropout=args.dropout,
-                       mc_samples=args.mc_samples)
+                       mc_samples=args.mc_samples,
+                       **({"pocket_cond": True} if getattr(args, "pocket_cond", False) else {}))
 
     samples = []
     if args.index_csv:
@@ -347,7 +348,10 @@ def train(args: argparse.Namespace) -> Path:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-    print(f"[curate] H_PL contradiction samples skipped: {contradictions}")
+    if args.hpl_max >= 1.0:
+        print(f"[curate] H_PL contradiction filter DISABLED (hpl_max={args.hpl_max})")
+    else:
+        print(f"[curate] H_PL contradiction samples skipped: {contradictions}")
 
     # Validation (honesty gate): Spearman on the held-out val split.
     if val_rows and head is not None and trunk is not None:
@@ -628,6 +632,8 @@ def main() -> None:
     parser.add_argument("--model_name", default="protenix-v2")
     parser.add_argument("--checkpoint_dir", default="/workspace/model")
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--pocket_cond", action="store_true",
+                        help="pocket-conditioned readout (pooled ligand+rec context)")
     parser.add_argument("--num_blocks", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--mc_samples", type=int, default=4)
@@ -657,6 +663,21 @@ def main() -> None:
                         help="weight of the intra-assay relative-difference loss "
                              "(Nesso-1 up-weights this to optimise ranking)")
     args = parser.parse_args()
+
+    import random as _random
+    _random.seed(args.seed)
+    try:
+        import numpy as _np
+        _np.random.seed(args.seed)
+    except ImportError:
+        pass
+    try:
+        import torch as _torch
+        _torch.manual_seed(args.seed)
+        if _torch.cuda.is_available():
+            _torch.cuda.manual_seed_all(args.seed)
+    except ImportError:
+        pass
 
     ckpt = train(args)
     print(

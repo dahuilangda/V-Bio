@@ -1998,75 +1998,95 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   return (
     <>
     <ProjectDetailLayout
-      projectName={project.name}
-      canDownloadResult={Boolean(
-        defaultDownloadTaskId
-      )}
-      downloadingResult={downloadingResult}
-      workflow={{
-        shortTitle: workflow.shortTitle,
-        runLabel: workflow.runLabel,
-        description: workflow.description
+      headerMetaProps={{
+        projectName: project.name,
+        displayTaskState,
+        workflowShortTitle: workflow.shortTitle,
+        isActiveRuntime,
+        progressPercent,
+        submittedAt: displaySubmittedAt,
+        totalRuntimeSeconds
       }}
-      workspaceTab={workspaceTab}
-      componentStepLabel={componentStepLabel}
-      taskName={draft.taskName}
-      taskSummary={draft.taskSummary}
-      isPredictionWorkflow={isPredictionWorkflow}
-      isVirtualScreeningWorkflow={isVirtualScreeningWorkflow}
-      isAffinityWorkflow={isAffinityWorkflow}
-      isLeadOptimizationWorkflow={isLeadOptimizationWorkflow}
-      constraintsSupported={allowedConstraintTypes.length > 0}
-      displayTaskState={displayTaskState}
-      isActiveRuntime={isActiveRuntime}
-      progressPercent={progressPercent}
-      statusSubmittedAt={displaySubmittedAt}
-      totalRuntimeSeconds={totalRuntimeSeconds}
-      canEdit={canEdit}
-      loading={loading}
-      saving={saving}
-      submitting={submitting}
-      runSubmitting={runSubmitting}
-      hasUnsavedChanges={hasUnsavedChanges}
-      runMenuOpen={runMenuOpen}
-      runDisabled={effectiveRunDisabled}
-      runBlockedReason={effectiveRunBlockedReason}
-      isRunRedirecting={isRunRedirecting}
-      canOpenRunMenu={canOpenRunMenu}
-      showHeaderRunAction
-      showStopAction={showHeaderStopAction}
-      stopSubmitting={headerStopRunPending}
-      stopDisabled={headerStopRunDisabled}
-      stopTitle={headerStopRunTitle}
-      showQuickRunFab={showQuickRunFab}
-      taskHistoryPath={taskHistoryPath}
-      runSuccessNotice={runSuccessNotice}
-      error={error}
-      resultError={resultError}
-      affinityPreviewError={affinityPreviewError}
-      resultChainConsistencyWarning={resultChainConsistencyWarning}
-      projectResultsSectionProps={projectResultsSectionProps}
-      affinitySectionProps={affinityWorkflowSectionProps}
-      leadOptimizationSectionProps={leadOptimizationWorkflowSectionProps}
-      predictionSectionProps={predictionWorkflowSectionProps}
-      virtualScreeningSectionProps={virtualScreeningWorkflowSectionProps}
-      runtimeSettingsProps={workflowRuntimeSettingsSectionProps}
-      runActionRef={runActionRef as RefObject<HTMLDivElement>}
-      topRunButtonRef={topRunButtonRef as RefObject<HTMLButtonElement>}
-      onOpenTaskHistory={handleOpenTaskHistory}
-      onDownloadResult={handleDownloadResult}
-      onSaveDraft={() => {
-        void saveDraft();
+      headerActionsProps={{
+        taskHistoryPath,
+        onOpenTaskHistory: handleOpenTaskHistory,
+        onDownloadResult: handleDownloadResult,
+        canDownloadResult: Boolean(defaultDownloadTaskId),
+        downloadingResult,
+        onSaveDraft: () => {
+          void saveDraft();
+        },
+        canEdit,
+        saving,
+        hasUnsavedChanges,
+        onReset: handleResetFromHeader,
+        loading,
+        submitting,
+        runSubmitting,
+        runActionRef: runActionRef as RefObject<HTMLDivElement>,
+        topRunButtonRef: topRunButtonRef as RefObject<HTMLButtonElement>,
+        onRunAction: handleHeaderRunAction,
+        runDisabled: effectiveRunDisabled,
+        runBlockedReason: effectiveRunBlockedReason,
+        workflowRunLabel: workflow.runLabel,
+        isRunRedirecting,
+        canOpenRunMenu,
+        runMenuOpen,
+        onRestoreSavedDraft: handleRestoreSavedDraft,
+        onRunCurrentDraft: handleRunCurrentDraft,
+        showRunAction: true,
+        showStopAction: showHeaderStopAction,
+        stopSubmitting: headerStopRunPending,
+        stopDisabled: headerStopRunDisabled,
+        stopTitle: headerStopRunTitle,
+        onStopAction: handleHeaderStopAction
       }}
-      onReset={handleResetFromHeader}
-      onRunAction={handleHeaderRunAction}
-      onStopAction={handleHeaderStopAction}
-      onRestoreSavedDraft={handleRestoreSavedDraft}
-      onRunCurrentDraft={handleRunCurrentDraft}
-      onWorkspaceTabChange={setWorkspaceTab}
-      onTaskNameChange={handleTaskNameChange}
-      onTaskSummaryChange={handleTaskSummaryChange}
-      onWorkspaceFormSubmit={handleWorkspaceFormSubmit}
+      overlaysProps={{
+        runSuccessNotice,
+        taskHistoryPath,
+        onOpenTaskHistory: handleOpenTaskHistory,
+        isRunRedirecting,
+        showQuickRunFab,
+        onRunAction: handleHeaderRunAction,
+        runDisabled: effectiveRunDisabled,
+        runBlockedReason: effectiveRunBlockedReason,
+        workflowRunLabel: workflow.runLabel,
+        submitting: runSubmitting,
+        error,
+        resultError,
+        affinityPreviewError,
+        resultChainConsistencyWarning
+      }}
+      stepperProps={{
+        workspaceTab,
+        onWorkspaceTabChange: setWorkspaceTab,
+        isPredictionWorkflow,
+        isAffinityWorkflow,
+        isLeadOptimizationWorkflow,
+        constraintsSupported: allowedConstraintTypes.length > 0,
+        componentStepLabel
+      }}
+      contentProps={{
+        workspaceTab,
+        componentStepLabel,
+        projectResultsSectionProps,
+        onSaveDraft: handleWorkspaceFormSubmit,
+        canEdit,
+        taskName: draft.taskName,
+        taskSummary: draft.taskSummary,
+        onTaskNameChange: handleTaskNameChange,
+        onTaskSummaryChange: handleTaskSummaryChange,
+        affinitySectionProps: affinityWorkflowSectionProps,
+        leadOptimizationSectionProps: leadOptimizationWorkflowSectionProps,
+        isPredictionWorkflow,
+        isVirtualScreeningWorkflow,
+        isAffinityWorkflow,
+        isLeadOptimizationWorkflow,
+        predictionSectionProps: predictionWorkflowSectionProps,
+        virtualScreeningSectionProps: virtualScreeningWorkflowSectionProps,
+        workflowDescription: workflow.description,
+        runtimeSettingsProps: workflowRuntimeSettingsSectionProps
+      }}
     />
     {copilotAvailable && session?.userId ? (
       <ProjectCopilotModal

@@ -46,6 +46,15 @@ class PeptideReward:
             "sol": 0.8, "syn": 0.8, "liab": 0.8,
             "min_ipae": 0.8, "learned_heads": 0.6, "self_consistency": 0.7,
             "ncaa": 0.4, "len": 0.4, "sim": 0.5,
+            # pocket chemistry complementarity (0.9/10.8 of the geometric
+            # mean): a pre-folding, zero-oracle-cost pull toward sequences
+            # whose side-chain chemistry matches the user pocket's demands
+            # (acidic anchors against a basic rim, aromatics against
+            # Y/H/F). Derived from interface physics diagnostics: shapes
+            # can be well-packed yet score poorly when the polar lock is
+            # missing — this term teaches the policy that chemistry early,
+            # before the expensive oracle confirms it.
+            "chem_comp": 0.9,
         }
         self._learned = None  # lazily loaded PeptideGPT property heads
 
@@ -76,10 +85,16 @@ class PeptideReward:
         if ipsae is not None:
             if surrogate_sigma is not None and surrogate_sigma > 0:
                 ipsae = float(ipsae) - surrogate_sigma  # risk-averse
-            parts["interface"] = _ramp(float(ipsae), 0.30, 0.15)
+            # ramp anchored at 0.20: de novo cyclic binders operate in the
+            # 0.2-0.5 ipSAE band during search — the old lo=0.30 put that
+            # whole band on the ramp's tail, compressing within-generation
+            # reward contrast ~3x and starving GRPO of group variance
+            parts["interface"] = _ramp(float(ipsae), 0.20, 0.15)
         iptm = m.get("pair_iptm") if m.get("pair_iptm") is not None else m.get("iptm")
         if iptm is not None:
-            parts["iptm"] = _ramp(float(iptm), self.target_iptm - 0.15, 0.10)
+            # width widened to keep gradient in the working band instead of
+            # the lo+0.10 dead zone
+            parts["iptm"] = _ramp(float(iptm), self.target_iptm - 0.25, 0.15)
         plddt = m.get("binder_avg_plddt")
         if plddt:
             parts["pose"] = _ramp(float(plddt) / 100.0, 0.45, 0.12)
@@ -94,6 +109,11 @@ class PeptideReward:
         sc = m.get("self_consistency")
         if sc is not None:
             parts["self_consistency"] = float(sc)
+        cc = m.get("chem_comp")
+        if cc is not None:
+            # pocket chemistry complementarity in [0, 1], computed by the
+            # orchestrator from the user pocket's amino-acid composition
+            parts["chem_comp"] = float(cc)
         mp = m.get("min_ipae")
         if mp is not None:
             # SOTA interchain confidence: min target-binder PAE (Angstrom);

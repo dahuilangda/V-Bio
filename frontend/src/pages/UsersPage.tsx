@@ -4,6 +4,7 @@ import type { AppUser } from '../types/models';
 import { formatDateTime } from '../utils/date';
 import { isSuperAdminIdentity } from '../api/authApi';
 import { adminCreateUser, adminListUsers, adminUpdateUser, toAppUser } from '../api/authServerApi';
+import { Field } from '../components/common/Field';
 
 export function UsersPage() {
   const [users, setUsers] = useState<AppUser[]>([]);
@@ -119,22 +120,18 @@ export function UsersPage() {
       <section className="panel">
         <h2>Create User</h2>
         <form className="form-grid users-create" onSubmit={onCreate}>
-          <label className="field">
-            <span>Username</span>
+          <Field label="Username">
             <input name="username" required />
-          </label>
-          <label className="field">
-            <span>Display Name</span>
+          </Field>
+          <Field label="Display Name">
             <input name="name" required />
-          </label>
-          <label className="field">
-            <span>Email</span>
+          </Field>
+          <Field label="Email">
             <input name="email" type="email" />
-          </label>
-          <label className="field">
-            <span>Initial Password</span>
+          </Field>
+          <Field label="Initial Password">
             <input name="password" type="password" required />
-          </label>
+          </Field>
           <label className="switch-field">
             <input type="checkbox" name="is_admin" />
             <span>Admin role</span>

@@ -1038,6 +1038,29 @@ def copilot_steer() -> Tuple[Response, int]:
     return jsonify({"queued": False, "error": "No in-flight turn with that key (it may have finished), or the steering queue is full."}), 409
 
 
+@app.post("/vbio-api/copilot/stop")
+def copilot_stop() -> Tuple[Response, int]:
+    """Explicitly stop an in-flight streaming turn (pi destructive-interrupt alignment).
+
+    Steering is cooperative; this is the independent destructive channel. The in-flight
+    round's current model call still runs to completion (requests cannot be cancelled
+    mid-flight), but every later check point — round top, execution waves — sees the abort
+    and the turn ends honestly instead of burning its remaining budget.
+    """
+    if not _copilot_is_configured():
+        return jsonify({"error": "Copilot is not configured."}), 404
+    payload = request.get_json(silent=True) or {}
+    turn_key = str(payload.get("turn_key") or "").strip()
+    if not turn_key:
+        return jsonify({"error": "turn_key is required."}), 400
+    from management_api.copilot_stream import request_abort
+
+    stopped = request_abort(turn_key)
+    if stopped:
+        return jsonify({"stopped": True}), 200
+    return jsonify({"stopped": False, "error": "No in-flight turn with that key (it may have finished)."}), 409
+
+
 @app.post("/vbio-api/copilot/complete")
 def copilot_complete() -> Tuple[Response, int]:
     # Inline auto-complete is best-effort assistance: it never blocks the composer or surfaces an

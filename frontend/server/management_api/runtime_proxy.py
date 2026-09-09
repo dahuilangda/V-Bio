@@ -179,6 +179,9 @@ class RuntimeProxy:
                 data.append((key, value))
 
         if upstream_path == "/predict":
+            raw_msa_mode = request_obj.form.get("msa_mode")
+            if raw_msa_mode and str(raw_msa_mode).strip():
+                data.append(("msa_mode", str(raw_msa_mode).strip()))
             raw_use_msa = request_obj.form.get("use_msa_server")
             if raw_use_msa is None or not str(raw_use_msa).strip():
                 yaml_upload = request_obj.files.get("yaml_file")

@@ -1,16 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FocusEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CustomResidueEditorModal } from './CustomResidueEditorModal';
+import { CommitNumberInput } from '../../components/common/CommitNumberInput';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
-import { JSMEEditor } from '../../components/project/JSMEEditor';
 import { buildCustomResidueCatalog, BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES, type ResidueCatalogEntry } from '../../components/project/residueCatalog';
 import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
-import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
-import { toggleTerminalAmide } from '../../utils/smilesTransform';
+import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
 import { PeptideCysSpectrum } from '../../components/project/PeptideCysSpectrum';
+import { Field } from '../../components/common/Field';
 import {
   resolveAnchorsAtLength,
   validateCysLayout,
@@ -52,36 +53,6 @@ function normalizeCustomResidueCode(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
 }
 
-// System-generated CCD code for a NEW custom residue: deterministic per (user, SMILES) so the
-// same residue has one stable identity under its owner and never collides across users in a
-// shared project. Users cannot author it. Runtime user CCDs override built-ins, so the code
-// only needs to be unique + stable, not avoid the real-CCD namespace. Existing residues keep
-// their original codes — no migration.
-function generateCustomResidueCode(userId: string | null | undefined, smiles: string): string {
-  const input = `${String(userId || 'anon').trim()}${String(smiles || '').trim()}`;
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  const fnv1a = (seed: number) => {
-    let hash = seed >>> 0;
-    for (let index = 0; index < input.length; index += 1) {
-      hash ^= input.charCodeAt(index);
-      hash = Math.imul(hash, 0x01000193);
-    }
-    return hash >>> 0;
-  };
-  const left = fnv1a(0x811c9dc5);
-  const right = fnv1a(0x9e3779b9);
-  let code = 'U';
-  let a = left;
-  let b = right;
-  for (let index = 0; index < 3; index += 1) {
-    code += alphabet[a % 36];
-    a = Math.floor(a / 36);
-    code += alphabet[b % 36];
-    b = Math.floor(b / 36);
-  }
-  return code; // U + 6 alphanumeric chars
-}
-
 const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number], string> = {
   n: 'N',
@@ -91,58 +62,6 @@ const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number]
   oxt: 'OXT'
 };
 
-function clampCommittedNumber(value: number, minValue: number, maxValue: number, fallback: number, step?: number): number {
-  const parsed = Number.isFinite(value) ? value : fallback;
-  const clamped = Math.max(minValue, Math.min(maxValue, parsed));
-  if (step && step > 0) return Number((Math.round(clamped / step) * step).toFixed(6));
-  return Math.floor(clamped);
-}
-
-function CommitNumberInput({
-  value,
-  min,
-  max,
-  step,
-  disabled,
-  onCommit
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  disabled?: boolean;
-  onCommit: (value: number) => void;
-}) {
-  const [draftValue, setDraftValue] = useState(String(value));
-
-  useEffect(() => {
-    setDraftValue(String(value));
-  }, [value]);
-
-  const commit = (rawValue: string) => {
-    const next = clampCommittedNumber(Number(rawValue), min, max, value, step);
-    setDraftValue(String(next));
-    if (next !== value) onCommit(next);
-  };
-
-  return (
-    <input
-      type="number"
-      min={min}
-      max={max}
-      step={step}
-      value={draftValue}
-      onChange={(event: ChangeEvent<HTMLInputElement>) => setDraftValue(event.target.value)}
-      onBlur={(event: FocusEvent<HTMLInputElement>) => commit(event.target.value)}
-      onKeyDown={(event) => {
-        if (event.key !== 'Enter') return;
-        commit(event.currentTarget.value);
-        event.currentTarget.blur();
-      }}
-      disabled={disabled}
-    />
-  );
-}
 
 
 export interface WorkflowRuntimeSettingsSectionProps {
@@ -322,6 +241,7 @@ export function WorkflowRuntimeSettingsSection({
   // Local mirror so a click is reflected instantly even when an upstream
   // normalizer round-trips the draft; external value changes win.
   const [backendMirror, setBackendMirror] = useState<string>(normalizedBackend);
+  const [residuePoolOpen, setResiduePoolOpen] = useState(false);
   useEffect(() => {
     setBackendMirror(normalizedBackend);
   }, [normalizedBackend]);
@@ -348,6 +268,15 @@ export function WorkflowRuntimeSettingsSection({
   // Rail reference length: the length range's max when set, else the legacy
   // single binder length. Manual Cys choices are made against this reference.
   const cysReferenceLength = Math.max(8, peptideLengthMax || peptideBinderLength || 20);
+  // Single source of truth for UI previews (mask rail / initial-sequence
+  // placeholder): the length RANGE the backend will actually design within —
+  // locked range uses that exact length, open range uses its max (longest
+  // candidate), and only a fully unset range falls back to the legacy fixed
+  // binder length. Prevents the "range 8-12 but preview says 20" confusion.
+  const lengthLocked = peptideLengthMin === peptideLengthMax;
+  const effectiveDesignLength = lengthLocked
+    ? peptideLengthMin
+    : (peptideLengthMax || peptideBinderLength || 20);
   const cysPositionAuto = peptideBicyclicCysLayout === 'auto';
   const cysLayoutParams: CysLayoutParams = useMemo(
     () => ({
@@ -430,18 +359,18 @@ export function WorkflowRuntimeSettingsSection({
       String(peptideInitialSequence || '')
         .replace(/[\s_-]/g, '')
         .toUpperCase()
-        .slice(0, peptideBinderLength),
-    [peptideInitialSequence, peptideBinderLength]
+        .slice(0, effectiveDesignLength),
+    [peptideInitialSequence, effectiveDesignLength]
   );
   const normalizedSequenceMask = useMemo(() => {
     const normalized = String(peptideSequenceMask || '')
       .replace(/[\s_-]/g, '')
       .toUpperCase()
       .replace(/[^ARNDCQEGHILKMFPSTWYVX]/g, '')
-      .slice(0, peptideBinderLength);
-    if (!normalized) return 'X'.repeat(Math.max(1, peptideBinderLength));
-    return normalized.padEnd(Math.max(1, peptideBinderLength), 'X');
-  }, [peptideSequenceMask, peptideBinderLength]);
+      .slice(0, effectiveDesignLength);
+    if (!normalized) return 'X'.repeat(Math.max(1, effectiveDesignLength));
+    return normalized.padEnd(Math.max(1, effectiveDesignLength), 'X');
+  }, [peptideSequenceMask, effectiveDesignLength]);
   const maskChars = useMemo(() => normalizedSequenceMask.split(''), [normalizedSequenceMask]);
 
   useEffect(() => {
@@ -723,12 +652,12 @@ export function WorkflowRuntimeSettingsSection({
     });
     if (isBicyclicMode) {
       Object.values(cysSlotValueMap).forEach((pos) => {
-        const normalized = Math.max(1, Math.min(peptideBinderLength, Math.floor(Number(pos) || 1)));
+        const normalized = Math.max(1, Math.min(effectiveDesignLength, Math.floor(Number(pos) || 1)));
         protectedSet.add(normalized);
       });
     }
     return protectedSet;
-  }, [maskChars, isBicyclicMode, cysSlotValueMap, peptideBinderLength]);
+  }, [maskChars, isBicyclicMode, cysSlotValueMap, effectiveDesignLength]);
   const residuePlacementStatusByKey = useMemo(() => {
     const status = new Map<string, { selectable: boolean; allowedPositions: number[]; reason: string; placement: string }>();
     residueCatalogSections.forEach((section) => {
@@ -891,10 +820,7 @@ export function WorkflowRuntimeSettingsSection({
     <section className="panel subtle component-runtime-settings">
       <div className="component-runtime-settings-row">
         {showFullFields && (
-          <label className="field">
-            <span>
-              Backend <span className="required-mark">*</span>
-            </span>
+          <Field label={<>Backend <span className="required-mark">*</span></>}>
             <select
               required
               value={displayedBackend}
@@ -930,25 +856,24 @@ export function WorkflowRuntimeSettingsSection({
                 </option>
               ))}
             </select>
-          </label>
+          </Field>
         )}
 
         {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && (
-          <label className="field">
-            <span>Seed (optional)</span>
+                      <Field label="Seed (optional)">
             <input
-              type="number"
-              min={0}
-              value={seed ?? ''}
-              onChange={(e) => {
-                const value = e.target.value;
-                const nextSeed = value === '' ? null : Math.max(0, Math.floor(Number(value) || 0));
-                onSeedChange(nextSeed);
-              }}
-              disabled={!canEditRuntimeIdentity}
-              placeholder="Default: 42"
+            type="number"
+            min={0}
+            value={seed ?? ''}
+            onChange={(e) => {
+              const value = e.target.value;
+              const nextSeed = value === '' ? null : Math.max(0, Math.floor(Number(value) || 0));
+              onSeedChange(nextSeed);
+            }}
+            disabled={!canEditRuntimeIdentity}
+            placeholder="Default: 42"
             />
-          </label>
+            </Field>
         )}
 
         {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && normalizedBackend !== 'nesso' && (
@@ -968,77 +893,98 @@ export function WorkflowRuntimeSettingsSection({
             <section className="peptide-runtime-group">
               <div className="peptide-runtime-group-head">General</div>
               <div className="peptide-runtime-grid">
-                <label className="field">
-                  <span>Peptide Design Mode</span>
+                                  <Field label="Peptide Design Mode">
                   <select
-                    value={peptideDesignMode}
-                    onChange={(e) =>
-                      onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'linear')
-                    }
-                    disabled={!canEdit}
+                  value={peptideDesignMode}
+                  onChange={(e) =>
+                    onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'linear')
+                  }
+                  disabled={!canEdit}
                   >
-                    <option value="linear">Linear</option>
-                    <option value="cyclic" disabled={normalizedBackend === 'alphafold3'}>
-                      Cyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
-                    </option>
-                    <option value="bicyclic" disabled={normalizedBackend === 'alphafold3'}>
-                      Bicyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
-                    </option>
+                  <option value="linear">Linear</option>
+                  <option value="cyclic" disabled={normalizedBackend === 'alphafold3'}>
+                    Cyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
+                  </option>
+                  <option value="bicyclic" disabled={normalizedBackend === 'alphafold3'}>
+                    Bicyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
+                  </option>
                   </select>
-                </label>
-                <label className="field">
-                  <span>Peptide Chirality</span>
+                  </Field>
+                                  <Field label="Peptide Chirality">
                   <select
-                    value={peptideChirality}
-                    onChange={(e) =>
-                      onPeptideChiralityChange((e.target.value as 'l' | 'd') || 'l')
-                    }
-                    disabled={!canEdit}
+                  value={peptideChirality}
+                  onChange={(e) =>
+                    onPeptideChiralityChange((e.target.value as 'l' | 'd') || 'l')
+                  }
+                  disabled={!canEdit}
                   >
-                    <option value="l">L-peptide (standard)</option>
-                    <option value="d" disabled={normalizedBackend !== 'boltz2dock' && normalizedBackend !== 'protenix2dock'}>
-                      D-peptide{displayedBackend !== 'boltz2dock' && displayedBackend !== 'protenix2dock' ? '' : ''}
-                    </option>
+                  <option value="l">L-peptide (standard)</option>
+                  <option value="d" disabled={normalizedBackend !== 'boltz2dock' && normalizedBackend !== 'protenix2dock'}>
+                    D-peptide{displayedBackend !== 'boltz2dock' && displayedBackend !== 'protenix2dock' ? '' : ''}
+                  </option>
                   </select>
-                </label>
-                <label className="field">
-                  <span>Initial peptide structure (optional)</span>
+                  </Field>
+                <div className="peptide-structure-seed-row">
+                  <Field label="Initial peptide structure (optional)">
                   <div className="peptide-structure-upload">
-                    <input
-                      type="file"
-                      accept=".pdb,.cif,.mmcif"
-                      disabled={!canEdit || peptideChirality !== 'd'}
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        e.target.value = '';
-                        if (!file) return;
-                        const format = file.name.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
-                        file.text().then((content) => {
-                          onPeptideStructureUploadChange({
-                            fileName: file.name, format, content, chainId: '',
-                          });
+                  <input
+                    type="file"
+                    accept=".pdb,.cif,.mmcif"
+                    disabled={!canEdit || peptideChirality !== 'd'}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      const format = file.name.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
+                      file.text().then((content) => {
+                        onPeptideStructureUploadChange({
+                          fileName: file.name, format, content, chainId: '',
                         });
-                      }}
-                    />
-                    {peptideStructureUpload ? (
-                      <div className="peptide-structure-upload-meta">
-                        <span title={peptideStructureUpload.fileName}>
-                          {peptideStructureUpload.fileName}
-                        </span>
-                        <button
-                          type="button"
-                          className="ghost small"
-                          disabled={!canEdit}
-                          onClick={() => onPeptideStructureUploadChange(null)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ) : null}
+                      });
+                    }}
+                  />
+                  {peptideStructureUpload ? (
+                    <div className="peptide-structure-upload-meta">
+                      <span title={peptideStructureUpload.fileName}>
+                        {peptideStructureUpload.fileName}
+                      </span>
+                      <button
+                        type="button"
+                        className="ghost small"
+                        disabled={!canEdit}
+                        onClick={() => onPeptideStructureUploadChange(null)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : null}
                   </div>
-                </label>
+                  </Field>
+                  <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
+                    <input
+                      type="checkbox"
+                      checked={peptideUseInitialSequence}
+                      onChange={(e) => onPeptideUseInitialSequenceChange(e.target.checked)}
+                      disabled={!canEdit}
+                    />
+                    <span>Seed from reference</span>
+                    {/* Click guard: a plain span inside a label would toggle the
+                        checkbox when clicked; the tip itself is hover/focus-only. */}
+                    <span className="peptide-seed-info" onClick={(e) => e.preventDefault()}>
+                      <InfoTip text="Use the reference sequence as the starting point for generation 1." align="start" />
+                    </span>
+                  </label>
+                </div>
                 <label className="field peptide-length-range">
-                  <span>Peptide Length (min–max)</span>
+                  <span>
+                    Peptide Length
+                    {lengthLocked ? ' (fixed)' : ' (min–max)'}
+                    {!lengthLocked && peptideLengthMin !== undefined ? (
+                      <span className="muted" style={{ marginLeft: 6, fontSize: '0.9em' }}>
+                        adaptive {peptideLengthMin}–{peptideLengthMax} aa
+                      </span>
+                    ) : null}
+                  </span>
                   <div className="peptide-length-range-inputs">
                     <CommitNumberInput
                       min={peptideDesignMode === 'bicyclic' ? 8 : 5}
@@ -1057,30 +1003,21 @@ export function WorkflowRuntimeSettingsSection({
                     />
                   </div>
                 </label>
-                <div className="peptide-runtime-inline-row">
-                  <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
-                    <input
-                      type="checkbox"
-                      checked={peptideUseInitialSequence}
-                      onChange={(e) => onPeptideUseInitialSequenceChange(e.target.checked)}
-                      disabled={!canEdit}
-                    />
-                    <span>Seed from reference</span>
-                  </label>
-                  <InfoTip text="Use the reference sequence as the starting point for generation 1." align="start" />
-                </div>
-                <div className="peptide-residue-config">
-                  <div className="peptide-residue-config-head">
-                    <div className="peptide-residue-config-title">
-                      <strong>
-                        Residues used for design
-                        <InfoTip text="Choose which residues the next generation may use." align="start" />
-                      </strong>
-                    </div>
+                <div className={`peptide-residue-config${residuePoolOpen ? " residue-pool-open" : ""}`}>
+                  <button
+                    type="button"
+                    className="peptide-residue-config-head"
+                    onClick={() => setResiduePoolOpen(!residuePoolOpen)}
+                    aria-expanded={residuePoolOpen}
+                  >
+                    <span className="peptide-residue-config-chevron">
+                      {residuePoolOpen ? "▾" : "▸"}
+                    </span>
+                    <strong>Residues used for design</strong>
                     <span className="peptide-residue-selection-summary">
                       {selectedNaturalCount} natural / {selectedNonNaturalCount} non-natural selected
                     </span>
-                  </div>
+                  </button>
                   <div className="peptide-residue-usage">
                     <div className="peptide-residue-usage-copy">
                       <strong>
@@ -1122,6 +1059,7 @@ export function WorkflowRuntimeSettingsSection({
                       Edits apply to the next submission.
                     </div>
                   ) : null}
+                  {residuePoolOpen && (
                   <div className="peptide-residue-pool" aria-label="Design residues">
                     {residueCatalogSections.map((section) => {
                       const sectionSelectedCount = section.entries.filter((entry) =>
@@ -1235,175 +1173,66 @@ export function WorkflowRuntimeSettingsSection({
                       );
                     })}
                   </div>
+                  )}
                 </div>
-                {customEditorOpen && (
-                  <div className="peptide-custom-editor">
-                    <div className="peptide-custom-editor-head">
-                      <strong>{customEditingCcd ? 'Edit custom residue' : 'Add custom residue'}</strong>
-                      <button type="button" className="btn btn-ghost btn-compact" onClick={closeCustomResidueEditor}>
-                        Close
-                      </button>
-                    </div>
-                    <div className="peptide-custom-editor-grid">
-                      <label className="field">
-                        <span>CCD</span>
-                        <input
-                          value={customEditingCcd || generateCustomResidueCode(currentUserId, customDraftSmiles.trim())}
-                          readOnly
-                          title="Auto-generated per user + residue; must be unique."
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Name</span>
-                        <input
-                          value={customDraftName}
-                          disabled={residuePoolControlsDisabled}
-                          onChange={(event) => setCustomDraftName(event.target.value)}
-                          placeholder="Custom residue"
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Base residue</span>
-                        <select
-                          value={customDraftBaseResidue}
-                          disabled={residuePoolControlsDisabled}
-                          onChange={(event) => setCustomDraftBaseResidue(event.target.value)}
-                        >
-                          {'ARNDCQEGHILKMFPSTWYV'.split('').map((aa) => (
-                            <option key={aa} value={aa}>
-                              {aa}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <div className="peptide-custom-editor-main">
-                      <div className="jsme-editor-container component-jsme-shell peptide-custom-jsme">
-                        <JSMEEditor smiles={customDraftSmiles} height={360} onSmilesChange={setCustomDraftSmiles} />
-                      </div>
-                      <div className="peptide-custom-preview">
-                        <MemoLigand2DPreview
-                          smiles={customDraftSmiles}
-                          width={240}
-                          height={160}
-                          highlightAtomIndices={assignedBackboneIndices.length ? assignedBackboneIndices : undefined}
-                          highlightAtomColorsOverride={backboneHighlightColorOverride}
-                          atomLabels={backboneAtomLabels}
-                          onAtomClick={armedBackboneSlot ? handleBackboneAtomClick : undefined}
-                        />
-                        <div className="peptide-custom-backbone-slots" role="group" aria-label="Backbone atom slots">
-                          {CUSTOM_BACKBONE_SLOTS.map((slot) => {
-                            const idx = customDraftBackbone[slot];
-                            const armed = armedBackboneSlot === slot;
-                            return (
-                              <button
-                                key={slot}
-                                type="button"
-                                className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}${customDraftSlotErrors[slot] ? ' error' : ''}`}
-                                onClick={() => setArmedBackboneSlot((prev) => (prev === slot ? null : slot))}
-                                title={
-                                  armed
-                                    ? `Click an atom in the 2D to assign ${slotLabel(slot)}`
-                                    : `Set ${slotLabel(slot)}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
-                                }
-                              >
-                                <span className="peptide-custom-backbone-slot-label">{slotLabel(slot)}</span>
-                                <span className="peptide-custom-backbone-slot-value">{idx === undefined ? '—' : `#${idx + 1}`}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                        {firstBackboneSlotError(customDraftSlotErrors) ? (
-                          <span className="peptide-custom-invalid">{firstBackboneSlotError(customDraftSlotErrors)}</span>
-                        ) : null}
-                        <div className="peptide-custom-backbone-foot">
-                          <button
-                            type="button"
-                            className="peptide-custom-backbone-reset"
-                            onClick={() => void resetBackboneToAuto()}
-                            title="Re-run auto backbone detection"
-                          >
-                            Auto
-                          </button>
-                          {!customDraftValid ? (
-                            <span className="peptide-custom-invalid">Backbone N-CA-C(=O) is required.</span>
-                          ) : null}
-                          {customDraftAutoStatus === 'failed' ? (
-                            <span className="peptide-custom-invalid">
-                              Auto could not identify the full backbone. Click atoms to set N/CA/C/O/OXT manually — for a C-terminal amide, enable amidation first.
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
-                    </div>
-                    <label className="field peptide-custom-smiles">
-                      <span>Custom Residue SMILES</span>
-                      <input
-                        value={customDraftSmiles}
-                        disabled={residuePoolControlsDisabled}
-                        onChange={(event) => setCustomDraftSmiles(event.target.value)}
-                      />
-                    </label>
-                    <label className="switch-field peptide-custom-amidation">
-                      <input
-                        type="checkbox"
-                        checked={customDraftAmidated}
-                        disabled={residuePoolControlsDisabled}
-                        onChange={async (event) => {
-                          const nextAmidated = event.target.checked;
-                          const currentSmiles = String(customDraftSmiles || '').trim() || CUSTOM_RESIDUE_SCAFFOLD_SMILES;
-                          // Flip the backbone's terminal atom (OXT <-> NXT), honoring the user's OXT pick.
-                          // Atomic: if the terminal can't be resolved, leave flag and SMILES unchanged.
-                          const transformed = await toggleTerminalAmide(currentSmiles, customDraftBackbone, nextAmidated);
-                          if (!transformed || transformed === currentSmiles) return;
-                          setCustomDraftAmidated(nextAmidated);
-                          setCustomDraftSmiles(transformed);
-                        }}
-                      />
-                      <span>C-terminal amidation</span>
-                    </label>
-                    <div className="peptide-custom-editor-actions">
-                      <button
-                        type="button"
-                        className="btn btn-primary btn-compact"
-                        disabled={residuePoolControlsDisabled || !customDraftSmiles.trim() || !customDraftValid || Boolean(firstBackboneSlotError(customDraftSlotErrors))}
-                        onClick={saveCustomResidueDraft}
-                      >
-                        Save residue
-                      </button>
-                    </div>
-                  </div>
-                )}
-                <label className="field">
-                  <span>Iterations</span>
+                <CustomResidueEditorModal
+                  open={customEditorOpen}
+                  userId={currentUserId ?? 'anon'}
+                  editingCcd={customEditingCcd}
+                  disabled={residuePoolControlsDisabled}
+                  draftSmiles={customDraftSmiles}
+                  draftName={customDraftName}
+                  draftBaseResidue={customDraftBaseResidue}
+                  draftBackbone={customDraftBackbone}
+                  draftAmidated={customDraftAmidated}
+                  draftValid={customDraftValid}
+                  autoStatus={customDraftAutoStatus}
+                  slotErrors={customDraftSlotErrors}
+                  activeSlot={activeCysSlot}
+                  armedSlot={armedBackboneSlot}
+                  assignedIndices={assignedBackboneIndices}
+                  backboneAtomLabels={backboneAtomLabels}
+                  onAtomClick={handleBackboneAtomClick}
+                  onResetBackbone={resetBackboneToAuto}
+                  activeSlotValue={activeCysSlot}
+                  highlightColors={backboneHighlightColorOverride}
+                  onSmilesChange={setCustomDraftSmiles}
+                  onNameChange={setCustomDraftName}
+                  onBaseResidueChange={setCustomDraftBaseResidue}
+                  onAmidatedChange={setCustomDraftAmidated}
+                  onActiveSlotChange={(v) => setActiveCysSlot(v as typeof activeCysSlot)}
+                  onArmSlot={(v) => setArmedBackboneSlot(v as typeof armedBackboneSlot)}
+                  onAssignAtom={handleBackboneAtomClick}
+                  onSave={saveCustomResidueDraft}
+                  onClose={closeCustomResidueEditor}
+                />
+                                  <Field label="Iterations">
                   <CommitNumberInput
-                    min={2}
-                    max={100}
-                    value={peptideIterations}
-                    onCommit={onPeptideIterationsChange}
-                    disabled={!canEdit}
+                  min={2}
+                  max={100}
+                  value={peptideIterations}
+                  onCommit={onPeptideIterationsChange}
+                  disabled={!canEdit}
                   />
-                </label>
-                <label className="field">
-                  <span>Population Size</span>
+                  </Field>
+                                  <Field label="Population Size">
                   <CommitNumberInput
-                    min={2}
-                    max={100}
-                    value={peptidePopulationSize}
-                    onCommit={onPeptidePopulationSizeChange}
-                    disabled={!canEdit}
+                  min={2}
+                  max={100}
+                  value={peptidePopulationSize}
+                  onCommit={onPeptidePopulationSizeChange}
+                  disabled={!canEdit}
                   />
-                </label>
-                <label className="field">
-                  <span>Elite Size</span>
+                  </Field>
+                                  <Field label="Elite Size">
                   <CommitNumberInput
-                    min={1}
-                    max={Math.max(1, peptidePopulationSize - 1)}
-                    value={peptideEliteSize}
-                    onCommit={onPeptideEliteSizeChange}
-                    disabled={!canEdit}
+                  min={1}
+                  max={Math.max(1, peptidePopulationSize - 1)}
+                  value={peptideEliteSize}
+                  onCommit={onPeptideEliteSizeChange}
+                  disabled={!canEdit}
                   />
-                </label>
+                  </Field>
                 <label className="field peptide-mask-field">
                   <span>Fixed positions</span>
                   <input
@@ -1412,7 +1241,7 @@ export function WorkflowRuntimeSettingsSection({
                     value={normalizedInitialSequence}
                     onChange={(e) => onPeptideInitialSequenceChange(e.target.value)}
                     disabled={!canEdit}
-                    placeholder={`Reference sequence, length ${peptideBinderLength}`}
+                    placeholder={lengthLocked ? `Reference sequence, length ${effectiveDesignLength}` : `Reference sequence, up to ${effectiveDesignLength} aa (design range ${peptideLengthMin}–${peptideLengthMax})`}
                     spellCheck={false}
                   />
                   <div className="peptide-mask-rail" role="list" aria-label="Sequence mask positions">

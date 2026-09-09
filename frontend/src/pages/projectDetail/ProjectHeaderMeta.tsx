@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { formatDuration } from '../../utils/date';
 
-interface ProjectHeaderMetaProps {
+export interface ProjectHeaderMetaProps {
   projectName: string;
   displayTaskState: string;
   workflowShortTitle: string;

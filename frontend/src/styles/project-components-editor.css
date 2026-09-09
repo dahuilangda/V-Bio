@@ -234,6 +234,15 @@
   margin-top: 19px;
 }
 
+/* MSA mode selector: content-sized select inside component-meta's auto column.
+   All visual chrome (surface, line border, radius, chevron, focus ring) comes
+   from the shared select styles — global.css plus .component-card select. */
+.component-card .msa-mode-select {
+  width: auto;
+  min-width: 132px;
+  min-height: 32px;
+}
+
 .component-card .btn.btn-compact {
   padding: 6px 10px;
   font-size: var(--text-xs);

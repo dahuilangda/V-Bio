@@ -84,6 +84,7 @@ export interface LoadedDraftFields {
   taskSummary: string;
   backend: string;
   use_msa: boolean;
+  msa_mode: 'none' | 'uniref' | 'env';
   color_mode: string;
   inputConfig: ProjectInputConfig;
 }
@@ -222,6 +223,7 @@ export async function loadProjectFlow(params: {
     taskSummary: String(snapshotSourceTaskRow?.summary || '').trim(),
     backend: normalizedBackend,
     use_msa: accessibleProject.use_msa,
+    msa_mode: accessibleProject.msa_mode ?? (accessibleProject.use_msa ? 'uniref' : 'none'),
     color_mode: accessibleProject.color_mode === 'alphafold' ? 'alphafold' : 'default',
     inputConfig: {
       ...taskAlignedConfig,

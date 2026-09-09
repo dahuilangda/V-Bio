@@ -717,70 +717,75 @@ export function ProjectTasksPage() {
         <ApiAccessPage />
       ) : (
         <ProjectTasksWorkspace
-          totalRowCount={taskRows.length}
-          canManageShares={canManageShares}
-          taskSearch={taskSearch}
-          onTaskSearchChange={setTaskSearch}
-          stateFilter={stateFilter}
-          onStateFilterChange={setStateFilter}
-          workflowFilter={workflowFilter}
-          onWorkflowFilterChange={setWorkflowFilter}
-          workflowOptions={workflowOptions}
-          backendFilter={backendFilter}
-          onBackendFilterChange={setBackendFilter}
-          backendOptions={backendOptions}
-          filteredCount={filteredRows.length}
-          showAdvancedFilters={showAdvancedFilters}
-          onToggleAdvancedFilters={() => setShowAdvancedFilters((prev) => !prev)}
-          advancedFilterCount={advancedFilterCount}
-          submittedWithinDays={submittedWithinDays}
-          onSubmittedWithinDaysChange={setSubmittedWithinDays}
-          seedFilter={seedFilter}
-          onSeedFilterChange={setSeedFilter}
-          minPlddt={minPlddt}
-          onMinPlddtChange={setMinPlddt}
-          minIptm={minIptm}
-          onMinIptmChange={setMinIptm}
-          maxPae={maxPae}
-          onMaxPaeChange={setMaxPae}
-          failureOnly={failureOnly}
-          onFailureOnlyChange={setFailureOnly}
-          structureSearchMode={structureSearchMode}
-          onStructureSearchModeChange={setStructureSearchMode}
-          structureSearchQuery={structureSearchQuery}
-          onStructureSearchQueryChange={setStructureSearchQuery}
-          structureSearchLoading={structureSearchLoading}
-          structureSearchError={structureSearchError}
-          structureSearchMatches={structureSearchMatches}
-          visibleMetricColumns={visibleMetricColumns}
-          onVisibleMetricColumnsChange={setVisibleMetricColumns}
-          onClearAdvancedFilters={clearAdvancedFilters}
-          sortKey={sortKey}
-          sortMark={sortMark}
-          onNormalizeSortKey={normalizeSortKey}
-          onSort={handleSort}
-          filteredRows={filteredRows}
-          pagedRows={pagedRows}
-          editingTaskNameId={editingTaskNameId}
-          editingTaskNameValue={editingTaskNameValue}
-          savingTaskNameId={savingTaskNameId}
-          openingTaskId={openingTaskId}
-          deletingTaskId={deletingTaskId}
-          terminatingTaskId={terminatingTaskId}
-          onOpenTask={openTask}
-          onTerminateTask={terminateTask}
-          onRemoveTask={removeTask}
-          onOpenShareTask={setSharedTaskRow}
-          onBeginTaskNameEdit={beginTaskNameEdit}
-          onCancelTaskNameEdit={cancelTaskNameEdit}
-          onSaveTaskNameEdit={saveTaskNameEdit}
-          onEditingTaskNameValueChange={setEditingTaskNameValue}
-          currentPage={currentPage}
-          totalPages={totalPages}
-          pageSize={pageSize}
-          onPageSizeChange={setPageSize}
-          onPageChange={setPage}
-          onJumpToPage={jumpToPage}
+          filtersProps={{
+            taskSearch,
+            onTaskSearchChange: setTaskSearch,
+            stateFilter,
+            onStateFilterChange: setStateFilter,
+            workflowFilter,
+            onWorkflowFilterChange: setWorkflowFilter,
+            workflowOptions,
+            backendFilter,
+            onBackendFilterChange: setBackendFilter,
+            backendOptions,
+            filteredMatchedCount: filteredRows.length,
+            showAdvancedFilters,
+            onToggleAdvancedFilters: () => setShowAdvancedFilters((prev) => !prev),
+            advancedFilterCount,
+            submittedWithinDays,
+            onSubmittedWithinDaysChange: setSubmittedWithinDays,
+            seedFilter,
+            onSeedFilterChange: setSeedFilter,
+            minPlddt,
+            onMinPlddtChange: setMinPlddt,
+            minIptm,
+            onMinIptmChange: setMinIptm,
+            maxPae,
+            onMaxPaeChange: setMaxPae,
+            failureOnly,
+            onFailureOnlyChange: setFailureOnly,
+            structureSearchMode,
+            onStructureSearchModeChange: setStructureSearchMode,
+            structureSearchQuery,
+            onStructureSearchQueryChange: setStructureSearchQuery,
+            structureSearchLoading,
+            structureSearchError,
+            structureSearchMatches,
+            visibleMetricColumns,
+            onVisibleMetricColumnsChange: setVisibleMetricColumns,
+            onClearAdvancedFilters: clearAdvancedFilters
+          }}
+          tableProps={{
+            totalRowCount: taskRows.length,
+            canManageShares,
+            filteredCount: filteredRows.length,
+            visibleMetricColumns,
+            sortKey,
+            sortMark,
+            onSort: handleSort,
+            onNormalizeSortKey: normalizeSortKey,
+            pagedRows,
+            editingTaskNameId,
+            editingTaskNameValue,
+            savingTaskNameId,
+            openingTaskId,
+            deletingTaskId,
+            terminatingTaskId,
+            onOpenTask: openTask,
+            onTerminateTask: terminateTask,
+            onRemoveTask: removeTask,
+            onOpenShareTask: setSharedTaskRow,
+            onBeginTaskNameEdit: beginTaskNameEdit,
+            onCancelTaskNameEdit: cancelTaskNameEdit,
+            onSaveTaskNameEdit: saveTaskNameEdit,
+            onEditingTaskNameValueChange: setEditingTaskNameValue,
+            currentPage,
+            totalPages,
+            pageSize,
+            onPageSizeChange: setPageSize,
+            onPageChange: setPage,
+            onJumpToPage: jumpToPage
+          }}
         />
       )}
       {project && session?.userId && sharedTaskRow && canManageShares ? (

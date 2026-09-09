@@ -272,16 +272,21 @@ def protenix2dock_task(self, score_args: dict):
             linker_chain = str(score_args.get("linker_chain") or "").strip()
             linker_ccd = str(score_args.get("linker_ccd") or "SEZ").strip().upper()
             bond_pairs = str(score_args.get("bond_pairs") or "").strip()
-            if linker_chain or bond_pairs:
-                if not linker_chain:
-                    raise ValueError("peptide mode linker requires linker_chain.")
+            # linker topology (bicyclic SG<->linker) and intra-peptide bonds
+            # (cyclic head-tail N-C) both ride --bond_pairs; only the former
+            # carries a linker chain entity
+            if linker_chain:
+                if not bond_pairs:
+                    raise ValueError("peptide mode linker requires bond_pairs.")
                 entry.extend(["--linker_chain", linker_chain, "--linker_ccd", linker_ccd])
             if bond_pairs:
                 entry.extend(["--bond_pairs", bond_pairs])
+            pocket_res = str(score_args.get("pocket_res") or "").strip()
+            if pocket_res:
+                entry.extend(["--pocket_res", pocket_res])
             entry.extend([
                 "--bond_upper", str(float(score_args.get("bond_upper") or 2.2)),
-                "--pocket_cutoff", str(float(score_args.get("pocket_cutoff") or 9.0)),
-                "--pocket_upper", str(float(score_args.get("pocket_upper") or 8.0)),
+                "--pocket_upper", str(float(score_args.get("pocket_upper") or 6.0)),
             ])
             if score_args.get("peptide_sequence"):
                 entry.extend(["--peptide_sequence", str(score_args["peptide_sequence"])])

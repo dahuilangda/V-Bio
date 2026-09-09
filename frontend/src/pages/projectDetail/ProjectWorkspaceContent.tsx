@@ -8,7 +8,7 @@ import { VirtualScreeningWorkflowSection, type VirtualScreeningWorkflowSectionPr
 import { WorkflowRuntimeSettingsSection, type WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
 import type { WorkspaceTab } from './workspaceTypes';
 
-interface ProjectWorkspaceContentProps {
+export interface ProjectWorkspaceContentProps {
   workspaceTab: WorkspaceTab;
   componentStepLabel: string;
   projectResultsSectionProps: ProjectResultsSectionProps;

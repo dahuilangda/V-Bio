@@ -3,6 +3,7 @@ import { type MolstarAtomHighlight, type MolstarResidueHighlight, type MolstarRe
 import { LeadOptMolstarViewer } from './LeadOptMolstarViewer';
 import { combineLigandAndBoxOverlay } from '../../../utils/pocketBox';
 import { InfoTip } from '../../../components/common/InfoTip';
+import { Field } from '../../common/Field';
 
 interface LeadOptReferencePanelProps {
   sectionId?: string;
@@ -82,8 +83,7 @@ export function LeadOptReferencePanel({
   return (
     <section id={sectionId} className="panel subtle lead-opt-panel lead-opt-panel--reference">
       <div className="lead-opt-reference-grid">
-        <label className="field">
-          <span>Target (PDB/CIF)</span>
+        <Field label="Target (PDB/CIF)">
           <input
             type="file"
             className="file-input-unified"
@@ -96,9 +96,8 @@ export function LeadOptReferencePanel({
             }}
             disabled={!canEdit || loading || submitting}
           />
-        </label>
-        <label className="field">
-          <span>Ligand (SDF/MOL2/PDB/CIF)</span>
+        </Field>
+        <Field label="Ligand (SDF/MOL2/PDB/CIF)">
           <input
             type="file"
             className="file-input-unified"
@@ -111,7 +110,7 @@ export function LeadOptReferencePanel({
             }}
             disabled={!canEdit || loading || submitting}
           />
-        </label>
+        </Field>
       </div>
       <div className="lead-opt-reference-status">
         <p className="small muted">

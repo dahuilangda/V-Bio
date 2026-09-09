@@ -12,7 +12,7 @@ import type {
 } from './taskListTypes';
 import { backendLabel } from './taskPresentation';
 
-interface ProjectTasksFiltersProps {
+export interface ProjectTasksFiltersProps {
   taskSearch: string;
   onTaskSearchChange: (value: string) => void;
   stateFilter: 'all' | ProjectTask['task_state'];

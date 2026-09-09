@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { FlaskConical, Lock, Mail, Signature, User } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { Field } from '../components/common/Field';
 
 export function RegisterPage() {
   const { registerAction } = useAuth();
@@ -44,16 +45,14 @@ export function RegisterPage() {
         <h1>Register</h1>
 
         <form onSubmit={onSubmit} className="form-grid">
-          <label className="field">
-            <span>Display Name</span>
+          <Field label="Display Name">
             <div className="input-wrap">
               <Signature size={16} />
               <input value={name} onChange={(e) => setName(e.target.value)} required />
             </div>
-          </label>
+          </Field>
 
-          <label className="field">
-            <span>Username</span>
+          <Field label="Username">
             <div className="input-wrap">
               <User size={16} />
               <input
@@ -64,18 +63,16 @@ export function RegisterPage() {
                 required
               />
             </div>
-          </label>
+          </Field>
 
-          <label className="field">
-            <span>Email (optional)</span>
+          <Field label="Email (optional)">
             <div className="input-wrap">
               <Mail size={16} />
               <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
             </div>
-          </label>
+          </Field>
 
-          <label className="field">
-            <span>Password</span>
+          <Field label="Password">
             <div className="input-wrap">
               <Lock size={16} />
               <input
@@ -86,10 +83,9 @@ export function RegisterPage() {
                 required
               />
             </div>
-          </label>
+          </Field>
 
-          <label className="field">
-            <span>Confirm Password</span>
+          <Field label="Confirm Password">
             <div className="input-wrap">
               <Lock size={16} />
               <input
@@ -100,7 +96,7 @@ export function RegisterPage() {
                 required
               />
             </div>
-          </label>
+          </Field>
 
           {error && <div className="alert error">{error}</div>}
 

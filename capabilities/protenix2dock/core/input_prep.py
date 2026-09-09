@@ -443,82 +443,6 @@ def align_init_coords(
     return coords, mask, {"ligand_rows": ligand_rows}
 
 
-def compute_contact_pairs(
-    coords: np.ndarray,
-    mask: np.ndarray,
-    ligand_rows: np.ndarray,
-    contact_cutoff: float,
-    max_distance: float,
-    max_pairs: int = 240,
-    anchor_slack: float | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Ligand/peptide-pocket contact pairs for TFG guidance.
-
-    For every protein atom within contact_cutoff of the placed ligand, pair it
-    with its nearest ligand atom.
-
-    anchor_slack: when set, the per-pair upper bound is tightened to the
-    PLACED geometry (d_i + slack, capped by max_distance) instead of a flat
-    max_distance. PairwiseDistancePotential is flat-bottomed and its
-    projection only fires on out-of-bounds pairs, so a flat 8 A bound lets
-    the denoiser drag a whole peptide away while every pair stays
-    "satisfied". Per-pair bounds turn the contacts into a real geometric
-    anchor: local relaxation inside the slack, projection pulls back any
-    larger excursion.
-    """
-    if ligand_rows.size == 0:
-        return None
-    ligand_row_set = set(ligand_rows.tolist())
-    protein_rows = np.array([i for i in range(len(coords)) if mask[i] > 0 and i not in ligand_row_set])
-    if protein_rows.size == 0:
-        return None
-    lig = coords[ligand_rows]  # [L,3]
-    pro = coords[protein_rows]  # [P,3]
-    d = np.linalg.norm(pro[:, None, :] - lig[None, :, :], axis=-1)  # [P,L]
-    nearest_lig = d.argmin(axis=1)
-    nearest_dist = d.min(axis=1)
-    selected = np.where(nearest_dist <= contact_cutoff)[0]
-    if selected.size == 0:
-        # Nothing in range: anchor to the closest 8 protein atoms so the
-        # guidance still has a pocket signal.
-        order = np.argsort(nearest_dist)[:8]
-        selected = order
-    if selected.size > max_pairs:
-        order = np.argsort(nearest_dist[selected])[:max_pairs]
-        selected = selected[order]
-    pairs = np.stack(
-        [protein_rows[selected], ligand_rows[nearest_lig[selected]]], axis=1
-    ).astype(np.int64)
-    if anchor_slack is not None:
-        # upper floor 2.2 A: the band is derived from the PLACED geometry, so a
-        # clashing placement (measured 2026-09-04: staged peptide buried at
-        # 0.24 A) would otherwise demand sub-physical contacts and the TFG
-        # projection crushes the peptide into the receptor wall (mass CA
-        # chirality inversions). A contact pair never asks for less than a
-        # legal close contact.
-        upper = np.clip(
-            nearest_dist[selected] + float(anchor_slack),
-            2.2,
-            float(max_distance),
-        ).astype(np.float32)
-        # matching lower bound: without it the projection can push the
-        # peptide into the receptor wall
-        lower = np.maximum(2.2, nearest_dist[selected] - float(anchor_slack)).astype(np.float32)
-        print(
-            f"[Info] Anchored guidance constraints prepared: {len(pairs)} pairs, "
-            f"cutoff={contact_cutoff:.1f}A, per-pair band = d±{anchor_slack:.2f}A "
-            f"(upper capped {max_distance:.1f}A, both bounds floored 2.2A)."
-        )
-    else:
-        upper = np.full(len(pairs), max_distance, dtype=np.float32)
-        lower = np.full(len(pairs), 2.2, dtype=np.float32)
-        print(
-            f"[Info] Anchored guidance constraints prepared: {len(pairs)} pairs, "
-            f"cutoff={contact_cutoff:.1f}A, max_distance={max_distance:.1f}A."
-        )
-    return pairs, upper, lower
-
-
 def _bond_pairs_as_rows(
     info: dict[str, Any],
     bond_pairs: list[tuple[tuple[str, int, str], tuple[str, int, str]]],
@@ -1115,6 +1039,74 @@ def align_complex_init_coords(
         "atom_names": np.asarray(atom_names),
         "asym_to_entity": asym_to_entity,
     }
+
+
+def compute_pocket_guidance_pairs(
+    info: dict[str, Any],
+    pocket_residues: list[tuple[str, int]],
+    upper: float,
+    peptide_entity: int,
+    staged_to_auto: dict[str, str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Boltz2-style pocket guidance pairs for PocketPotential.
+
+    For every user-named pocket residue (staged numbering), pair EVERY free
+    peptide atom with EVERY heavy atom of that residue; the residue is the
+    soft-min group. Pose-independent by construction (row indices + flat
+    upper bound only) — works from a pure-noise peptide start, unlike the
+    removed posed-distance contact anchors.
+
+    Returns (pair_index [M,2] int64, group [M] int64, upper [M] float32)
+    ready for the PROTENIX_POCKET_GUIDANCE_PATH npz, or None when no pocket
+    atom resolves.
+    """
+    asym = info["asym"]
+    res_id = info["res_id"]
+    atom_names = info["atom_names"]
+    asym_to_letter: dict[int, str] = {}
+    for value in asym:
+        v = int(value)
+        if v not in asym_to_letter:
+            asym_to_letter[v] = chr(ord("A") + len(asym_to_letter))
+
+    def _auto_chain(chain: str) -> str:
+        if staged_to_auto is None:
+            return chain
+        return staged_to_auto.get(chain, chain)
+
+    # pocket residue -> atom rows (heavy atoms only; H names are 1-2 chars
+    # starting with H/D)
+    pocket_rows_by_group: list[list[int]] = []
+    for chain_raw, resnum in pocket_residues:
+        letter = _auto_chain(str(chain_raw))
+        rows = [
+            i for i in range(len(asym))
+            if asym_to_letter[int(asym[i])] == letter
+            and int(res_id[i]) == int(resnum)
+            and not str(atom_names[i]).lstrip("0123456789").startswith(("H", "D"))
+            and str(atom_names[i]) != "D"
+        ]
+        if rows:
+            pocket_rows_by_group.append(rows)
+    if not pocket_rows_by_group:
+        return None
+
+    peptide_rows = list(info["entity_rows"][int(peptide_entity)])
+    if not peptide_rows:
+        return None
+
+    pair_index: list[list[int]] = []
+    group: list[int] = []
+    for g, rows in enumerate(pocket_rows_by_group):
+        for p_row in peptide_rows:
+            for q_row in rows:
+                pair_index.append([int(p_row), int(q_row)])
+                group.append(g)
+    return (
+        np.asarray(pair_index, dtype=np.int64),
+        np.asarray(group, dtype=np.int64),
+        np.full(len(group), float(upper), dtype=np.float32),
+    )
 
 
 def compute_bond_contact_pairs(
