@@ -1,0 +1,276 @@
+/* Open-state panel shell styles (floating panel frame, chat-window grid,
+   error banner, messages list, load-earlier, suppressed overlay states).
+   Moved from ProjectCopilotModal.css — rendered exclusively by
+   CopilotPanelShell.tsx. Mixed multi-selector grid rules and other
+   components' families (drag-handle, action-stack, history, settings,
+   message cards, launcher) stayed behind. */
+.copilot-floating-panel {
+  position: fixed;
+  z-index: 100;
+  width: min(560px, calc(100vw - 24px));
+  height: min(680px, calc(100vh - 24px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  min-width: min(340px, calc(100vw - 16px));
+  min-height: min(360px, calc(100vh - 16px));
+  resize: both;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #cddbd3;
+  box-shadow: 0 16px 42px rgba(16, 38, 29, 0.18);
+}
+
+.copilot-modal.copilot-chat-window {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+  background: #fff;
+}
+
+.copilot-modal.copilot-chat-window.history-open {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(180px, 1fr) auto auto;
+  column-gap: 12px;
+}
+
+.copilot-chat-window.history-open .copilot-error {
+  grid-row: 2;
+}
+
+.copilot-chat-window.history-open .copilot-messages {
+  grid-row: 3;
+}
+
+.copilot-chat-window .copilot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.copilot-chat-window .copilot-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.copilot-chat-window .copilot-title h2 {
+  font-size: var(--text-lg);
+}
+
+.copilot-chat-window .copilot-title span {
+  display: block;
+  max-width: 420px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copilot-chat-window .copilot-error {
+  margin: 0;
+}
+
+.copilot-chat-window .copilot-messages {
+  flex: 1 1 auto;
+  min-height: 180px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  scroll-padding-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #fff;
+  border: 0;
+  border-radius: 0;
+  margin-right: -10px;
+  padding: 6px 14px 18px 2px;
+}
+
+.copilot-chat-window .copilot-messages > :last-child {
+  margin-bottom: 2px;
+}
+
+/* Render-window affordance: older transcript messages stay unrendered until asked for, so the
+   button reads as a quiet centered seam between loaded history and the unrendered tail. */
+.copilot-chat-window .copilot-load-earlier {
+  align-self: center;
+  border: 1px solid #d5e0d9;
+  border-radius: 999px;
+  background: #f4f8f5;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  padding: 6px 12px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.copilot-chat-window .copilot-load-earlier:hover {
+  background: #e9f1ec;
+  color: var(--text);
+}
+
+.copilot-chat-window .copilot-empty {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.copilot-chat-window .copilot-message {
+  max-width: 82%;
+  border: 1px solid #d5e0d9;
+  border-radius: 18px;
+  background: #fff;
+  padding: 8px 11px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+}
+
+.copilot-chat-window .copilot-message.is-user {
+  align-self: flex-end;
+  border-color: #c0dfcf;
+  background: #eef8f2;
+  border-bottom-right-radius: 6px;
+}
+
+.copilot-chat-window .copilot-message.is-assistant {
+  align-self: flex-start;
+  border-color: #d7e1dc;
+  background: #fff;
+  border-bottom-left-radius: 6px;
+}
+
+.copilot-chat-window .copilot-message.is-system {
+  align-self: center;
+  max-width: 92%;
+  border-color: #d6dfd9;
+  background: #f7faf8;
+  color: #52675d;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+}
+
+.copilot-chat-window .copilot-thinking {
+  display: block;
+  color: var(--muted);
+}
+
+/* Failed action receipt: soft red tint so the user sees something went wrong — no border bar,
+   the receipt text (with the failure reason) is the single error surface. */
+.copilot-chat-window .copilot-message.is-action-failed {
+  background: #fef2f2;
+}
+
+@media (max-width: 767px) {
+    /* Small screens: the floating panel becomes a true full-screen sheet (overrides the persisted
+     position/size, which would otherwise push the composer off-screen). Drag/resize are visually
+     disabled via !important. */
+  .copilot-floating-panel {
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    /* height/max-height/top are intentionally NOT !important here: the component applies inline
+       styles bound to window.visualViewport so the panel tracks the visible region above the soft
+       keyboard (dvh alone is unreliable across browsers). The CSS values below are the keyboard-
+       closed defaults; the inline visualViewport styles override them when the keyboard opens.
+       left/right/bottom stay !important because those edges never change on keyboard open. */
+    /* Start below the app top-nav (64px): the panel's header — with the close button —
+       must never sit underneath the sticky nav, which would make the panel unclosable
+       (observed on phones). */
+    top: 64px;
+    /* dvh is the dynamic viewport height — it shrinks when the soft keyboard opens on browsers
+       that support it, keeping the input visible as a baseline. The inline visualViewport styles
+       are the authoritative source and override this when available. */
+    height: calc(100dvh - 64px);
+    max-width: 100vw !important;
+    max-height: 100dvh;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    border: 0;
+    border-radius: 0;
+    resize: none;
+  }
+  /* On mobile, the suppressed dock-chip adds no value (a dialog already covers the full screen).
+     Hide it entirely instead of showing a floating pill behind the dialog. */
+  .copilot-floating-panel.copilot-suppressed {
+    display: none !important;
+  }
+  .copilot-modal.copilot-chat-window {
+    width: 100%;
+    height: 100%;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .copilot-modal.copilot-chat-window.history-open {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto minmax(180px, 1fr) auto auto;
+  }
+}
+
+/*
+ * Suppressed state: a modal-mask dialog (new-project, sharing, ...) is open elsewhere on the page.
+ * The overlay coordinator flags it and the panel collapses to a compact dock chip placed under the
+ * dialog's z-index, so the two never visually overlap. The chip hints the assistant is still active
+ * and will restore once the dialog closes; it is non-interactive while suppressed.
+ */
+.copilot-floating-panel.copilot-suppressed {
+  z-index: 80;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  resize: none;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.copilot-floating-panel.copilot-suppressed .copilot-modal {
+  display: none;
+}
+
+.copilot-floating-panel.copilot-suppressed::after {
+  content: 'Copilot';
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  height: auto;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid #c6d7ce;
+  background: #fff;
+  color: #243d32;
+  box-shadow: 0 8px 22px rgba(26, 56, 43, 0.16);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Settings panel (proxy / LLM server / API key)                      */
+/* ------------------------------------------------------------------ */
+
+.copilot-chat-window {
+  position: relative;
+}

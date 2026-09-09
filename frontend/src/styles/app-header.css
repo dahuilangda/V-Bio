@@ -1,0 +1,159 @@
+/* header domain — extracted from global.css (CSS slimming) */
+
+.top-link,
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-weight: 500;
+  font-size: var(--text-md);
+}
+.brand {
+  color: var(--text);
+  font-weight: 700;
+  margin-right: 10px;
+}
+.top-link.active,
+.top-link:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.nav-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+}
+.nav-hamburger:hover {
+  color: #1f4f3f;
+  background: #eef6f1;
+  border-color: #b4cec1;
+}
+.nav-hamburger:focus-visible {
+  outline: 2px solid #c2d6c8;
+  outline-offset: 2px;
+}
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-right: 0;
+  padding: 6px 12px 6px 8px;
+  border-radius: 999px;
+  background: #f4f9f6;
+  border: 1px solid #cfe0d5;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+.user-menu {
+  position: relative;
+}
+.user-chip-button {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.user-chip-button:hover {
+  background: #edf6f0;
+  border-color: #bed6c7;
+}
+.user-chip-button.open {
+  background: #e9f4ed;
+  border-color: #b7d1c0;
+  box-shadow: 0 0 0 2px rgba(154, 189, 168, 0.22);
+}
+.user-chip-text {
+  line-height: 1.15;
+}
+.user-chip-caret {
+  color: #5b7769;
+  transition: transform 0.16s ease;
+}
+.user-chip-caret.open {
+  transform: rotate(180deg);
+}
+.user-menu-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 172px;
+  border: 1px solid #d3e1d9;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(26, 56, 43, 0.14);
+  overflow: hidden;
+  z-index: 20;
+}
+.user-menu-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #1f3a2e;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.user-menu-item + .user-menu-item {
+  border-top: 1px solid #e5eee8;
+}
+.user-menu-item:hover {
+  background: #f4faf6;
+}
+.user-menu-item:focus-visible {
+  outline: 2px solid #c2d6c8;
+  outline-offset: -2px;
+}
+.user-menu-item.danger {
+  color: #9b2b2b;
+}
+.user-menu-item.danger:hover {
+  background: #fdf1f1;
+}
+/* ── Responsive ────────────────────────────────────────────────────────────
+   The hamburger is hidden on wide screens (display:none above) and revealed in
+   two steps, mirroring the .top-nav-link collapsing in global.css. */
+
+/* 861-1100px band: with the full link set + user chip the fixed-height header
+   wraps badly — collapse to the hamburger one step earlier than phone layout. */
+@media (max-width: 1100px) {
+  .nav-hamburger {
+    display: inline-flex;
+  }
+  .user-chip-text {
+    min-width: 0;
+  }
+  .user-chip-text .user-name {
+    display: block;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* Phones: larger touch target for the hamburger. */
+@media (max-width: 860px) {
+  .nav-hamburger {
+    display: inline-flex;
+    width: 44px;
+    height: 44px;
+  }
+}

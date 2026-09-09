@@ -1,0 +1,294 @@
+/* Token registry modal styles (create form, permission chips, paged table).
+   Moved from styles/api-access.css — rendered exclusively by
+   ApiTokenRegistryModal.tsx. The shared .api-token-modal-head (used by the
+   yaml/project-token modals too) and .api-pager stayed behind. */
+.api-token-create {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(210px, 1.2fr) minmax(260px, 1.45fr) 120px minmax(240px, 1.3fr) auto;
+  align-items: end;
+}
+
+.api-token-create .field {
+  margin: 0;
+}
+
+.api-token-name-field,
+.api-token-project-field {
+  min-width: 0;
+}
+
+.api-token-expiry-field {
+  max-width: 140px;
+}
+
+.api-token-source-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.api-permission-grid {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  flex-wrap: nowrap;
+}
+
+.api-permission-chip {
+  border: 1px solid #d4dfd8;
+  border-radius: 999px;
+  background: #f7fbf9;
+  color: #355348;
+  height: 36px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.api-permission-chip:hover {
+  background: #eef6f1;
+  border-color: #c5d7cd;
+}
+
+.api-permission-chip.active {
+  background: #e6f3eb;
+  border-color: #a8c9b6;
+  color: #1f4838;
+}
+
+.api-token-create-action {
+  min-width: 0;
+  grid-column: auto;
+  align-self: end;
+  justify-self: end;
+}
+
+.api-token-table-wrap {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 0 #f1f5f3 inset;
+}
+
+.api-token-table {
+  min-width: 0;
+  width: 100%;
+}
+
+.api-token-table .row-selected {
+  background: #f4faf6;
+}
+
+.api-token-table tbody tr:hover {
+  background: #f8fcf9;
+}
+
+.api-token-table th:last-child,
+.api-token-table td:last-child {
+  min-width: 216px;
+}
+
+.api-token-table thead th {
+  position: sticky;
+  top: 0;
+  background: #f7fbf8;
+  z-index: 1;
+}
+
+.api-token-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.api-token-modal {
+  display: grid;
+  gap: 12px;
+}
+
+.api-token-modal.modal-wide {
+  width: min(1240px, 97vw);
+}
+
+.api-token-modal-body {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
+.api-token-modal-create {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d7e3dc;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fafdfb 0%, #f5faf7 100%);
+  padding: 12px;
+}
+
+.api-token-modal-create .api-token-create {
+  grid-template-columns: minmax(210px, 1.2fr) minmax(260px, 1.45fr) 120px minmax(240px, 1.3fr) auto;
+}
+
+.api-token-modal-create .api-token-create-action {
+  grid-column: auto;
+}
+
+.api-token-project-field {
+  min-width: 280px;
+}
+
+.api-token-permissions-field {
+  grid-column: auto;
+  justify-self: start;
+}
+
+.api-token-modal-create .field input,
+.api-token-modal-create .field select {
+  height: 36px;
+}
+
+.api-token-project-field select {
+  font-size: var(--text-xs);
+}
+
+.api-token-modal-list {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid #d9e5de;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+}
+
+.api-token-list-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #dbe6df;
+}
+
+.api-token-scope-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.api-token-scope-indicator strong {
+  font-size: var(--text-sm);
+}
+
+.api-token-search-field {
+  margin: 0;
+  min-width: 240px;
+}
+
+.api-token-search-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.api-token-table-scroll {
+  max-height: 540px;
+}
+
+.api-token-perm-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.api-token-perm-badge {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid #d2dfd7;
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.api-token-perm-badge.on {
+  background: #e8f4ec;
+  border-color: #b4d1bf;
+  color: #24553f;
+}
+
+.api-token-perm-badge.off {
+  background: #f4f6f5;
+  border-color: #d7dfdb;
+  color: #86948d;
+}
+
+.api-token-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.api-token-status-chip.active {
+  background: #eaf6ef;
+  color: #245740;
+  border-color: #cde4d6;
+}
+
+.api-token-status-chip.revoked {
+  background: #f3f4f4;
+  color: #6b7c74;
+  border-color: #dde2df;
+}
+
+@media (max-width: 1100px) {
+  .api-token-modal-body {
+    grid-template-columns: 1fr;
+  }
+  .api-token-search-field {
+    min-width: 0;
+    width: 100%;
+  }
+  .api-token-project-field {
+    min-width: 0;
+  }
+  .api-permission-grid {
+    flex-wrap: wrap;
+    height: auto;
+  }
+  .api-token-modal-create .api-token-create,
+  .api-token-create {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .api-token-permissions-field {
+    grid-column: auto;
+  }
+  .api-token-expiry-field {
+    max-width: none;
+  }
+  .api-token-create-action {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .api-token-create {
+    grid-template-columns: 1fr;
+  }
+}

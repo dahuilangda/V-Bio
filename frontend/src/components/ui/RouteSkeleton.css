@@ -1,0 +1,132 @@
+/* Suspense fallback for lazily-loaded routes — page-shaped skeleton that
+   mirrors the panel/table aesthetic so chunk loads read as progressive
+   rendering, not a blank swap. */
+
+.route-skeleton {
+  display: grid;
+  gap: clamp(12px, 1vw, 18px);
+}
+
+.route-skeleton-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.route-skeleton-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: clamp(12px, 1.2vw, 18px);
+  display: grid;
+  gap: 14px;
+}
+
+.route-skeleton-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.route-skeleton-rows {
+  display: grid;
+  gap: 12px;
+}
+
+.route-skeleton-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 2.2fr) 1.4fr 0.8fr 0.8fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.skel {
+  border-radius: 8px;
+  background: #e9f1ec;
+  animation: skel-pulse 1.3s ease-in-out infinite;
+  will-change: opacity;
+}
+
+.skel-title {
+  width: 168px;
+  height: 26px;
+}
+
+.skel-button {
+  width: 128px;
+  height: 34px;
+  border-radius: 10px;
+}
+
+.skel-input {
+  width: min(320px, 60%);
+  height: 36px;
+}
+
+.skel-select {
+  width: 148px;
+  height: 36px;
+}
+
+.skel-cell {
+  height: 16px;
+  width: 82%;
+}
+
+.skel-cell-name {
+  height: 20px;
+  width: 96%;
+}
+
+.skel-cell-sm {
+  width: 56%;
+}
+
+.skel-cell-actions {
+  width: 104px;
+  height: 26px;
+  border-radius: 999px;
+}
+
+@keyframes skel-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+    opacity: 0.75;
+  }
+}
+
+@media (max-width: 860px) {
+  .route-skeleton-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .skel-cell-sm,
+  .skel-cell-actions {
+    display: none;
+  }
+}
+
+/* Screen-reader text for the skeleton's status announcement. */
+.route-skeleton-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
