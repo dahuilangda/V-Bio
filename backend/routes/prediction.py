@@ -272,7 +272,13 @@ def register_prediction_routes(
             )
         else:
             use_msa_server = parse_bool(use_msa_server_raw, False)
-            logger.info('use_msa_server parameter received: %s for client %s.', use_msa_server, request.remote_addr)
+        msa_mode = str(request.form.get('msa_mode') or 'uniref').strip()
+        if msa_mode not in ('uniref', 'env', 'none'):
+            msa_mode = 'uniref'
+        if msa_mode == 'none':
+            use_msa_server = False
+        logger.info('msa_mode=%s (use_msa_server=%s) for client %s.',
+                    msa_mode, use_msa_server, request.remote_addr)
 
         model_name = request.form.get('model', None)
         if model_name:
@@ -560,6 +566,7 @@ def register_prediction_routes(
         predict_args = {
             'yaml_content': yaml_content,
             'use_msa_server': use_msa_server,
+            'msa_mode': msa_mode,
             'model_name': model_name,
             'backend': backend,
             'seed': seed_value,

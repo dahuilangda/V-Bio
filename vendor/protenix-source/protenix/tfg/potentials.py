@@ -818,6 +818,90 @@ class PairwiseDistancePotential(Potential):
 
 
 @register
+class PocketPotential(Potential):
+    """Boltz2-style pocket guidance: soft-min upper bound per pocket residue.
+
+    Semantics (mirrors boltz-2.2.1 ContactPotentital, potentials.py:653-667):
+    each pocket RESIDUE defines a group of (binder atom, pocket atom) pairs;
+    the group energy is a smooth minimum over its pairs of the flat-bottom
+    excess ``k * relu(d - upper)`` — i.e. "the residue is satisfied when at
+    least ONE of its atom pairs lies within ``upper`` A of the binder".
+    This disjunctive (min-over-group) form is what per-pair
+    PairwiseDistancePotential bands cannot express: flat bands on every pair
+    would demand the binder touch EVERY pocket atom simultaneously
+    (over-constraint), and the resulting projection on the full generation
+    schedule is ill-conditioned. This potential is energy+gradient only
+    (mu channel) — it never projects, so the JJ^T singularity cannot arise.
+
+    Expected `feats`:
+        - `pocket_pair_index`: `[2, M]` binder-atom/pocket-atom pairs
+        - `pocket_pair_group`: `[M]` int64 group id (one per pocket residue)
+        - `pocket_pair_upper`: `[M]` per-pair upper bound in A
+
+    Params:
+        - `k`: force constant (default 1.0, boltz2 uses k=1 linear excess)
+        - `softmin_lambda`: soft-min sharpness (default 8.0; boltz2 anneals
+          union_lambda 8 -> 0 over sampling; a constant 8.0 keeps early
+          averaging and late argmin-selection behaviour)
+
+    Energy: ``E = sum_g -(1/lambda) * logsumexp_m in g (-lambda * e_m)``,
+    whose gradient w.r.t. e_m is exactly the in-group softmax weight.
+    """
+
+    def __init__(self, default_params: Optional[dict[str, Any]] = None):
+        defaults = {"k": 1.0, "softmin_lambda": 8.0}
+        if default_params is not None:
+            defaults.update(default_params)
+        super().__init__(defaults)
+
+    def _eval(self, coords, feats, params, need_grad: bool):
+        idx = feats["pocket_pair_index"]
+        if idx.numel() == 0:
+            return (
+                _zeros_energy_and_grad(coords) if need_grad else _zeros_energy(coords)
+            )
+        group = feats["pocket_pair_group"]
+        upper = feats["pocket_pair_upper"]
+        lam = float(params["softmin_lambda"])
+        k = float(params["k"])
+
+        d, grad_d = _distance_value_and_grad(coords, idx, need_grad)
+        excess = k * torch.relu(d - upper)  # [..., M] flat-bottom, only far is penalized
+
+        n_groups = int(group.max().item()) + 1 if group.numel() else 0
+        if n_groups == 0:
+            return (
+                _zeros_energy_and_grad(coords) if need_grad else _zeros_energy(coords)
+            )
+        # group membership mask [G, M]: 1 where pair m belongs to group g
+        mask = torch.nn.functional.one_hot(group.to(torch.long), n_groups).to(
+            excess.dtype
+        ).transpose(-1, -2)
+        # padded[-lam * excess] into [.., G, M] with -inf outside the group;
+        # every group has >= 1 pair, so each logsumexp row has a finite entry
+        val = (-lam * excess).unsqueeze(-2)  # [.., 1, M]
+        padded = torch.where(
+            mask.bool(), val, torch.full_like(val, float("-inf"))
+        )  # [.., G, M]
+        lse = torch.logsumexp(padded, dim=-1)  # [.., G]
+        energy = _sum_energy(-(1.0 / lam) * lse)
+
+        if not need_grad:
+            return energy
+
+        # dE_g/de_m = softmax within group; d e/d d = k * (d > upper)
+        soft_w = torch.softmax(padded, dim=-1)  # [.., G, M], zero outside groups
+        batch_shape = excess.shape[:-1]
+        gather_idx = group.view(*([1] * len(batch_shape)), 1, -1).expand(
+            *batch_shape, 1, -1
+        )  # [.., 1, M]
+        dE_dexcess = soft_w.gather(-1, gather_idx).squeeze(-2) * k  # [.., M]
+        dE_dd = dE_dexcess * (d > upper).to(d.dtype)
+        grad_atom = _aggregate_atom_gradients(coords, idx, grad_d, dE_dd)
+        return energy, grad_atom
+
+
+@register
 class StereoBondPotential(Potential):
     """Stereo double-bond (cis/trans) constraint using |dihedral|.
 

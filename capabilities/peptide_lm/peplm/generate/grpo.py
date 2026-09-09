@@ -23,7 +23,13 @@ class GRPOUpdater:
     def __init__(self, agent, prior, vocab: Vocab, device="cuda", lr=3e-5,
                  clip_eps: float = 0.2, kl_beta: float = 0.02,
                  ent_coef: float = 0.003, tis_cap: float = 2.0,
-                 max_len: int = 96):
+                 max_len: int = 96,
+                 kl_target: float | None = 0.01):
+        # kl_target enables the OpenRLHF AdaptiveKLController pattern: beta
+        # tracks the measured KL-to-prior with a deadband, guarding both
+        # failure modes of a fixed beta — prior collapse (beta too weak for
+        # a reward-hacking oracle) and frozen policy (beta too strong early
+        # in the loop). None keeps the legacy fixed beta.
         self.agent = agent
         self.prior = prior
         self.vocab = vocab
@@ -33,6 +39,7 @@ class GRPOUpdater:
         self.ent_coef = ent_coef
         self.tis_cap = tis_cap
         self.max_len = max_len
+        self.kl_target = kl_target
         self.opt = torch.optim.Adam(agent.parameters(), lr=lr)
         self.prior.eval()
 
@@ -67,7 +74,8 @@ class GRPOUpdater:
             key = s[2] if len(s) > 2 and s[2] else "solo"
             src = s[3] if len(s) > 3 and s[3] else "mix"
             plen = int(s[4]) if len(s) > 4 and s[4] else 0
-            norm.append((list(toks), r, str(key), str(src), plen))
+            ss = s[5] if len(s) > 5 else None
+            norm.append((list(toks), r, str(key), str(src), plen, ss))
         if len(norm) < 4:
             return {"n": 0}
 
@@ -84,6 +92,7 @@ class GRPOUpdater:
         keys = [norm[i][2] for i in keep]
         sources = [norm[i][3] for i in keep]
         plens = [min(norm[i][4], len(e) - 2) for i, e in zip(keep, enc)]
+        sss = [norm[i][5] for i in keep]
         advs = self._group_advantage(keys, rewards, sources)
 
         x_all = torch.full((len(enc), max(len(e) for e in enc)), pad, dtype=torch.long)
@@ -94,11 +103,20 @@ class GRPOUpdater:
         for r_i, plen in enumerate(plens):
             if plen > 0:
                 tok_mask[r_i, :plen] = 0.0
+        # additive ss track (v8): per-row id lists align to the encoded
+        # tokens; rows without a track train on the plain token stream
+        ss_all = None
+        if any(ss for ss in sss):
+            ss_all = torch.zeros_like(x_all)
+            for r_i, (e, ss) in enumerate(zip(enc, sss)):
+                if ss:
+                    n = min(len(ss), len(e))
+                    ss_all[r_i, :n] = torch.tensor(ss[:n], dtype=torch.long)
 
         self.agent.eval()
         with torch.no_grad():
-            old_lp = self.agent._token_logprobs(x_all)
-            ref_lp = self.prior._token_logprobs(x_all)
+            old_lp = self.agent._token_logprobs(x_all, ss_all)
+            ref_lp = self.prior._token_logprobs(x_all, ss_all)
         adv_t = torch.tensor(advs, dtype=torch.float32, device=self.device)
 
         stats = {"loss": [], "kl": [], "clip": [], "ent": []}
@@ -114,7 +132,12 @@ class GRPOUpdater:
                 x = x_all[sel]
                 m = tok_mask[sel]
                 o_lp, r_lp = old_lp[sel], ref_lp[sel]
-                logits = self.agent.gpt(x[:, :-1]).logits
+                ss = ss_all[sel] if ss_all is not None else None
+                if ss is not None:
+                    logits = self.agent.gpt(inputs_embeds=self.agent._embed(
+                        x[:, :-1], ss[:, :-1])).logits
+                else:
+                    logits = self.agent.gpt(x[:, :-1]).logits
                 lp = F.log_softmax(logits.float(), dim=-1)
                 tgt = x[:, 1:]
                 new_lp = lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
@@ -132,6 +155,14 @@ class GRPOUpdater:
                 ent = -(lp.exp() * lp).sum(-1)
                 ent_b = (ent * m).sum() / denom
                 loss = pg_loss + self.kl_beta * kl - self.ent_coef * ent_b
+                # adaptive KL: deadband ±2x around target, beta bounded
+                # [beta/10, beta*10]; measured on the pre-update KL estimate
+                if self.kl_target is not None:
+                    kl_hat = float(kl.detach())
+                    if kl_hat > 2.0 * self.kl_target:
+                        self.kl_beta = min(10.0 * 0.02, self.kl_beta * 1.5)
+                    elif kl_hat < 0.5 * self.kl_target:
+                        self.kl_beta = max(0.002, self.kl_beta / 1.5)
                 self.opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.agent.parameters(), 1.0)

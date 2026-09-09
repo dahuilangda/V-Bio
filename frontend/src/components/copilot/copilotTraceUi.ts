@@ -164,3 +164,48 @@ export function formatTraceStep(step: CopilotTraceStep): string {
       return step.event;
   }
 }
+
+// ---- action receipts ----------------------------------------------------
+// Receipts the backend attaches when a plan action is applied/cancelled/fails;
+// the message cards style failures and the modal filters resolved actions.
+
+export type CopilotActionResolutionStatus = 'applied' | 'cancelled' | 'failed';
+
+export interface CopilotActionResolution {
+  plan_id: string;
+  operation_id: string;
+  status: CopilotActionResolutionStatus;
+  /** The action skill id (e.g. the page operation that was confirmed). */
+  skill?: string;
+  /** The human-facing label shown on the confirmation chip. */
+  label?: string;
+  detail?: string;
+  error?: string;
+  /** The action's own arguments — what a recovery/summary turn may cite as actually applied. */
+  arguments?: Record<string, unknown>;
+}
+
+export function readActionResolutions(message: ProjectCopilotMessage): CopilotActionResolution[] {
+  const value = message.metadata?.action_resolutions;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const resolution = item as Partial<CopilotActionResolution>;
+    const planId = String(resolution.plan_id || '').trim();
+    const operationId = String(resolution.operation_id || '').trim();
+    const status = resolution.status;
+    if (!planId || !operationId || (status !== 'applied' && status !== 'cancelled' && status !== 'failed')) return [];
+    return [{
+      plan_id: planId,
+      operation_id: operationId,
+      status,
+      ...(typeof resolution.skill === 'string' && resolution.skill ? { skill: resolution.skill } : {}),
+      ...(typeof resolution.label === 'string' && resolution.label ? { label: resolution.label } : {}),
+      ...(typeof resolution.detail === 'string' && resolution.detail ? { detail: resolution.detail } : {}),
+      ...(typeof resolution.error === 'string' && resolution.error ? { error: resolution.error } : {}),
+      ...(resolution.arguments && typeof resolution.arguments === 'object' && !Array.isArray(resolution.arguments)
+        ? { arguments: resolution.arguments as Record<string, unknown> }
+        : {}),
+    }];
+  });
+}

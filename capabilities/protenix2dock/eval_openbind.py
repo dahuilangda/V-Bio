@@ -3,9 +3,20 @@
 
 Mirrors train_affinity.py's val loop exactly (frozen trunk representations +
 crystal coords + head readout) so the number is directly comparable to the
-trainer's [val] gate. Reference bars on this set:
-  - MW baseline:        Spearman +0.469
-  - Nesso-1 zero-shot:  Spearman -0.453
+trainer's [val] gate.
+
+Reference bars — official OpenBind EV-A71_2A benchmark table (n=490 compounds,
+compound-level Spearman, OpenBind-Consortium/EV-A71_2A_benchmark
+plotting/tables/affinity_prediction_metrics.csv):
+  - MW baseline:   +0.4859   (best zero-shot ranker in the official table)
+  - GNINA (redock): +0.4305
+  - Bolt-2:        +0.4011
+  - AEV-PLIG:      +0.2218 / smina +0.1886 / cLogP +0.1744 / AQAffinity +0.1145
+  - Nesso-1:       ~ +0.51  (bioRxiv 2026.08.01.742196, n=494 pre-curation;
+                              the only published method above MW)
+This eval's dedup column averages predictions per compound_group (494 groups
+over 639 complexes) — close to Nesso-1's 494-compound protocol, NOT the
+official 490-compound curated set; treat comparisons as approximate.
 """
 from __future__ import annotations
 
@@ -28,6 +39,9 @@ def main() -> None:
     ap.add_argument("--checkpoint_dir", default="/workspace/model")
     ap.add_argument("--limit", type=int, default=0, help="0 = all")
     ap.add_argument("--msa_server_url", default="http://172.17.3.200:8080")
+    ap.add_argument("--seed", type=int, default=0, help="fix for deterministic eval")
+    ap.add_argument("--mc_samples", type=int, default=0,
+                    help="override the ckpt's MC-dropout sample count; 1 = dropout off (deterministic)")
     args = ap.parse_args()
 
     import torch
@@ -36,6 +50,7 @@ def main() -> None:
     from core.runner import build_configs
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(args.seed)
     work_dir = Path(args.work_dir).expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +83,8 @@ def main() -> None:
     head = ProtenixAffinityHead(**head_cfg).to(device)
     head.load_state_dict(blob["state_dict"])
     head.eval()
+    if args.mc_samples > 0:
+        head.mc_samples = args.mc_samples
     print(f"[eval] ckpt epoch={blob.get('epoch')} step={blob.get('global_step')}", flush=True)
 
     rows = list(csv.DictReader(open(args.index_csv)))
@@ -108,10 +125,11 @@ def main() -> None:
         r, _ = pearsonr(preds, labels)
         print(f"[RESULT] OpenBind EV-A71 zero-shot: n={len(preds)} "
               f"Spearman={rho:+.3f} (p={pv:.1e}) Pearson={r:+.3f}", flush=True)
-        print("[RESULT] bars: MW baseline +0.469 | nesso-1 zero-shot -0.453", flush=True)
+        print("[RESULT] official bars (n=490): MW +0.486 | GNINA +0.431 | Bolt-2 +0.401 | Nesso-1 ~ +0.51 (n=494)", flush=True)
         with open(work_dir / "openbind_eval.json", "w") as f:
             json.dump({"n": len(preds), "spearman": rho, "pearson": r,
                        "errors": errors, "ckpt": args.ckpt,
+                       "epoch": blob.get("epoch"), "global_step": blob.get("global_step"),
                        "names": names, "preds": preds, "labels": labels}, f, indent=2)
 
 

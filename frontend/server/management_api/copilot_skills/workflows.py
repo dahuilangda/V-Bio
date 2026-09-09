@@ -1,6 +1,34 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+# Canonical workflow vocabulary (single source of truth, mirrors the frontend's
+# WORKFLOWS registry). Skill schemas and capability prose DERIVE from this tuple —
+# never re-list workflow keys where the model can see them.
+WORKFLOW_KEYS: tuple[str, ...] = (
+    "prediction",
+    "virtual_screening",
+    "affinity",
+    "peptide_design",
+    "lead_optimization",
+)
+
+# Backend availability per workflow (platform rule, single source). A workflow whose
+# list has one entry has a FIXED backend — schemas expose that one value and prose
+# describes the constraint by rule, never by hardcoding the backend's brand name.
+_WORKFLOW_BACKENDS: Dict[str, List[str]] = {
+    "virtual_screening": ["nesso"],
+}
+
+
+def workflow_backend_values(workflow_key: str) -> List[str]:
+    # Backend values legal for a workflow (falls back to the general backend list).
+    normalized = normalize_workflow_key(workflow_key)
+    if normalized in _WORKFLOW_BACKENDS:
+        return list(_WORKFLOW_BACKENDS[normalized])
+    from management_api.copilot_capabilities import TASK_PARAMETER_SCHEMA  # local: avoid import cycle
+
+    return list(TASK_PARAMETER_SCHEMA["backend"]["values"])
 
 
 def normalize_workflow_key(value: Any, *, default: str = "prediction") -> str:

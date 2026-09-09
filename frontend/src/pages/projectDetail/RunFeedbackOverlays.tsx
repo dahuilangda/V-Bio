@@ -2,7 +2,7 @@ import type { MouseEvent } from 'react';
 import { CheckCircle2, LoaderCircle } from 'lucide-react';
 import { RunPlayIcon } from './RunPlayIcon';
 
-interface RunFeedbackOverlaysProps {
+export interface RunFeedbackOverlaysProps {
   runSuccessNotice: string | null;
   taskHistoryPath: string;
   onOpenTaskHistory: (event: MouseEvent<HTMLElement>) => void;

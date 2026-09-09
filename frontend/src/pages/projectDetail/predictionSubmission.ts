@@ -19,6 +19,7 @@ export interface PredictionDraftFields {
   taskSummary: string;
   backend: string;
   use_msa: boolean;
+  msa_mode?: 'none' | 'uniref' | 'env';
   color_mode: string;
   inputConfig: ProjectInputConfig;
 }
@@ -467,6 +468,11 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   try {
     const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(submissionConfig);
     const hasMsa = isVirtualScreeningWorkflow ? false : computeUseMsaFlag(activeComponents, draft.use_msa);
+    // Derive msa_mode from the first protein component's setting (or project default)
+    const firstProtein = activeComponents.find(c => c.type === 'protein');
+    const msaMode: 'none' | 'uniref' | 'env' = isVirtualScreeningWorkflow
+      ? 'none'
+      : (firstProtein?.msaMode ?? (hasMsa ? 'uniref' : 'none'));
     const persistenceWarnings: string[] = [];
     const peptideCustomCcdMolecules = isPeptideDesignWorkflow
       ? selectedCustomResidueDefinitions(submissionConfig.options)
@@ -480,6 +486,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       taskSummary: normalizeTaskSummary(draft.taskSummary),
       backend: effectiveBackend,
       use_msa: hasMsa,
+      msa_mode: msaMode,
       color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
       inputConfig: persistedInputConfig
     };
@@ -493,6 +500,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       await patch({
         backend: nextDraft.backend,
         use_msa: nextDraft.use_msa,
+        msa_mode: nextDraft.msa_mode ?? 'uniref',
         protein_sequence: proteinSequence,
         ligand_smiles: ligandSmiles,
         color_mode: nextDraft.color_mode,

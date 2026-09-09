@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Clock3, ExternalLink, Square, Trash2 } from 'lucide-react';
 import type { ProjectTask } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
@@ -13,7 +14,7 @@ const METRIC_COLUMN_LABELS: Record<TaskMetricColumnKey, string> = {
   pae: 'PAE'
 };
 
-interface ProjectTasksTableProps {
+export interface ProjectTasksTableProps {
   totalRowCount: number;
   canManageShares: boolean;
   filteredCount: number;
@@ -22,6 +23,8 @@ interface ProjectTasksTableProps {
   sortKey: SortKey;
   sortMark: (key: SortKey) => string;
   onSort: (key: SortKey) => void;
+  /** Resets sortKey to 'submitted' when the current sort column isn't renderable. */
+  onNormalizeSortKey: (key: SortKey) => void;
   pagedRows: TaskListRow[];
   editingTaskNameId: string | null;
   editingTaskNameValue: string;
@@ -54,6 +57,7 @@ export function ProjectTasksTable({
   sortKey,
   sortMark,
   onSort,
+  onNormalizeSortKey,
   pagedRows,
   editingTaskNameId,
   editingTaskNameValue,
@@ -78,6 +82,23 @@ export function ProjectTasksTable({
 }: ProjectTasksTableProps) {
   const isLeadOptMode = tableMode === 'lead_opt';
   const isPeptideMode = tableMode === 'peptide';
+  // Metric columns collapse in dedicated modes; keep sortKey pointing at a
+  // column that still exists.
+  const compactMetricsView = tableMode !== 'default';
+
+  useEffect(() => {
+    if (!compactMetricsView) return;
+    if (sortKey === 'submitted') return;
+    onNormalizeSortKey('submitted');
+  }, [compactMetricsView, onNormalizeSortKey, sortKey]);
+
+  useEffect(() => {
+    if (compactMetricsView) return;
+    if (sortKey === 'submitted' || sortKey === 'backend' || sortKey === 'seed' || sortKey === 'mode') return;
+    if (visibleMetricColumns.includes(sortKey as TaskMetricColumnKey)) return;
+    onNormalizeSortKey('submitted');
+  }, [compactMetricsView, onNormalizeSortKey, sortKey, visibleMetricColumns]);
+
   const tableClass = `table project-table task-table${
     isLeadOptMode ? ' task-table--leadopt' : isPeptideMode ? ' task-table--peptide' : ''
   }`;

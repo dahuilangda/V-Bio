@@ -66,6 +66,7 @@ export interface InputComponent {
   numCopies: number;
   sequence: string;
   useMsa?: boolean;
+  msaMode?: 'none' | 'uniref' | 'env';
   cyclic?: boolean;
   inputMethod?: LigandInputMethod;
   modifications?: ProteinModification[];
@@ -305,6 +306,7 @@ export interface Project {
   summary: string;
   backend: string;
   use_msa: boolean;
+  msa_mode?: 'none' | 'uniref' | 'env';
   protein_sequence: string;
   ligand_smiles: string;
   color_mode: string;
@@ -518,6 +520,7 @@ export interface PredictionSubmitInput {
   seed?: number | null;
   backend: string;
   useMsa: boolean;
+  msaMode?: 'none' | 'uniref' | 'env';
   templateUploads?: PredictionTemplateUpload[];
   customCcdMolecules?: CustomCcdMoleculeInput[];
   lowVram?: boolean;
@@ -567,6 +570,7 @@ export interface AffinitySubmitInput {
   ligandChainId?: string;
   affinityRefine?: boolean;
   useMsa?: boolean;
+  msaMode?: 'none' | 'uniref' | 'env';
   useTemplate?: boolean;
   dockPocket?: AffinityDockPocket | null;
 }

@@ -105,53 +105,6 @@
   box-shadow: 0 0 0 1px #d4e4da inset;
 }
 
-.api-create-button {
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
-  padding: 0 !important;
-  display: inline-grid;
-  place-items: center;
-  appearance: none;
-  -webkit-appearance: none;
-  border: 1px solid #2d5d48 !important;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #2d6a53 0%, #255a46 100%) !important;
-  color: #fff;
-  line-height: 0;
-  overflow: hidden;
-  box-shadow: none !important;
-  filter: none !important;
-  transform: none !important;
-  outline: none;
-  vertical-align: middle;
-}
-
-.task-new-button.api-create-button,
-.task-new-button.api-create-button:hover,
-.task-new-button.api-create-button:focus-visible {
-  box-shadow: none !important;
-}
-
-.api-create-button:hover {
-  background: linear-gradient(180deg, #34765d 0%, #2a634d 100%) !important;
-}
-
-.api-create-button:focus-visible {
-  outline: 2px solid #8db9a2;
-  outline-offset: 2px;
-}
-
-.api-create-button::before,
-.api-create-button::after {
-  content: none !important;
-}
-
-.api-create-button svg {
-  display: block;
-  color: inherit;
-}
-
 .api-project-stats-panel {
   display: grid;
   gap: 12px;
@@ -436,101 +389,6 @@
   border-color: #e1e7e4;
 }
 
-.api-project-token-modal {
-  width: min(840px, 95vw);
-  display: grid;
-  gap: 12px;
-}
-
-.api-project-token-modal-body {
-  display: grid;
-  gap: 10px;
-}
-
-.api-project-token-modal-empty {
-  border: 1px dashed #d4e2d9;
-  border-radius: 10px;
-  background: #f8fbf9;
-  padding: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.api-project-token-modal-list {
-  display: grid;
-  gap: 8px;
-  max-height: 56vh;
-  overflow: auto;
-}
-
-.api-project-token-modal-item {
-  border: 1px solid #dbe6df;
-  border-radius: 10px;
-  background: #fff;
-  padding: 8px 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.api-project-token-modal-main {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.api-project-token-modal-main strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.api-project-token-modal-main code {
-  font-size: var(--text-xs);
-}
-
-.api-project-token-modal-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.api-project-token-modal-actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.api-kpi-grid {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.api-kpi-card {
-  border: 1px solid #d3ded7;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f6faf7 100%);
-  padding: 12px;
-  display: grid;
-  gap: 4px;
-}
-
-.api-kpi-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #3c5d4f;
-  font-size: var(--text-sm);
-}
-
-.api-kpi-card strong {
-  font-size: 24px;
-  line-height: var(--lh-tight);
-  font-variant-numeric: tabular-nums;
-}
-
 .api-usage-panel {
   display: grid;
   gap: 12px;
@@ -631,110 +489,6 @@
   box-shadow: 0 0 0 1px #cfddd4 inset;
 }
 
-.api-token-create {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: minmax(210px, 1.2fr) minmax(260px, 1.45fr) 120px minmax(240px, 1.3fr) auto;
-  align-items: end;
-}
-
-.api-token-create .field {
-  margin: 0;
-}
-
-.api-token-name-field,
-.api-token-project-field {
-  min-width: 0;
-}
-
-.api-token-expiry-field {
-  max-width: 140px;
-}
-
-.api-token-source-wrap {
-  display: grid;
-  gap: 6px;
-}
-
-.api-token-source {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid #d4dfd8;
-  border-radius: 10px;
-  padding: 4px;
-  background: #f4f8f5;
-}
-
-.api-token-source-item {
-  border: 0;
-  background: transparent;
-  color: #4a6155;
-  border-radius: 8px;
-  padding: 6px 10px;
-  font: inherit;
-  font-size: var(--text-sm);
-  line-height: 1.25;
-  cursor: pointer;
-  transition: background 0.14s ease, color 0.14s ease;
-}
-
-.api-token-source-item:hover:not(:disabled) {
-  background: #edf3ee;
-  color: #1f392f;
-}
-
-.api-token-source-item.active {
-  background: #ffffff;
-  color: #10291f;
-  box-shadow: 0 0 0 1px #cfddd4 inset;
-}
-
-.api-token-source-item:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.api-permission-grid {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  height: 36px;
-  flex-wrap: nowrap;
-}
-
-.api-permission-chip {
-  border: 1px solid #d4dfd8;
-  border-radius: 999px;
-  background: #f7fbf9;
-  color: #355348;
-  height: 36px;
-  padding: 0 12px;
-  font: inherit;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.api-permission-chip:hover {
-  background: #eef6f1;
-  border-color: #c5d7cd;
-}
-
-.api-permission-chip.active {
-  background: #e6f3eb;
-  border-color: #a8c9b6;
-  color: #1f4838;
-}
-
-.api-token-create-action {
-  min-width: 0;
-  grid-column: auto;
-  align-self: end;
-  justify-self: end;
-}
-
 .api-empty-state {
   display: grid;
   gap: 10px;
@@ -743,54 +497,6 @@
   border-radius: 12px;
   background: #f8fbf9;
   padding: 14px;
-}
-
-.api-token-table-wrap {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 1px 0 #f1f5f3 inset;
-}
-
-.api-token-table {
-  min-width: 0;
-  width: 100%;
-}
-
-.api-token-table .row-selected {
-  background: #f4faf6;
-}
-
-.api-token-table tbody tr:hover {
-  background: #f8fcf9;
-}
-
-.api-token-table th:last-child,
-.api-token-table td:last-child {
-  min-width: 216px;
-}
-
-.api-token-table thead th {
-  position: sticky;
-  top: 0;
-  background: #f7fbf8;
-  z-index: 1;
-}
-
-.api-token-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.api-token-modal {
-  display: grid;
-  gap: 12px;
-}
-
-.api-token-modal.modal-wide {
-  width: min(1240px, 97vw);
 }
 
 .api-token-modal-head {
@@ -807,147 +513,6 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-}
-
-.api-token-modal-body {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: 1fr;
-  align-items: start;
-}
-
-.api-token-modal-create {
-  display: grid;
-  gap: 10px;
-  border: 1px solid #d7e3dc;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #fafdfb 0%, #f5faf7 100%);
-  padding: 12px;
-}
-
-.api-token-modal-create .api-token-create {
-  grid-template-columns: minmax(210px, 1.2fr) minmax(260px, 1.45fr) 120px minmax(240px, 1.3fr) auto;
-}
-
-.api-token-modal-create .api-token-create-action {
-  grid-column: auto;
-}
-
-.api-token-project-field {
-  min-width: 280px;
-}
-
-.api-token-permissions-field {
-  grid-column: auto;
-  justify-self: start;
-}
-
-.api-token-modal-create .field input,
-.api-token-modal-create .field select {
-  height: 36px;
-}
-
-.api-token-project-field select {
-  font-size: var(--text-xs);
-}
-
-.api-token-modal-list {
-  display: grid;
-  gap: 10px;
-  width: 100%;
-  border: 1px solid #d9e5de;
-  border-radius: 12px;
-  background: #fff;
-  padding: 10px;
-}
-
-.api-token-list-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed #dbe6df;
-}
-
-.api-token-scope-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.api-token-scope-indicator strong {
-  font-size: var(--text-sm);
-}
-
-.api-token-search-field {
-  margin: 0;
-  min-width: 240px;
-}
-
-.api-token-search-field > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.api-token-table-scroll {
-  max-height: 540px;
-}
-
-.api-token-perm-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.api-token-perm-badge {
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  border: 1px solid #d2dfd7;
-  display: inline-grid;
-  place-items: center;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.api-token-perm-badge.on {
-  background: #e8f4ec;
-  border-color: #b4d1bf;
-  color: #24553f;
-}
-
-.api-token-perm-badge.off {
-  background: #f4f6f5;
-  border-color: #d7dfdb;
-  color: #86948d;
-}
-
-.api-token-status-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 64px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  border: 1px solid transparent;
-}
-
-.api-token-status-chip.active {
-  background: #eaf6ef;
-  color: #245740;
-  border-color: #cde4d6;
-}
-
-.api-token-status-chip.revoked {
-  background: #f3f4f4;
-  color: #6b7c74;
-  border-color: #dde2df;
 }
 
 .api-usage-bars {
@@ -1015,11 +580,6 @@
   justify-content: flex-end;
 }
 
-.api-curl-panel {
-  display: grid;
-  gap: 10px;
-}
-
 .api-command-panel {
   display: grid;
   gap: 12px;
@@ -1039,15 +599,6 @@
 
 .api-builder-resizable .api-builder-controls {
   margin-right: 12px;
-}
-
-.api-builder-resizable .api-command-right {
-  margin-left: 12px;
-}
-
-.api-command-right {
-  display: grid;
-  gap: 10px;
 }
 
 .api-builder-controls {
@@ -1148,158 +699,6 @@
   font-size: var(--text-2xs);
 }
 
-.api-yaml-builder-trigger {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.api-yaml-builder {
-  border: 1px solid #d7e3dc;
-  border-radius: 10px;
-  background: #fff;
-  padding: 10px;
-  display: grid;
-  gap: 8px;
-}
-
-.api-yaml-builder-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.api-yaml-builder-grid {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.api-yaml-template-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.api-yaml-dropzone {
-  border: 1px dashed #c7d8ce;
-  border-radius: 8px;
-  background: #f7fbf9;
-  padding: 8px 10px;
-  font-size: var(--text-xs);
-  color: #466458;
-  text-align: center;
-}
-
-.api-yaml-modal {
-  width: min(96vw, 1760px);
-  max-width: 1760px;
-  display: grid;
-  gap: 14px;
-}
-
-.api-yaml-modal-body {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(860px, 1.45fr) minmax(360px, 0.7fr);
-  align-items: start;
-}
-
-.api-yaml-modal-body-resizable {
-  grid-template-columns: minmax(0, var(--api-yaml-left-width, 68%)) 10px minmax(320px, 1fr);
-  gap: 0;
-  align-items: start;
-}
-
-.api-yaml-modal-body-resizable .api-yaml-modal-editor {
-  margin-right: 12px;
-}
-
-.api-yaml-modal-body-resizable .api-yaml-modal-preview {
-  margin-left: 12px;
-}
-
-.api-yaml-modal-editor {
-  display: grid;
-  gap: 8px;
-  max-height: none;
-  overflow: visible;
-  padding-right: 2px;
-}
-
-.api-yaml-modal-preview {
-  display: grid;
-  gap: 10px;
-  max-height: none;
-  overflow: visible;
-  align-content: start;
-}
-
-.api-yaml-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.api-yaml-components {
-  display: grid;
-  gap: 8px;
-}
-
-.api-yaml-components-flat {
-  margin-top: 0;
-}
-
-.api-yaml-component-toolbar {
-  border: 1px solid #d7e3dc;
-  border-radius: 10px;
-  background: #fff;
-  padding: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.api-yaml-component-toolbar-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.api-yaml-component-card {
-  border: 1px solid #d7e3dc;
-  border-radius: 10px;
-  background: #fff;
-  padding: 8px;
-  display: grid;
-  gap: 6px;
-}
-
-.api-yaml-component-card-odd {
-  background: linear-gradient(180deg, #f8fcfa 0%, #f3f9f6 100%);
-  border-color: #d4e4db;
-}
-
-.api-yaml-component-card-even {
-  background: linear-gradient(180deg, #fbfdfc 0%, #f4f7f5 100%);
-  border-color: #dbe5df;
-}
-
-.api-yaml-component-card > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.api-yaml-component-grid {
-  display: grid;
-  gap: 6px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .api-yaml-component-flags {
   display: flex;
   flex-wrap: wrap;
@@ -1316,91 +715,10 @@
   white-space: nowrap;
 }
 
-.api-yaml-component-card .field,
-.api-yaml-component-card .switch-field {
-  margin: 0;
-  gap: 3px;
-}
-
-.api-yaml-component-card .field > span,
-.api-yaml-component-card .switch-field > span {
-  font-size: var(--text-2xs);
-}
-
-.api-yaml-component-card input,
-.api-yaml-component-card select,
-.api-yaml-component-card textarea {
-  padding: 6px 8px;
-  font-size: var(--text-xs);
-}
-
-.api-yaml-component-card textarea {
-  line-height: 1.3;
-}
-
-.api-yaml-component-card .checkbox-inline {
-  gap: 6px;
-  font-size: var(--text-xs);
-}
-
-.api-yaml-jsme-shell {
-  min-height: 350px;
-}
-
-.api-yaml-component-toolbar-bottom {
-  margin-top: 2px;
-}
-
 .api-yaml-preview-actions {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-.api-yaml-constraints {
-  border: 1px solid #d7e3dc;
-  border-radius: 10px;
-  background: #fff;
-  padding: 7px;
-  display: grid;
-  gap: 6px;
-}
-
-.api-yaml-constraints-toggle {
-  justify-content: flex-start;
-  gap: 7px;
-  width: 100%;
-}
-
-.api-yaml-constraints-body {
-  border-top: 1px dashed #d6e2da;
-  padding-top: 7px;
-}
-
-.api-yaml-constraints-body .constraint-editor {
-  gap: 8px;
-}
-
-.api-yaml-constraints-body .constraint-section {
-  padding: 8px;
-}
-
-.api-yaml-constraints-body .constraint-list {
-  gap: 8px;
-}
-
-.api-yaml-constraints-body .constraint-card {
-  padding: 8px;
-}
-
-.api-yaml-constraints-body .constraint-card-grid,
-.api-yaml-constraints-body .constraint-pocket-contact-grid {
-  gap: 6px;
-}
-
-.api-command-list {
-  display: grid;
-  gap: 10px;
 }
 
 .api-command-item {
@@ -1498,79 +816,15 @@
   gap: 6px;
 }
 
-.api-docs-panel {
-  display: grid;
-  gap: 10px;
-}
-
-.api-doc-steps {
-  margin: 0;
-  padding-left: 20px;
-  display: grid;
-  gap: 8px;
-}
-
-.api-doc-steps li {
-  display: grid;
-  gap: 2px;
-}
-
-.api-curl-grid {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.api-curl-card {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  overflow: hidden;
-}
-
-.api-curl-card > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid #e8eeea;
-  background: #f7fbf8;
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-
-.api-curl-card pre {
-  margin: 0;
-  padding: 10px;
-  overflow: auto;
-  font-size: var(--text-xs);
-  line-height: 1.35;
-  background: #fbfdfc;
-}
-
-.api-notes-grid {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.api-note-item {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  padding: 10px;
-  display: grid;
-  gap: 4px;
-}
-
 .checkbox-inline {
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
 
-/* Override global `input { width:100%; padding; border; border-radius }`
+/* Override global `input { width:100%; padding; border; border-radius }
+
+`
    which otherwise stretches the checkbox into a padded bordered box. */
 .checkbox-inline input[type="checkbox"] {
   width: 16px;
@@ -1582,29 +836,21 @@
   background: none;
 }
 
-.field.checkbox > span {
-  display: inline-flex;
-  align-items: center;
-}
-
 @media (max-width: 1100px) {
-  .api-project-stats-controls {
+          .api-project-stats-controls {
     width: 100%;
     flex-wrap: wrap;
     align-items: stretch;
   }
-
   .api-project-stats-controls-left {
     flex: 1 1 100%;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-
   .api-project-stats-controls-right {
     flex: 1 1 100%;
     justify-content: space-between;
     align-items: center;
   }
-
   .api-project-search-field,
   .api-project-filter-field,
   .api-project-sort-field {
@@ -1612,271 +858,98 @@
     width: 100%;
     flex: 1 1 auto;
   }
-
   .api-usage-controls {
     width: 100%;
     justify-content: flex-start;
   }
-
   .api-token-inline {
     max-width: none;
     flex: 1 1 100%;
   }
-
   .api-usage-meta {
     margin-left: 0;
   }
-
   .api-builder-grid {
     grid-template-columns: 1fr;
   }
-
   .api-builder-resizable {
     grid-template-columns: 1fr;
     gap: 12px;
   }
-
-  .api-builder-resizable .api-builder-controls,
-  .api-builder-resizable .api-command-right {
-    margin: 0;
-  }
-
-  .api-yaml-builder-trigger {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .api-yaml-builder-grid,
-  .api-yaml-template-grid {
-    grid-template-columns: 1fr;
-  }
-
   .api-prediction-affinity-grid {
     grid-template-columns: 1fr;
   }
-
-  .api-yaml-modal-body,
-  .api-yaml-modal-body-resizable {
-    grid-template-columns: 1fr;
-  }
-
-  .api-yaml-modal-body-resizable .api-yaml-modal-editor,
-  .api-yaml-modal-body-resizable .api-yaml-modal-preview {
-    margin: 0;
-  }
-
   .api-affinity-options {
     flex-wrap: wrap;
     gap: 8px;
   }
-
-  .api-command-right {
-    grid-template-columns: 1fr;
-  }
-
   .api-builder-resizable .panel-resizer {
     display: none;
   }
-
-  .api-yaml-modal-body-resizable .panel-resizer {
-    display: none;
-  }
-
   .api-curl-grid {
     grid-template-columns: 1fr;
   }
-
   .api-notes-grid {
     grid-template-columns: 1fr;
   }
-
-  .api-token-modal-body {
-    grid-template-columns: 1fr;
-  }
-
   .api-token-inline {
     min-width: 220px;
   }
-
-  .api-token-search-field {
-    min-width: 0;
-    width: 100%;
-  }
-
-  .api-token-project-field {
-    min-width: 0;
-  }
-
-  .api-permission-grid {
-    flex-wrap: wrap;
-    height: auto;
-  }
-
-  .api-token-modal-create .api-token-create,
-  .api-token-create {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .api-token-permissions-field {
-    grid-column: auto;
-  }
-
-  .api-token-expiry-field {
-    max-width: none;
-  }
-
-  .api-token-create-action {
-    grid-column: 1 / -1;
-    min-width: 0;
-  }
-
   .api-pager {
     justify-content: center;
   }
-
   .api-usage-bar-row {
     grid-template-columns: 86px minmax(0, 1fr) 40px;
   }
 }
 
 @media (max-width: 760px) {
-  .api-access-context {
+          .api-access-context {
     width: 100%;
   }
-
   .api-access-header {
     align-items: flex-start;
     gap: 10px;
   }
-
   .api-access-actions {
     width: auto;
     justify-content: flex-start;
     flex-wrap: nowrap;
   }
-
-  .api-token-create {
-    grid-template-columns: 1fr;
-  }
-
   .api-section-head {
     flex-direction: column;
     align-items: flex-start;
   }
-
   .api-usage-controls {
     width: 100%;
   }
-
   .api-range-switch {
     width: 100%;
     justify-content: space-between;
   }
-
   .api-token-inline {
     min-width: 0;
     width: 100%;
   }
-
   .api-project-search-field,
   .api-project-filter-field,
   .api-project-sort-field {
     width: 100%;
     flex: 1 1 100%;
   }
-
   .api-project-stats-controls-left {
     grid-template-columns: 1fr;
   }
-
   .api-project-stats-controls-right {
     width: 100%;
     flex-wrap: wrap;
     justify-content: flex-start;
   }
-
   .api-history-item {
     flex-direction: column;
     align-items: flex-start;
   }
-
   .api-history-item-actions {
     align-self: flex-end;
-  }
-}
-
-
-.api-yaml-modifications {
-  display: grid;
-  gap: 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px;
-  background: rgba(255, 255, 255, 0.62);
-}
-
-.api-yaml-mod-row {
-  display: grid;
-  grid-template-columns: 34px minmax(72px, 0.55fr) minmax(92px, 0.7fr) minmax(58px, 0.45fr) minmax(118px, 0.8fr) minmax(150px, 1fr) minmax(120px, 0.8fr) 30px;
-  gap: 6px;
-  align-items: end;
-  padding: 7px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.75);
-}
-
-.api-yaml-mod-row > strong {
-  align-self: center;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.api-yaml-mod-row .field {
-  gap: 4px;
-}
-
-.api-yaml-mod-row .field > span {
-  min-height: 14px;
-  line-height: 14px;
-  white-space: nowrap;
-}
-
-.api-yaml-mod-row input,
-.api-yaml-mod-row select {
-  width: 100%;
-  height: 34px;
-  min-height: 34px;
-}
-
-.api-yaml-mod-smiles {
-  min-width: 0;
-}
-
-.api-yaml-mod-status {
-  align-self: center;
-  min-width: 0;
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.api-yaml-mod-status.valid {
-  color: var(--success);
-}
-
-.api-yaml-mod-status.invalid {
-  color: var(--danger);
-}
-
-@media (max-width: 980px) {
-  .api-yaml-mod-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) 30px;
-  }
-
-  .api-yaml-mod-row > strong,
-  .api-yaml-mod-smiles,
-  .api-yaml-mod-status {
-    grid-column: span 1;
   }
 }

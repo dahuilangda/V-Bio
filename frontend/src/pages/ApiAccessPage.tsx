@@ -1,4 +1,5 @@
 import {
+
   createApiToken as createApiTokenServer,
   deleteApiToken as deleteApiTokenServer,
   listApiTokens as listApiTokensServer,
@@ -17,22 +18,11 @@ import {
 } from 'react';
 import {
   BarChart3,
-  Check,
-  ChevronDown,
   ChevronLeft,
-  ChevronRight,
-  Clock3,
-  Copy,
   Download,
   Info,
   KeyRound,
-  LoaderCircle,
-  Plus,
-  Search,
-  ShieldCheck,
-  ShieldOff,
-  Trash2,
-  X
+  ShieldCheck
 } from 'lucide-react';
 import { InfoTip } from '../components/common/InfoTip';
 import { useModalDialog } from '../components/ui/useModalDialog';
@@ -48,11 +38,8 @@ import type {
   Project,
   ProteinModification,
   ProteinModificationInputMethod,
-  ProteinModificationTerminal
 } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
-import { ConstraintEditor } from '../components/project/ConstraintEditor';
-import { JSMEEditor } from '../components/project/JSMEEditor';
 import {
   getProjectTaskById,
   listApiTokenUsagePage,
@@ -68,13 +55,21 @@ import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromCompone
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
 import { loadRDKitModule } from '../utils/rdkit';
 import { rdkitMolHasAminoAcidBackbone, looksLikeAminoAcidBackboneSmiles } from '../utils/inputValidation';
+import { ApiYamlBuilderModal } from './ApiYamlBuilderModal';
+import { ApiProjectTokenModal } from './ApiProjectTokenModal';
+import { ApiTokenRegistryModal } from './ApiTokenRegistryModal';
+import { ApiDocsPanel } from './ApiDocsPanel';
+import { ApiCommandRightColumn } from './ApiCommandRightColumn';
+import { LeadOptOptions } from './ApiLeadOptOptions';
+import { AffinityConfigBlock } from './ApiAffinityConfigBlock';
+import { UsagePanel } from './ApiUsagePanel';
+import { ProjectStatsPanel } from './ApiProjectStatsPanel';
+import { useCommandClipboard } from './useCommandClipboard';
+import { Field } from '../components/common/Field';
 import {
   ApiBuilderGridStyle,
-  BUILDER_BUILT_IN_MODIFICATIONS,
   BUILDER_CUSTOM_RESIDUE_SCAFFOLD,
   BuilderWorkflowKey,
-  COMMAND_HISTORY_LIMIT,
-  COMMAND_HISTORY_STORAGE_KEY,
   CommandHistoryEntry,
   DAILY_USAGE_PAGE_SIZE,
   EMPTY_PREDICTION_PROPERTIES,
@@ -93,16 +88,12 @@ import {
   buildBuilderCustomCcd,
   builderPositionForTerminal,
   builderResidueAt,
-  builderSequenceLength,
   builderTerminalForPosition,
-  clampBuilderModPosition,
   computeUsageSummaryFromDaily,
   createBuilderModification,
   createYamlBuilderComponent,
   escapeForDoubleQuotedShell,
   extractFileNameFromPath,
-  fallbackCopyText,
-  formatIso,
   inferTemplateFormat,
   isAffinityUploadComponent,
   isSamePredictionProperties,
@@ -237,14 +228,11 @@ export function ApiAccessPage() {
   const [yamlBuilderLeftWidth, setYamlBuilderLeftWidth] = useState(68);
   const [isYamlBuilderResizing, setIsYamlBuilderResizing] = useState(false);
   const [projectTokenPanelProjectId, setProjectTokenPanelProjectId] = useState<string | null>(null);
-  const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
-  const [copiedActionId, setCopiedActionId] = useState('');
   const commandPanelRef = useRef<HTMLElement | null>(null);
   const builderGridRef = useRef<HTMLDivElement | null>(null);
   const builderResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
   const yamlBuilderGridRef = useRef<HTMLDivElement | null>(null);
   const yamlBuilderResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
-  const copiedResetTimerRef = useRef<number | null>(null);
   const scopedTaskPrefillRef = useRef('');
   const openBuilderHandledRef = useRef('');
 
@@ -416,24 +404,6 @@ export function ApiAccessPage() {
 
   useEffect(() => {
     setCommandHistory(readCommandHistoryFromStorage());
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      window.localStorage.setItem(COMMAND_HISTORY_STORAGE_KEY, JSON.stringify(commandHistory));
-    } catch {
-      // ignore quota/storage errors
-    }
-  }, [commandHistory]);
-
-  useEffect(() => {
-    return () => {
-      if (copiedResetTimerRef.current !== null) {
-        window.clearTimeout(copiedResetTimerRef.current);
-        copiedResetTimerRef.current = null;
-      }
-    };
   }, []);
 
   useEffect(() => {
@@ -1456,6 +1426,23 @@ ${submitTaskIdCapture}`;
       : commandSubmitPrediction);
   const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}${leadOptHint}${customResidueHint}`;
   const submitBackendLabel = builderWorkflowKey === 'affinity' ? effectiveAffinityBackend : effectivePredictionBackend;
+  const {
+    copiedActionId,
+    commandHistory,
+    copyText,
+    setCommandHistory,
+  } = useCommandClipboard({
+    onError: setError,
+    onSuccess: setSuccess,
+    buildEntryContext: () => ({
+      workflow: builderWorkflowKey,
+      backend: submitBackendLabel,
+      projectId: selectedTokenProjectId,
+      projectName: selectedProject?.name || '',
+      tokenId: selectedTokenId,
+      tokenName: selectedToken?.name || '',
+    }),
+  });
   const statusEndpoint = `/status/${taskIdForCommand}`;
   const resultsEndpoint = `/results/${taskIdForCommand}`;
   const commandStatus = `curl -X GET "${managementApiBaseUrl}${statusEndpoint}?project_id=${selectedTokenProjectId}" \\
@@ -1470,54 +1457,6 @@ ${submitTaskIdCapture}`;
     : '';
   const commandTaskAction = `curl -X DELETE "${managementApiBaseUrl}/tasks/${taskIdForCommand}?project_id=${selectedTokenProjectId}&operation_mode=${builderTaskOperation}" \\
   -H "X-API-Token: ${curlToken}"`;
-
-  const rememberCommandHistory = (label: string, command: string) => {
-    const entry: CommandHistoryEntry = {
-      id: typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : `hist_${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      label,
-      command,
-      workflow: builderWorkflowKey,
-      backend: submitBackendLabel,
-      projectId: selectedTokenProjectId,
-      projectName: selectedProject?.name || '',
-      tokenId: selectedTokenId,
-      tokenName: selectedToken?.name || ''
-    };
-    setCommandHistory((prev) => [entry, ...prev.filter((item) => item.command !== command)].slice(0, COMMAND_HISTORY_LIMIT));
-  };
-
-  const copyText = async (text: string, okMessage: string, historyLabel?: string, copyId?: string) => {
-    let copied = false;
-    try {
-      if (navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        copied = true;
-      }
-    } catch {
-      copied = false;
-    }
-    if (!copied) {
-      copied = fallbackCopyText(text);
-    }
-    if (!copied) {
-      setError('Copy failed. Clipboard permission may be blocked in this context.');
-      return;
-    }
-    if (historyLabel) {
-      rememberCommandHistory(historyLabel, text);
-    }
-    if (copyId) {
-      setCopiedActionId(copyId);
-      if (copiedResetTimerRef.current !== null) {
-        window.clearTimeout(copiedResetTimerRef.current);
-      }
-      copiedResetTimerRef.current = window.setTimeout(() => {
-        setCopiedActionId((prev) => (prev === copyId ? '' : prev));
-      }, 1200);
-    }
-    setSuccess(okMessage);
-  };
 
   const downloadGeneratedYaml = () => {
     if (typeof document === 'undefined' || typeof window === 'undefined') return;
@@ -1833,194 +1772,30 @@ ${submitTaskIdCapture}`;
       </section>
 
       {!isProjectScoped && (
-      <section className="panel api-project-stats-panel">
-        <div className="api-section-head">
-          <h2><BarChart3 size={16} /> Project Stats</h2>
-        </div>
-        <div className="api-project-stats-controls">
-          <div className="api-project-stats-controls-left">
-            <label className="field api-project-search-field">
-              <span><Search size={12} /> Find</span>
-              <input
-                value={projectStatsSearch}
-                onChange={(e) => setProjectStatsSearch(e.target.value)}
-                placeholder="project / workflow"
-              />
-            </label>
-            <label className="field api-project-filter-field">
-              <span>Workflow</span>
-              <select
-                value={projectStatsWorkflowFilter}
-                onChange={(e) => setProjectStatsWorkflowFilter(normalizeProjectStatsWorkflowFilter(e.target.value))}
-              >
-                <option value="all">All</option>
-                <option value="prediction">Prediction</option>
-                <option value="virtual_screening">Virtual Screening</option>
-                <option value="affinity">Affinity</option>
-              </select>
-            </label>
-            <label className="field api-project-sort-field">
-              <span>Sort</span>
-              <select
-                value={projectStatsSort}
-                onChange={(e) => setProjectStatsSort(normalizeProjectStatsSort(e.target.value))}
-              >
-                <option value="last_desc">Last call (newest)</option>
-                <option value="last_asc">Last call (oldest)</option>
-                <option value="calls_desc">Calls (high to low)</option>
-                <option value="calls_asc">Calls (low to high)</option>
-                <option value="success_desc">Success (high to low)</option>
-                <option value="success_asc">Success (low to high)</option>
-              </select>
-            </label>
-          </div>
-          <div className="api-project-stats-controls-right">
-            <div className="api-range-switch" role="radiogroup" aria-label="Project stats window">
-              <span className="api-range-icon" aria-hidden="true"><Clock3 size={13} /></span>
-              {(['7d', '30d', '90d', 'all'] as UsageWindow[]).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  className={`api-range-item ${usageWindow === item ? 'active' : ''}`}
-                  onClick={() => setUsageWindow(item)}
-                  aria-pressed={usageWindow === item}
-                >
-                  {item.toUpperCase()}
-                </button>
-              ))}
-            </div>
-            <button className="btn btn-secondary api-builder-jump-btn" type="button" onClick={jumpToCommandBuilder}>
-              <KeyRound size={13} /> Open Builder
-            </button>
-          </div>
-        </div>
-        <div className="table-wrap api-project-table-wrap">
-          <table className="table api-project-table">
-            <thead>
-              <tr>
-                <th>Project</th>
-                <th>Workflow</th>
-                <th>Tokens</th>
-                <th>Calls</th>
-                <th>Success</th>
-                <th>Last Call</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projectStatsLoading ? (
-                <tr>
-                  <td colSpan={7} className="muted">Loading project stats...</td>
-                </tr>
-              ) : pagedProjectStatsRows.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="muted">No projects.</td>
-                </tr>
-              ) : (
-                pagedProjectStatsRows.map((item) => {
-                  const isSelected = item.project.id === selectedTokenProjectId;
-                  return (
-                    <tr
-                      key={item.project.id}
-                      className={isSelected ? 'row-selected' : ''}
-                      onClick={() => selectProjectContext(item.project.id)}
-                    >
-                      <td>{item.project.name}</td>
-                      <td>
-                        <span className={`api-workflow-pill workflow-${item.workflowKey}`}>
-                          {item.workflowLabel}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="api-project-token-stat">{item.activeTokenCount}/{item.tokenCount}</div>
-                      </td>
-                      <td>
-                        <div className="api-project-calls-cell">
-                          <div className="api-project-calls-head">
-                            <BarChart3 size={12} />
-                            <strong>{item.totalCalls}</strong>
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`api-project-success-chip ${item.successRate >= 80 ? 'high' : item.successRate >= 50 ? 'mid' : 'low'}`}>
-                          {item.successRate.toFixed(1)}%
-                        </span>
-                      </td>
-                      <td>{item.lastEventAt ? formatIso(item.lastEventAt) : '-'}</td>
-                      <td>
-                        <div className="api-project-manage-actions">
-                          <button
-                            type="button"
-                            className="api-project-builder-btn"
-                            title="Open Builder"
-                            aria-label="Open Builder"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              jumpToCommandBuilderForProject(item.project.id);
-                            }}
-                          >
-                            <ChevronRight size={12} />
-                          </button>
-                          <button
-                            type="button"
-                            className="api-project-token-view-btn"
-                            title="View project tokens"
-                            aria-label="View project tokens"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openProjectTokenPanel(item.project.id);
-                            }}
-                          >
-                            <KeyRound size={12} />
-                          </button>
-                          <button
-                            type="button"
-                            className="api-project-manage-btn"
-                            title="Open token registry"
-                            aria-label="Open token registry"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openTokenRegistryForProject(item.project.id);
-                            }}
-                          >
-                            <ShieldCheck size={12} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-        {filteredProjectStatsRows.length > PROJECT_STATS_PAGE_SIZE && (
-          <div className="api-pager">
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setProjectStatsPage((prev) => Math.max(1, prev - 1))}
-              disabled={projectStatsPage <= 1}
-              title="Previous page"
-              aria-label="Previous page"
-            >
-              <ChevronLeft size={14} />
-            </button>
-            <span className="muted small">{projectStatsPage} / {projectStatsPageCount}</span>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setProjectStatsPage((prev) => Math.min(projectStatsPageCount, prev + 1))}
-              disabled={projectStatsPage >= projectStatsPageCount}
-              title="Next page"
-              aria-label="Next page"
-            >
-              <ChevronRight size={14} />
-            </button>
-          </div>
-        )}
-      </section>
+      <ProjectStatsPanel
+        filteredProjectStatsRows={filteredProjectStatsRows}
+        projectStatsLoading={projectStatsLoading}
+        projectStatsPage={projectStatsPage}
+        projectStatsPageCount={projectStatsPageCount}
+        projectStatsSearch={projectStatsSearch}
+        projectStatsSort={projectStatsSort}
+        projectStatsWorkflowFilter={projectStatsWorkflowFilter}
+        usageWindow={usageWindow}
+        selectedTokenProjectId={selectedTokenProjectId}
+        pagedProjectStatsRows={pagedProjectStatsRows}
+        normalizeWorkflowFilter={normalizeProjectStatsWorkflowFilter}
+        normalizeSort={(v) => normalizeProjectStatsSort(v as string)}
+        onSearchChange={setProjectStatsSearch}
+        onWorkflowFilterChange={setProjectStatsWorkflowFilter}
+        onSortChange={setProjectStatsSort}
+        onPageChange={setProjectStatsPage}
+        onWindowChange={setUsageWindow}
+        onSelectProject={selectProjectContext}
+        onJumpToBuilder={jumpToCommandBuilder}
+        onJumpToBuilderForProject={jumpToCommandBuilderForProject}
+        onOpenTokenPanel={openProjectTokenPanel}
+        onOpenRegistry={openTokenRegistryForProject}
+      />
       )}
       <section className="panel api-command-panel" ref={commandPanelRef}>
         <div className="api-section-head">
@@ -2033,8 +1808,7 @@ ${submitTaskIdCapture}`;
           style={builderGridStyle}
         >
           <aside className="api-builder-controls">
-            <label className="field">
-              <span><KeyRound size={12} /> Token</span>
+            <Field label={<><KeyRound size={12} /> Token</>}>
               <select value={selectedTokenId} onChange={(e) => setSelectedTokenId(e.target.value)} disabled={tokens.length === 0}>
                 {selectedProjectTokens.length === 0 ? (
                   <option value="">No tokens</option>
@@ -2046,17 +1820,16 @@ ${submitTaskIdCapture}`;
                   ))
                 )}
               </select>
-            </label>
+            </Field>
 
-            <label className="field">
-              <span>Token Plaintext</span>
+                          <Field label="Token Plaintext">
               <input
-                value={builderTokenPlainInput}
-                onChange={(e) => setBuilderTokenPlainInput(e.target.value)}
-                placeholder="vbio_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                disabled={!selectedTokenId}
+              value={builderTokenPlainInput}
+              onChange={(e) => setBuilderTokenPlainInput(e.target.value)}
+              placeholder="vbio_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              disabled={!selectedTokenId}
               />
-            </label>
+              </Field>
 
             <div className="api-builder-project">
               <span className="muted small">Project (from token)</span>
@@ -2071,8 +1844,7 @@ ${submitTaskIdCapture}`;
             )}
 
             {(isPredictionWorkflow || isVirtualScreeningWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
-              <label className="field">
-                <span>{isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}</span>
+              <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}>
                 <select
                   value={effectivePredictionBackend}
                   onChange={(e) => setBuilderPredictionBackend(normalizePredictionBackend(e.target.value))}
@@ -2088,7 +1860,7 @@ ${submitTaskIdCapture}`;
                     </>
                   )}
                 </select>
-              </label>
+              </Field>
             )}
 
             {isPredictionWorkflow && effectivePredictionBackend !== 'alphafold3' && !isNessoPredictionBackend && (
@@ -2104,102 +1876,52 @@ ${submitTaskIdCapture}`;
 
             {LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && (
               <>
-                <label className="field">
-                  <span>
-                    target_config path
-                    <InfoTip
-                      text="Must point to a valid lead-optimization YAML containing the protein sequence."
-                      align="end"
-                    />
-                  </span>
-                  <input
-                    value={builderLeadOptTargetConfigPath}
-                    onChange={(e) => setBuilderLeadOptTargetConfigPath(e.target.value)}
-                    placeholder="./target.yaml"
-                  />
-                </label>
-                <label className="field">
-                  <span>Input compound (SMILES)</span>
-                  <input
-                    value={builderLeadOptInputCompound}
-                    onChange={(e) => setBuilderLeadOptInputCompound(e.target.value)}
-                    placeholder="CCOc1ccc..."
-                  />
-                </label>
-                <section className="api-prediction-affinity-panel api-leadopt-panel">
-                  <div className="api-prediction-affinity-head">
-                    <span className="api-prediction-affinity-title">
-                      <ShieldCheck size={14} />
-                      Lead Opt Options
-                    </span>
-                    <label className="checkbox-inline api-prediction-affinity-toggle">
-                      <input
-                        type="checkbox"
-                        checked={builderLeadOptEnableAffinity}
-                        onChange={(e) => setBuilderLeadOptEnableAffinity(e.target.checked)}
-                      />
-                      <span>Enable affinity</span>
-                    </label>
-                  </div>
-                  <div className="api-prediction-affinity-grid">
-                    <label className="field">
-                      <span>Target chain</span>
-                      <input value={builderLeadOptTargetChain} onChange={(e) => setBuilderLeadOptTargetChain(e.target.value)} placeholder="A" />
-                    </label>
-                    <label className="field">
-                      <span>Ligand chain</span>
-                      <input value={builderLeadOptLigandChain} onChange={(e) => setBuilderLeadOptLigandChain(e.target.value)} placeholder="L" />
-                    </label>
-                    <label className="field">
-                      <span>Objective profile</span>
-                      <select value={builderLeadOptObjectiveProfile} onChange={(e) => setBuilderLeadOptObjectiveProfile(e.target.value)}>
-                        <option value="balanced">balanced</option>
-                        <option value="potency_first">potency_first</option>
-                        <option value="admet_safe">admet_safe</option>
-                        <option value="cns_like">cns_like</option>
-                        <option value="custom">custom</option>
-                      </select>
-                    </label>
-                  </div>
-                </section>
+                <LeadOptOptions
+                  builderLeadOptTargetConfigPath={builderLeadOptTargetConfigPath}
+                  builderLeadOptInputCompound={builderLeadOptInputCompound}
+                  builderLeadOptTargetChain={builderLeadOptTargetChain}
+                  builderLeadOptLigandChain={builderLeadOptLigandChain}
+                  builderLeadOptObjectiveProfile={builderLeadOptObjectiveProfile}
+                  builderLeadOptEnableAffinity={builderLeadOptEnableAffinity}
+                  onTargetConfigPathChange={setBuilderLeadOptTargetConfigPath}
+                  onInputCompoundChange={setBuilderLeadOptInputCompound}
+                  onTargetChainChange={setBuilderLeadOptTargetChain}
+                  onLigandChainChange={setBuilderLeadOptLigandChain}
+                  onObjectiveProfileChange={setBuilderLeadOptObjectiveProfile}
+                  onEnableAffinityChange={setBuilderLeadOptEnableAffinity}
+                />
               </>
             )}
 
             {isAffinityWorkflow && (
-              <label className="field">
-                <span>Affinity Backend</span>
+                              <Field label="Affinity Backend">
                 <select
-                  value={effectiveAffinityBackend}
-                  onChange={(e) => setBuilderAffinityBackend(normalizeAffinityBackend(e.target.value))}
+                value={effectiveAffinityBackend}
+                onChange={(e) => setBuilderAffinityBackend(normalizeAffinityBackend(e.target.value))}
                 >
-                  <option value="boltz">boltz</option>
-                  <option value="protenix">protenix</option>
+                <option value="boltz">boltz</option>
+                <option value="protenix">protenix</option>
                 </select>
-              </label>
+                </Field>
             )}
 
-            <label className="field">
-              <span>Task Name (optional)</span>
+                          <Field label="Task Name (optional)">
               <input value={builderTaskName} onChange={(e) => setBuilderTaskName(e.target.value)} placeholder="Only sent when filled" />
-            </label>
+              </Field>
 
-            <label className="field">
-              <span>Task Summary (optional)</span>
+                          <Field label="Task Summary (optional)">
               <input value={builderTaskSummary} onChange={(e) => setBuilderTaskSummary(e.target.value)} placeholder="Only sent when filled" />
-            </label>
+              </Field>
 
             {isPredictionWorkflow && (
               <>
-                <label className="field">
-                  <span>
-                    YAML file path
-                    <InfoTip
-                      text="The YAML Builder keeps ligand SMILES as smiles; choose CCD input only for known CCD codes."
-                      align="end"
-                    />
-                  </span>
+                <Field
+                  label="YAML file path"
+                  hint="The YAML Builder keeps ligand SMILES as smiles; choose CCD input only for known CCD codes."
+                  hintAlign="end"
+                >
                   <input value={builderYamlPath} onChange={(e) => setBuilderYamlPath(e.target.value)} placeholder="./config.yaml" />
-                </label>
+                </Field>
                 <div className="api-yaml-builder-trigger">
                   <button className="btn btn-secondary" type="button" onClick={() => setYamlBuilderOpen(true)}>
                     Open YAML Builder
@@ -2225,42 +1947,40 @@ ${submitTaskIdCapture}`;
                     </label>
                   </div>
                   <div className="api-prediction-affinity-grid">
-                    <label className="field">
-                      <span>Target chain</span>
+                                          <Field label="Target chain">
                       <select
-                        value={predictionPairTargetChain}
-                        onChange={(e) => setPredictionAffinityTargetChain(e.target.value)}
-                        disabled={predictionTargetChainOptions.length === 0}
+                      value={predictionPairTargetChain}
+                      onChange={(e) => setPredictionAffinityTargetChain(e.target.value)}
+                      disabled={predictionTargetChainOptions.length === 0}
                       >
-                        {predictionTargetChainOptions.length === 0 ? (
-                          <option value="">None</option>
-                        ) : (
-                          predictionTargetChainOptions.map((item) => (
-                            <option key={`prediction-target-${item.chainId}`} value={item.chainId}>
-                              {item.label}
-                            </option>
-                          ))
-                        )}
+                      {predictionTargetChainOptions.length === 0 ? (
+                        <option value="">None</option>
+                      ) : (
+                        predictionTargetChainOptions.map((item) => (
+                          <option key={`prediction-target-${item.chainId}`} value={item.chainId}>
+                            {item.label}
+                          </option>
+                        ))
+                      )}
                       </select>
-                    </label>
-                    <label className="field">
-                      <span>Ligand chain</span>
+                      </Field>
+                                          <Field label="Ligand chain">
                       <select
-                        value={predictionPairLigandChain}
-                        onChange={(e) => setPredictionAffinityLigandChain(e.target.value)}
-                        disabled={predictionLigandChainOptions.length === 0}
+                      value={predictionPairLigandChain}
+                      onChange={(e) => setPredictionAffinityLigandChain(e.target.value)}
+                      disabled={predictionLigandChainOptions.length === 0}
                       >
-                        {predictionLigandChainOptions.length === 0 ? (
-                          <option value="">None</option>
-                        ) : (
-                          predictionLigandChainOptions.map((item) => (
-                            <option key={`prediction-ligand-${item.chainId}`} value={item.chainId}>
-                              {item.label}
-                            </option>
-                          ))
-                        )}
+                      {predictionLigandChainOptions.length === 0 ? (
+                        <option value="">None</option>
+                      ) : (
+                        predictionLigandChainOptions.map((item) => (
+                          <option key={`prediction-ligand-${item.chainId}`} value={item.chainId}>
+                            {item.label}
+                          </option>
+                        ))
+                      )}
                       </select>
-                    </label>
+                      </Field>
                   </div>
                   {!predictionPairReady && (
                     <span className="muted small">Target + ligand are required.</span>
@@ -2274,28 +1994,23 @@ ${submitTaskIdCapture}`;
 
             {isVirtualScreeningWorkflow && (
               <>
-                <label className="field">
-                  <span>YAML file path</span>
+                                  <Field label="YAML file path">
                   <input value={builderYamlPath} onChange={(e) => setBuilderYamlPath(e.target.value)} placeholder="./config.yaml" />
-                </label>
-                <label className="field">
-                  <span>Target protein sequence</span>
+                  </Field>
+                                  <Field label="Target protein sequence">
                   <textarea
-                    rows={7}
-                    value={builderVirtualScreeningProtein}
-                    onChange={(e) => setBuilderVirtualScreeningProtein(e.target.value.replace(/\s+/g, '').toUpperCase())}
-                    placeholder="One-letter amino-acid sequence"
-                    spellCheck={false}
+                  rows={7}
+                  value={builderVirtualScreeningProtein}
+                  onChange={(e) => setBuilderVirtualScreeningProtein(e.target.value.replace(/\s+/g, '').toUpperCase())}
+                  placeholder="One-letter amino-acid sequence"
+                  spellCheck={false}
                   />
-                </label>
-                <label className="field">
-                  <span>
-                    Compound library
-                    <InfoTip
-                      text="One SMILES per line; optional 'name SMILES' rows or FASTA-style >name headers."
-                      align="end"
-                    />
-                  </span>
+                  </Field>
+                <Field
+                  label="Compound library"
+                  hint="One SMILES per line; optional 'name SMILES' rows or FASTA-style >name headers."
+                  hintAlign="end"
+                >
                   <textarea
                     rows={10}
                     value={builderVirtualScreeningInput}
@@ -2304,38 +2019,34 @@ ${submitTaskIdCapture}`;
                     spellCheck={false}
                     disabled={vsLibraryFileMode}
                   />
-                </label>
-                <label className="field">
-                  <span>Load library from file (.smi / .csv / .txt)</span>
+                </Field>
+                                  <Field label="Load library from file (.smi / .csv / .txt)">
                   <input
-                    type="file"
-                    accept=".smi,.smiles,.csv,.tsv,.txt"
-                    disabled={vsLibraryFileMode}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      e.currentTarget.value = '';
-                      if (!file) return;
-                      void file.text().then((text) => {
-                        setBuilderVirtualScreeningInput(text.trim());
-                      });
-                    }}
+                  type="file"
+                  accept=".smi,.smiles,.csv,.tsv,.txt"
+                  disabled={vsLibraryFileMode}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.currentTarget.value = '';
+                    if (!file) return;
+                    void file.text().then((text) => {
+                      setBuilderVirtualScreeningInput(text.trim());
+                    });
+                  }}
                   />
-                </label>
-                <label className="field">
-                  <span>
-                    Library file path
-                    <InfoTip
-                      text="Uploaded as a separate compounds_file part, replacing the inline library. Provide the library inline or as a file — never both."
-                      align="end"
-                    />
-                  </span>
+                  </Field>
+                <Field
+                  label="Library file path"
+                  hint="Uploaded as a separate compounds_file part, replacing the inline library. Provide the library inline or as a file — never both."
+                  hintAlign="end"
+                >
                   <input
                     value={builderVsLibraryPath}
                     onChange={(e) => setBuilderVsLibraryPath(e.target.value)}
                     placeholder="./library.smi"
                     spellCheck={false}
                   />
-                </label>
+                </Field>
                 <div className="api-builder-note muted small">
                   Ranking-only results (no structures) — read them from /results/&lt;TASK_ID&gt;/screening.
                   <InfoTip
@@ -2346,201 +2057,56 @@ ${submitTaskIdCapture}`;
               </>
             )}
 
-            {isAffinityWorkflow && (
-              <>
-                <div className="api-yaml-component-flags api-affinity-options">
-                  {/* No MSA toggle: boltz2score always runs with the MSA server (the backend
-                      force-enables use_msa_server), so the switch was a dead control. */}
-                  <label className="checkbox-inline">
-                    <input
-                      type="checkbox"
-                      checked={builderAffinityConfidenceOnly}
-                      onChange={(e) => setBuilderAffinityConfidenceOnly(e.target.checked)}
-                    />
-                    <span>Confidence Only</span>
-                  </label>
-                </div>
-                <label className="field">
-                  <span>Mode</span>
-                  <select
-                    value={builderAffinityMode}
-                    onChange={(e) => setBuilderAffinityMode(normalizeAffinityBuilderMode(e.target.value))}
-                  >
-                    <option value="score">score</option>
-                    <option value="pose">pose</option>
-                    <option value="refine">refine</option>
-                    <option value="interface">interface</option>
-                    <option value="dock">dock</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Seed (optional)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={builderAffinitySeed ?? ''}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setBuilderAffinitySeed(value === '' ? null : Math.max(0, Math.floor(Number(value) || 0)));
-                    }}
-                    placeholder="Default: 42"
-                  />
-                </label>
-                <label className="field">
-                  <span>Target file path</span>
-                  <input value={builderTargetPath} onChange={(e) => setBuilderTargetPath(e.target.value)} placeholder="./protein.pdb" />
-                </label>
-                {isDockBuilderMode ? (
-                  <>
-                    <label className="field">
-                      <span>Ligand SMILES (required by dock)</span>
-                      <input
-                        value={builderAffinityLigandSmiles}
-                        onChange={(e) => setBuilderAffinityLigandSmiles(e.target.value)}
-                        placeholder="e.g. CC(C)CC1=CC=C(C=C1)C(C)C(=O)O"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Pocket definition method</span>
-                      <select
-                        value={builderPocketMethod}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          setBuilderPocketMethod(value === 'ligand' || value === 'residues' ? value : 'center');
-                        }}
-                      >
-                        <option value="center">Manual coordinates</option>
-                        <option value="ligand">Reference ligand (auto-detect pocket)</option>
-                        <option value="residues">Pocket residues</option>
-                      </select>
-                    </label>
-                    {builderPocketMethod === 'center' ? (
-                      <label className="field">
-                        <span>Pocket center X / Y / Z (Å)</span>
-                        <div className="row gap-8">
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={builderDockCenterX}
-                            onChange={(e) => setBuilderDockCenterX(e.target.value)}
-                            placeholder="x"
-                          />
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={builderDockCenterY}
-                            onChange={(e) => setBuilderDockCenterY(e.target.value)}
-                            placeholder="y"
-                          />
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={builderDockCenterZ}
-                            onChange={(e) => setBuilderDockCenterZ(e.target.value)}
-                            placeholder="z"
-                          />
-                        </div>
-                      </label>
-                    ) : builderPocketMethod === 'ligand' ? (
-                      <label className="field">
-                        <span>Reference ligand file path (pocket auto-detected server-side)</span>
-                        <input
-                          value={builderPocketLigandPath}
-                          onChange={(e) => setBuilderPocketLigandPath(e.target.value)}
-                          placeholder="./reference_ligand.sdf"
-                        />
-                      </label>
-                    ) : (
-                      <label className="field">
-                        <span>Pocket residues (CHAIN:RESNUM, comma-separated)</span>
-                        <input
-                          value={builderPocketResidues}
-                          onChange={(e) => setBuilderPocketResidues(e.target.value)}
-                          placeholder="A:100,A:101"
-                        />
-                      </label>
-                    )}
-                    <label className="field">
-                      <span>Pocket size X / Y / Z (Å, default 22)</span>
-                      <div className="row gap-8">
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          value={builderDockSizeX}
-                          onChange={(e) => setBuilderDockSizeX(e.target.value)}
-                          placeholder="22"
-                        />
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          value={builderDockSizeY}
-                          onChange={(e) => setBuilderDockSizeY(e.target.value)}
-                          placeholder="22"
-                        />
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          value={builderDockSizeZ}
-                          onChange={(e) => setBuilderDockSizeZ(e.target.value)}
-                          placeholder="22"
-                        />
-                      </div>
-                    </label>
-                  </>
-                ) : (
-                  <label className="field">
-                    <span>Ligand file path</span>
-                    <input value={builderLigandPath} onChange={(e) => setBuilderLigandPath(e.target.value)} placeholder="./ligand.sdf" />
-                  </label>
-                )}
-                {!builderAffinityConfidenceOnly && !isDockBuilderMode && (
-                  <>
-                    <label className="field">
-                      <span>Target chain</span>
-                      <input
-                        value={builderAffinityTargetChain}
-                        onChange={(e) => setBuilderAffinityTargetChain(e.target.value)}
-                        placeholder="A"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Ligand chain</span>
-                      <input
-                        value={builderAffinityLigandChain}
-                        onChange={(e) => setBuilderAffinityLigandChain(e.target.value)}
-                        placeholder="L"
-                      />
-                    </label>
-                    {!isDockBuilderMode && (
-                      <label className="field">
-                        <span>Ligand SMILES</span>
-                        <input
-                          value={builderAffinityLigandSmiles}
-                          onChange={(e) => setBuilderAffinityLigandSmiles(e.target.value)}
-                          placeholder="Required for affinity mode"
-                        />
-                      </label>
-                    )}
-                  </>
-                )}
-              </>
-            )}
+            <AffinityConfigBlock
+              isAffinityWorkflow={isAffinityWorkflow}
+              isDockBuilderMode={isDockBuilderMode}
+              normalizeMode={normalizeAffinityBuilderMode}
+              builderAffinityConfidenceOnly={builderAffinityConfidenceOnly}
+              builderAffinityMode={builderAffinityMode}
+              builderAffinitySeed={builderAffinitySeed}
+              builderTargetPath={builderTargetPath}
+              builderAffinityLigandSmiles={builderAffinityLigandSmiles}
+              builderPocketMethod={builderPocketMethod}
+              builderDockCenterX={builderDockCenterX}
+              builderDockCenterY={builderDockCenterY}
+              builderDockCenterZ={builderDockCenterZ}
+              builderDockSizeX={builderDockSizeX}
+              builderDockSizeY={builderDockSizeY}
+              builderDockSizeZ={builderDockSizeZ}
+              builderPocketLigandPath={builderPocketLigandPath}
+              builderPocketResidues={builderPocketResidues}
+              builderLigandPath={builderLigandPath}
+              builderAffinityTargetChain={builderAffinityTargetChain}
+              builderAffinityLigandChain={builderAffinityLigandChain}
+              onAffinityConfidenceOnlyChange={setBuilderAffinityConfidenceOnly}
+              onAffinityModeChange={(v) => setBuilderAffinityMode(v as typeof builderAffinityMode)}
+              onAffinitySeedChange={setBuilderAffinitySeed}
+              onTargetPathChange={setBuilderTargetPath}
+              onAffinityLigandSmilesChange={setBuilderAffinityLigandSmiles}
+              onPocketMethodChange={(v) => setBuilderPocketMethod(v as 'center' | 'ligand' | 'residues')}
+              onDockCenterXChange={setBuilderDockCenterX}
+              onDockCenterYChange={setBuilderDockCenterY}
+              onDockCenterZChange={setBuilderDockCenterZ}
+              onDockSizeXChange={setBuilderDockSizeX}
+              onDockSizeYChange={setBuilderDockSizeY}
+              onDockSizeZChange={setBuilderDockSizeZ}
+              onPocketLigandPathChange={setBuilderPocketLigandPath}
+              onPocketResiduesChange={setBuilderPocketResidues}
+              onLigandPathChange={setBuilderLigandPath}
+              onAffinityTargetChainChange={setBuilderAffinityTargetChain}
+              onAffinityLigandChainChange={setBuilderAffinityLigandChain}
+            />
 
-            <label className="field">
-              <span>Result ZIP path</span>
+                          <Field label="Result ZIP path">
               <input value={builderResultPath} onChange={(e) => setBuilderResultPath(e.target.value)} placeholder="./result.zip" />
-            </label>
+              </Field>
 
-            <label className="field">
-              <span>Task operation</span>
+                          <Field label="Task operation">
               <select value={builderTaskOperation} onChange={(e) => setBuilderTaskOperation((e.target.value === 'delete' ? 'delete' : 'cancel'))}>
-                <option value="cancel">cancel</option>
-                <option value="delete">delete</option>
+              <option value="cancel">cancel</option>
+              <option value="delete">delete</option>
               </select>
-            </label>
+              </Field>
           </aside>
 
           <div
@@ -2553,1098 +2119,167 @@ ${submitTaskIdCapture}`;
             onKeyDown={handleBuilderResizerKeyDown}
           />
 
-          <div className="api-command-right">
-            <div className="api-command-list">
-              <article className="api-command-item">
-                <header>
-                  <span>1. Environment</span>
-                  <button className={`icon-btn ${copiedActionId === 'copy-env' ? 'is-copied' : ''}`} type="button" aria-label="Copy env command" onClick={() => { void copyText(commandEnv, 'Environment command copied.', 'Environment', 'copy-env'); }}>
-                    <Copy size={14} />
-                  </button>
-                </header>
-                <pre><code>{commandEnv}</code></pre>
-              </article>
-
-              {(isPredictionWorkflow || isVirtualScreeningWorkflow) && (
-                <article className="api-command-item">
-                  <header>
-                    <span>YAML Preview</span>
-                    <div className="api-yaml-preview-actions">
-                      <button className="icon-btn" type="button" aria-label="Download generated YAML" onClick={downloadGeneratedYaml}>
-                        <Download size={14} />
-                      </button>
-                      <button className={`icon-btn ${copiedActionId === 'copy-yaml-preview' ? 'is-copied' : ''}`} type="button" aria-label="Copy generated YAML" onClick={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Preview', 'copy-yaml-preview'); }}>
-                        <Copy size={14} />
-                      </button>
-                    </div>
-                  </header>
-                  <pre><code>{yamlBuilderText}</code></pre>
-                </article>
-              )}
-
-              <article className="api-command-item">
-                <header>
-                  <span>
-                    2. Submit ({!isSupportedSubmitWorkflow
-                      ? selectedWorkflow.shortTitle
-                      : builderWorkflowKey === 'prediction'
-                        ? `Prediction/${effectivePredictionBackend}`
-                        : builderWorkflowKey === 'virtual_screening'
-                          ? 'Virtual Screening/nesso'
-                        : `Affinity/${effectiveAffinityBackend}`})
-                  </span>
-                  <button
-                    className={`icon-btn ${copiedActionId === 'copy-submit' ? 'is-copied' : ''}`}
-                    type="button"
-                    aria-label="Copy submit command"
-                    disabled={!isSupportedSubmitWorkflow}
-                    onClick={() => { void copyText(commandSubmitWithHints, 'Submit command copied.', 'Submit', 'copy-submit'); }}
-                  >
-                    <Copy size={14} />
-                  </button>
-                </header>
-                {!isSupportedSubmitWorkflow && (
-                  <p className="muted small">Select a Prediction, Virtual Screening, or Affinity project to generate submit command.</p>
-                )}
-                <pre><code>{commandSubmitWithHints}</code></pre>
-              </article>
-
-              <article className="api-command-item">
-                <header>
-                  <span>
-                    3. Check Status
-                    <InfoTip text="Uses the $TASK_ID captured from the submit response." />
-                  </span>
-                  <button className={`icon-btn ${copiedActionId === 'copy-status' ? 'is-copied' : ''}`} type="button" aria-label="Copy status command" onClick={() => { void copyText(commandStatus, 'Status command copied.', 'Status', 'copy-status'); }}>
-                    <Copy size={14} />
-                  </button>
-                </header>
-                <pre><code>{commandStatus}</code></pre>
-              </article>
-
-              <article className="api-command-item">
-                <header>
-                  <span>4. Download Result</span>
-                  <button className={`icon-btn ${copiedActionId === 'copy-result' ? 'is-copied' : ''}`} type="button" aria-label="Copy result command" onClick={() => { void copyText(commandResults, 'Result command copied.', 'Result', 'copy-result'); }}>
-                    <Copy size={14} />
-                  </button>
-                </header>
-                <pre><code>{commandResults}</code></pre>
-              </article>
-
-              {commandScreeningResults && (
-                <article className="api-command-item">
-                  <header>
-                    <span>5. Screening Ranking</span>
-                    <button className={`icon-btn ${copiedActionId === 'copy-screening' ? 'is-copied' : ''}`} type="button" aria-label="Copy screening ranking command" onClick={() => { void copyText(commandScreeningResults, 'Screening ranking command copied.', 'Screening Ranking', 'copy-screening'); }}>
-                      <Copy size={14} />
-                    </button>
-                  </header>
-                  <InfoTip text="compounds[0] is the strongest binder (lowest affinity_pred_value, log10 IC50 in µM)." />
-                  <pre><code>{commandScreeningResults}</code></pre>
-                </article>
-              )}
-
-              <article className="api-command-item">
-                <header>
-                  <span>{commandScreeningResults ? '6.' : '5.'} {builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task'}</span>
-                  <button className={`icon-btn ${copiedActionId === 'copy-task-action' ? 'is-copied' : ''}`} type="button" aria-label="Copy task action command" onClick={() => { void copyText(commandTaskAction, 'Task action command copied.', builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task', 'copy-task-action'); }}>
-                    <Copy size={14} />
-                  </button>
-                </header>
-                <InfoTip text={`Operation mode: ${builderTaskOperation}.`} />
-                <pre><code>{commandTaskAction}</code></pre>
-              </article>
-            </div>
-
-            <section className="api-command-history">
-              <div className="api-command-history-head">
-                <h3>Recent Command History</h3>
-                <button className="btn btn-ghost" type="button" onClick={() => setCommandHistory([])} disabled={commandHistory.length === 0}>
-                  Clear
-                </button>
-              </div>
-              {commandHistory.length === 0 ? (
-                <div className="muted small">No history yet. Copy any command to add it here.</div>
-              ) : (
-                <div className="api-history-list">
-                  {commandHistory.map((entry) => (
-                    <div key={entry.id} className="api-history-item">
-                      <div className="api-history-item-main">
-                        <strong>{entry.label}</strong>
-                        <span className="muted small">
-                          {entry.projectName || '-'} · {entry.workflow}/{entry.backend || '-'} · {entry.tokenName || '-'} · {formatIso(entry.createdAt)}
-                        </span>
-                      </div>
-                      <div className="api-history-item-actions">
-                        <button className="icon-btn" type="button" aria-label="Use command context" onClick={() => applyCommandHistory(entry)}>
-                          <Check size={14} />
-                        </button>
-                        <button className={`icon-btn ${copiedActionId === `copy-history-${entry.id}` ? 'is-copied' : ''}`} type="button" aria-label="Copy command from history" onClick={() => { void copyText(entry.command, 'History command copied.', undefined, `copy-history-${entry.id}`); }}>
-                          <Copy size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          </div>
+          <ApiCommandRightColumn
+            clipboard={{
+              copiedActionId,
+              copyText,
+              commandHistory,
+              setCommandHistory,
+              applyCommandHistory
+            }}
+            commands={{
+              commandEnv,
+              yamlBuilderText,
+              downloadGeneratedYaml,
+              commandSubmitWithHints,
+              commandStatus,
+              commandResults,
+              commandScreeningResults,
+              commandTaskAction
+            }}
+            workflow={{
+              isPredictionWorkflow,
+              isVirtualScreeningWorkflow,
+              isSupportedSubmitWorkflow,
+              selectedWorkflow,
+              builderWorkflowKey,
+              effectivePredictionBackend,
+              effectiveAffinityBackend,
+              builderTaskOperation
+            }}
+          />
         </div>
       </section>
 
-      <section className="panel api-usage-panel">
-        <div className="api-section-head">
-          <h2><BarChart3 size={16} /> Usage</h2>
-          <div className="api-usage-controls">
-            <label className="api-token-inline" aria-label="Usage token">
-              <span className="api-token-inline-label"><KeyRound size={12} /> Token</span>
-              <select
-                value={selectedTokenId}
-                onChange={(e) => setSelectedTokenId(e.target.value)}
-                disabled={tokens.length === 0}
-              >
-                {selectedProjectTokens.length === 0 ? (
-                  <option value="">No tokens</option>
-                ) : (
-                  selectedProjectTokens.map((token) => (
-                    <option key={token.id} value={token.id}>
-                      {token.name} ({token.token_prefix}...{token.token_last4})
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-            <div className="api-builder-meta api-usage-meta">
-              <span className="badge">Calls {selectedTokenUsageSummary.total}</span>
-              <span className="badge">Success {selectedTokenUsageSummary.successRate.toFixed(1)}%</span>
-            </div>
-          </div>
-        </div>
-
-        {!selectedTokenId ? (
-          <div className="api-empty-state">
-            <p className="muted">No token selected.</p>
-            <button className="btn btn-primary" type="button" onClick={() => openTokenRegistry()}>
-              <Plus size={14} /> New Token
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="api-usage-bars">
-              <div className="api-usage-bars-head">
-                <span className="muted small">Daily traffic</span>
-                {usageBarsPageCount > 1 && (
-                  <div className="api-pager">
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => setUsageBarsPage((prev) => Math.max(1, prev - 1))}
-                      disabled={usageBarsPage <= 1}
-                      title="Previous daily page"
-                      aria-label="Previous daily page"
-                    >
-                      <ChevronLeft size={14} />
-                    </button>
-                    <span className="muted small">{usageBarsPage} / {usageBarsPageCount}</span>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => setUsageBarsPage((prev) => Math.min(usageBarsPageCount, prev + 1))}
-                      disabled={usageBarsPage >= usageBarsPageCount}
-                      title="Next daily page"
-                      aria-label="Next daily page"
-                    >
-                      <ChevronRight size={14} />
-                    </button>
-                  </div>
-                )}
-              </div>
-              {tokenUsageDaily.length === 0 ? (
-                <div className="muted">No usage data.</div>
-              ) : (
-                pagedDailyUsage.map((item) => {
-                  const width = Math.max(4, (item.total_count / maxDailyCount) * 100);
-                  return (
-                    <div className="api-usage-bar-row" key={`${item.token_id}-${item.usage_day}`}>
-                      <span className="api-usage-day">{item.usage_day}</span>
-                      <div className="api-usage-bar-track">
-                        <span className="api-usage-bar-fill" style={{ width: `${width}%` }} />
-                      </div>
-                      <span className="api-usage-count">{item.total_count}</span>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            <div className="table-wrap api-usage-table-wrap">
-              <table className="table api-usage-table">
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Action</th>
-                    <th>Status</th>
-                    <th>Path</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tokenUsage.map((item) => (
-                    <tr key={item.id}>
-                      <td>{formatIso(item.created_at)}</td>
-                      <td>{item.action || `${item.method} ${item.path}`}</td>
-                      <td>{item.succeeded ? 'OK' : `Error (${item.status_code})`}</td>
-                      <td><code>{item.path}</code></td>
-                    </tr>
-                  ))}
-                  {tokenUsageTotal === 0 && (
-                    <tr>
-                      <td colSpan={4} className="muted">No events.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            {eventPageCount > 1 && (
-              <div className="api-pager">
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => setEventPage((prev) => Math.max(1, prev - 1))}
-                  disabled={eventPage <= 1}
-                  title="Previous page"
-                  aria-label="Previous page"
-                >
-                  <ChevronLeft size={14} />
-                </button>
-                <span className="muted small">{eventPage} / {eventPageCount}</span>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => setEventPage((prev) => Math.min(eventPageCount, prev + 1))}
-                  disabled={eventPage >= eventPageCount}
-                  title="Next page"
-                  aria-label="Next page"
-                >
-                  <ChevronRight size={14} />
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </section>
+      <UsagePanel
+        tokens={tokens}
+        selectedTokenId={selectedTokenId}
+        selectedProjectTokens={selectedProjectTokens}
+        tokenUsage={tokenUsage}
+        tokenUsageDaily={tokenUsageDaily}
+        tokenUsageTotal={tokenUsageTotal}
+        selectedTokenUsageSummary={selectedTokenUsageSummary}
+        eventPage={eventPage}
+        eventPageCount={eventPageCount}
+        usageBarsPage={usageBarsPage}
+        usageBarsPageCount={usageBarsPageCount}
+        pagedDailyUsage={pagedDailyUsage}
+        maxDailyCount={maxDailyCount}
+        onEventPageChange={setEventPage}
+        onUsageBarsPageChange={setUsageBarsPage}
+        onSelectedTokenIdChange={setSelectedTokenId}
+        onOpenRegistry={openTokenRegistry}
+      />
 
       {!isProjectScoped && (
-      <section className="panel api-docs-panel">
-        <div className="api-section-head">
-          <h2><Info size={16} /> API Docs</h2>
-        </div>
-        <ol className="api-doc-steps">
-          <li>
-            <strong>Create project in V-Bio web</strong>
-            <InfoTip text="API does not create project. Pick existing project in the builder." />
-          </li>
-          <li>
-            <strong>Create token and bind project</strong>
-            <InfoTip text="Token registry controls submit/cancel/delete permissions per project." />
-          </li>
-          <li>
-            <strong>Use generated submit command</strong>
-            <InfoTip text="Workflow is fixed by project type; select backend where applicable before copying." />
-          </li>
-          <li>
-            <strong>YAML format (prediction)</strong>
-            <InfoTip text="Use `version + sequences`; ligand entries can use `smiles` or `ccd`; add constraints/properties/templates only when needed." />
-          </li>
-          <li>
-            <strong>Track and download</strong>
-            <InfoTip text="Use status and result commands with the same `project_id` and token." />
-          </li>
-          <li>
-            <strong>Cancel or delete safely</strong>
-            <InfoTip text="`operation_mode=cancel|delete`, permission checked by gateway." />
-          </li>
-          <li>
-            <strong>Reuse from history</strong>
-            <InfoTip text="Recent copied commands are saved below builder for one-click reuse." />
-          </li>
-        </ol>
-      </section>
+        <ApiDocsPanel />
       )}
 
       {yamlBuilderOpen && (
-        <div className="modal-mask" onClick={() => setYamlBuilderOpen(false)}>
-          <div
-            className="modal modal-wide api-yaml-modal"
-            onClick={(e) => e.stopPropagation()}
-            {...yamlBuilderDialogProps}
-            aria-label="YAML Builder"
-          >
-            <div className="api-token-modal-head">
-              <h2><Info size={17} /> YAML Builder</h2>
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="Close yaml builder"
-                onClick={() => setYamlBuilderOpen(false)}
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <div
-              ref={yamlBuilderGridRef}
-              className={`api-yaml-modal-body api-yaml-modal-body-resizable ${isYamlBuilderResizing ? 'is-resizing' : ''}`}
-              style={yamlBuilderGridStyle}
-            >
-              <section className="api-yaml-modal-editor">
-                <div className="api-builder-meta">
-                  <span className="badge">Protein {yamlComponentStats.protein}</span>
-                  <span className="badge">DNA {yamlComponentStats.dna}</span>
-                  <span className="badge">RNA {yamlComponentStats.rna}</span>
-                  <span className="badge">Ligand {yamlComponentStats.ligand}</span>
-                  <span className="badge">Constraints {builderYamlConstraints.length}</span>
-                  <span className="badge">Affinity {builderYamlProperties.affinity ? 'on' : 'off'}</span>
-                </div>
-                <div className="component-sidebar-list api-yaml-components api-yaml-components-flat">
-                  {builderYamlComponents.map((component, index) => (
-                    <article
-                      key={component.id}
-                      className={`api-yaml-component-card ${index % 2 === 0 ? 'api-yaml-component-card-odd' : 'api-yaml-component-card-even'}`}
-                    >
-                      <header>
-                        <button
-                          className="btn btn-ghost api-yaml-collapse-btn"
-                          type="button"
-                          onClick={() => toggleYamlBuilderComponentCollapsed(component.id)}
-                          aria-label="Toggle component details"
-                        >
-                          <ChevronRight size={13} className={builderYamlCollapsed[component.id] ? '' : 'api-icon-rotated'} />
-                          <strong>Component {index + 1}</strong>
-                          <span className="muted small">({componentTypeLabel(component.type)}, x{component.numCopies})</span>
-                        </button>
-                        <button className="icon-btn danger" type="button" aria-label="Remove component" onClick={() => removeYamlBuilderComponent(component.id)}>
-                          <Trash2 size={14} />
-                        </button>
-                      </header>
-
-                      {!builderYamlCollapsed[component.id] && (
-                        <>
-                          <div className="api-yaml-component-grid">
-                            <label className="field">
-                              <span>Type</span>
-                              <select
-                                value={component.type}
-                                onChange={(e) => {
-                                  const nextType = e.target.value === 'dna' || e.target.value === 'rna' || e.target.value === 'ligand' ? e.target.value : 'protein';
-                                  updateYamlBuilderComponent(component.id, (current) => {
-                                    const next: InputComponent = { ...current, type: nextType };
-                                    if (nextType === 'ligand') {
-                                      next.inputMethod = current.inputMethod === 'ccd' ? 'ccd' : current.inputMethod === 'jsme' ? 'jsme' : 'smiles';
-                                      delete next.useMsa;
-                                      delete next.cyclic;
-                                    } else {
-                                      next.useMsa = current.useMsa !== false;
-                                      next.cyclic = Boolean(current.cyclic);
-                                      delete next.inputMethod;
-                                    }
-                                    return next;
-                                  });
-                                  if (nextType !== 'protein') {
-                                    setBuilderYamlTemplates((prev) => {
-                                      const next = { ...prev };
-                                      delete next[component.id];
-                                      return next;
-                                    });
-                                  }
-                                }}
-                              >
-                                <option value="protein">protein</option>
-                                <option value="dna">dna</option>
-                                <option value="rna">rna</option>
-                                <option value="ligand">ligand</option>
-                              </select>
-                            </label>
-
-                            <label className="field">
-                              <span>Copies</span>
-                              <input
-                                type="number"
-                                min={1}
-                                value={component.numCopies}
-                                onChange={(e) => {
-                                  const copies = Math.max(1, Math.floor(Number(e.target.value) || 1));
-                                  updateYamlBuilderComponent(component.id, (current) => ({ ...current, numCopies: copies }));
-                                }}
-                              />
-                            </label>
-                          </div>
-
-                          {component.type === 'ligand' && (
-                            <>
-                              <label className="field">
-                                <span>Ligand input</span>
-                                <select
-                                  value={component.inputMethod === 'ccd' ? 'ccd' : component.inputMethod === 'jsme' ? 'jsme' : 'smiles'}
-                                  onChange={(e) =>
-                                    updateYamlBuilderComponent(component.id, (current) => ({
-                                      ...current,
-                                      inputMethod: e.target.value === 'ccd' ? 'ccd' : e.target.value === 'jsme' ? 'jsme' : 'smiles'
-                                    }))
-                                  }
-                                >
-                                  <option value="smiles">smiles</option>
-                                  <option value="jsme">jsme</option>
-                                  <option value="ccd">ccd</option>
-                                </select>
-                              </label>
-                              <label className="field">
-                                <span>{component.inputMethod === 'ccd' ? 'CCD Code' : 'SMILES'}</span>
-                                <input
-                                  value={component.sequence}
-                                  onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, sequence: e.target.value }))}
-                                  placeholder={component.inputMethod === 'ccd' ? 'Example: ATP' : 'Example: CC(=O)NC1=CC=C(C=C1)O'}
-                                />
-                              </label>
-                              {component.inputMethod === 'jsme' && (
-                                <div className="field">
-                                  <span>JSME Molecule Editor</span>
-                                  <div className="jsme-editor-container component-jsme-shell api-yaml-jsme-shell">
-                                    <JSMEEditor
-                                      smiles={component.sequence}
-                                      height={320}
-                                      onSmilesChange={(value) =>
-                                        updateYamlBuilderComponent(component.id, (current) => ({ ...current, sequence: value }))
-                                      }
-                                    />
-                                  </div>
-                                </div>
-                              )}
-                            </>
-                          )}
-
-                          {component.type !== 'ligand' && (
-                            <label className="field">
-                              <span>Sequence</span>
-                              <textarea
-                                rows={3}
-                                value={component.sequence}
-                                onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, sequence: e.target.value }))}
-                                placeholder="Component sequence"
-                              />
-                            </label>
-                          )}
-
-                          {component.type === 'protein' && (
-                            <>
-                              <div className="api-yaml-component-flags">
-                                <label className="checkbox-inline">
-                                  <input
-                                    type="checkbox"
-                                    checked={component.useMsa !== false}
-                                    onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, useMsa: e.target.checked }))}
-                                  />
-                                  <span>MSA</span>
-                                </label>
-                                <label className="checkbox-inline">
-                                  <input
-                                    type="checkbox"
-                                    checked={Boolean(component.cyclic)}
-                                    onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, cyclic: e.target.checked }))}
-                                  />
-                                  <span>Cyclic</span>
-                                </label>
-                              </div>
-
-                              <div className="api-yaml-builder api-yaml-modifications">
-                                <div className="api-builder-meta">
-                                  <span className="badge">Residue Modifications {(component.modifications || []).length}</span>
-                                  <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderModification(component.id)}>
-                                    <Plus size={12} />
-                                    Add
-                                  </button>
-                                </div>
-                                {(component.modifications || []).map((mod, modIndex) => {
-                                  const terminal = builderTerminalForPosition(mod.position, component.sequence, mod.terminal);
-                                  const residue = builderResidueAt(component.sequence, mod.position) || mod.baseResidue || '-';
-                                  const customValid = mod.inputMethod !== 'jsme' || Boolean(builderCustomResidueValidity[mod.id] ?? looksLikeAminoAcidBackboneSmiles(mod.smiles || ''));
-                                  return (
-                                    <div key={mod.id} className="api-yaml-mod-row">
-                                      <strong>#{modIndex + 1}</strong>
-                                      <label className="field">
-                                        <span>Position</span>
-                                        <input
-                                          type="number"
-                                          min={1}
-                                          max={Math.max(1, builderSequenceLength(component.sequence) || 1)}
-                                          value={mod.position}
-                                          onChange={(e) => {
-                                            const position = clampBuilderModPosition(Number(e.target.value), component.sequence);
-                                            patchYamlBuilderModification(component.id, mod.id, {
-                                              position,
-                                              terminal: builderTerminalForPosition(position, component.sequence),
-                                              baseResidue: builderResidueAt(component.sequence, position) || mod.baseResidue
-                                            });
-                                          }}
-                                        />
-                                      </label>
-                                      <label className="field">
-                                        <span>Site</span>
-                                        <select
-                                          value={terminal}
-                                          onChange={(e) => {
-                                            const nextTerminal = e.target.value as ProteinModificationTerminal;
-                                            const position = builderPositionForTerminal(nextTerminal, mod.position, component.sequence);
-                                            patchYamlBuilderModification(component.id, mod.id, {
-                                              terminal: nextTerminal,
-                                              position,
-                                              baseResidue: builderResidueAt(component.sequence, position) || mod.baseResidue
-                                            });
-                                          }}
-                                        >
-                                          <option value="internal">Internal</option>
-                                          <option value="n_term">N-term</option>
-                                          <option value="c_term">C-term</option>
-                                        </select>
-                                      </label>
-                                      <label className="field">
-                                        <span>Residue</span>
-                                        <input value={residue} readOnly />
-                                      </label>
-                                      <label className="field">
-                                        <span>Source</span>
-                                        <select
-                                          value={mod.inputMethod}
-                                          onChange={(e) => {
-                                            const inputMethod = (e.target.value === 'jsme' ? 'jsme' : 'ccd') as ProteinModificationInputMethod;
-                                            const fallback = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.baseResidue === residue) || BUILDER_BUILT_IN_MODIFICATIONS[0];
-                                            const smiles = mod.smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD;
-                                            patchYamlBuilderModification(component.id, mod.id, {
-                                              inputMethod,
-                                              ccd: inputMethod === 'jsme' ? buildBuilderCustomCcd(component.id, mod.position, smiles) : fallback.ccd,
-                                              smiles: inputMethod === 'jsme' ? smiles : undefined,
-                                              label: inputMethod === 'jsme' ? 'Custom residue' : fallback.label,
-                                              customEditorCollapsed: true
-                                            });
-                                            if (inputMethod === 'jsme') validateBuilderCustomSmiles(mod.id, smiles);
-                                          }}
-                                        >
-                                          <option value="ccd">Built-in CCD</option>
-                                          <option value="jsme">Custom SMILES</option>
-                                        </select>
-                                      </label>
-                                      {mod.inputMethod === 'ccd' ? (
-                                        <label className="field">
-                                          <span>CCD</span>
-                                          <select
-                                            value={BUILDER_BUILT_IN_MODIFICATIONS.some((item) => item.ccd === mod.ccd) ? mod.ccd : BUILDER_BUILT_IN_MODIFICATIONS[0].ccd}
-                                            onChange={(e) => {
-                                              const selected = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.ccd === e.target.value) || BUILDER_BUILT_IN_MODIFICATIONS[0];
-                                              patchYamlBuilderModification(component.id, mod.id, { ccd: selected.ccd, label: selected.label, baseResidue: residue });
-                                            }}
-                                          >
-                                            {BUILDER_BUILT_IN_MODIFICATIONS.map((item) => (
-                                              <option key={item.ccd} value={item.ccd}>{item.label} ({item.ccd})</option>
-                                            ))}
-                                          </select>
-                                        </label>
-                                      ) : (
-                                        <>
-                                          <label className="field api-yaml-mod-smiles">
-                                            <span>Residue SMILES</span>
-                                            <input
-                                              value={mod.smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD}
-                                              onChange={(e) => {
-                                                const smiles = e.target.value;
-                                                patchYamlBuilderModification(component.id, mod.id, { smiles, ccd: buildBuilderCustomCcd(component.id, mod.position, smiles) });
-                                                validateBuilderCustomSmiles(mod.id, smiles);
-                                              }}
-                                            />
-                                          </label>
-                                          <span className={`api-yaml-mod-status ${customValid ? 'valid' : 'invalid'}`}>
-                                            {customValid ? 'Backbone OK' : 'Needs N-CA-C(=O) backbone'}
-                                          </span>
-                                        </>
-                                      )}
-                                      <button type="button" className="icon-btn danger" aria-label="Remove residue modification" onClick={() => removeYamlBuilderModification(component.id, mod.id)}>
-                                        <Trash2 size={13} />
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-
-                              <div className="api-yaml-builder">
-                                <label className="field">
-                                  <span>Template absolute path (optional)</span>
-                                  <input
-                                    value={builderYamlTemplates[component.id]?.path || ''}
-                                    onChange={(e) => updateYamlBuilderTemplate(component.id, (current) => ({ ...current, path: e.target.value }))}
-                                    placeholder="/abs/path/template.cif"
-                                  />
-                                </label>
-                                <div className="api-yaml-builder-grid api-yaml-template-grid">
-                                  <label className="field">
-                                    <span>Template format</span>
-                                    <select
-                                      value={builderYamlTemplates[component.id]?.format || 'auto'}
-                                      onChange={(e) =>
-                                        updateYamlBuilderTemplate(component.id, (current) => ({
-                                          ...current,
-                                          format: e.target.value === 'pdb' ? 'pdb' : e.target.value === 'cif' ? 'cif' : 'auto'
-                                        }))
-                                      }
-                                    >
-                                      <option value="auto">auto</option>
-                                      <option value="pdb">pdb</option>
-                                      <option value="cif">cif</option>
-                                    </select>
-                                  </label>
-                                  <label className="field">
-                                    <span>Template chain</span>
-                                    <input
-                                      value={builderYamlTemplates[component.id]?.templateChain || ''}
-                                      onChange={(e) => updateYamlBuilderTemplate(component.id, (current) => ({ ...current, templateChain: e.target.value }))}
-                                      placeholder="A"
-                                    />
-                                  </label>
-                                  <label className="field">
-                                    <span>Target chains</span>
-                                    <input
-                                      value={builderYamlTemplates[component.id]?.targetChains || ''}
-                                      onChange={(e) => updateYamlBuilderTemplate(component.id, (current) => ({ ...current, targetChains: e.target.value }))}
-                                      placeholder="A,B"
-                                    />
-                                  </label>
-                                </div>
-                              </div>
-                            </>
-                          )}
-                        </>
-                      )}
-                    </article>
-                  ))}
-                </div>
-                <div className="api-yaml-component-toolbar api-yaml-component-toolbar-bottom">
-                  <span className="muted small">Add component below</span>
-                  <div className="api-yaml-component-toolbar-actions">
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('protein')}>
-                      <Plus size={13} /> Protein
-                    </button>
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('ligand')}>
-                      <Plus size={13} /> Ligand
-                    </button>
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('dna')}>
-                      <Plus size={13} /> DNA
-                    </button>
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('rna')}>
-                      <Plus size={13} /> RNA
-                    </button>
-                  </div>
-                </div>
-                <section className="api-yaml-constraints">
-                  <button
-                    className="btn btn-ghost api-yaml-collapse-btn api-yaml-constraints-toggle"
-                    type="button"
-                    onClick={() => setBuilderYamlConstraintsOpen((prev) => !prev)}
-                    aria-expanded={builderYamlConstraintsOpen}
-                    aria-label="Toggle constraints and properties editor"
-                  >
-                    {builderYamlConstraintsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                    <strong>Constraints &amp; Properties</strong>
-                    <span className="muted small">
-                      {builderYamlConstraints.length} constraint{builderYamlConstraints.length === 1 ? '' : 's'}
-                    </span>
-                  </button>
-                  {builderYamlConstraintsOpen && (
-                    <div className="api-yaml-constraints-body">
-                      <ConstraintEditor
-                        components={normalizedYamlBuilderComponents}
-                        constraints={builderYamlConstraints}
-                        properties={builderYamlProperties}
-                        onConstraintsChange={setBuilderYamlConstraints}
-                        onPropertiesChange={setBuilderYamlProperties}
-                        showAffinitySection
-                      />
-                    </div>
-                  )}
-                </section>
-              </section>
-
-              <div
-                className={`panel-resizer ${isYamlBuilderResizing ? 'dragging' : ''}`}
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize YAML Builder panels"
-                tabIndex={0}
-                onPointerDown={handleYamlBuilderResizerPointerDown}
-                onKeyDown={handleYamlBuilderResizerKeyDown}
-              />
-
-              <section className="api-yaml-modal-preview">
-                <div className="api-command-item">
-                  <header>
-                    <span>Generated YAML</span>
-                    <div className="api-yaml-preview-actions">
-                      <button className="icon-btn" type="button" aria-label="Download generated YAML" onClick={downloadGeneratedYaml}>
-                        <Download size={14} />
-                      </button>
-                      <button className={`icon-btn ${copiedActionId === 'copy-yaml-modal' ? 'is-copied' : ''}`} type="button" aria-label="Copy generated YAML" onClick={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Builder', 'copy-yaml-modal'); }}>
-                        <Copy size={14} />
-                      </button>
-                    </div>
-                  </header>
-                  <pre><code>{yamlBuilderText}</code></pre>
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
+        <ApiYamlBuilderModal
+          chrome={{
+            dialogProps: yamlBuilderDialogProps,
+            setYamlBuilderOpen,
+            gridRef: yamlBuilderGridRef,
+            gridStyle: yamlBuilderGridStyle,
+            isResizing: isYamlBuilderResizing,
+            onResizePointerDown: handleYamlBuilderResizerPointerDown,
+            onResizeKeyDown: handleYamlBuilderResizerKeyDown
+          }}
+          components={{
+            builderYamlComponents,
+            builderYamlCollapsed,
+            builderCustomResidueValidity,
+            addYamlBuilderComponent,
+            updateYamlBuilderComponent,
+            toggleYamlBuilderComponentCollapsed,
+            removeYamlBuilderComponent,
+            addYamlBuilderModification,
+            patchYamlBuilderModification,
+            removeYamlBuilderModification,
+            validateBuilderCustomSmiles
+          }}
+          templates={{
+            builderYamlTemplates,
+            setBuilderYamlTemplates,
+            updateYamlBuilderTemplate
+          }}
+          constraints={{
+            builderYamlConstraints,
+            setBuilderYamlConstraints,
+            builderYamlProperties,
+            setBuilderYamlProperties,
+            builderYamlConstraintsOpen,
+            setBuilderYamlConstraintsOpen,
+            normalizedYamlBuilderComponents
+          }}
+          preview={{
+            yamlComponentStats,
+            yamlBuilderText,
+            copiedActionId,
+            copyText,
+            downloadGeneratedYaml
+          }}
+        />
       )}
 
       {projectTokenPanelProjectId && (
-        <div className="modal-mask" onClick={() => setProjectTokenPanelProjectId(null)}>
-          <div
-            className="modal api-project-token-modal"
-            onClick={(e) => e.stopPropagation()}
-            {...projectTokenDialogProps}
-            aria-label="Project tokens"
-          >
-            <div className="api-token-modal-head">
-              <h2><KeyRound size={17} /> {projectTokenPanelProject?.name || 'Project'} Tokens</h2>
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="Close project token panel"
-                onClick={() => setProjectTokenPanelProjectId(null)}
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <div className="api-project-token-modal-body">
-              {projectTokenPanelTokens.length === 0 ? (
-                <div className="api-project-token-modal-empty muted">
-                  <ShieldOff size={16} />
-                  <span>No tokens in this project yet.</span>
-                </div>
-              ) : (
-                <div className="api-project-token-modal-list">
-                  {projectTokenPanelTokens.map((token) => (
-                    <article key={token.id} className="api-project-token-modal-item">
-                      <div className="api-project-token-modal-main">
-                        <strong>{token.name}</strong>
-                        <code>{token.token_prefix}...{token.token_last4}</code>
-                      </div>
-                      <div className="api-project-token-modal-meta">
-                        <span className={`badge ${token.is_active ? '' : 'badge-muted'}`}>
-                          {token.is_active ? 'active' : 'revoked'}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-compact"
-                          onClick={() => {
-                            setSelectedProjectId(String(token.project_id || ''));
-                            setSelectedTokenId(token.id);
-                            setProjectTokenPanelProjectId(null);
-                          }}
-                        >
-                          Use
-                        </button>
-                        {token.is_active && (
-                          <button
-                            type="button"
-                            className="icon-btn"
-                            title="Revoke token"
-                            aria-label="Revoke token"
-                            disabled={tokenRevokingId === token.id}
-                            aria-busy={tokenRevokingId === token.id}
-                            onClick={() => { void revokeToken(token.id); }}
-                          >
-                            {tokenRevokingId === token.id ? <LoaderCircle size={13} className="spin" /> : <ShieldOff size={13} />}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="icon-btn danger"
-                          title="Delete token"
-                          aria-label="Delete token"
-                          disabled={tokenDeletingId === token.id}
-                          aria-busy={tokenDeletingId === token.id}
-                          onClick={() => { void removeToken(token.id); }}
-                        >
-                          {tokenDeletingId === token.id ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={13} />}
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-              <div className="api-project-token-modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    if (!projectTokenPanelProjectId) return;
-                    setProjectTokenPanelProjectId(null);
-                    openTokenRegistryForProject(projectTokenPanelProjectId);
-                  }}
-                >
-                  <KeyRound size={13} />
-                  Open Token Registry
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ApiProjectTokenModal
+          projectTokenPanelProjectId={projectTokenPanelProjectId}
+          projectTokenPanelProject={projectTokenPanelProject}
+          projectTokenPanelTokens={projectTokenPanelTokens}
+          dialogProps={projectTokenDialogProps}
+          setProjectTokenPanelProjectId={setProjectTokenPanelProjectId}
+          setSelectedProjectId={setSelectedProjectId}
+          setSelectedTokenId={setSelectedTokenId}
+          tokenRevokingId={tokenRevokingId}
+          tokenDeletingId={tokenDeletingId}
+          revokeToken={revokeToken}
+          removeToken={removeToken}
+          openTokenRegistryForProject={openTokenRegistryForProject}
+        />
       )}
 
       {registryOpen && (
-        <div className="modal-mask" onClick={closeTokenRegistry}>
-          <div
-            className="modal modal-wide api-token-modal"
-            onClick={(e) => e.stopPropagation()}
-            {...tokenRegistryDialogProps}
-            aria-label="Token registry"
-          >
-            <div className="api-token-modal-head">
-              <h2><ShieldCheck size={17} /> Token Registry{registryScopeProject ? ` · ${registryScopeProject.name}` : ''}</h2>
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="Close token registry"
-                onClick={closeTokenRegistry}
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="api-token-modal-body">
-              <section className="api-token-modal-create">
-                <form className="api-token-create" onSubmit={createApiToken}>
-                  <label className="field api-token-name-field">
-                    <span>Name</span>
-                    <input value={newTokenName} onChange={(e) => setNewTokenName(e.target.value)} placeholder="token-xxxxxxxx" required />
-                  </label>
-
-                  {!registryScopeProject && (
-                    <label className="field api-token-project-field">
-                      <span>Project</span>
-                      <select
-                        value={selectedProjectId}
-                        onChange={(e) => setSelectedProjectId(e.target.value)}
-                        disabled={projectLoading || projects.length === 0}
-                      >
-                        {projects.length === 0 ? (
-                          <option value="">No project</option>
-                        ) : (
-                          projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)
-                        )}
-                      </select>
-                    </label>
-                  )}
-
-                  <label className="field api-token-expiry-field">
-                    <span>Expire (d)</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={newTokenExpiresDays}
-                      onChange={(e) => setNewTokenExpiresDays(e.target.value)}
-                      placeholder="Never"
-                    />
-                  </label>
-
-                  <div className="field api-token-source-wrap api-token-permissions-field">
-                    <span>Permissions</span>
-                    <div className="api-permission-grid">
-                      <button
-                        type="button"
-                        className={`api-permission-chip ${allowSubmit ? 'active' : ''}`}
-                        onClick={() => setAllowSubmit((prev) => !prev)}
-                        aria-pressed={allowSubmit}
-                      >
-                        Submit
-                      </button>
-                      <button
-                        type="button"
-                        className={`api-permission-chip ${allowDelete ? 'active' : ''}`}
-                        onClick={() => setAllowDelete((prev) => !prev)}
-                        aria-pressed={allowDelete}
-                      >
-                        Delete
-                      </button>
-                      <button
-                        type="button"
-                        className={`api-permission-chip ${allowCancel ? 'active' : ''}`}
-                        onClick={() => setAllowCancel((prev) => !prev)}
-                        aria-pressed={allowCancel}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="row end api-token-create-action">
-                    <button className="btn btn-primary" type="submit" disabled={tokenCreating || !selectedProjectId}>
-                      <Plus size={14} /> {tokenCreating ? 'Creating...' : 'Create Token'}
-                    </button>
-                  </div>
-                </form>
-
-                {newTokenPlainText && (
-                  <div className="token-plain-block">
-                    <label className="field">
-                      <span>New Token</span>
-                      <textarea rows={2} readOnly value={newTokenPlainText} />
-                    </label>
-                    <div className="row">
-                      <button
-                        className={`btn btn-secondary ${copiedActionId === 'copy-new-token' ? 'is-copied' : ''}`}
-                        type="button"
-                        onClick={() => { void copyText(newTokenPlainText, 'Token copied.', undefined, 'copy-new-token'); }}
-                      >
-                        <Copy size={14} /> Copy
-                      </button>
-                      <button className="btn btn-ghost" type="button" onClick={() => setNewTokenPlainText('')}>
-                        Hide
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </section>
-
-              <section className="api-token-modal-list">
-                <div className="api-token-list-toolbar">
-                  {registryScopeProject && (
-                    <div className="api-token-scope-indicator">
-                      <span className="badge">Project scope</span>
-                      <strong>{registryScopeProject.name}</strong>
-                    </div>
-                  )}
-                  <label className="field api-token-search-field">
-                    <span><Search size={12} /> Find</span>
-                    <input
-                      value={tokenQuery}
-                      onChange={(e) => setTokenQuery(e.target.value)}
-                      placeholder="name / prefix"
-                    />
-                  </label>
-                </div>
-
-                <div className="table-wrap api-token-table-wrap api-token-table-scroll">
-                  <table className="table api-token-table">
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        {showRegistryProjectColumn && <th>Project</th>}
-                        <th>Permissions</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tokenLoading ? (
-                        <tr>
-                          <td colSpan={showRegistryProjectColumn ? 5 : 4} className="muted">Loading...</td>
-                        </tr>
-                      ) : pagedTokens.length === 0 ? (
-                        <tr>
-                          <td colSpan={showRegistryProjectColumn ? 5 : 4} className="muted">No tokens.</td>
-                        </tr>
-                      ) : (
-                        pagedTokens.map((token) => {
-                          const projectName = projects.find((item) => item.id === token.project_id)?.name || '-';
-                          return (
-                            <tr key={token.id} className={selectedTokenId === token.id ? 'row-selected' : ''}>
-                              <td>{token.name}<br /><code>{token.token_prefix}...{token.token_last4}</code></td>
-                              {showRegistryProjectColumn && <td>{projectName}</td>}
-                              <td>
-                                <div className="api-token-perm-badges">
-                                  <span className={`api-token-perm-badge ${token.allow_submit ? 'on' : 'off'}`}>S</span>
-                                  <span className={`api-token-perm-badge ${token.allow_delete ? 'on' : 'off'}`}>D</span>
-                                  <span className={`api-token-perm-badge ${token.allow_cancel ? 'on' : 'off'}`}>C</span>
-                                </div>
-                              </td>
-                              <td>
-                                <span className={`api-token-status-chip ${token.is_active ? 'active' : 'revoked'}`}>
-                                  {token.is_active ? 'Active' : 'Revoked'}
-                                </span>
-                              </td>
-                              <td>
-                                <div className="api-token-actions">
-                                  <button
-                                    className="icon-btn"
-                                    type="button"
-                                    title="Select"
-                                    aria-label="Select token"
-                                    onClick={() => setSelectedTokenId(token.id)}
-                                  >
-                                    <Check size={14} />
-                                  </button>
-                                  <button
-                                    className="icon-btn"
-                                    type="button"
-                                    title="Revoke"
-                                    aria-label="Revoke token"
-                                    disabled={!token.is_active || tokenRevokingId === token.id}
-                                    aria-busy={tokenRevokingId === token.id}
-                                    onClick={() => {
-                                      void revokeToken(token.id);
-                                    }}
-                                  >
-                                    {tokenRevokingId === token.id ? <LoaderCircle size={14} className="spin" /> : <ShieldOff size={14} />}
-                                  </button>
-                                  <button
-                                    className="icon-btn danger"
-                                    type="button"
-                                    title="Delete"
-                                    aria-label="Delete token"
-                                    disabled={tokenDeletingId === token.id}
-                                    aria-busy={tokenDeletingId === token.id}
-                                    onClick={() => {
-                                      void removeToken(token.id);
-                                    }}
-                                  >
-                                    {tokenDeletingId === token.id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="api-pager">
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => setTokenPage((prev) => Math.max(1, prev - 1))}
-                    disabled={tokenPage <= 1}
-                    title="Previous page"
-                    aria-label="Previous page"
-                  >
-                    <ChevronLeft size={14} />
-                  </button>
-                  <span className="muted small">{tokenPage} / {tokenPageCount}</span>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => setTokenPage((prev) => Math.min(tokenPageCount, prev + 1))}
-                    disabled={tokenPage >= tokenPageCount}
-                    title="Next page"
-                    aria-label="Next page"
-                  >
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
+        <ApiTokenRegistryModal
+          registryScopeProject={registryScopeProject}
+          tokenRegistryDialogProps={tokenRegistryDialogProps}
+          closeTokenRegistry={closeTokenRegistry}
+          createApiToken={createApiToken}
+          tokenCreating={tokenCreating}
+          newTokenName={newTokenName}
+          setNewTokenName={setNewTokenName}
+          newTokenExpiresDays={newTokenExpiresDays}
+          setNewTokenExpiresDays={setNewTokenExpiresDays}
+          newTokenPlainText={newTokenPlainText}
+          setNewTokenPlainText={setNewTokenPlainText}
+          allowSubmit={allowSubmit}
+          setAllowSubmit={setAllowSubmit}
+          allowDelete={allowDelete}
+          setAllowDelete={setAllowDelete}
+          allowCancel={allowCancel}
+          setAllowCancel={setAllowCancel}
+          projects={projects}
+          projectLoading={projectLoading}
+          selectedProjectId={selectedProjectId}
+          setSelectedProjectId={setSelectedProjectId}
+          showRegistryProjectColumn={showRegistryProjectColumn}
+          tokenLoading={tokenLoading}
+          tokenQuery={tokenQuery}
+          setTokenQuery={setTokenQuery}
+          tokenPage={tokenPage}
+          setTokenPage={setTokenPage}
+          tokenPageCount={tokenPageCount}
+          pagedTokens={pagedTokens}
+          selectedTokenId={selectedTokenId}
+          setSelectedTokenId={setSelectedTokenId}
+          tokenRevokingId={tokenRevokingId}
+          tokenDeletingId={tokenDeletingId}
+          revokeToken={revokeToken}
+          removeToken={removeToken}
+          copiedActionId={copiedActionId}
+          copyText={copyText}
+        />
       )}
     </div>
   );

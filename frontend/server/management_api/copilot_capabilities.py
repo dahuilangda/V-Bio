@@ -4,7 +4,11 @@ from typing import Any, Dict, List
 
 from management_api.copilot_skill_harness import CopilotSkillDefinition
 from management_api.copilot_skills.context_actions import build_context_skill_definitions
-from management_api.copilot_skills.workflows import infer_workflow_key, normalize_workflow_key
+from management_api.copilot_skills.workflows import (
+    infer_workflow_key,
+    normalize_workflow_key,
+    workflow_backend_values,
+)
 
 
 COPILOT_CAPABILITIES: List[Dict[str, str]] = [
@@ -82,11 +86,11 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "virtual_screening.submit_plan",
-        "description": "Plan Virtual Screening seed updates and reruns with the fixed Nesso-1 backend.",
+        "description": "Plan Virtual Screening seed updates and reruns with this workflow's fixed backend.",
         "trigger": "Virtual Screening rerun, seed change, or request to submit the current screening batch.",
         "inputs": "Current target sequence, compound library, seed, and run disabled reason.",
         "confirmation": "Always require explicit user confirmation before applying a seed or running.",
-        "execution_boundary": "Nesso-1 is the only backend. Do not expose structure-prediction backend choices, templates, or component replacement patches.",
+        "execution_boundary": "This workflow runs on a single fixed backend (read it from the workflow's backend schema values). Do not expose structure-prediction backend choices, templates, or component replacement patches.",
     },
     {
         "name": "affinity.submit_plan",
@@ -278,9 +282,8 @@ def build_capability_orientation(
 
 
 def _backend_values_for_workflow(workflow_key: str) -> List[str]:
-    if normalize_workflow_key(workflow_key) == "virtual_screening":
-        return ["nesso"]
-    return list(TASK_PARAMETER_SCHEMA["backend"]["values"])
+    # Derived from the workflow-vocabulary single source (copilot_skills/workflows.py).
+    return workflow_backend_values(workflow_key)
 
 
 def _task_parameter_json_schema(workflow_key: str) -> Dict[str, Any]:

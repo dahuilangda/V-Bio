@@ -4,6 +4,8 @@ import { CommandPalette } from './components/palette/CommandPalette';
 import './components/palette/CommandPalette.css';
 import { AppShell } from './components/layout/AppShell';
 import { AdminRoute, ProtectedRoute, SuperAdminRoute } from './components/layout/ProtectedRoute';
+import { ScrollToTop } from './components/router/ScrollToTop';
+import { RouteSkeleton } from './components/ui/RouteSkeleton';
 import { LoginPage } from './pages/LoginPage';
 import { JwtCallbackPage } from './pages/JwtCallbackPage';
 import { RegisterPage } from './pages/RegisterPage';
@@ -21,10 +23,6 @@ function ShellPage({ children }: { children: JSX.Element }) {
   return <AppShell>{children}</AppShell>;
 }
 
-function PageLoading() {
-  return <div className="centered-page">Loading page...</div>;
-}
-
 function ProjectApiAccessRedirect() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -37,6 +35,9 @@ function ProjectApiAccessRedirect() {
 export default function App() {
   return (
     <>
+      {/* Route-change scroll policy: new navigations start at the top, back/forward
+          keep the browser's scroll restoration. Must live inside the Router. */}
+      <ScrollToTop />
       {/* Global ⌘K palette: lives inside the Router (navigation commands need it) and
           above the routes so it overlays every page. */}
       <CommandPalette />
@@ -50,7 +51,7 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <ProjectsPage />
               </Suspense>
             </ShellPage>
@@ -62,7 +63,7 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <SharesPage />
               </Suspense>
             </ShellPage>
@@ -74,7 +75,7 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <ProjectDetailPage />
               </Suspense>
             </ShellPage>
@@ -86,7 +87,7 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <ProjectTasksPage />
               </Suspense>
             </ShellPage>
@@ -114,7 +115,7 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <SettingsPage />
               </Suspense>
             </ShellPage>
@@ -126,7 +127,7 @@ export default function App() {
         element={
           <SuperAdminRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <UsersPage />
               </Suspense>
             </ShellPage>
@@ -139,7 +140,7 @@ export default function App() {
         element={
           <SuperAdminRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <JwtClientsPage />
               </Suspense>
             </ShellPage>
@@ -151,7 +152,7 @@ export default function App() {
         element={
           <AdminRoute>
             <ShellPage>
-              <Suspense fallback={<PageLoading />}>
+              <Suspense fallback={<RouteSkeleton />}>
                 <AdminMonitorPage />
               </Suspense>
             </ShellPage>

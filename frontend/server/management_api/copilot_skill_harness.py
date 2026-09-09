@@ -12,6 +12,63 @@ from management_api.copilot_skills.online_databases import OnlineDatabaseSkills
 
 
 READ_EFFECTS = frozenset({"read", "observe", "resolve", "inspect"})
+
+
+def _first_sentence(description: str) -> str:
+    """Leading sentence of a skill description (the always-in-context summary tier).
+
+    A terminator only ends the sentence when followed by whitespace or end-of-text:
+    "ClinicalTrials.gov" keeps its domain period instead of truncating to
+    "Search ClinicalTrials." (which carried no contract information at all)."""
+    text = str(description or "").strip()
+    if not text:
+        return text
+    for index, char in enumerate(text):
+        if char not in ".!?\n":
+            continue
+        following = text[index + 1 : index + 2]
+        if following and not following.isspace():
+            continue
+        return text[: index + 1].strip()
+    return text
+
+
+def _compact_input_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Name/type/required view of an input schema: property descriptions dropped, shape kept.
+
+    Property-level query contracts (language constraints, units, semantics) live in the
+    full tier — reachable on demand via the skills.contract read skill — so the compact
+    tier carries only what argument-shape correctness needs."""
+    if not isinstance(schema, dict):
+        return schema
+    properties = schema.get("properties")
+    compact_props = None
+    if isinstance(properties, dict):
+        compact_props = {}
+        for key, value in properties.items():
+            if isinstance(value, dict):
+                compact_props[key] = {
+                    probe: value[probe]
+                    for probe in ("type", "enum", "minimum", "maximum")
+                    if probe in value
+                }
+            else:
+                compact_props[key] = value
+    compact: Dict[str, Any] = {"type": schema.get("type", "object")}
+    if compact_props is not None:
+        compact["properties"] = compact_props
+    if isinstance(schema.get("required"), list):
+        compact["required"] = list(schema["required"])
+    return compact
+
+# Context budget for the rendered tool protocol (prose + tool catalog JSON). The protocol
+# rides EVERY planner round; unbounded skill descriptions would silently eclipse the
+# context-payload budget (MAX_CONTEXT_TOTAL_CHARS in copilot.py). Enforced in
+# render_protocol_prompt; a regression test pins the current size so growth must be a
+# conscious decision. Two-tier contract disclosure (one-line summaries + on-demand detail
+# skill) is the designed escape valve, but it changes what the model sees per turn and
+# requires the A/B harness (e2e_diag_copilot.py) before it may replace full rendering.
+MAX_PROTOCOL_PROMPT_CHARS = 28000
 CONFIRMATION_EFFECTS = frozenset({"create", "update", "delete", "execute", "navigate"})
 KNOWN_EFFECTS = READ_EFFECTS | CONFIRMATION_EFFECTS
 
@@ -439,10 +496,18 @@ class CopilotSkillHarness:
     def render_protocol_prompt(
         self,
         definitions: Mapping[str, CopilotSkillDefinition] | None = None,
+        *,
+        read_disclosure: str = "full",
     ) -> str:
         import json
 
         available = definitions if definitions is not None else self._read_definitions()
+        # Two-tier disclosure (pi progressive-disclosure alignment): "full" renders every
+        # read skill's complete description+schema (the A/B-protected default); "summary"
+        # renders each description's first sentence plus a compact name/type schema — the
+        # FULL contracts stay reachable via the on-demand skills.contract read skill the
+        # assistant registers in summary mode. Adoption is decided by the e2e A/B harness.
+        summary_mode = str(read_disclosure).strip().lower() == "summary"
         # Tool catalog in the conventional {name, description, input_schema} shape that tool-calling
         # models are trained on (OpenAI/Anthropic/SmolAgents all use this). Split into read tools
         # (the harness executes them and returns observations) and action tools (the harness surfaces
@@ -451,17 +516,46 @@ class CopilotSkillHarness:
         read_tools = []
         action_tools = []
         for definition in available.values():
-            tool = {
-                "name": definition.name,
-                "description": definition.description,
-                "input_schema": definition.input_schema,
-            }
+            if definition.read_only and summary_mode:
+                tool = {
+                    "name": definition.name,
+                    "description": _first_sentence(definition.description),
+                    "input_schema": _compact_input_schema(definition.input_schema),
+                }
+            else:
+                tool = {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "input_schema": definition.input_schema,
+                }
             if definition.read_only:
                 read_tools.append(tool)
             else:
                 tool["page"] = definition.context_type or ""
                 tool["advances_to"] = definition.effective_target_context or ""
                 action_tools.append(tool)
+        rendered = self._render_protocol_prose(read_tools, action_tools)
+        if len(rendered) > MAX_PROTOCOL_PROMPT_CHARS:
+            # Soft budget: log loudly but never kill a running turn — the aggregate token
+            # budget (copilot.py MAX_TURN_TOTAL_TOKENS) is the hard stop for runaway spend.
+            # The deterministic gate is the regression test that renders the PRODUCTION
+            # catalog across every context/workflow and fails CI on budget drift.
+            import logging
+
+            logging.getLogger(__name__).error(
+                "skill protocol prompt exceeds its context budget (%d > %d chars) — "
+                "the tool catalog is eclipsing the payload budget; shrink skill "
+                "descriptions or move detail to an on-demand skill.",
+                len(rendered),
+                MAX_PROTOCOL_PROMPT_CHARS,
+            )
+        return rendered
+
+    def _render_protocol_prose(
+        self,
+        read_tools: List[Dict[str, Any]],
+        action_tools: List[Dict[str, Any]],
+    ) -> str:
         return (
             "CONTRACT — three roles, one loop:\n"
             "- PLANNER (you): own the DIRECTION. When the goal needs more than one unit operation, "
@@ -542,10 +636,28 @@ class CopilotSkillHarness:
         context_type: str = "",
         active_outline: Sequence[Dict[str, Any]] | None = None,
         context_row_ids: Sequence[str] | None = None,
+        unreachable_skills: frozenset[str] | None = None,
     ) -> PlanAudit:
         issues: List[str] = []
         if not isinstance(candidate, dict):
             return PlanAudit((), ("planner output must be an object",), {}, "")
+        # Structural retry cap (independent of prompt guidance): a source that failed as
+        # UNREACHABLE (transport/5xx) repeatedly this turn is dead for this turn — calling it
+        # again cannot succeed and only burns rounds. The rejection message tells the planner
+        # the legal alternatives (report / ask / different source). This cannot be talked
+        # around by prompt: it is enforced here, before any operation executes.
+        dead_sources = set(unreachable_skills or frozenset())
+        if dead_sources and isinstance(candidate.get("operations"), list):
+            for operation in candidate.get("operations"):
+                if isinstance(operation, dict):
+                    op_skill = str(operation.get("skill") or "").strip()
+                    if op_skill in dead_sources:
+                        issues.append(
+                            f"operation calls skill '{op_skill}' whose source is unreachable this turn "
+                            "(repeated transport/5xx failures) — report the outage or ask the user instead; "
+                            "do not call it again this turn (earlier observations from it remain usable "
+                            "via $fromObservation)"
+                        )
 
         allowed_fields = {"message", "questions", "operations", "goal_steps"}
         issues.extend(f"planner output field is not declared: {key}" for key in candidate if key not in allowed_fields)
@@ -828,7 +940,14 @@ class CopilotSkillHarness:
             elif len(dependencies) > self.max_calls_per_round:
                 issues.append(f"{path}.depends_on has more items than the declared maximum")
             elif len(dependencies) != len(set(dependencies)):
-                issues.append(f"{path}.depends_on must contain unique items")
+                # DETERMINISTIC REPAIR, not a rejection: a duplicated dependency id is
+                # semantically identical to its deduped list — zero ambiguity, zero
+                # information loss. Rejecting forced the model to re-emit an identical
+                # plan to fix formatting, and real models repeatedly failed that
+                # re-emission (observed: gemma4-31b repeated the duplicate twice and the
+                # turn died). The repair is observable downstream: PlanAudit.operations
+                # carries the deduped list the execution wave actually runs.
+                dependencies = list(dict.fromkeys(dependencies))
             for dependency in dependencies:
                 if dependency in observation_map and not observation_map[dependency].get("ok"):
                     issues.append(f"{path}.depends_on references a failed observation: {dependency}")

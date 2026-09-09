@@ -115,6 +115,7 @@ class ProtenixAffinityHead(nn.Module):
         max_dist: float = 22.0,
         dropout: float = 0.1,
         mc_samples: int = 4,
+        pocket_cond: bool = False,
     ):
         super().__init__()
         self.num_dist_bins = num_dist_bins
@@ -138,8 +139,14 @@ class ProtenixAffinityHead(nn.Module):
             ]
         )
 
+        # Pocket-conditioned readout: the value head also sees mean-pooled
+        # ligand and receptor single representations, so it can separate
+        # "big ligand" bulk effects from interface quality and calibrate to
+        # the pocket (between-pocket variance is ~36% of label variance).
+        self.pocket_cond = pocket_cond
+        in_dim = c_z + (2 * c_s if pocket_cond else 0)
         self.out_mlp = nn.Sequential(
-            nn.Linear(c_z, c_z), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(in_dim, c_z), nn.GELU(), nn.Dropout(dropout),
             nn.Linear(c_z, c_s), nn.GELU(),
         )
         self.to_value_a = self._scalar_head(c_s)
@@ -300,6 +307,13 @@ class ProtenixAffinityHead(nn.Module):
 
         pmf = pm.unsqueeze(-1).to(z.dtype)
         g = (z * pmf).sum(dim=(1, 2)) / (pmf.sum(dim=(1, 2)) + 1e-7)
+        if self.pocket_cond:
+            s_flat = s_inputs[0].float()  # [N, c_s]
+            n_rec = rec.sum().clamp(min=1)
+            n_lig = lig.sum().clamp(min=1)
+            rec_ctx = (s_flat * rec.unsqueeze(-1).float()).sum(0) / n_rec
+            lig_ctx = (s_flat * lig.unsqueeze(-1).float()).sum(0) / n_lig
+            g = torch.cat([g[0], lig_ctx, rec_ctx], dim=-1).unsqueeze(0)
 
         vals_a, vals_b, scores = [], [], []
         for _ in range(max(1, mc_samples)):

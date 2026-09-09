@@ -1,7 +1,7 @@
 import { Dna, Eye, SlidersHorizontal, Target } from 'lucide-react';
 import type { WorkspaceTab } from './workspaceTypes';
 
-interface WorkspaceStepperProps {
+export interface WorkspaceStepperProps {
   workspaceTab: WorkspaceTab;
   onWorkspaceTabChange: (tab: WorkspaceTab) => void;
   isPredictionWorkflow: boolean;

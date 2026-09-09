@@ -9,6 +9,7 @@ import {
   type JwtClientRecord
 } from '../api/jwtClientsApi';
 import { useAuth } from '../hooks/useAuth';
+import { Field } from '../components/common/Field';
 
 export function JwtClientsPage() {
   const { session, loading: authLoading, ensureManagementSession } = useAuth();
@@ -167,10 +168,9 @@ export function JwtClientsPage() {
           <h2><KeyRound size={18} /> Create JWT</h2>
         </div>
         <form className="form-grid integration-create" onSubmit={onCreateClient}>
-          <label className="field">
-            <span>Name</span>
+          <Field label="Name">
             <input name="name" placeholder="External system" required />
-          </label>
+          </Field>
           <button className="btn btn-primary" type="submit" disabled={!canManage}>Create JWT</button>
         </form>
 

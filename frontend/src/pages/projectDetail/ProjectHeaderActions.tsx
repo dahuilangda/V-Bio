@@ -2,7 +2,7 @@ import type { MouseEvent, RefObject } from 'react';
 import { ArrowLeft, Download, LoaderCircle, RefreshCcw, Save, Square } from 'lucide-react';
 import { RunPlayIcon } from './RunPlayIcon';
 
-interface ProjectHeaderActionsProps {
+export interface ProjectHeaderActionsProps {
   taskHistoryPath: string;
   onOpenTaskHistory: (event: MouseEvent<HTMLElement>) => void;
   onDownloadResult: () => void;

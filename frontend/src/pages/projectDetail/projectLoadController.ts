@@ -89,7 +89,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
       setWorkspaceTab(loaded.suggestedWorkspaceTab);
     }
 
-    setDraft(loaded.draft as TDraft);
+    setDraft(loaded.draft as unknown as TDraft);
     setSavedDraftFingerprint(loaded.savedDraftFingerprint);
     setSavedComputationFingerprint(loaded.savedComputationFingerprint);
     setSavedTemplateFingerprint(loaded.savedTemplateFingerprint);

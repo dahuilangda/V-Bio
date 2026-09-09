@@ -525,6 +525,21 @@ export async function streamCopilotTurn(
  * any failure (timeout, abort, non-ok, parse error) so the composer never blocks. Uses its own
  * short timeout and links an external AbortSignal so a newer keystroke can cancel an in-flight call.
  */
+export async function requestCopilotStop(input: { turnKey: string }): Promise<boolean> {
+  try {
+    const res = await fetch(managementApiUrl('/vbio-api/copilot/stop'), {
+      method: 'POST',
+      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ turn_key: input.turnKey })
+    });
+    if (!res.ok) return false;
+    const payload = (await res.json().catch(() => ({}))) as { stopped?: boolean };
+    return payload.stopped === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function submitCopilotSteering(input: { turnKey: string; text: string }): Promise<boolean> {
   try {
     const res = await fetch(managementApiUrl('/vbio-api/copilot/steer'), {

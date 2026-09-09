@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { MemoLigand2DPreview } from '../Ligand2DPreview';
 import { fetchLeadOptimizationHaloBackends, type LeadOptHaloBackend, type LeadOptHaloRoundEvent } from '../../../api/backendLeadOptimizationApi';
 import type { LeadOptHaloCandidate } from './hooks/useLeadOptHaloRun';
+import { Field } from '../../common/Field';
 
 /** Fallback while (or if) the backend listing is unavailable — must mirror
  * the backend's PredictOracle.SUPPORTED_BACKENDS ordering. */
@@ -60,16 +61,14 @@ export function LeadOptHaloParamsPanel({
     <section className="panel subtle lead-opt-panel">
       <div className="lead-opt-panel-title">Optimization</div>
       <div className="lead-opt-halo-grid">
-        <label className="field">
-          <span>Scoring backend</span>
+        <Field label="Scoring backend">
           <select value={backend} disabled={disabled} onChange={(e) => onBackendChange(e.target.value as LeadOptHaloBackend)}>
             {backendOptions.map((option) => (
               <option key={option.value} value={option.value}>{option.label}</option>
             ))}
           </select>
-        </label>
-        <label className="field">
-          <span>Iterations (rounds)</span>
+        </Field>
+        <Field label="Iterations (rounds)">
           <input
             type="number"
             min={1}
@@ -78,9 +77,8 @@ export function LeadOptHaloParamsPanel({
             disabled={disabled}
             onChange={(e) => onRoundsChange(Math.max(1, Math.min(100, Math.floor(Number(e.target.value) || 1))))}
           />
-        </label>
-        <label className="field">
-          <span>Oracle budget / round</span>
+        </Field>
+        <Field label="Oracle budget / round">
           <input
             type="number"
             min={1}
@@ -89,7 +87,7 @@ export function LeadOptHaloParamsPanel({
             disabled={disabled}
             onChange={(e) => onBudgetChange(Math.max(1, Math.min(512, Math.floor(Number(e.target.value) || 1))))}
           />
-        </label>
+        </Field>
         <div className="field field-span-2">
           <span>Pocket</span>
           <div className="muted small">{pocketLabel}</div>

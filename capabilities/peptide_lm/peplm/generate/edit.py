@@ -124,9 +124,26 @@ def edit_candidates(agent, vocab, parent: Candidate, n: int, device,
               + ["<suf>"] + suffix_res + ["<mid>"])
     plan = None
     if plan_kwargs:
-        fixed_rel = {pos - a: tok for pos, tok in (fixed_abs or {}).items()
-                     if pos >= a}
-        plan = build_plan(_PlanCfg(**plan_kwargs), vocab,
+        # Constraint index space: the sampler seeds its residue-emission
+        # counter with EVERY residue token in the prompt (prefix + suffix
+        # flanks of the FIM window), so fill token j decodes at
+        # emitted = len(prefix_res) + len(suffix_res) + j. Absolute
+        # sequence positions must therefore be remapped by that offset —
+        # and only for positions INSIDE the regenerated span; positions in
+        # the flanks ride the prompt as fixed context and must not be
+        # re-enforced (the old `pos - a` mapping was off by the suffix
+        # length, so decode-time forcing never fired where intended and
+        # could fire on the wrong residue; correctness silently depended
+        # on the post-hoc overwrite below).
+        off = len(prefix_res) + len(suffix_res)
+        fixed_rel = {pos - a + off: tok
+                     for pos, tok in (fixed_abs or {}).items()
+                     if a <= pos < b}
+        span_kwargs = dict(plan_kwargs)
+        span_kwargs["cys_positions"] = tuple(
+            p - a + off for p in (plan_kwargs.get("cys_positions") or ())
+            if a <= p < b)
+        plan = build_plan(_PlanCfg(**span_kwargs), vocab,
                           length=len(res), fixed=fixed_rel,
                           ncaa_pool_tokens=pool_tokens)
     fills = agent.sample_with_prompt(

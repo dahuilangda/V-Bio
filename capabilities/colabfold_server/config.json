@@ -13,7 +13,7 @@
         "colabfold": {
             "parallelstages": true,
             "uniref": "/app/databases/uniref30_2302_db_gpu2",
-            "pdb": "/app/databases/pdb100_230517",
+            "pdb": "/app/databases/pdb100_230517_gpu2",
             "environmental": "/app/databases/colabfold_envdb_202108_db_gpu2",
             "pdb70": "/app/databases/pdb100_230517",
             "pdbdivided": "/app/databases/pdb/divided",
@@ -26,9 +26,9 @@
     },
     "worker": {
         "gracefulexit": false,
-        "jobtimeoutseconds": 3600,
-        "terminategraceseconds": 30,
-        "jobretentionhours": 48,
+        "jobtimeoutseconds": 1800,
+        "terminategraceseconds": 10,
+        "jobretentionhours": 6,
         "jobcleanupintervalseconds": 600
     },
     "redis": {

@@ -30,6 +30,7 @@ import {
   validateVirtualScreeningSmiles,
   VIRTUAL_SCREENING_EXAMPLE
 } from '../../utils/virtualScreening';
+import { Field } from '../../components/common/Field';
 
 export type VirtualScreeningInputMode = 'upload' | 'paste';
 
@@ -372,8 +373,7 @@ export function VirtualScreeningWorkflowSection({
 
           {screeningInputMode === 'upload' ? (
             <div className="virtual-screening-library-source-panel">
-              <label className="field">
-                <span>SMILES / CSV / TSV file</span>
+              <Field label="SMILES / CSV / TSV file">
                 <input
                   ref={uploadRef}
                   type="file"
@@ -384,7 +384,7 @@ export function VirtualScreeningWorkflowSection({
                   }}
                   disabled={!canEdit}
                 />
-              </label>
+              </Field>
               <p className="small muted virtual-screening-source-caption">
                 {screeningInputFileName
                   ? 'Loaded: ' + screeningInputFileName

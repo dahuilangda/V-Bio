@@ -692,3 +692,29 @@ export function buildComponentAtomOptionsByChain(components: InputComponent[], r
 
   return result;
 }
+
+export function generateCustomResidueCode(userId: string | null | undefined, smiles: string): string {
+  const input = `${String(userId || 'anon').trim()}${String(smiles || '').trim()}`;
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const fnv1a = (seed: number) => {
+    let hash = seed >>> 0;
+    for (let index = 0; index < input.length; index += 1) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+  };
+  const left = fnv1a(0x811c9dc5);
+  const right = fnv1a(0x9e3779b9);
+  let code = 'U';
+  let a = left;
+  let b = right;
+  for (let index = 0; index < 3; index += 1) {
+    code += alphabet[a % 36];
+    a = Math.floor(a / 36);
+    code += alphabet[b % 36];
+    b = Math.floor(b / 36);
+  }
+  return code; // U + 6 alphanumeric chars
+}
+
