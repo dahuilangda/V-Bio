@@ -1,0 +1,124 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+**/.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# ── Tests (kept local, never uploaded) ──────────────────
+**/tests/
+
+# ── Environment / secrets ───────────────────────────────
+# Patterns without a slash match at every level, so a bare
+# `.env` covers frontend/, supabase-lite/, capabilities/, …
+# The !.env.example negation must stay AFTER `.env.*`.
+.env
+.env.*
+!.env.example
+*.env.bak
+deploy/docker/*.env
+
+# ── Runtime outputs / caches ────────────────────────────
+*.log*
+*.pid
+nohup.out
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-journal
+*.db-journal
+**/.run/
+.af3_jax_cache/
+.boltz_cache/
+boltz_central_results/
+AF3Score/
+BioPhi
+data/fold_input.json
+data/chembl_*
+capabilities/colabfold_server/databases
+capabilities/colabfold_server/jobs/
+capabilities/colabfold_server/msa-server-*
+capabilities/designer/temp_design_run_*
+capabilities/boltz2score/data/
+capabilities/boltz2score/.venv/
+
+# ── Model weights (too large for git; provision on disk) ─
+capabilities/peptide_lm/models/*.pt
+
+# ── PeptideLM run directory ─────────────────────────────
+# Fully retired from the repo: offline tooling writes to VBIO_RUNS_DIR (else
+# /data/vbio_runs — see capabilities/peptide_lm/peplm/paths.py), platform
+# results live in the unified backend RESULTS_BASE_DIR tree, and the training
+# inputs / property-head assets under runs/ regenerate via
+# `peplm.data.build_corpus` / `peplm.score.learned_props` training entry.
+capabilities/peptide_lm/runs/
+
+# ── HALO: trained priors + novelty corpus stay on disk ──
+capabilities/halo/runs/
+
+# ── protenix build artifacts ────────────────────────────
+vendor/protenix-source/**/*.o
+vendor/protenix-source/**/*.so
+vendor/protenix-source/**/.ninja_*
+
+# ── Frontend ────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+coverage/
+frontend/supabase-lite/data/
+
+# ── IDE / OS / tooling ──────────────────────────────────
+.vscode/
+.idea/
+.claude/settings.local.json
+.zcode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# .gitignore is tracked: clones rely on it to keep weights, caches and
+# venvs out of the working tree
+
+# ── colabfold server: prebuilt mmseqs binaries ──────────
+# 189MB ELF + 86MB tarball exceed GitHub's 100MB limit; provision on disk
+# (see capabilities/colabfold_server/_prebuilt/README.md). The vendored
+# mmseqs-server Go fork IS committed (source).
+capabilities/colabfold_server/_prebuilt/*.tar.gz
+capabilities/colabfold_server/_prebuilt/mmseqs.real
+capabilities/colabfold_server/mmseqs-server/backend/msa-server
+capabilities/colabfold_server/mmseqs-server/backend/vendor/
+
+# ── patch/conflict leftovers ────────────────────────────
+*.orig
+*.rej
+capabilities/protenix2dock/RANKL_4FCX_A.pdb
+backend/runtime/RANKL_4FCX_A.pdb
+backend/runtime/psslm_data/rankl_cyclic_final.yaml
+capabilities/colabfold_server/config.json.bak
+
+# Model weights stay on disk, never in git (14.6 GB: ESM-1b + caches)
+capabilities/peptide_lm/hub/
+capabilities/peptide_lm/models/external/
+capabilities/peptide_lm/models/cache/
+
+# ── Isolated python envs (ESM3 runtime) ─────────────────
+# The esm3 package needs its own interpreter; weights stay under the
+# ignored models/external/ tree
+vendor/esm3-venv/
+vendor/*-venv/
