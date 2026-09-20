@@ -50,13 +50,13 @@ def _coerce_opt_bool(value: Any) -> bool | None:
     return None
 
 
-def _resolve_low_vram(score_args: dict, gpu_id: int) -> bool:
+def _resolve_low_vram(score_args: dict) -> bool:
     """low_vram: ONLY an explicit user request enables it (default off).
 
     The engine's default mode (fp32 trunk, cuequivariance kernels, all
     diffusion samples batched) is markedly faster but needs roughly double the
-    memory of low_vram — the measured OOM driving the old auto path was a
-    ~2150-token complex on a 24 GB card. Policy (2026-09-04): no silent
+    memory of low_vram — a ~2150-token complex on a 24 GB card measured as the
+    OOM boundary. Policy: no silent
     performance/precision degradation; an OOM on an undersized card surfaces
     loudly instead. Pass low_vram=true explicitly to opt in.
     """
@@ -100,41 +100,58 @@ def _build_protenix2dock_command(
     return command, container_name
 
 
-def _pocket_center_and_size(score_args, protein_file, task_temp_dir):
-    """Resolve pocket_residues / pocket_ligand to a (center, size) box.
+def _resolve_dock_pocket_residues(score_args, protein_file, task_temp_dir):
+    """Resolve the three dock pocket definitions to an explicit residue list.
 
-    pocket_residues: centroid of the named residues' atoms on the protein
-    structure, box = their extent + 4 A. pocket_ligand: centroid and extent
-    of the reference ligand's heavy atoms (SDF via RDKit, PDB via gemmi).
-    Returns None when neither definition is present.
+    pocket_residues: passed through verbatim (author numbering — the engine
+    translates to assembled ordinals). center+size box: residues with a heavy
+    atom inside the box. pocket_ligand: residues with a heavy atom within
+    5 A of the reference ligand's heavy atoms. Returns the "CHAIN:RES,..."
+    string or None for a BLIND dock (no pocket anywhere on the surface is
+    implied; the caller logs it).
     """
-    import numpy as np
-
     residues = str(score_args.get("pocket_residues") or "").strip()
-    ligand_content = str(score_args.get("pocket_ligand_content") or "").strip()
-    if not (residues or ligand_content):
-        return None
-
-    pts = []
     if residues:
-        if not protein_file:
-            return None
-        import gemmi
+        return residues
 
-        wanted = set()
-        for token in residues.split(","):
-            chain_part, _, num_part = token.strip().partition(":")
-            if chain_part and num_part.isdigit():
-                wanted.add((chain_part.strip(), int(num_part)))
+    center = [score_args.get(f"center_{axis}") for axis in "xyz"]
+    has_center = all(v is not None for v in center)
+    if has_center:
+        if not protein_file:
+            raise ValueError("box-defined dock pocket requires protein_file.")
+        import gemmi
+        import numpy as np
+
+        half = np.array([
+            float(score_args.get(f"size_{axis}") or 18.0) / 2.0 for axis in "xyz"
+        ])
+        c = np.array([float(v) for v in center])
         st = gemmi.read_structure(protein_file)
         st.setup_entities()
+        picked = []
         for chain in st[0]:
             for res in chain:
-                if (chain.name, int(res.seqid.num)) in wanted:
-                    for atom in res:
-                        if atom.element != gemmi.Element("H"):
-                            pts.append([atom.pos.x, atom.pos.y, atom.pos.z])
-    else:
+                for atom in res:
+                    if atom.element == gemmi.Element("H"):
+                        continue
+                    d = np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - c
+                    if np.all(np.abs(d) <= half):
+                        picked.append((chain.name, int(res.seqid.num)))
+                        break
+        if not picked:
+            raise ValueError(
+                "dock pocket box contains no receptor heavy atoms; check "
+                "center/size against the target structure")
+        return ",".join(f"{ch}:{num}" for ch, num in picked)
+
+    ligand_content = str(score_args.get("pocket_ligand_content") or "").strip()
+    if score_args.get("pocket_ligand_filename") and not ligand_content:
+        raise ValueError("pocket_ligand_filename set but content is empty")
+    if ligand_content:
+        if not protein_file:
+            raise ValueError("reference-ligand dock pocket requires protein_file.")
+        import gemmi
+        import numpy as np
         from werkzeug.utils import secure_filename as _sf
 
         ligand_path = os.path.join(
@@ -152,21 +169,52 @@ def _pocket_center_and_size(score_args, protein_file, task_temp_dir):
             pts = [[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y,
                     conf.GetAtomPosition(i).z] for i in range(mol.GetNumAtoms())]
         else:
-            import gemmi
-
-            st = gemmi.read_structure(ligand_path)
-            st.setup_entities()
-            pts = [[a.pos.x, a.pos.y, a.pos.z] for ch in st[0]
+            st_l = gemmi.read_structure(ligand_path)
+            st_l.setup_entities()
+            pts = [[a.pos.x, a.pos.y, a.pos.z] for ch in st_l[0]
                    for r in ch for a in r if a.element != gemmi.Element("H")]
-    if not pts:
-        return None
-    arr = np.array(pts, dtype=float)
-    center = arr.mean(axis=0)
-    size = arr.max(axis=0) - arr.min(axis=0) + 8.0
-    return [float(v) for v in center], [float(v) for v in size]
+        if not pts:
+            raise ValueError(
+                "pocket_ligand resolved zero heavy atoms; check the file")
+        lig = np.array(pts, dtype=float)
+
+        st = gemmi.read_structure(protein_file)
+        st.setup_entities()
+        picked = []
+        for chain in st[0]:
+            for res in chain:
+                hit = False
+                for atom in res:
+                    if atom.element == gemmi.Element("H"):
+                        continue
+                    d = np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - lig
+                    if float(np.sqrt((d * d).sum(axis=1)).min()) <= 5.0:
+                        hit = True
+                        break
+                if hit:
+                    key = (chain.name, int(res.seqid.num))
+                    if key not in picked:
+                        picked.append(key)
+        if not picked:
+            raise ValueError(
+                "no receptor heavy atom lies within 5 A of the reference ligand")
+        return ",".join(f"{ch}:{num}" for ch, num in picked)
+
+    return None
 
 
-@celery_app.task(bind=True, name="backend.worker.tasks.protenix2dock_task")
+@celery_app.task(
+    bind=True, name="backend.worker.tasks.protenix2dock_task",
+    # Transient-infrastructure retry: refine tasks take 2-10 min, so the
+    # longer backoff gives the GPU time to drain before retrying
+    autoretry_for=(ConnectionError, TimeoutError),
+    retry_backoff=60,
+    retry_backoff_max=900,
+    retry_jitter=True,
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 
 def protenix2dock_task(self, score_args: dict):
     from backend.worker import tasks as _tasks
@@ -174,13 +222,14 @@ def protenix2dock_task(self, score_args: dict):
     task_id = self.request.id
     redis_client = get_redis_client()
     tracker = _tasks.TaskProgressTracker(task_id, redis_client)
+    tracker.start_heartbeat()
     gpu_id = -1
 
     try:
-        tracker.update_status("waiting_gpu", "Waiting for GPU allocation")
+        tracker.update_status("waiting_gpu", "Waiting for GPU allocation", payload={"progress": {"progress_percent": 5.0}})
         gpu_id = _tasks._acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
         reported_gpu = gpu_id
-        tracker.update_status("running", f"Acquired GPU {gpu_id}. Starting protenix2dock.")
+        tracker.update_status("running", f"Acquired GPU {gpu_id}. Starting protenix2dock.", payload={"progress": {"progress_percent": 10.0}})
         _tasks._raise_if_task_cancelled(self, redis_client, task_id)
 
         task_temp_dir = f"/data/boltz_central_results/_runtime_tmp/p2d_task_{task_id}"
@@ -207,7 +256,10 @@ def protenix2dock_task(self, score_args: dict):
         ]
         if msa_server_url:
             entry.extend(["--msa_server_url", msa_server_url])
-        if _resolve_low_vram(score_args, gpu_id):
+        msa_mode_arg = str(score_args.get("msa_mode") or "").strip().lower()
+        if msa_mode_arg in ("uniref", "env", "auto"):
+            entry.extend(["--msa_mode", msa_mode_arg])
+        if _resolve_low_vram(score_args):
             entry.append("--low_vram")
 
         # Persist uploaded inputs (route forwards file CONTENTS, matching the
@@ -233,25 +285,23 @@ def protenix2dock_task(self, score_args: dict):
             if not ligand_smiles:
                 raise ValueError("protenix2dock dock mode requires ligand_smiles.")
             entry.extend(["--ligand_smiles", ligand_smiles])
-            if score_args.get("center_x") is None:
-                # pocket_residues / pocket_ligand define the box implicitly:
-                # resolve them to a center here instead of dying at the CLI
-                resolved = _pocket_center_and_size(score_args, protein_file, task_temp_dir)
-                if resolved is None:
-                    raise ValueError(
-                        "dock mode requires a pocket definition (center "
-                        "coordinates, pocket_residues, or a pocket_ligand file).")
-                for axis, value in zip("xyz", resolved[0]):
-                    score_args[f"center_{axis}"] = value
-                if score_args.get("size_x") is None and resolved[1] is not None:
-                    for axis, value in zip("xyz", resolved[1]):
-                        score_args[f"size_{axis}"] = value
-            for axis in ("x", "y", "z"):
-                ckey, skey = f"center_{axis}", f"size_{axis}"
-                if score_args.get(ckey) is not None:
-                    entry.extend([f"--{ckey}", str(float(score_args[ckey]))])
-                if score_args.get(skey) is not None:
-                    entry.extend([f"--{skey}", str(float(score_args[skey]))])
+            # Pocket conditioning for the sampler: every definition resolves to
+            # an explicit residue list (PocketPotential groups). No pocket
+            # anywhere -> BLIND dock (whole-surface search) — a valid choice,
+            # not an error.
+            pocket_residues = _resolve_dock_pocket_residues(
+                score_args, protein_file, task_temp_dir)
+            if pocket_residues:
+                entry.extend(["--pocket_res", pocket_residues])
+                entry.extend([
+                    "--pocket_upper",
+                    str(float(score_args.get("pocket_upper") or 6.0)),
+                ])
+                logger.info(
+                    "dock pocket guidance on %d residues",
+                    len(pocket_residues.split(",")))
+            else:
+                logger.info("dock mode: BLIND (no pocket definition given)")
         elif requested_mode not in ("score", "peptide"):
             if not ligand_file:
                 raise ValueError(f"protenix2dock {requested_mode} mode requires ligand_file.")
@@ -317,7 +367,7 @@ def protenix2dock_task(self, score_args: dict):
                     " ".join(shlex.quote(p) for p in command))
         _tasks._raise_if_task_cancelled(self, redis_client, task_id)
 
-        tracker.update_status("running", f"Running protenix2dock ({requested_mode})")
+        tracker.update_status("running", f"Running protenix2dock ({requested_mode})", payload={"progress": {"progress_percent": 30.0}})
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, start_new_session=True, bufsize=1,
@@ -341,7 +391,12 @@ def protenix2dock_task(self, score_args: dict):
                 tail_lines.pop(0)
             m = _STAGE_RE.search(line)
             if m:
-                tracker.update_status("running", m.group(1)[:200])
+                # stage relays must carry the progress payload too — each
+                # update_status REPLACES the stored status, so a payload-less
+                # relay here would wipe the percent the header chip reads
+                tracker.update_status(
+                    "running", m.group(1)[:200],
+                    payload={"progress": {"progress_percent": 50.0}})
             _tasks._raise_if_task_cancelled(self, redis_client, task_id)
             if _time.time() > hard_deadline:
                 process.kill()
@@ -360,11 +415,11 @@ def protenix2dock_task(self, score_args: dict):
                 )
             )
 
-        tracker.update_status("processing_output", "Packaging protenix2dock results")
+        tracker.update_status("processing_output", "Packaging protenix2dock results", payload={"progress": {"progress_percent": 85.0}})
 
         # dpeptide design-loop contract: mirror the boltz2 dpeptide task layout
         # ({contract_dir}/out/confidence.json + per-model json/cif pairs with
-        # an iptm key) so _dpeptide_refine_and_validate polls and selects the
+        # an iptm key) so the design-loop orchestrator polls and selects the
         # best sample without knowing which engine produced it.
         if score_args.get("dpeptide_contract"):
             import shutil as _shutil
@@ -401,6 +456,9 @@ def protenix2dock_task(self, score_args: dict):
                 try:
                     payload = json.loads(open(conf_meta, encoding="utf-8").read())
                 except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "dpeptide contract: skipping unparsable confidence "
+                        "file %s", conf_meta, exc_info=True)
                     continue
                 iptm = float(payload.get("iptm") or 0.0)
                 # No sample filtering: every produced sample ships; ranking by
@@ -413,6 +471,22 @@ def protenix2dock_task(self, score_args: dict):
                     structure_dir, f"confidence_{tag}_model_{sample}.json")
                 with open(conf_json, "w", encoding="utf-8") as fh:
                     json.dump({**payload, "iptm": iptm}, fh)
+                # Per-sample ipSAE alongside the per-sample cif: the design
+                # loop re-picks the shipped sample by geometry (engagement,
+                # clashes), which may differ from the best-by-iptm sample —
+                # without this copy its interface numbers describe a
+                # different sample's coordinates.
+                ips_src = os.path.join(
+                    os.path.dirname(cif_path), f"{base}_ipsae_sample_{sample}.json")
+                if os.path.exists(ips_src):
+                    try:
+                        _shutil.copyfile(
+                            ips_src,
+                            os.path.join(structure_dir, f"ipsae_{tag}_model_{sample}.json"))
+                    except OSError:
+                        logger.warning(
+                            "dpeptide contract: per-sample ipsae copy failed for %s",
+                            ips_src, exc_info=True)
                 scored.append((iptm, model_path))
                 # remember the engine predictions dir + sample base for the
                 # per-sample ipsae lookup after the best sample is chosen
@@ -469,7 +543,10 @@ def protenix2dock_task(self, score_args: dict):
                         payload["ligand_ipsae_max"] = meta.get("ligand_ipsae_max")
                         payload["ipsae_dom"] = meta.get("ipsae_dom")
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning(
+                    "dpeptide contract: ipSAE metrics omitted (extraction "
+                    "failed) — the design loop ranks without them",
+                    exc_info=True)
             with open(os.path.join(out_root, "confidence.json"), "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
             logger.info("Task %s: dpeptide contract written (best iptm=%.3f).", task_id, best_iptm)
@@ -486,7 +563,7 @@ def protenix2dock_task(self, score_args: dict):
                     zipf.write(fpath, f"protenix/output/{rel}")
 
 
-        tracker.update_status("uploading", "Uploading results to central API")
+        tracker.update_status("uploading", "Uploading results to central API", payload={"progress": {"progress_percent": 92.0}})
         if gpu_id != -1:
             release_gpu(gpu_id=gpu_id, task_id=task_id)
             gpu_id = -1
@@ -512,17 +589,24 @@ def protenix2dock_task(self, score_args: dict):
             "best_by_interface": summary.get("best_by_interface"),
         }
         self.update_state(state="SUCCESS", meta=final_meta)
-        tracker.update_status("completed", "Task completed successfully")
+        tracker.update_status("completed", "Task completed successfully", payload={"progress": {"progress_percent": 100.0}})
+        _tasks._notify_task_terminal(score_args, task_id, "SUCCESS", f"protenix2dock {requested_mode}")
         return final_meta
 
     except Ignore:
         raise
     except Exception as e:  # noqa: BLE001
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        tracker.update_status("failed", _tasks._truncate_text(e, 4000))
+        tracker.update_status("failed", _tasks._truncate_text(e, _tasks.MAX_STATUS_DETAILS_CHARS))
+        # Transient failures (ConnectionError/TimeoutError) autoretry — hold
+        # the FAILURE email until the last attempt so a retried success does
+        # not send "failed" followed by "completed" for the same task.
+        if self.request.retries >= self.max_retries:
+            _tasks._notify_task_terminal(score_args, task_id, "FAILURE", "protenix2dock job")
         self.update_state(state="FAILURE", meta=_tasks._build_failure_meta(e))
         raise
     finally:
+        tracker.stop_heartbeat()
         _tasks._terminate_task_containers_by_task_id(task_id)
         if gpu_id != -1:
             release_gpu(gpu_id=gpu_id, task_id=task_id)
