@@ -290,19 +290,20 @@ class ProtenixAffinityHead(nn.Module):
         z = z0.view(N, N, -1).unsqueeze(0)
 
         pm = pair_mask.unsqueeze(0)
-        # Chunk attention along the query dim for large complexes (N ~ 1000)
-        # and checkpoint each block (backward recomputes forwards) so peak
-        # memory stays bounded — same mechanism as the trunk's pairformer.
-        # Every constant is bound into the partials (like PairformerBlock.
-        # _prep_blocks): checkpoint_blocks threads only `z` between blocks.
-        chunk_size = 32 if N > 640 else None
+        # Chunk attention along the query dim and checkpoint each block
+        # (backward recomputes forwards) so peak memory stays bounded — same
+        # mechanism as the trunk's pairformer. The old `N > 640` guard never
+        # fired for max_seq_len<=600 training sets, leaving N~550 triangle
+        # attention unchunked at ~20-25GB. Training mode now ALWAYS chunks +
+        # checkpoints; inference keeps the size-based rule.
+        chunk_size = 32 if (self.training or N > 640) else None
         blocks = [
             partial(block, pair_mask=pm, chunk_size=chunk_size)
             for block in self.blocks
         ]
         (z,) = checkpoint_blocks(
             blocks, args=(z,),
-            blocks_per_ckpt=1 if (self.training and N > 640) else None,
+            blocks_per_ckpt=1 if (self.training or N > 640) else None,
         )
 
         pmf = pm.unsqueeze(-1).to(z.dtype)

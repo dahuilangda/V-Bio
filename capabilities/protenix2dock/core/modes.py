@@ -29,7 +29,7 @@ INTERFACE_MODE = "interface"
 DOCK_MODE = "dock"
 PEPTIDE_MODE = "peptide"
 
-SUPPORTED_MODES = (SCORE_MODE, POSE_MODE, REFINE_MODE, INTERFACE_MODE, DOCK_MODE, PEPTIDE_MODE)
+SUPPORTED_MODES = (SCORE_MODE, POSE_MODE, REFINE_MODE, INTERFACE_MODE, DOCK_MODE, PEPTIDE_MODE, "rediffuse")
 
 MODE_DESCRIPTIONS = {
     SCORE_MODE: "confidence scoring of an input pose (no diffusion)",
@@ -47,60 +47,53 @@ MODE_CONFIGS: dict[str, dict[str, object]] = {
         "sigma_max": 0.0,
         "sampling_steps": 0,
         "diffusion_samples": 1,
-        "anchor_contact_cutoff": 0.0,
-        "anchor_max_distance": 0.0,
     },
     POSE_MODE: {
         "name": "pose_default",
         "sigma_max": 0.02,
         "sampling_steps": 8,
         "diffusion_samples": 5,
-        "anchor_contact_cutoff": 5.0,
-        "anchor_max_distance": 5.5,
     },
     REFINE_MODE: {
         "name": "refine_default",
         "sigma_max": 0.03,
         "sampling_steps": 10,
         "diffusion_samples": 5,
-        "anchor_contact_cutoff": 5.0,
-        "anchor_max_distance": 6.0,
     },
     INTERFACE_MODE: {
         "name": "interface_default",
         "sigma_max": 0.04,
         "sampling_steps": 12,
         "diffusion_samples": 5,
-        "anchor_contact_cutoff": 5.0,
-        "anchor_max_distance": 6.5,
     },
     DOCK_MODE: {
         "name": "dock_default",
-        # sigma stays on the calibrated small-sigma ladder: the TFG contact
-        # projection is only well-conditioned in the local refinement regime
-        # (full generation schedules, s_max=160, make its projection matrix
-        # singular). Reference case (CDK8): ligand pLDDT 87.1 /
+        # Full blind schedule: the ligand denoises from pure noise, so a
+        # local-refine sigma would leave it a fragment. --pocket_res adds the
+        # PocketPotential term whose early-strong ramp is tuned for exactly
+        # this schedule. Reference case (CDK8): ligand pLDDT 87.1 /
         # iptm 0.986 / ipsae 0.838.
-        "sigma_max": 0.05,
-        "sampling_steps": 12,
+        "sigma_max": 160.0,
+        "sampling_steps": 200,
         "diffusion_samples": 5,
-        # Same pocket anchoring semantics as Boltz2Score dock: contacts within
-        # 9 A of the placed conformer, upper bound 10 A.
-        "anchor_contact_cutoff": 9.0,
-        "anchor_max_distance": 10.0,
+    },
+    # Partial-diffusion refinement (RFdiffusion partial_T analog): re-noise
+    # the peptide at sigma=12A from its input pose and denoise — local search
+    # around known-good geometry instead of blind restart. ~half the steps.
+    "rediffuse": {
+        "name": "peptide_rediffuse",
+        "sigma_max": 0.75,
+        "sampling_steps": 100,
+        "diffusion_samples": 8,
     },
     PEPTIDE_MODE: {
         "name": "peptide_default",
-        # Same calibrated small-sigma ladder as dock: the full generation
-        # schedule (s_max=160) makes the TFG constraint projection singular.
-        # The receptor is pinned to the input pose for every step (true
-        # inpainting); the peptide starts from its placed pose and denoises
-        # locally under pocket-anchoring + covalent bond TFG contacts.
+        # Staged local-refine ladder (bicyclic/linker route); the blind
+        # D-route overrides to the full schedule at runtime (--blind_peptide).
+        # The receptor is pinned for every step (true inpainting).
         "sigma_max": 0.05,
         "sampling_steps": 12,
         "diffusion_samples": 8,
-        "anchor_contact_cutoff": 9.0,
-        "anchor_max_distance": 8.0,
     },
 }
 

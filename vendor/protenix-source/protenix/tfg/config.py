@@ -28,13 +28,17 @@ What this file defines
 
 """
 
+import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 import torch
 
 from protenix.tfg import potentials
+
+logger = logging.getLogger(__name__)
 
 
 class Schedule:
@@ -100,6 +104,37 @@ class ExponentialInterpolation(Schedule):
         return float(self.start + (self.end - self.start) * (num / den))
 
 
+@dataclass(frozen=True)
+class PiecewiseStepFunction(Schedule):
+    """Piecewise-constant schedule, identical semantics to boltz-2.2.1.
+
+    ``compute(t)`` returns ``values[i]`` where ``i`` is the number of
+    thresholds strictly below ``t``:
+    ``t <= thresholds[0] -> values[0]`` ... ``t > thresholds[-1] -> values[-1]``.
+    Convention-agnostic: the caller decides whether t means noise level or
+    sampling progress; boltz2 evaluates it on progress (0 early -> 1 late).
+    """
+
+    thresholds: tuple
+    values: tuple
+
+    def __post_init__(self):
+        if len(self.thresholds) == 0:
+            raise ValueError("PiecewiseStepFunction requires >= 1 threshold")
+        if len(self.values) != len(self.thresholds) + 1:
+            raise ValueError(
+                "PiecewiseStepFunction requires len(values) == "
+                "len(thresholds) + 1")
+        object.__setattr__(self, "thresholds", tuple(self.thresholds))
+        object.__setattr__(self, "values", tuple(self.values))
+
+    def __call__(self, t: float) -> float:
+        idx = 0
+        while idx < len(self.thresholds) and t > self.thresholds[idx]:
+            idx += 1
+        return float(self.values[idx])
+
+
 def schedule_from_cfg(obj: Any) -> Schedule:
     """Parse a schedule from a config object.
 
@@ -111,6 +146,7 @@ def schedule_from_cfg(obj: Any) -> Schedule:
       Currently supported schedule types:
       - `{"type": "const", "value": 0.1}`
       - `{"type": "exp_interpolation", "start": 1.0, "end": 0.0, "alpha": 3.0}`
+      - `{"type": "piecewise", "thresholds": [0.25, 0.75], "values": [0.0, 0.5, 1.0]}`
     """
 
     if isinstance(obj, Schedule):
@@ -132,6 +168,11 @@ def schedule_from_cfg(obj: Any) -> Schedule:
                 start=float(cfg["start"]),
                 end=float(cfg["end"]),
                 alpha=float(cfg.get("alpha", 0.0)),
+            )
+        if t == "piecewise":
+            return PiecewiseStepFunction(
+                thresholds=tuple(float(x) for x in cfg["thresholds"]),
+                values=tuple(float(x) for x in cfg["values"]),
             )
         raise ValueError(f"Unknown schedule type: {t}")
 
@@ -232,6 +273,18 @@ class Term:
         for k, v in self.param_templates.items():
             out[k] = v(t) if isinstance(v, Schedule) else v
         return out
+
+    def energy_unweighted(
+        self, coords: torch.Tensor, feats: Mapping[str, Any], t: float
+    ) -> torch.Tensor:
+        """Energy WITHOUT the weight schedule (FK resampling channel).
+
+        boltz2 separates resampling_weight (constant) from
+        guidance_weight (scheduled); summing the SCHEDULED energy for
+        particle selection left weight-zero terms invisible to FK.
+        """
+        e = self._potential.energy(coords, feats, self._params_at(t))
+        return e.float()
 
     def energy(
         self, coords: torch.Tensor, feats: Mapping[str, Any], t: float
@@ -400,6 +453,15 @@ class TFGConfig:
     terms: tuple[Term, ...]
     # Debug switch: log per-term energies at the last refinement step.
     log_last_step_energy: bool = False
+    # SE(3) drift correction each guided step (boltz-2
+    # alignment_reverse_diff): rigid-align the noisy state onto the
+    # denoiser's x0 prediction before the update. DISABLED by default: in a
+    # mixed-quality system (init-coords receptor + from-noise peptide) the
+    # x0 prediction of the noisy part is unreliable early, and aligning the
+    # whole state to it tears the well-formed part (measured: receptor
+    # worst-bond deviation 18 A with it on, 0.7 A with it off). Boltz-2 can
+    # afford it because every chain starts from the same noise level.
+    align_to_x0: bool = False
 
 
 def parse_tfg_config(guidance_cfg: Mapping[str, Any] | None) -> TFGConfig:
@@ -482,3 +544,74 @@ def parse_tfg_config(guidance_cfg: Mapping[str, Any] | None) -> TFGConfig:
         terms=terms,
         log_last_step_energy=bool(cfg.get("log_last_step_energy", False)),
     )
+
+
+def pocket_augmented_guidance(guidance_cfg):
+    """protenix2dock TFG augmentation: steric hardening always, pocket term
+    only when its features exist.
+
+    Activation: ANY protenix2dock side channel (pocket npz OR the TFG
+    constraints npz that peptide mode always writes with the inter-chain
+    VDW shell). The stock config ships guidance ``enable: False`` — before
+    this gate covered the constraints npz too, BLIND peptide runs injected
+    118k clash-floor pairs into the input features that no potential ever
+    consumed (guidance off), and the eta=1.5 extrapolation alone jammed
+    every bound sample into the receptor (measured 2026-09-18: min
+    receptor-peptide heavy-atom distance 0.3-1.7 A in 7/8 samples of every
+    candidate, the 8th fully detached).
+    Modes:
+    - anchor (macrocyclic peptides): constant-weight solvent-side soft
+      box -- site localisation only, the denoiser owns the pose; the
+      boltz2 piecewise ramp below applies only to per-residue (ligand)
+      contact guidance.
+    mid-segment strength of boltz-2.2.1's contact guidance: on the
+    engine's normalized time axis (t=1 early/noisy, t=0 late/clean), a
+    linear ramp with start=0/end=1 gives weight 1.0 early (while the pose
+    is being chosen) decaying to 0.0 at the end (structure released for
+    refinement).
+    """
+    pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
+    has_pocket = bool(pocket_path) and os.path.exists(pocket_path)
+    constraints_path = os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", "").strip()
+    has_constraints = bool(constraints_path) and os.path.exists(constraints_path)
+    if not has_pocket and not has_constraints:
+        return guidance_cfg
+    if not isinstance(guidance_cfg, dict):
+        logger.warning(
+            "protenix2dock: side channels present but guidance config is "
+            f"{type(guidance_cfg).__name__}; protenix2dock terms not activated"
+        )
+        return guidance_cfg
+    augmented = dict(guidance_cfg)
+    augmented["enable"] = True
+    augmented["mu"] = max(float(augmented.get("mu") or 0.0), 0.3)
+    augmented["steps"] = dict(augmented.get("steps") or {})
+    augmented["steps"]["projection_outer"] = max(
+        int(augmented["steps"].get("projection_outer") or 0), 5)
+    augmented["steps"]["projection_inner"] = max(
+        int(augmented["steps"].get("projection_inner") or 0), 30)
+    terms = dict(augmented.get("terms") or {})
+    # Steric repulsion must outmuscle the pocket pull: raise the weight
+    # and remove the buffer so the 2.6-3.4 A overlap band has gradient.
+    terms["VinaStericPotential"] = {
+        "interval": 1,
+        "weight": 0.6,
+        "buffer": 0.0,
+    }
+    single_group = os.environ.get(
+        "PROTENIX_POCKET_GROUPING", "").strip().lower() == "anchor"
+
+    if has_pocket:
+        terms["PocketPotential"] = {
+            "interval": 1,
+            **({"weight": 1.0} if single_group else
+               {"weight": {"type": "piecewise",
+                           "thresholds": [0.25, 0.75],
+                           "values": [0.0, 0.5, 1.0]}}),
+            "softmin_lambda": {"type": "exp_interpolation",
+                               "start": 8.0, "end": 0.0, "alpha": -2.0},
+            "enable_projection": False,
+        }
+    augmented["terms"] = terms
+    return augmented
+

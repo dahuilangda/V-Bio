@@ -28,7 +28,7 @@ for P in A B C; do
     --env PYTHONPATH=/workspace/vbio/vendor/protenix-source --env PROTENIX_ROOT_DIR=/cache \
     --env PROTENIX_AFFINITY_CKPT=$CKPT \
     -w /workspace/vbio \
-    vbio-protenix-v2-runtime:2.0.0 /usr/local/micromamba/envs/protenix/bin/python \
+    ${P2D_IMAGE:-vbio-protenix-v2-runtime:2.0.0} /usr/local/micromamba/envs/protenix/bin/python \
     capabilities/protenix2dock/protenix2dock.py \
     --mode score --input /o/pose_${P}.pdb --output_dir /o/out_${P} --seed 42 --low_vram \
     > /dev/null 2>&1
@@ -37,7 +37,7 @@ for P in A B C; do
     -v /data/protenix/model:/workspace/model:ro -v $OUT:/o \
     --env PYTHONPATH=/workspace/vbio/vendor/protenix-source --env PROTENIX_ROOT_DIR=/cache \
     --env PROTENIX_AFFINITY_CKPT=$CKPT -w /workspace/vbio \
-    vbio-protenix-v2-runtime:2.0.0 /usr/local/micromamba/envs/protenix/bin/python \
+    ${P2D_IMAGE:-vbio-protenix-v2-runtime:2.0.0} /usr/local/micromamba/envs/protenix/bin/python \
     capabilities/protenix2dock/protenix2dock.py --mode score --input /o/pose_${P}.pdb \
     --output_dir /o/out_${P} --seed 42 --low_vram > $OUT/run_${P}.log 2>&1 || true
   V=$(P=$P python3 -c "

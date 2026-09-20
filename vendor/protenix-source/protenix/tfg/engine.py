@@ -136,6 +136,34 @@ class TFGEngine:
             grad = grad + g
         return energy, grad
 
+    def _energy_unweighted(
+        self,
+        coords: torch.Tensor,
+        feats: Mapping[str, Any],
+        *,
+        t: float,
+        step_i: int,
+    ) -> torch.Tensor:
+        """Sum of active term energies WITHOUT the guidance weight schedule.
+
+        boltz2 separates ``resampling_weight`` (constant, drives FK particle
+        selection from the first resampling event) from ``guidance_weight``
+        (scheduled, drives gradient updates). Summing the SCHEDULED energy
+        for resampling left early drifters unpenalised -- the pocket term
+        has weight 0 for the first quarter of steps, so particles the
+        denoiser prior dragged off the pocket survived every early FK event
+        and by the time the weight ramped up they were 70+ A away with no
+        good particle left to copy (measured: 3/8 samples in repeated runs).
+        """
+        total = torch.zeros(
+            coords.shape[:-2], device=coords.device, dtype=torch.float32
+        )
+        for term in self.cfg.terms:
+            if not term.active(step_i):
+                continue
+            total = total + term.energy_unweighted(coords, feats, t)
+        return total
+
     def _energy(
         self,
         coords: torch.Tensor,
@@ -513,6 +541,39 @@ class TFGEngine:
                     grad_x0, nan=0.0, posinf=_GRAD_LIMIT, neginf=-_GRAD_LIMIT
                 ).clamp(min=-_GRAD_LIMIT, max=_GRAD_LIMIT)
                 x0_ref = x0_ref + grad_x0 * float(self.cfg.mu)
+
+            # one-shot forensic dump: the refined x0 vs the state that
+            # leaves the sampler (three independent mysteries -- final
+            # clash, guard-era geometry, stereochemistry -- all showed the
+            # WRITTEN structure deviating from the energy-clean x0_ref)
+            _dump = os.environ.get("PROTENIX_DUMP_X0", "").strip()
+            if (_dump
+                    and step_i == num_diffusion_steps - 1
+                    and outer == self.cfg.outer_steps - 1):
+                torch.save(
+                    {"x0_ref": x0_ref.detach().cpu(),
+                     "x_work": x_work.detach().cpu(),
+                     "eta": float(step_scale_eta), "t_hat": float(t_hat.reshape(-1)[0]),
+                     "c_tau": float(c_tau), "step_i": int(step_i)},
+                    f"{_dump}/x0_step{step_i}_chunk{outer}.pt")
+
+            # 4.5) SE(3) drift correction (boltz-2 alignment_reverse_diff):
+            # the sampler's per-step random augmentation re-frames the whole
+            # system every step, and the Euler extrapolation can accumulate a
+            # global drift between the noisy state and the denoiser's own
+            # prediction. Rigid-aligning x_work onto x0_ref removes exactly
+            # that drift (a global SE(3) move, internal geometry untouched)
+            # so the update direction measures internal deformation only.
+            # boltz-2 ships this enabled by default in inference.
+            if self.cfg.align_to_x0:
+                from protenix.metrics.rmsd import weighted_rigid_align
+                with torch.autocast("cuda", enabled=False):
+                    n_atom = x_work.shape[-2]
+                    _w = torch.ones(n_atom, device=x_work.device,
+                                    dtype=torch.float32)
+                    x_work = weighted_rigid_align(
+                        x_work.float(), x0_ref.float(), _w,
+                    ).to(x_work.dtype)
 
             # 5) predictor-corrector update
             # keep sign convention consistent with AF3 sampler

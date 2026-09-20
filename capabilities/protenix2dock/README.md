@@ -10,7 +10,7 @@ in benchmarks.
 | `pose` | Refinement constrained to stay near the input pose | 0.02 / 8 / 5 |
 | `refine` | Flexible refinement | 0.03 / 10 / 5 |
 | `interface` | Interface-focused refinement | 0.04 / 12 / 5 |
-| `dock` | SMILES to pocket placement ensemble against a rigid receptor: one rotation per diffusion sample, steric-floor anchors, contact-guided sampling (the small-sigma ladder keeps the TFG guidance projection well-conditioned) | 0.05 / 12 / 5 |
+| `dock` | SMILES to pocket placement ensemble against a rigid receptor: one rotation per diffusion sample, steric-floor anchors, contact-guided sampling (the small-sigma ladder keeps the TFG guidance projection well-conditioned) | 160 / 200 / 5 |
 | `peptide` | Receptor-fixed peptide inpainting: the peptide enters as a proteinChain, the receptor is fixed every step, and bicyclic linkers carry explicit covalent-bond constraints. Used for mirror-space D-peptide design. | 0.05 / 12 / 8 |
 
 Protenix's `InferenceNoiseScheduler` uses the same EDM parameterisation as

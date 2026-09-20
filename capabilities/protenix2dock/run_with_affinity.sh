@@ -43,7 +43,7 @@ docker run --rm --entrypoint= --gpus all \
   -v "$OUT_DIR:$OUT_DIR" -v /dev/shm:/dev/shm \
   --env PYTHONPATH=/workspace/vbio/vendor/protenix-source \
   --env PROTENIX_ROOT_DIR=/cache \
-  vbio-protenix-v2-runtime:2.0.0 \
+  ${P2D_IMAGE:-vbio-protenix-v2-runtime:2.0.0} \
   /usr/local/micromamba/envs/protenix/bin/python \
   /workspace/vbio/capabilities/protenix2dock/protenix2dock.py \
   "${PROTENIX_ARGS[@]}"

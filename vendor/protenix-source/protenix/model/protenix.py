@@ -50,7 +50,6 @@ def _load_p2d_side_channels():
 
     Returns a dict with optional entries:
       coords [N_atom, 3] float32, mask [N_atom] float32, noise_scale float,
-      pin [N_atom] float32 (atoms clamped to coords every diffusion step),
       score_only bool, contacts {index [M,2] int64, upper [M] float32}.
     Results are cached per (path, mtime) so the multi-seed loop loads them once.
     """
@@ -59,9 +58,11 @@ def _load_p2d_side_channels():
         os.environ.get("PROTENIX_INIT_COORDS_PATH", ""),
         os.environ.get("PROTENIX_TFG_CONTACTS_PATH", ""),
         os.environ.get("PROTENIX_SCORE_ONLY", ""),
-        os.environ.get("PROTENIX_PIN_MASK_PATH", ""),
         os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", ""),
         os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", ""),
+        os.environ.get("PROTENIX_PIN_MASK_PATH", ""),
+        os.environ.get("PROTENIX_CCD_BOND_BANDS_PATH", ""),
+        os.environ.get("PROTENIX_CLASH_SHELL_PATH", ""),
     )
     if cache is not None and cache[0] == key:
         return cache[1]
@@ -78,20 +79,8 @@ def _load_p2d_side_channels():
         pin_path = os.environ.get("PROTENIX_PIN_MASK_PATH", "").strip()
         if pin_path and os.path.exists(pin_path):
             pin_blob = np.load(pin_path, allow_pickle=False)
-            pin = np.asarray(pin_blob["pin"], dtype=np.float32)
-            # coords may be [N_atom, 3] or an ensemble [n_sample, N_atom, 3];
-            # the pinned geometry is per-atom, shared by every sample
-            n_atom = (
-                out["coords"].shape[0] if out["coords"].ndim == 2
-                else out["coords"].shape[1]
-            )
-            if pin.shape[0] == n_atom:
-                out["pin"] = pin
-            else:
-                logger.warning(
-                    f"protenix2dock pin mask N={pin.shape[0]} does not match "
-                    f"init coords N={out['coords'].shape[0]}; ignoring pin mask."
-                )
+            if "pin" in pin_blob.files and pin_blob["pin"].shape[0] == out["coords"].shape[0]:
+                out["pin"] = np.asarray(pin_blob["pin"], dtype=np.float32)
     out["score_only"] = os.environ.get("PROTENIX_SCORE_ONLY", "").strip().lower() in {
         "1", "true", "yes", "on",
     } and "coords" in out
@@ -106,6 +95,21 @@ def _load_p2d_side_channels():
     if tfg_const_path and os.path.exists(tfg_const_path):
         blob = np.load(tfg_const_path, allow_pickle=False)
         out["tfg_constraints"] = {k: blob[k] for k in blob.files}
+    bands_path = os.environ.get("PROTENIX_CCD_BOND_BANDS_PATH", "").strip()
+    if bands_path and os.path.exists(bands_path):
+        blob = np.load(bands_path, allow_pickle=False)
+        out["ccd_bond_bands"] = {
+            "index": np.asarray(blob["pair_index"], dtype=np.int64),
+            "upper": np.asarray(blob["upper"], dtype=np.float32),
+            "lower": np.asarray(blob["lower"], dtype=np.float32),
+        }
+    clash_path = os.environ.get("PROTENIX_CLASH_SHELL_PATH", "").strip()
+    if clash_path and os.path.exists(clash_path):
+        blob = np.load(clash_path, allow_pickle=False)
+        out["clash_shell"] = {
+            "index": np.asarray(blob["pair_index"], dtype=np.int64),
+            "lower": np.asarray(blob["lower"], dtype=np.float32),
+        }
     pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
     if pocket_path and os.path.exists(pocket_path):
         blob = np.load(pocket_path, allow_pickle=False)
@@ -116,48 +120,6 @@ def _load_p2d_side_channels():
         }
     _load_p2d_side_channels._cache = (key, out)
     return out
-
-
-def _p2d_pocket_augmented_guidance(guidance_cfg):
-    """Add the PocketPotential term when pocket guidance features exist.
-
-    The term is conditionally registered so that every run WITHOUT a pocket
-    npz keeps the stock term set — `validate_features` fails fast on terms
-    whose features are missing. The weight schedule mirrors boltz-2.2.1's
-    contact guidance ramp (strong while the pose is still noise, released in
-    the final refinement steps): engine-normalized time runs t=1 (early/
-    noisy) -> 0 (late/clean) and ExponentialInterpolation evaluates
-    start at t=0, end at t=1, so start=0/end=1/alpha=3 gives weight ~1 early
-    decaying to 0 late.
-    """
-    pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
-    if not pocket_path or not os.path.exists(pocket_path):
-        return guidance_cfg
-    if not isinstance(guidance_cfg, dict):
-        logger.warning(
-            "protenix2dock: pocket guidance present but guidance config is "
-            f"{type(guidance_cfg).__name__}; pocket term not activated"
-        )
-        return guidance_cfg
-    augmented = dict(guidance_cfg)
-    augmented["enable"] = True
-    # Boltz2's contact guidance keeps half strength through the middle of
-    # sampling (PiecewiseStepFunction [0.25,0.75] -> [0.0,0.5,1.0] on the
-    # same t); an alpha-warped schedule left only ~18% at t=0.5 and the
-    # diffusion prior's own site preference beat the guidance (measured
-    # 2026-09-09: candidates landed 8-13 A off the user pocket). Linear
-    # ramp (alpha=0) matches boltz2's mid-sampling strength, and a
-    # pocket-task-specific mu floor raises the x0 refinement step so the
-    # pull survives the denoiser's site preference.
-    augmented["mu"] = max(float(augmented.get("mu") or 0.0), 0.3)
-    terms = dict(augmented.get("terms") or {})
-    terms["PocketPotential"] = {
-        "interval": 1,
-        "weight": {"type": "exp_interpolation", "start": 0.0, "end": 1.0, "alpha": 0.0},
-        "enable_projection": False,
-    }
-    augmented["terms"] = terms
-    return augmented
 
 
 def _p2d_tensor(p2d: dict[str, Any], key: str) -> Any:
@@ -172,6 +134,7 @@ def _p2d_tensor(p2d: dict[str, Any], key: str) -> Any:
 from protenix.model.modules.primitives import LinearNoBias
 from protenix.model.triangular.layers import LayerNorm
 from protenix.model.utils import simple_merge_dict_list
+from protenix.tfg.config import pocket_augmented_guidance
 from protenix.utils.logger import get_logger
 from protenix.utils.offload import TensorOffloader
 from protenix.utils.permutation.permutation import SymmetricPermutation
@@ -503,7 +466,7 @@ class Protenix(nn.Module):
         )
         _configs.update(
             {
-                "guidance_configs": _p2d_pocket_augmented_guidance(
+                "guidance_configs": pocket_augmented_guidance(
                     self.configs.sample_diffusion.to_dict().get("guidance")
                 )
             }
@@ -894,6 +857,7 @@ class Protenix(nn.Module):
                 f"protenix2dock: pocket guidance active — {pg_idx.shape[1]} pairs "
                 f"over {int(pg_group.max().item()) + 1} pocket residue groups."
             )
+ 
         if p2d.get("score_only") and p2d_coords is not None:
             # Score mode: skip diffusion entirely and evaluate the confidence
             # heads directly on the input coordinates. Ensembles carry no
@@ -923,18 +887,42 @@ class Protenix(nn.Module):
                 noise_schedule=noise_schedule,
                 inplace_safe=inplace_safe,
                 enable_efficient_fusion=self.enable_efficient_fusion,
+                bond_index=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["index"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d else None
+                ),
+                clash_index=(
+                    torch.from_numpy(p2d["clash_shell"]["index"])
+                    .to(s_inputs.device)
+                    if "clash_shell" in p2d else None
+                ),
+                clash_lower=(
+                    torch.from_numpy(p2d["clash_shell"]["lower"])
+                    .to(s_inputs.device)
+                    if "clash_shell" in p2d else None
+                ),
+                bond_upper=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["upper"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d else None
+                ),
+                bond_lower=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["lower"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d else None
+                ),
                 init_coords=p2d_coords,
+                pin_mask=(
+                    torch.from_numpy(p2d["pin"]).to(s_inputs.device)
+                    if "pin" in p2d else None
+                ),
                 init_mask=(
                     p2d_coord_mask
                     if p2d_coords is not None
                     else None
                 ),
                 init_noise_scale=float(p2d.get("noise_scale", 0.0)),
-                pin_mask=(
-                    torch.from_numpy(p2d["pin"]).to(s_inputs.device)
-                    if p2d_coords is not None and "pin" in p2d
-                    else None
-                ),
                 # Pocket-biased noise seeding: with the guidance npz present
                 # the free chains' initial noise cloud starts centred on the
                 # user pocket (atom rows = unique second column of the

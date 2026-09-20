@@ -229,9 +229,19 @@ def train(args: argparse.Namespace) -> Path:
                 "Retrain from scratch or rebuild the checkpoint with the "
                 "current ProtenixAffinityHead."
             ) from exc
+        # Architectural keys (pocket_cond, num_blocks, ...) must survive the
+        # round-trip: the resume rebuilds the head from the SAVED config, but
+        # _save_checkpoint regenerates config from CLI args — merge so a
+        # resumed run without the original flag doesn't save a mismatched
+        # config (it broke eval's head rebuild for pocket checkpoints).
+        for _k, _v in head_cfg_saved.items():
+            if _k not in ("c_s", "c_z"):
+                head_kwargs[_k] = _v
         opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
         if blob.get("optimizer"):
             opt.load_state_dict(blob["optimizer"])
+        sched, accum_counter = None, 0
+        opt.zero_grad(set_to_none=True)
         c_s, c_z = head_cfg_saved.get("c_s"), head_cfg_saved.get("c_z")
         print(f"[resume] epoch={start_epoch} step={global_step} from {args.resume_ckpt}")
 
@@ -246,24 +256,143 @@ def train(args: argparse.Namespace) -> Path:
     errors = 0
     contradictions = 0
 
+    # Label normalization: clamp pIC50 tails then z-score. The Huber delta=1
+    # then reads as 1 sigma, and absolute-vs-ranking objective tension shrinks.
+    # Spearman is unaffected (monotone) — no eval-side inversion needed.
+    lo, hi = args.label_lo, args.label_hi
+    _ys = [min(max(float(r["pic50"]), lo), hi) for r in samples]
+    y_mean = sum(_ys) / max(1, len(_ys))
+    y_std = (sum((y - y_mean) ** 2 for y in _ys) / max(1, len(_ys))) ** 0.5 or 1.0
+    print(f"[labels] clamped [{lo},{hi}] mu={y_mean:.3f} sigma={y_std:.3f}")
+
+    # Internal val gate: carve ~3% of TARGETS (not rows) out of the cached
+    # training pool. Cache-based + deterministic (eval mode, mc=1) so the
+    # gate number is reproducible — unlike the old end-of-run online val.
+    import hashlib
+    gate_rows = []
+    if getattr(args, "feature_cache", None):
+        def _is_gate(row):
+            key = str(row.get("target_id") or row.get("name") or "")
+            return int(hashlib.md5(key.encode()).hexdigest(), 16) % 33 == 0
+        gate_rows = [r for r in samples if _is_gate(r)]
+        _gate_names = {r.get("name") for r in gate_rows}
+        samples = [r for r in samples if r.get("name") not in _gate_names]
+        print(f"[gate] held out {len(gate_rows)} rows (~3% of targets); train rows: {len(samples)}")
+
+    # Poison list: samples that OOM twice are skipped permanently instead of
+    # burning the error budget every epoch (the old counter never reset, so
+    # deterministic replays aborted every incarnation at the same count).
+    _tok_cache = {}
+    if getattr(args, "feature_cache", None):
+        _tm_path = Path(args.feature_cache) / "n_token_map.json"
+        if _tm_path.exists():
+            _tok_cache = json.loads(_tm_path.read_text())
+
+    poison_path = work_dir / "poison.json"
+    poison = json.loads(poison_path.read_text()) if poison_path.exists() else {}
+    fail_counts = {}
+
+    # EMA shadow weights — replaces the old (prev+current)/2 cross-basin
+    # averaging, which was a self-no-op when resume path == save path.
+    ema_state = None
+
+    def _ema_update():
+        nonlocal ema_state
+        if head is None:
+            return
+        with torch.no_grad():
+            sd = head.state_dict()
+            if ema_state is None:
+                ema_state = {k: v.detach().clone().float() for k, v in sd.items()}
+                return
+            d = args.ema_decay
+            for k, v in sd.items():
+                if v.dtype.is_floating_point:
+                    ema_state[k].mul_(d).add_(v.detach().float(), alpha=1 - d)
+                else:
+                    ema_state[k] = v.detach().clone()
+
+    best_gate = -2.0
+
+    def _run_gate(epoch_now):
+        nonlocal best_gate
+        if not gate_rows or head is None:
+            return None
+        was_training = head.training
+        head.eval()
+        rng = random.Random(1234)
+        preds, labels_v, errs = [], [], 0
+        for row in rng.sample(gate_rows, min(args.val_gate_n, len(gate_rows))):
+            try:
+                feats, s_inputs, s, z, expected_dist, h_pl, coords = _cached_or_repr(
+                    trunk, row, args, work_dir, device, use_msa=False)
+                if coords is not None:
+                    coords = coords.to(device)
+                with torch.no_grad():
+                    entry = _grad_entry(head, s_inputs, s, z, coords, feats, device,
+                                        expected_dist=expected_dist)
+                preds.append(float(entry["affinity_pred_value_t"].item()))
+                labels_v.append(min(max(float(row["pic50"]), lo), hi))
+            except Exception:  # noqa: BLE001
+                errs += 1
+        if was_training:
+            head.train()
+        if len(preds) >= 16:
+            from scipy.stats import spearmanr
+            rho = spearmanr(preds, labels_v).statistic
+            tag = ""
+            if rho > best_gate:
+                best_gate = rho
+                tag = " *BEST*"
+                _save_checkpoint(head, opt, c_s, c_z, head_kwargs, history, epoch_now,
+                                 global_step, errors, contradictions,
+                                 work_dir / "best_gate.pt",
+                                 extra={"label_mean": y_mean, "label_std": y_std,
+                                        "label_lo": lo, "label_hi": hi,
+                                        "gate_spearman": rho, "state_dict_ema": ema_state})
+            print(f"[gate] step={global_step} n={len(preds)} spearman={rho:+.4f} err={errs}{tag}", flush=True)
+            return rho
+        return None
+
     # Resume semantics: --epochs is the number of ADDITIONAL epochs to run
     # after a resumed checkpoint (shard1: 0..1, shard2 resume: 1..2).
     end_epoch = start_epoch + max(1, args.epochs)
+    # Warmup + cosine decay over the PLANNED step budget. Constant LR was the
+    # audit's #1 cause of the 0.35-0.50 oscillation: batch-1 gradients at a
+    # never-annealing 1e-4 kicked the weights around the basin forever.
+    import math
+    _planned = max(1, max(1, args.epochs) * len(samples))
+    _warm = max(1, args.warmup)
+
+    def _lr_lambda(step):
+        if step < _warm:
+            return step / _warm
+        _p = min(1.0, (step - _warm) / max(1, _planned - _warm))
+        return args.lr_min_frac + (1 - args.lr_min_frac) * 0.5 * (1 + math.cos(math.pi * _p))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, _lr_lambda) if opt is not None else None
+    print(f"[sched] warmup={_warm} planned_steps={_planned} lr={args.lr} -> min {args.lr_min_frac * args.lr:.2e}")
+
     for epoch in range(start_epoch, end_epoch):
         random.shuffle(samples)
-        # Giant complexes OOM-cascade; sinking them to the epoch tail maximizes
-        # progress before any hard tail and lets empty_cache keep pace.
+        # Giant complexes sink to the epoch tail (smaller graphs first keeps
+        # the allocator healthy). The random tiebreak varies the order across
+        # epochs — the old sort was deterministic, freezing the visit order.
         if getattr(args, "feature_cache", None):
             _tok_map_p = Path(args.feature_cache) / "n_token_map.json"
             if _tok_map_p.exists():
                 _tm = json.loads(_tok_map_p.read_text())
-                samples.sort(key=lambda r: _tm.get(r.get("name", ""), 0))
+                samples.sort(key=lambda r: (_tm.get(r.get("name", ""), 10**9), random.random()))
+        epoch_errors = 0
         # Nesso-style assay-grouped pairing: with probability, draw a second
         # sample from the same assay for the relative-difference loss.
         by_assay = defaultdict(list)
         for row in samples:
             by_assay[row.get("assay_id") or (row.get("target_id") or "unknown")].append(row)
         for si, row in enumerate(samples):
+            _name = row.get("name") or f"idx{si}"
+            if poison.get(_name, 0) >= 2:
+                continue
             try:
                 use_msa = random.random() < args.msa_prob
                 dataset = _dataset_for(use_msa)
@@ -274,8 +403,14 @@ def train(args: argparse.Namespace) -> Path:
                     pool = by_assay[row.get("assay_id") or (row.get("target_id") or "unknown")]
                     if len(pool) > 1:
                         partner_row = random.choice([p for p in pool if p is not row])
+                        _nt = _tok_cache.get(row.get("name", ""), 10**9)
+                        _pt = _tok_cache.get(partner_row.get("name", ""), 10**9)
+                        _grad_pair = (max(_nt, _pt) <= args.grad_partner_max_tokens)
                         partner = _forward_row(
-                            trunk, head, partner_row, work_dir, device, args, msa_dataset_fn=_dataset_for
+                            trunk, head, partner_row, work_dir, device, args,
+                            msa_dataset_fn=_dataset_for,
+                            label_norm=(lo, hi, y_mean, y_std),
+                            require_grad=_grad_pair,
                         )
                 # Build the per-sample input job exactly like inference does.
                 feats, s_inputs, s, z, expected_dist, h_pl, coords = _cached_or_repr(
@@ -292,7 +427,12 @@ def train(args: argparse.Namespace) -> Path:
                     c_s, c_z = s_inputs.shape[-1], z.shape[-1]  # s_inputs carries the input-embedder width the head consumes
                     head = ProtenixAffinityHead(c_s=c_s, c_z=c_z, **head_kwargs).to(device)
                     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
-                label_pic50 = torch.tensor([float(row["pic50"])], device=device)
+                    opt.zero_grad(set_to_none=True)
+                    accum_counter = 0
+                    if sched is None:
+                        sched = torch.optim.lr_scheduler.LambdaLR(opt, _lr_lambda)
+                label_pic50 = torch.tensor(
+                    [(min(max(float(row["pic50"]), lo), hi) - y_mean) / y_std], device=device)
                 active = torch.tensor(
                     [float(row.get("active") or (1.0 if float(row["pic50"]) >= 6.0 else 0.0))],
                     device=device,
@@ -321,32 +461,65 @@ def train(args: argparse.Namespace) -> Path:
                     dy = label_pic50 - partner["label"]
                     rel = nn.functional.huber_loss((value - v2).reshape(1), dy.reshape(1))
                     loss = loss + args.rel_weight * rel
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
+                # Gradient accumulation: each sample is its own graph; scale by
+                # the window size and step every --accum samples. Together with
+                # clip_grad_norm this converts batch-1 gradient noise into an
+                # effective-batch average.
+                (loss / args.accum).backward()
+                accum_counter += 1
+                if accum_counter >= args.accum:
+                    torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+                    opt.step()
+                    if sched is not None:
+                        sched.step()
+                    opt.zero_grad(set_to_none=True)
+                    accum_counter = 0
+                    _ema_update()
                 global_step += 1
                 history.append(loss.item())
                 if args.ckpt_every > 0 and global_step % args.ckpt_every == 0:
                     _save_checkpoint(
                         head, opt, c_s, c_z, head_kwargs, history, (end_epoch - 1),
                         global_step, errors, contradictions, work_dir / "protenix_affinity_head.pt",
+                        extra={"label_mean": y_mean, "label_std": y_std,
+                               "label_lo": lo, "label_hi": hi, "state_dict_ema": ema_state},
                     )
+                    _run_gate(epoch)
                 if si % 10 == 0:
                     mem = torch.cuda.memory_allocated()/2**20 if torch.cuda.is_available() else 0
                     maxmem = torch.cuda.max_memory_allocated()/2**20 if torch.cuda.is_available() else 0
-                    print(f"[progress] epoch={epoch}/{args.epochs} sample={si}/{len(samples)} step={global_step} loss={loss.item():.4f} mem={mem:.0f}M peak={maxmem:.0f}M", flush=True)
-                if torch.cuda.is_available():
+                    lr_now = sched.get_last_lr()[0] if sched is not None else args.lr
+                    print(f"[progress] epoch={epoch}/{args.epochs} sample={si}/{len(samples)} step={global_step} loss={loss.item():.4f} lr={lr_now:.2e} mem={mem:.0f}M peak={maxmem:.0f}M", flush=True)
+                # empty_cache is a device-wide sync; every sample cost real
+                # throughput. Every 8th sample + the except path is enough.
+                if torch.cuda.is_available() and si % 8 == 0:
                     torch.cuda.empty_cache()
             except Exception as exc:  # noqa: BLE001
                 errors += 1
-                if errors <= 20:
-                    print(f"[skip] sample {si} failed: {exc}", flush=True)
-                if errors > max(50, len(samples) // 2):
-                    raise RuntimeError(f"too many sample failures ({errors})")
+                epoch_errors += 1
+                fail_counts[_name] = fail_counts.get(_name, 0) + 1
+                if fail_counts[_name] >= 2:
+                    poison[_name] = fail_counts[_name]
+                    poison_path.write_text(json.dumps(poison))
+                if errors <= 20 or epoch_errors % 200 == 0:
+                    print(f"[skip] sample {si} ({_name}) failed: {exc}", flush=True)
+                if epoch_errors > max(200, len(samples) // 3):
+                    raise RuntimeError(f"too many sample failures this epoch ({epoch_errors})")
                 # Crystal complexes vary wildly in token count; without this the
                 # caching allocator fragments across shapes and later samples OOM.
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+
+        # flush the accumulation window at epoch end
+        if accum_counter > 0:
+            torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+            opt.step()
+            if sched is not None:
+                sched.step()
+            opt.zero_grad(set_to_none=True)
+            accum_counter = 0
+            _ema_update()
+        _run_gate(epoch)
 
     if args.hpl_max >= 1.0:
         print(f"[curate] H_PL contradiction filter DISABLED (hpl_max={args.hpl_max})")
@@ -396,26 +569,10 @@ def train(args: argparse.Namespace) -> Path:
         head, opt, c_s, c_z, head_kwargs, history, (end_epoch - 1),
         global_step, errors, contradictions, ckpt_path,
     )
-    # Nesso-style checkpoint averaging with the best previous run, if any.
-    if args.resume_ckpt and Path(args.resume_ckpt).exists():
-        try:
-            prev = torch.load(args.resume_ckpt, map_location="cpu", weights_only=False)
-            avg = {k: (v.float() + prev["state_dict"][k].float()) / 2
-                   for k, v in head.state_dict().items()}
-            torch.save(
-                {
-                    "state_dict": {k: v.to(prev["state_dict"][k].dtype) for k, v in avg.items()},
-                    "config": {"c_s": c_s, "c_z": c_z, **head_kwargs},
-                    "history": history,
-                    "epoch": end_epoch - 1,
-                    "global_step": global_step,
-                    "averaged": True,
-                },
-                work_dir / "protenix_affinity_head_avg.pt",
-            )
-            print(f"[saved] averaged checkpoint (prev + this) -> protenix_affinity_head_avg.pt")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[Warning] checkpoint averaging skipped: {exc}")
+    # The old (prev+current)/2 averaging was removed: when the resume path
+    # equals the save path it averaged a checkpoint with itself, and across
+    # distant steps it averaged across basins. EMA (state_dict_ema) is the
+    # principled replacement and is saved inside every checkpoint.
     print(f"[saved] {ckpt_path}")
     return ckpt_path
 
@@ -461,7 +618,8 @@ def _cached_or_repr(trunk, row, args, work_dir, device, use_msa, msa_dataset_fn=
                 }
                 ed = torch.from_numpy(d["expected_dist"].astype(np.float32))
                 ed = ed if ed.numel() else None
-                coords = torch.from_numpy(d["coords"].astype(np.float32))
+                _c = torch.from_numpy(d["coords"].astype(np.float32))
+                coords = _c if _c.numel() else None  # empty = structure-free row
                 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 return (feats,
                         torch.from_numpy(d["s_inputs"].astype(np.float32)).to(dev),
@@ -478,41 +636,62 @@ def _cached_or_repr(trunk, row, args, work_dir, device, use_msa, msa_dataset_fn=
     coords = _crystal_coords(job, chains, ligand_ref) if structured else None
     return feats, s_inputs, s, z, expected_dist, h_pl, coords
 
-def _forward_row(trunk, head, row, work_dir, device, args, msa_dataset_fn):
-    """One no-grad forward for a partner sample (relative-difference loss)."""
+def _forward_row(trunk, head, row, work_dir, device, args, msa_dataset_fn,
+                 label_norm=None, require_grad=False, n_tokens=None):
+    """Partner forward for the relative-difference loss.
+
+    Runs in EVAL mode (deterministic — a stochastic ranking target injects
+    variance into the very signal Spearman reads). With ``require_grad`` the
+    graph is kept so BOTH sides of the pair learn from the ranking term
+    (in-batch pairwise ranking, boltz-2 style); the memory guard pairs only
+    when both graphs fit (n_tokens <= args.grad_partner_max_tokens)."""
     use_msa = random.random() < args.msa_prob
     dataset = msa_dataset_fn(use_msa)
     feats, s_inputs, s, z, expected_dist, h_pl, coords = _cached_or_repr(
         trunk, row, args, work_dir, device, use_msa)
     if coords is not None:
         coords = coords.to(device)
-    with torch.no_grad():
-        entry = _grad_entry(
-            head, s_inputs, s, z, coords, feats, device, expected_dist=expected_dist
-        )
+    _was_training = head.training
+    head.eval()
+    try:
+        if require_grad:
+            entry = _grad_entry(
+                head, s_inputs, s, z, coords, feats, device, expected_dist=expected_dist
+            )
+        else:
+            with torch.no_grad():
+                entry = _grad_entry(
+                    head, s_inputs, s, z, coords, feats, device, expected_dist=expected_dist
+                )
+    finally:
+        head.train(_was_training)
+    label = float(row["pic50"])
+    if label_norm is not None:
+        _lo, _hi, _mu, _sd = label_norm
+        label = (min(max(label, _lo), _hi) - _mu) / _sd
     return {
         "value": entry["affinity_pred_value_t"].detach(),
-        "label": torch.tensor([float(row["pic50"])], device=device),
+        "label": torch.tensor([label], device=device),
     }
 
 
 def _save_checkpoint(head, opt, c_s, c_z, head_kwargs, history, final_epoch,
-                  global_step, errors, contradictions, ckpt_path):
+                  global_step, errors, contradictions, ckpt_path, extra=None):
     import torch
 
-    torch.save(
-        {
-            "state_dict": head.state_dict(),
-            "optimizer": opt.state_dict() if opt is not None else None,
-            "config": {"c_s": c_s, "c_z": c_z, **head_kwargs},
-            "history": history,
-            "epoch": final_epoch,
-            "global_step": global_step,
-            "errors": errors,
-            "contradictions": contradictions,
-        },
-        ckpt_path,
-    )
+    blob = {
+        "state_dict": head.state_dict(),
+        "optimizer": opt.state_dict() if opt is not None else None,
+        "config": {"c_s": c_s, "c_z": c_z, **head_kwargs},
+        "history": history,
+        "epoch": final_epoch,
+        "global_step": global_step,
+        "errors": errors,
+        "contraditions": contradictions,
+    }
+    if extra:
+        blob.update(extra)
+    torch.save(blob, ckpt_path)
 
 
 
@@ -636,7 +815,9 @@ def main() -> None:
                         help="pocket-conditioned readout (pooled ligand+rec context)")
     parser.add_argument("--num_blocks", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--mc_samples", type=int, default=4)
+    parser.add_argument("--mc_samples", type=int, default=1,
+                        help="saved into the ckpt config; >1 makes EXTERNAL eval stochastic "
+                             "(MC-dropout). Keep 1 for deterministic evals.")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--msa_prob", type=float, default=0.5,
                         help="Probability of training with MSA features (nesso-style robustness)")
@@ -647,6 +828,18 @@ def main() -> None:
                         help="restore head+optimizer and continue (task sharding)")
     parser.add_argument("--val_csv", default=None, help="held-out split for the val gate")
     parser.add_argument("--val_limit", type=int, default=200)
+    parser.add_argument("--accum", type=int, default=8,
+                        help="gradient accumulation window (effective batch)")
+    parser.add_argument("--warmup", type=int, default=500)
+    parser.add_argument("--lr_min_frac", type=float, default=0.05)
+    parser.add_argument("--label_lo", type=float, default=2.0)
+    parser.add_argument("--label_hi", type=float, default=12.0)
+    parser.add_argument("--ema_decay", type=float, default=0.999)
+    parser.add_argument("--val_gate_n", type=int, default=120,
+                        help="internal cache-based gate subset size per evaluation")
+    parser.add_argument("--grad_partner_max_tokens", type=int, default=430,
+                        help="co-train the ranking partner (grads on) only when both "
+                             "graphs' token counts fit this bound; else no-grad partner")
     parser.add_argument("--hpl_max", type=float, default=0.7,
                         help="skip samples with H_PL above this AND pIC50 >= hpl_pic50_min")
     parser.add_argument("--hpl_pic50_min", type=float, default=6.0)
