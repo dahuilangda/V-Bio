@@ -52,6 +52,10 @@ class ProteinChainData:
     sequence: str
     # Per-sequence-position entries: {residue_name, ccd_or_none, atoms: {atom_name: (x,y,z)}}
     residues: list[dict] = field(default_factory=list)
+    # Author seqid per kept residue (parallel to `residues`); the assembled
+    # atom table keys on sequence ordinals, so pocket/bond specs written in
+    # the source file's author numbering must be translated through this.
+    seqids: list[tuple[int, str]] = field(default_factory=list)
 
     @property
     def modifications(self) -> list[dict]:
@@ -85,6 +89,7 @@ def parse_protein_chains(structure_path: Path, keep_chains: list[str] | None = N
             continue
         residues: list[dict] = []
         seq: list[str] = []
+        seqids: list[tuple[int, str]] = []
         for res in chain:
             name = res.name.strip().upper()
             if not _residue_is_polymer(res):
@@ -105,12 +110,14 @@ def parse_protein_chains(structure_path: Path, keep_chains: list[str] | None = N
                 continue
             seq.append(letter)
             residues.append({"residue_name": name, "ccd": ccd, "atoms": atoms})
+            seqids.append((res.seqid.num, res.seqid.icode.strip()))
         if residues:
             chains.append(
                 ProteinChainData(
                     chain_name=chain.name.strip(),
                     sequence="".join(seq),
                     residues=residues,
+                    seqids=seqids,
                 )
             )
     if not chains:
@@ -119,3 +126,62 @@ def parse_protein_chains(structure_path: Path, keep_chains: list[str] | None = N
             + (f" Requested chains: {sorted(keep)}." if keep else "")
         )
     return chains
+
+
+def translate_pocket_residues(
+    chains: list[ProteinChainData],
+    pocket_res: list[tuple[str, int]],
+) -> list[tuple[str, int]]:
+    """Translate dock-mode pocket specs from author numbering to assembled rows.
+
+    Input entries are ``(source chain name, author seqid)`` — what the user
+    picked against the uploaded file. The assembled atom table (and therefore
+    compute_pocket_guidance_pairs) keys on input.json auto chain letters and
+    1-based sequence ordinals, so every spec must be translated through the
+    parsed chains' seqid lists. Residues the parser dropped (non-polymer,
+    atomless, capping groups) have no assembled row and are rejected loudly
+    instead of silently weakening the pocket.
+
+    Returns ``[(auto_letter, ordinal), ...]``.
+    """
+    by_name: dict[str, ProteinChainData] = {}
+    for chain in chains:
+        by_name.setdefault(chain.chain_name, chain)
+    # auto letters follow input.json entity order (proteins first, ligand
+    # last); FIRST-wins on duplicate chain names, matching by_name exactly
+    letter_of: dict[str, str] = {}
+    for i, chain in enumerate(chains):
+        letter_of.setdefault(chain.chain_name, chr(ord("A") + i))
+
+    translated: list[tuple[str, int]] = []
+    missing: list[str] = []
+    ambiguous: list[str] = []
+    for chain_name, seqid in pocket_res:
+        chain = by_name.get(chain_name)
+        if chain is None:
+            missing.append(f"{chain_name}:{seqid}")
+            continue
+        # specs carry numbers only (the UI cannot express insertion codes):
+        # a num matching several residues (82 + 82A) is ambiguous and must
+        # not silently target whichever comes first
+        hits = [i for i, (num, _icode) in enumerate(chain.seqids) if num == seqid]
+        if not hits:
+            missing.append(f"{chain_name}:{seqid}")
+        elif len(hits) > 1:
+            variants = ", ".join(
+                f"{num}{icode or ''}"
+                for num, icode in (chain.seqids[i] for i in hits))
+            ambiguous.append(f"{chain_name}:{seqid} ({variants})")
+        else:
+            translated.append((letter_of[chain_name], hits[0] + 1))
+    if missing:
+        raise ValueError(
+            f"pocket residues {', '.join(missing)} not found in the parsed "
+            "polymer chains (dropped or atomless residues cannot guide); "
+            "check the chain letters and residue numbering against the "
+            "uploaded structure")
+    if ambiguous:
+        raise ValueError(
+            f"pocket residues ambiguous (insertion codes): {', '.join(ambiguous)}; "
+            "specify a neighboring unambiguous residue instead")
+    return translated

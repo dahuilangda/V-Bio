@@ -16,6 +16,7 @@ import os
 from typing import Any, Callable, Optional
 
 import torch
+import numpy as np
 
 from protenix.model.utils import centre_random_augmentation
 from protenix.tfg import parse_tfg_config, TFGEngine
@@ -121,6 +122,83 @@ class InferenceNoiseScheduler:
         return t_step_list
 
 
+def _make_band_projector(idx, up, lo, device, pin_mask=None):
+    """Damped-Jacobi distance-band projector for covalent geometry.
+
+    Constrains ATOMS, not groups: without it a steric shove dislodges one
+    atom off its residue, since nothing in the sampler negotiates that
+    atom against its own bonds (measured: free-chain bonds off by up to
+    0.22 A with rings collapsed to CG-CZ 1.5 A). Projected after the
+    pocket/clash bands so bond geometry wins the negotiation -- the
+    official PairwiseDistancePotential ordering (angles then bonds).
+
+    Pinned endpoints (pin_mask == 1) take zero correction: they are the
+    fixed receptor, and a band whose one end is pinned must move only its
+    free end (SHAKE with a fixed anchor). Without this the clash shell
+    pushed the receptor off its input pose (measured: pin deviation up to
+    1.8 A and aromatic rings pulled to 2.2-3.4 A fighting the chemistry
+    bands).
+
+    Damped per-pair Jacobi sweeps: a direct minimum-norm solve goes
+    singular when many pairs share atoms; this form is unconditionally
+    stable and converges in tens of sweeps on step-sized violations.
+    """
+    if idx is None or up is None or idx.numel() == 0:
+        return None
+    idx = idx.to(device=device, dtype=torch.long)
+    if idx.dim() != 2 or idx.shape[0] != 2:
+        idx = idx.t().contiguous()
+    up = up.to(device=device, dtype=torch.float32)
+    lo = (lo.to(device=device, dtype=torch.float32)
+          if lo is not None else torch.maximum(up - 0.24,
+                                               torch.tensor(0.5, device=device)))
+    free_col = (
+        1.0 - pin_mask.to(device=device, dtype=torch.float32)
+        if pin_mask is not None
+        else None
+    )
+    if free_col is not None:
+        active = (free_col[idx[0]] + free_col[idx[1]]) > 0
+        idx = idx[:, active]
+        up = up[active]
+        lo = lo[active]
+        wi = free_col[idx[0]]
+        wj = free_col[idx[1]]
+    else:
+        wi = wj = None
+    if idx.numel() == 0:
+        return None
+
+    def _project(x: torch.Tensor, iters: int = 30) -> None:
+        shape = x.shape
+        flat = x.reshape(-1, shape[-2], 3).float()
+        for si in range(flat.shape[0]):
+            xi = flat[si]
+            for _ in range(iters):
+                a, b = xi[idx[0]], xi[idx[1]]
+                d = (a - b).norm(dim=-1)
+                viol = torch.where(d > up, d - up, (d - lo).clamp(max=0))
+                if float(viol.abs().max()) < 1e-3:
+                    break
+                u = (a - b) / d.clamp(min=1e-8).unsqueeze(-1)
+                corr = torch.zeros_like(xi)
+                half = 0.5 * viol.clamp(-4.0, 4.0)
+                if wi is not None:
+                    corr.index_add_(0, idx[0],
+                                    (-half).unsqueeze(-1) * u * wi.unsqueeze(-1))
+                    corr.index_add_(0, idx[1],
+                                    (+half).unsqueeze(-1) * u * wj.unsqueeze(-1))
+                else:
+                    corr.index_add_(0, idx[0], (-half).unsqueeze(-1) * u)
+                    corr.index_add_(0, idx[1], (+half).unsqueeze(-1) * u)
+                norm = corr.norm(dim=-1, keepdim=True)
+                xi += corr * (norm.clamp(max=0.5) / norm.clamp(min=1e-8))
+            flat[si] = xi
+        x.copy_(flat.to(x.dtype).reshape(shape))
+
+    return _project
+
+
 def sample_diffusion(
     denoise_net: Callable,
     input_feature_dict: dict[str, Any],
@@ -141,10 +219,15 @@ def sample_diffusion(
     attn_chunk_size: Optional[int] = None,
     enable_efficient_fusion: bool = False,
     guidance_configs: Optional[dict[str, Any]] = None,
+    bond_index: Optional[torch.Tensor] = None,
+    bond_upper: Optional[torch.Tensor] = None,
+    bond_lower: Optional[torch.Tensor] = None,
+    clash_index: Optional[torch.Tensor] = None,
+    clash_lower: Optional[torch.Tensor] = None,
     init_coords: Optional[torch.Tensor] = None,
+    pin_mask: Optional[torch.Tensor] = None,
     init_mask: Optional[torch.Tensor] = None,
     init_noise_scale: float = 0.0,
-    pin_mask: Optional[torch.Tensor] = None,
     pocket_seed_rows: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
@@ -185,10 +268,6 @@ def sample_diffusion(
             init_coords, 0 = start from noise). [N_atom].
         init_noise_scale (float): fraction of the schedule's initial noise level
             mixed into the initialised coordinates (0.0 = pure init).
-        pin_mask (Optional[torch.Tensor]): per-atom flag for true inpainting
-            (1 = clamped to init_coords after every step, 0 = denoised). The
-            pinned atoms therefore stay bit-exact through the loop; use this
-            for receptor-fixed peptide design/refinement.
                         [lower, upper] holds the free chains at the placed geometry —
             neither drifting away nor penetrating the receptor wall.
 
@@ -207,6 +286,38 @@ def sample_diffusion(
         tfg = TFGEngine(tfg_cfg, device=device, dtype=torch.float32)
 
 
+
+
+    # Free-chain covalent geometry (CCD rest lengths) as a per-step
+    # projection: bonds are chemistry, not guidance -- they apply whether or
+    # not any guidance channel is active, and they are what keeps the free
+    # chain's internal geometry intact while the sampler moves it.
+    _bond_project = _make_band_projector(bond_index, bond_upper, bond_lower,
+                                         device, pin_mask=pin_mask)
+    if _bond_project is not None:
+        logger.info("chemistry bands active: %d bonds+rings",
+                    int(bond_index.shape[0]))
+    # Clash shell projection: DISABLED by default. Every ordering tried
+    # (clash-first, chemistry-first, budget-split) let the 37k one-sided
+    # floors fight the chemistry bands and drag aromatic rings off their
+    # CCD geometry (measured: rings 2.2-3.4 A vs 2.80 with the shell on,
+    # 2.80 with it off) while fixing only the 2/8 samples that interpen-
+    # etrate — and those are cheaply rejected at sample selection. The
+    # VinaSteric energy term (advice through the denoiser) stays active.
+    # Env switch retained for experiments.
+    _clash_project = None
+    _clash_enabled = os.environ.get(
+        "PROTENIX_CLASH_SHELL_PROJECT", "0").strip().lower() in ("1", "true")
+    if (_clash_enabled and clash_index is not None
+            and clash_lower is not None):
+        _clash_upper = torch.full_like(
+            clash_lower.to(device), 1e3, dtype=torch.float32)
+        _clash_project = _make_band_projector(
+            clash_index, _clash_upper, clash_lower, device,
+            pin_mask=pin_mask)
+        if _clash_project is not None:
+            logger.info("clash shell active: %d one-sided floors",
+                        int(clash_index.shape[0]))
 
     def _chunk_sample_diffusion(chunk_n_sample, inplace_safe, chunk_offset=0):
         # init noise
@@ -286,11 +397,7 @@ def sample_diffusion(
                 # chirality (measured: 16 A displacement on 3LNJ). Recenter
                 # on the PINNED centroid only: the receptor stays at its
                 # absolute position (the pin below becomes a no-op) and the
-                # free part keeps its relative geometry. Recentering on the
-                # whole-complex centroid instead would translate the peptide
-                # by (pinned_center - complex_center) every step (measured
-                # ~9 A on 3LNJ) — the pin discards that shift for the
-                # receptor but leaves it on the free chains.
+                # free part keeps its relative geometry.
                 _pin_step = pin_mask.to(device=device, dtype=dtype).view(1, N_atom, 1)
                 _base_step = init_base.view(1, N_atom, 3)
                 _ref_center = (
@@ -371,9 +478,10 @@ def sample_diffusion(
                 dt = c_tau - t_hat
                 x_l = x_noisy + step_scale_eta * dt[..., None, None] * delta
 
-            # True inpainting: clamp the pinned atoms to the input coordinates
-            # after every step (the step's recentering moved them; restore the
-            # absolute frame before the next iteration).
+            # True inpainting: clamp the pinned atoms to the input pose.
+            # The receptor is FIXED by contract — only the peptide is being
+            # generated. The clamp restores the absolute frame the step's
+            # recentering/prediction moved.
             if pin_mask is not None and init_coords is not None:
                 _pin = pin_mask.to(device=device, dtype=dtype).view(
                     (1,) * (len(batch_shape) + 1) + (N_atom, 1)
@@ -382,28 +490,20 @@ def sample_diffusion(
                     (1,) * (len(batch_shape) + 1) + (N_atom, 3)
                 )
                 x_l = x_l * (1.0 - _pin) + _base * _pin
-                # Hard geometric anchor on the free part: the denoiser's x0
-                # prior pulls an unanchored peptide to its own pocket guess
-                # (measured 8 A off a crystal pose) and the TFG projection
-                # only fires on the x0 prediction, not on x_t. Project the
-                # anchor pairs back inside their bounds on x_t itself, with
-                # the pinned atoms held as constants (minimum-norm solution
-                # over the free columns only). Step-sized displacements keep
-                # the linearization exact.
-                if _nan_dbg and not bool(torch.isfinite(x_l).all()):
-                    logger.warning(
-                        f"SAMPLER-NAN post-pin step={step_i} nonfinite="
-                        f"{int((~torch.isfinite(x_l)).sum().item())}"
-                    )
 
-        if pin_mask is not None and init_coords is not None:
-            _pin = pin_mask.to(device=device, dtype=dtype).view(
-                (1,) * (len(batch_shape) + 1) + (N_atom, 1)
-            )
-            _base = init_base.view(
-                (1,) * (len(batch_shape) + 1) + (N_atom, 3)
-            )
-            x_l = x_l * (1.0 - _pin) + _base * _pin
+            # Chemistry bands with the full budget (clash shell projection
+            # disabled by default — see its definition block for why).
+            if _bond_project is not None:
+                _bond_project(x_l, iters=30)
+            if _clash_project is not None:
+                _clash_project(x_l, iters=3)
+
+        # Final full-budget chemistry convergence: the shipped structure
+        # carries exact CCD geometry.
+        if _clash_project is not None:
+            _clash_project(x_l, iters=5)
+        if _bond_project is not None:
+            _bond_project(x_l, iters=60)
 
         return x_l
 

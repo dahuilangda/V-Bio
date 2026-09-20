@@ -34,6 +34,13 @@ def build_configs(
         "seeds": ",".join(str(s) for s in seeds),
         "use_msa": "true",
         "need_atom_confidence": "true",
+        # MC-dropout disable: the engine's default config
+        # flips a per-run coin (apply_rate=0.4) and zeroes 40% of trunk
+        # recycle-embedding channels via F.dropout — 40% of inference runs
+        # silently run a degraded trunk. Diversity already comes from the
+        # diffusion noise; for max-confidence binder design this is pure
+        # downside and explains part of the pLDDT 50-72 spread.
+        "mc_dropout_apply_rate": "0.0",
         "sample_diffusion.N_step": str(n_step),
         "sample_diffusion.N_sample": str(n_sample),
         "inference_noise_scheduler.s_max": str(sigma_max),

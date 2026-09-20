@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import os
 import json
 import sys
 import time
@@ -87,10 +88,13 @@ def main() -> None:
             tokens = int(row.get("protein_tokens") or 0)
             if tokens and tokens + 32 > args.max_seq_len:
                 continue
-            for use_msa in (False, True):
+            _msa0_only = bool(os.environ.get("PRECOMPUTE_MSA0_ONLY", ""))
+            for use_msa in ((False,) if _msa0_only else (False, True)):
                 key = f"{row['name']}_msa{int(use_msa)}.npz"
                 path = out_dir / key
                 if path.exists():
+                    continue
+                if _msa0_only and use_msa:
                     continue
                 job, chains, ligand_ref, structured = T._sample_job(
                     row, targs, work_dir, use_msa=use_msa)
@@ -107,7 +111,8 @@ def main() -> None:
                     z_lig_cols=zc[:, lt].astype(np.float16),
                     lig_tokens=lt.astype(np.int32),
                     n_token=np.int32(zc.shape[0]),
-                    coords=T._crystal_coords(job, chains, ligand_ref).numpy().astype(np.float32),
+                    coords=(T._crystal_coords(job, chains, ligand_ref).numpy().astype(np.float32)
+                            if structured else np.zeros((0, 3), np.float32)),
                     expected_dist=(expected_dist.to(torch.float32).cpu().numpy()
                                    if expected_dist is not None
                                    else np.zeros(0, np.float16)).astype(np.float16),
@@ -118,6 +123,11 @@ def main() -> None:
                 done += 1
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+            if _msa0_only:
+                _l1 = out_dir / f"{row['name']}_msa1.npz"
+                _l0 = out_dir / f"{row['name']}_msa0.npz"
+                if _l0.exists() and not _l1.exists():
+                    _l1.symlink_to(_l0)
         except Exception as exc:  # noqa: BLE001
             fail += 1
             if fail <= 20:
