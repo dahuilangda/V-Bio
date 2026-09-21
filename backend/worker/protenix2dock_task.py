@@ -101,6 +101,18 @@ def _build_protenix2dock_command(
 
 
 
+@celery_app.task(
+    bind=True, name="backend.worker.tasks.protenix2dock_task",
+    # Transient-infrastructure retry: refine tasks take 2-10 min, so the
+    # longer backoff gives the GPU time to drain before retrying
+    autoretry_for=(ConnectionError, TimeoutError),
+    retry_backoff=60,
+    retry_backoff_max=900,
+    retry_jitter=True,
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def protenix2dock_task(self, score_args: dict):
     from backend.worker import tasks as _tasks
 
