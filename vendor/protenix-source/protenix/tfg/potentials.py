@@ -519,7 +519,7 @@ def _solve_constraint_projection(
         vv = v.to(work_dtype)
         denom = gf @ gf.transpose(-1, -2)
         # Scale-aware Tikhonov regularization: constraints that share free
-        # atoms (bond pairs + pocket contacts on one linker) make J J^T
+        # atoms (bond pairs + contacts on one linker) make J J^T
         # near-singular, and a flat eps*I is not enough — the solve then
         # returns huge lambda and the projection delta goes non-finite,
         # poisoning the linker atoms for the rest of sampling (measured: 9
@@ -821,7 +821,6 @@ class PairwiseDistancePotential(Potential):
         interface prior: projecting the full 3.1 A shell every step is a
         purely radial force that flattened binders into one-atom-thick
         pancakes (100% contact fraction, 0.9 A thickness) whenever the
-        pocket term demanded surface contact. Floor 0 disables the guard.
         """
         idx = feats["pairwise_distance_index"]
         idx, lower, upper = self._get_distance_bounds(feats, params)
@@ -855,125 +854,6 @@ class PairwiseDistancePotential(Potential):
         )
         return delta_x_bond + delta_x_clash + delta_x_angle
 
-
-@register
-class PocketPotential(Potential):
-    """Boltz2-style pocket guidance: soft-min upper bound per pocket residue.
-
-    Semantics (mirrors boltz-2.2.1 ContactPotentital, potentials.py:653-667):
-    each pocket RESIDUE defines a group of (binder atom, pocket atom) pairs;
-    the group energy is a smooth minimum over its pairs of the flat-bottom
-    excess ``k * relu(d - upper)`` — i.e. "the residue is satisfied when at
-    least ONE of its atom pairs lies within ``upper`` A of the binder".
-    This disjunctive (min-over-group) form is what per-pair
-    PairwiseDistancePotential bands cannot express: flat bands on every pair
-    would demand the binder touch EVERY pocket atom simultaneously
-    (over-constraint), and the resulting projection on the full generation
-    schedule is ill-conditioned. This potential is energy+gradient only
-    (mu channel) — it never projects, so the JJ^T singularity cannot arise.
-
-    Expected `feats`:
-        - `pocket_pair_index`: `[2, M]` binder-atom/pocket-atom pairs
-        - `pocket_pair_group`: `[M]` int64 group id (one per pocket residue)
-        - `pocket_pair_upper`: `[M]` per-pair upper bound in A
-
-    Params:
-        - `k`: force constant (default 1.0, boltz2 uses k=1 linear excess)
-        - `softmin_lambda`: soft-min sharpness (default 8.0; boltz2 anneals
-          union_lambda 8 -> 0 over sampling; a constant 8.0 keeps early
-          averaging and late argmin-selection behaviour)
-
-    Energy: ``E = sum_g -(1/lambda) * logsumexp_m in g (-lambda * e_m)``,
-    whose gradient w.r.t. e_m is exactly the in-group softmax weight.
-
-    Shell repulsion : the
-    disjunctive upper bound is purely attractive — once a pair sits inside
-    ``upper`` its gradient is zero, so a strong pull can drag the binder
-    THROUGH the receptor surface with nothing pushing back (measured:
-    designed peptides 1.2-1.9 A from receptor atoms). Every pair whose
-    distance falls under ``repulse_floor`` (default 3.0 A, the heavy-atom
-    non-bonded floor) now pays a linear penalty OUTSIDE the soft-min so
-    any single overlapping pair pushes the binder back to the shell. The
-    attraction moves the pose into the pocket; the floor keeps it on the
-    surface. Set ``repulse_floor`` to 0 to restore pure attraction.
-
-    Energy: ``E = sum_g softmin_g(e_m) + k * sum_m relu(floor - d_m)``.
-    """
-
-    def __init__(self, default_params: Optional[dict[str, Any]] = None):
-        defaults = {"k": 1.0, "softmin_lambda": 8.0, "repulse_floor": 3.0}
-        if default_params is not None:
-            defaults.update(default_params)
-        super().__init__(defaults)
-
-    def _eval(self, coords, feats, params, need_grad: bool):
-        idx = feats["pocket_pair_index"]
-        if idx.numel() == 0:
-            return (
-                _zeros_energy_and_grad(coords) if need_grad else _zeros_energy(coords)
-            )
-        group = feats["pocket_pair_group"]
-        upper = feats["pocket_pair_upper"]
-        # softmin_lambda may arrive as an annealed schedule (boltz2
-        # union_lambda 8 -> 0); clamp away from 0 so the (1/lam) in the
-        # soft-min stays finite -- at 1e-3 the in-group weights are
-        # already effectively the hard argmin
-        lam = max(float(params["softmin_lambda"]), 1e-3)
-        k = float(params["k"])
-        floor = float(params.get("repulse_floor", 3.0))
-
-        d, grad_d = _distance_value_and_grad(coords, idx, need_grad)
-        excess = k * torch.relu(d - upper)  # [..., M] flat-bottom, only far is penalized
-        # per-pair shell floor: active for EVERY overlapping pair, outside
-        # the group soft-min (a single buried pair must push back even when
-        # the group's best pair already satisfies the upper bound)
-        overlap = k * torch.relu(floor - d)  # [..., M]
-
-        n_groups = int(group.max().item()) + 1 if group.numel() else 0
-        if n_groups == 0:
-            return (
-                _zeros_energy_and_grad(coords) if need_grad else _zeros_energy(coords)
-            )
-        # empty-group guard: sparse group ids (or any producer bug) leave
-        # all-zero one-hot rows whose LSE reads -inf -> energy +inf -> nan
-        # downstream (measured: FK multinomial device assert). Such rows
-        # carry no constraint and contribute exactly zero.
-        _group_sizes = torch.bincount(
-            group.to(torch.long), minlength=n_groups)
-        _empty = _group_sizes == 0
-        # group membership mask [G, M]: 1 where pair m belongs to group g
-        mask = torch.nn.functional.one_hot(group.to(torch.long), n_groups).to(
-            excess.dtype
-        ).transpose(-1, -2)
-        # padded[-lam * excess] into [.., G, M] with -inf outside the group;
-        # every group has >= 1 pair, so each logsumexp row has a finite entry
-        val = (-lam * excess).unsqueeze(-2)  # [.., 1, M]
-        padded = torch.where(
-            mask.bool(), val, torch.full_like(val, float("-inf"))
-        )  # [.., G, M]
-        lse = torch.logsumexp(padded, dim=-1)  # [.., G]
-        # empty groups (all-zero one-hot rows, e.g. from sparse group ids)
-        # read LSE = -inf; they carry no constraint and must contribute
-        # exactly zero energy, not +inf
-        if bool(_empty.any()):
-            lse = torch.where(_empty, torch.zeros_like(lse), lse)
-        energy = (_sum_energy(-(1.0 / lam) * lse)
-                  + _sum_energy(overlap))
-
-        if not need_grad:
-            return energy
-
-        # dE_g/de_m = softmax weight of pair m within its group:
-        # mask with the group membership and sum over G, which extracts
-        # the per-pair diagonal soft_w[b, group[m], m]
-        soft_w = torch.softmax(padded, dim=-1)  # [.., G, M]
-        # `where` (not `*`): softmax of an all -inf row is nan and
-        # nan * 0-mask stays nan
-        dE_dexcess = torch.where(mask.bool(), soft_w, torch.zeros_like(soft_w)).sum(dim=-2) * k  # [.., M]
-        dE_dd = dE_dexcess * (d > upper).to(d.dtype)
-        dE_dd = dE_dd - k * (d < floor).to(d.dtype)  # shell floor gradient
-        grad_atom = _aggregate_atom_gradients(coords, idx, grad_d, dE_dd)
-        return energy, grad_atom
 
 
 @register

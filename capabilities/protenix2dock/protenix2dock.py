@@ -50,12 +50,11 @@ from core.constraints import (
     compute_free_chain_tfg_constraints,
     compute_ligand_covalent_bands,
     compute_vdw_shell_constraints,
-    compute_pocket_guidance_pairs,
 )
 from core.ipsae import compute_ipsae_for_output
 from core.modes import SUPPORTED_MODES, built_in_config
 from core.runner import collect_results, run_protenix
-from core.structure import parse_protein_chains, translate_pocket_residues
+from core.structure import parse_protein_chains
 
 log = logging.getLogger("protenix2dock")
 
@@ -118,7 +117,7 @@ def parse_args(argv=None):
                         "binding pose; staged peptide coordinates are only "
                         "used for the chemistry (bond/angle) TFG constraints. "
                         "Uses the FULL noise schedule (sigma_max 160, 200 "
-                        "steps) instead of the local refine schedule; pocket "
+                        "steps) instead of the local refine schedule"
                         "guidance is pose-independent and composes with it.")
     # peptide mode (receptor-fixed peptide design/refinement)
     p.add_argument("--peptide_chain",
@@ -134,17 +133,6 @@ def parse_args(argv=None):
                         "(peptide SG <-> linker anchor), e.g. 'B:1:SG,L:1:CD;B:9:SG,L:1:C1'")
     p.add_argument("--bond_upper", type=float, default=1.5,
                    help="TFG upper bound for the covalent bond pairs (A)")
-    p.add_argument("--pocket_res",
-                   help="pocket residues as 'chain:resnum,chain:resnum,...'. "
-                        "peptide mode: STAGED complex numbering, soft-min "
-                        "upper bound per residue on the peptide atoms "
-                        "(composes with --blind_peptide). dock mode: author "
-                        "numbering of the uploaded protein file, same "
-                        "PocketPotential guidance on the ligand atoms; "
-                        "omitting it runs a BLIND whole-surface dock")
-    p.add_argument("--pocket_upper", type=float, default=6.0,
-                   help="PocketPotential per-pair upper bound (A); boltz2's "
-                        "pocket max_distance default is 6.0")
     p.add_argument("--score_only", action="store_true",
                    help="peptide mode: bypass diffusion, score the input pose "
                         "with the confidence heads (bit-exact pass-through)")
@@ -254,7 +242,7 @@ def build_engine_inputs(args, protein_path, ligand_sdf, ligand_mol, work_dir):
     """MSA + input.json + aligned init coords for the engine.
 
     Returns (input_json, coords, mask, info, chains) — `chains` is the parsed
-    ProteinChainData list in entity order, needed by dock-mode pocket
+    ProteinChainData list in entity order
     translation (author seqid -> assembled ordinal).
     """
     keep_chains = [c for c in (args.target_chain or "").split(",") if c.strip()] or None
@@ -282,9 +270,47 @@ def build_engine_inputs(args, protein_path, ligand_sdf, ligand_mol, work_dir):
         )
     ], indent=2), encoding="utf-8")
 
-    coords, mask, info = align_init_coords(input_json, chains, ligand_mol)
+    coords, mask, info = align_init_coords(
+        input_json, chains, ligand_mol,
+        require_complete=bool(getattr(args, "score_only", False)))
     np.savez(work_dir / "init_coords.npz", coords=coords, mask=mask)
     return input_json, coords, mask, info, chains
+
+
+def _cif_interface_geometry(cif_path, ligand_chain: str):
+    """Heavy-atom interface geometry of one predicted sample.
+
+    Returns (min_dist, clash_pairs) between the binder chain and every
+    other polymer chain, or None when the CIF is missing/unreadable. This
+    is the geometric gate the best-sample selection was missing: a sample
+    with a buried main-chain interpenetration (measured 1.55 A, d3ddb001
+    sample 0) can top the ipsae chart precisely BECAUSE the interface is
+    over-buried — score alone selects for it.
+    """
+    try:
+        import gemmi
+        st = gemmi.read_structure(str(cif_path))
+        st.setup_entities()
+        st.remove_hydrogens()
+    except Exception:
+        return None
+    rec_rows: list[list[float]] = []
+    binder_rows: list[list[float]] = []
+    for ch in st[0]:
+        target = binder_rows if ch.name == ligand_chain else rec_rows
+        for r in ch:
+            if r.het_flag == 'H':
+                continue
+            for a in r:
+                if a.element == gemmi.Element('H'):
+                    continue
+                target.append([a.pos.x, a.pos.y, a.pos.z])
+    if not rec_rows or not binder_rows:
+        return None
+    rec = np.asarray(rec_rows)
+    binder = np.asarray(binder_rows)
+    d = np.sqrt(((rec[:, None] - binder[None]) ** 2).sum(-1))
+    return float(d.min()), int((d < 2.2).sum())
 
 
 def add_interface_metrics(summary: dict, output_dir: Path, ligand_chain="B",
@@ -330,6 +356,17 @@ def add_interface_metrics(summary: dict, output_dir: Path, ligand_chain="B",
         pair = _pair_iptm_of(entry.get("file") or "")
         if pair is not None:
             entry["pair_iptm"] = round(pair, 4)
+        # Per-sample interface geometry for the best-sample gate below.
+        conf_file = entry.get("file") or ""
+        if conf_file:
+            sample_idx = entry.get("sample")
+            pred_dir = Path(conf_file).parent
+            cif_hits = sorted(pred_dir.glob(f"*sample_{sample_idx}.cif"))
+            if cif_hits:
+                geom = _cif_interface_geometry(cif_hits[0], ligand_chain)
+                if geom is not None:
+                    entry["interface_min_dist"] = round(geom[0], 3)
+                    entry["interface_clash_pairs"] = geom[1]
     if not by_sample:
         return
     w_dom, w_iptm, w_max = _interface_weights()
@@ -337,8 +374,27 @@ def add_interface_metrics(summary: dict, output_dir: Path, ligand_chain="B",
         return (w_dom * float(entry.get("ipsae_dom") or 0.0)
                 + w_iptm * float(entry.get("iptm") or 0.0)
                 + w_max * float(entry.get("ligand_ipsae_max") or 0.0))
-    best = max(summary["confidences"], key=score)
+    # Geometric gate on the shipped best: among samples with a physically
+    # clean interface (no heavy-atom pair under 2.2 A), ship the
+    # highest-scoring one. Score alone selects for over-buried interfaces
+    # (measured: d3ddb001 sample 0 topped the chart at ipsae_dom 0.7-class
+    # while carrying a 1.55 A main-chain interpenetration — 22 clash
+    # pairs). When NO sample is clean the score winner still ships but is
+    # flagged so downstream consumers can demand a re-run.
+    clean = [e for e in summary["confidences"]
+             if e.get("interface_clash_pairs") == 0
+             and float(e.get("interface_min_dist") or 0.0) >= 2.3]
+    pool = clean if clean else summary["confidences"]
+    best = max(pool, key=score)
     best["interface_score"] = round(score(best), 4)
+    if not clean:
+        best["geometry_flagged"] = True
+        log.warning(
+            "best sample %s ships with interface clashes (min %.2f A, %d "
+            "pairs under 2.2 A) — no clean sample in this run",
+            best.get("sample"), float(best.get("interface_min_dist") or 0.0),
+            int(best.get("interface_clash_pairs") or 0))
+    summary["n_geometrically_clean"] = len(clean)
     summary["best_by_interface"] = best
 
 
@@ -352,7 +408,7 @@ def _run_peptide_engine(
     never as an SDF — with optional covalent_bonds to the linker. The
     receptor is held to the input pose by an SE(3)-equivariant reference
     restraint (PROTENIX_TARGET_REF_PATH); TFG guidance carries the covalent
-    bond pairs (bicyclic chemistry) + pocket anchoring contacts.
+    bond pairs (bicyclic chemistry).
     """
     complex_path = Path(args.input).expanduser().resolve()
     if not complex_path.is_file():
@@ -490,7 +546,8 @@ def _run_peptide_engine(
     ], indent=2), encoding="utf-8")
 
     coords, mask, info = align_complex_init_coords(
-        input_json, complex_path, entity_chain_names)
+        input_json, complex_path, entity_chain_names,
+        require_complete=bool(getattr(args, "score_only", False)))
 
 
     blind_peptide = bool(getattr(args, "blind_peptide", False))
@@ -520,7 +577,7 @@ def _run_peptide_engine(
         info, coords, mask, free_entities=free_entities,
         cyclic_chains=is_cyclic)
     # Inter-chain VDW shell: lower-bound pairs every binder heavy atom
-    # against every receptor heavy atom. The pocket term is purely
+    # against every receptor heavy atom. The blind route's steric
     # attractive and the denoiser happily proposes buried x0; this family
     # rides the PROJECTED constraint channel, pushing any buried pose back
     # to the surface on every guided step (root fix for interpenetration).
@@ -575,6 +632,17 @@ def _run_peptide_engine(
         init_mask[pep_rows] = 0.0
         log.info("blind peptide: %d peptide atoms start from pure noise "
                  "(full schedule)", int((mask[pep_rows] > 0).sum()))
+        # BLIND ROUTE RUNS TFG IN ENERGY-ONLY MODE. Root fix (2026-09-21
+        # T1-T4 A/B): the raw sampler produces F/Y/W/H side chains with
+        # perfect CCD geometry (T2/T4: ring planes 0.000-0.008 A,
+        # junction angles +-3 deg, OH in-plane); the TFG PROJECTED
+        # projected channel that the TFG guidance fed whenever the
+        # constraints npz exists (peptide mode writes it unconditionally
+        # -- --no_guidance was a silent no-op) dragged rings into boats
+        # (0.41-0.53 A). Energy-only keeps the soft steric mu-gradient
+        # (pushes the lightly-buried side chains the bare sampler leaves,
+        # n22 2-5) with an EMPTY projected channel.
+        os.environ.setdefault("PROTENIX_TFG_ENERGY_ONLY", "1")
 
     init_npz = work_dir / "init_coords.npz"
     np.savez(init_npz, coords=coords, mask=init_mask)
@@ -628,19 +696,36 @@ def _run_peptide_engine(
         _ccd_bands = None
         log.warning("CCD bond bands unavailable: %s", _band_exc)
     if _ccd_bands is not None:
-        _chem_idx, _chem_up, _chem_lo, _clash_idx, _clash_lo = _ccd_bands
+        (_chem_idx, _chem_up, _chem_lo, _clash_idx, _clash_lo,
+         _rigid, _aro_dof) = _ccd_bands
         _band_npz = work_dir / "ccd_bond_bands.npz"
-        np.savez(_band_npz, pair_index=_chem_idx,
-                 upper=_chem_up, lower=_chem_lo)
+        _band_payload: dict[str, Any] = {
+            "pair_index": _chem_idx, "upper": _chem_up, "lower": _chem_lo}
+        if _rigid is not None:
+            _band_payload["ring_rows"] = _rigid[0]
+            _band_payload["ring_coords"] = _rigid[1]
+            _band_payload["ring_bb_rows"] = _rigid[2]
+            _band_payload["ring_bb_coords"] = _rigid[3]
+        if _aro_dof is not None:
+            _band_payload["aro_dof"] = _aro_dof
+            # rebuild mode only: the analytic side-chain rebuild moves
+            # interface atoms onto exact CCD geometry; without the clash
+            # floors those corrections bury into the pinned receptor
+            # (measured n22 8-32, 1/8 clean). Default route has no
+            # rebuilds -- the network's own side chains need no floors.
+            if os.environ.get("PROTENIX_AROMATIC_REBUILD", "") in ("1", "true"):
+                os.environ.setdefault("PROTENIX_CLASH_SHELL_PROJECT", "1")
+        np.savez(_band_npz, **_band_payload)
         os.environ["PROTENIX_CCD_BOND_BANDS_PATH"] = str(_band_npz)
-        log.info("CCD chemistry bands: %d bonds+rings (CCD rest lengths)",
-                 len(_chem_up))
+        log.info("CCD chemistry bands: %d bonds+rings + %d rigid aromatic "
+                 "templates", len(_chem_up),
+                 int(_rigid[0].shape[0]) if _rigid is not None else 0)
         if _clash_idx is not None:
             _clash_npz = work_dir / "clash_shell.npz"
             np.savez(_clash_npz, pair_index=_clash_idx, lower=_clash_lo)
             os.environ["PROTENIX_CLASH_SHELL_PATH"] = str(_clash_npz)
-            log.info("clash shell bands: %d one-sided 3.1 A floors "
-                     "(projected before the chemistry bands)", len(_clash_lo))
+            log.info("clash shell bands written: %d one-sided 3.1 A floors "
+                     "(projected only when explicitly enabled)", len(_clash_lo))
 
     pin_npz = work_dir / "pin_mask.npz"
     np.savez(pin_npz, pin=ref_mask)
@@ -650,16 +735,17 @@ def _run_peptide_engine(
              int(ref_mask.sum()), len(ref_mask))
 
     guidance = not args.no_guidance
-    if str(getattr(args, "pocket_res", "") or "").strip() and args.no_guidance:
-        raise SystemExit(
-            "--pocket_res requires TFG guidance; drop --no_guidance or "
-            "the pocket definition")
     if guidance:
-        # peptide-mode pocket semantics: single soft-min group (part of the
-        # peptide in the region) -- the engine turns the term into a
-        # constant-weight site localizer instead of boltz2's per-residue
-        # contact guidance ramp
-        os.environ["PROTENIX_POCKET_GROUPING"] = "anchor"
+        # Pocket semantics follow the binder TOPOLOGY. A cyclic peptide is
+        # compact: the solvent-side anchor box localizes it and the engine
+        # runs the term at constant weight. A linear chain cannot ball up
+        # within `upper` of one atom -- anchor forced a 16-mer (~50 A
+        # extended) into a 12 A ball and crushed it into the receptor
+        # (measured 2026-09-20: interface min 0.22 A, CA chirality +0.0 in
+        # 2/4 samples). Linear chains take boltz2's per-residue contact
+        # groups with its guidance weight ramp instead.
+        # cyclic topology still feeds the TFG bond list (head-tail amide);
+        is_cyclic = any(headtail_refs)
         # backbone stereochemistry guard (all-residue CA chirality + omega
         # planarity) for the free chain: computed later once the assembled
         # table exists
@@ -696,54 +782,6 @@ def _run_peptide_engine(
             )
             os.environ["PROTENIX_TFG_CONTACTS_PATH"] = str(contacts)
             log.info("TFG contacts: %d bond pairs", n_bond_pairs)
-        # Native pocket guidance (boltz2 semantics): the user's
-        # pocket residue list drives a soft-min upper-bound potential on the
-        # free peptide atoms — pose-independent, so it composes with the
-        # blind (pure-noise) peptide start where the removed posed-distance
-        # anchors were meaningless. The old per-pair flat bands derived from
-        # the PLACED geometry are gone entirely: they demanded simultaneous
-        # satisfaction of every pair (over-constraint) and their projection
-        # is ill-conditioned on the full schedule.
-        pocket_res_raw = str(getattr(args, "pocket_res", "") or "").strip()
-        if pocket_res_raw:
-            pocket_res: list[tuple[str, int]] = []
-            for token in pocket_res_raw.split(","):
-                token = token.strip()
-                if not token:
-                    continue
-                if ":" not in token:
-                    raise SystemExit(
-                        f"--pocket_res entry {token!r} must be 'chain:resnum'")
-                chain_part, num_part = token.split(":", 1)
-                pocket_res.append((chain_part.strip(), int(num_part)))
-            try:
-                pocket_npz_data = compute_pocket_guidance_pairs(
-                    info, coords, pocket_res, float(args.pocket_upper),
-                    binder_rows=list(info["entity_rows"][len(receptor_names)]),
-                    staged_to_auto=staged_to_auto,
-                    grouping="anchor",
-                )
-            except ValueError as exc:
-                raise SystemExit(f"peptide mode: {exc}") from exc
-            if pocket_npz_data is None:
-                raise SystemExit(
-                    f"--pocket_res resolved no atoms on the staged receptor "
-                    f"({pocket_res_raw}); check the chain letters and residue "
-                    "numbering against the staged complex")
-            pocket_npz = work_dir / "pocket_guidance.npz"
-            np.savez(
-                pocket_npz,
-                pair_index=pocket_npz_data[0],
-                group=pocket_npz_data[1],
-                upper=pocket_npz_data[2],
-            )
-            os.environ["PROTENIX_POCKET_GUIDANCE_PATH"] = str(pocket_npz)
-            log.info(
-                "pocket guidance: %d pairs over %d pocket residues "
-                "(soft-min upper %.1f A)",
-                len(pocket_npz_data[1]), pocket_npz_data[1].max() + 1,
-                float(args.pocket_upper),
-            )
 
     # Ring-bond enforcement contract (TFG-native):
     #   - input.json covalent_bonds   -> featurizer bond features (the model
@@ -809,7 +847,7 @@ def main(argv=None):
         os.environ["PROTENIX_AFFINITY_CKPT"] = str(
             Path(args.affinity_head_ckpt).expanduser().resolve())
 
-    # peptide mode sets its own TFG contacts (covalent bonds + pocket anchors)
+    # peptide mode sets its own TFG contacts (covalent bonds)
     # and pin mask inside _run_peptide_engine; the generic ligand-anchored
     # guidance below applies to the ligand modes only.
     guidance = not args.no_guidance
@@ -825,8 +863,7 @@ def main(argv=None):
             #     prior is invented
             #   - ligand covalent chemistry rides the TFG channel
             #     (RDKit topology, pose-independent)
-            #   - with --pocket_res the PocketPotential term conditions the
-            #     sampler toward the user's pocket (see below); without it
+            #   - the steric term keeps the binder out of the receptor wall
             #     the run is blind (whole-surface search)
             # protein atoms WITH source coordinates are restrained to the
             # input pose by the SE(3)-equivariant reference potential (same
@@ -855,59 +892,11 @@ def main(argv=None):
                 log.info("dock mode: %d ligand covalent bond bands", len(lig_cov[1]))
             # Pocket-guided docking (the same PocketPotential the peptide
             # path uses, applied to the ligand's free atoms): the user's
-            # pocket residue list — author numbering of the uploaded file —
-            # is translated to assembled (auto letter, ordinal) rows and
-            # conditions the sampler through a soft-min upper bound per
-            # residue. Without --pocket_res the run is BLIND: the ligand
-            # explores the whole surface on the model's own docking task.
-            pocket_res_raw = str(getattr(args, "pocket_res", "") or "").strip()
-            if pocket_res_raw and not guidance:
-                raise SystemExit(
-                    "--pocket_res requires TFG guidance; drop --no_guidance "
-                    "or the pocket definition")
-            if pocket_res_raw:
-                pocket_res: list[tuple[str, int]] = []
-                for token in pocket_res_raw.split(","):
-                    token = token.strip()
-                    if not token:
-                        continue
-                    if ":" not in token:
-                        raise SystemExit(
-                            f"--pocket_res entry {token!r} must be 'chain:resnum'")
-                    chain_part, num_part = token.split(":", 1)
-                    pocket_res.append((chain_part.strip(), int(num_part)))
-                try:
-                    translated = translate_pocket_residues(chains, pocket_res)
-                except ValueError as exc:
-                    raise SystemExit(f"dock mode: {exc}") from exc
-                try:
-                    pocket_npz_data = compute_pocket_guidance_pairs(
-                        info, coords, translated, float(args.pocket_upper),
-                        binder_rows=list(info["ligand_rows"]),
-                    )
-                except ValueError as exc:
-                    raise SystemExit(f"dock mode: {exc}") from exc
-                if pocket_npz_data is None:
-                    raise SystemExit(
-                        f"--pocket_res resolved no atoms on the receptor "
-                        f"({pocket_res_raw}); check the chain letters and "
-                        "residue numbering against the uploaded structure")
-                pocket_npz = work_dir / "pocket_guidance.npz"
-                np.savez(
-                    pocket_npz,
-                    pair_index=pocket_npz_data[0],
-                    group=pocket_npz_data[1],
-                    upper=pocket_npz_data[2],
-                )
-                os.environ["PROTENIX_POCKET_GUIDANCE_PATH"] = str(pocket_npz)
-                log.info(
-                    "dock mode: pocket-guided — %d pairs over %d pocket "
-                    "residues (soft-min upper %.1f A)",
-                    len(pocket_npz_data[1]), pocket_npz_data[1].max() + 1,
-                    float(args.pocket_upper),
-                )
+            # pocket guidance removed (2026-09-21, user decision):
+            # the            # ligand always samples the whole surface; the model's own
+            # docking prior locates the binding site
             else:
-                log.info("dock mode: BLIND — no pocket given, ligand samples "
+                log.info("dock mode: BLIND — ligand samples "
                          "the whole surface")
             log.info("dock mode: native blind inpainting — pinned %d/%d "
                      "protein atoms, %d ligand atoms from noise",
@@ -981,6 +970,14 @@ def main(argv=None):
         )
 
     summary_path = output_dir / "protenix2dock_summary.json"
+    # Align the ranking-best pointer with the geometric gate: when the
+    # interface-best is a physically clean sample it becomes THE best;
+    # a clash-flagged interface-best leaves ranking-best in place (the
+    # flag travels with the entry so consumers can see why).
+    bbi = summary.get("best_by_interface")
+    if (bbi and not bbi.get("geometry_flagged")
+            and summary.get("best", {}).get("sample") != bbi.get("sample")):
+        summary["best"] = bbi
     summary_path.write_text(json.dumps(summary, indent=2, default=str),
                             encoding="utf-8")
     best = summary.get("best")

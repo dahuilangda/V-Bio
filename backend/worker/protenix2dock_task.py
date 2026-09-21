@@ -100,121 +100,6 @@ def _build_protenix2dock_command(
     return command, container_name
 
 
-def _resolve_dock_pocket_residues(score_args, protein_file, task_temp_dir):
-    """Resolve the three dock pocket definitions to an explicit residue list.
-
-    pocket_residues: passed through verbatim (author numbering — the engine
-    translates to assembled ordinals). center+size box: residues with a heavy
-    atom inside the box. pocket_ligand: residues with a heavy atom within
-    5 A of the reference ligand's heavy atoms. Returns the "CHAIN:RES,..."
-    string or None for a BLIND dock (no pocket anywhere on the surface is
-    implied; the caller logs it).
-    """
-    residues = str(score_args.get("pocket_residues") or "").strip()
-    if residues:
-        return residues
-
-    center = [score_args.get(f"center_{axis}") for axis in "xyz"]
-    has_center = all(v is not None for v in center)
-    if has_center:
-        if not protein_file:
-            raise ValueError("box-defined dock pocket requires protein_file.")
-        import gemmi
-        import numpy as np
-
-        half = np.array([
-            float(score_args.get(f"size_{axis}") or 18.0) / 2.0 for axis in "xyz"
-        ])
-        c = np.array([float(v) for v in center])
-        st = gemmi.read_structure(protein_file)
-        st.setup_entities()
-        picked = []
-        for chain in st[0]:
-            for res in chain:
-                for atom in res:
-                    if atom.element == gemmi.Element("H"):
-                        continue
-                    d = np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - c
-                    if np.all(np.abs(d) <= half):
-                        picked.append((chain.name, int(res.seqid.num)))
-                        break
-        if not picked:
-            raise ValueError(
-                "dock pocket box contains no receptor heavy atoms; check "
-                "center/size against the target structure")
-        return ",".join(f"{ch}:{num}" for ch, num in picked)
-
-    ligand_content = str(score_args.get("pocket_ligand_content") or "").strip()
-    if score_args.get("pocket_ligand_filename") and not ligand_content:
-        raise ValueError("pocket_ligand_filename set but content is empty")
-    if ligand_content:
-        if not protein_file:
-            raise ValueError("reference-ligand dock pocket requires protein_file.")
-        import gemmi
-        import numpy as np
-        from werkzeug.utils import secure_filename as _sf
-
-        ligand_path = os.path.join(
-            task_temp_dir,
-            _sf(str(score_args.get("pocket_ligand_filename") or "pocket_ligand.sdf")))
-        with open(ligand_path, "w", encoding="utf-8") as fh:
-            fh.write(ligand_content)
-        if ligand_path.endswith((".sdf", ".mol")):
-            from rdkit import Chem
-
-            mol = next(iter(Chem.SDMolSupplier(ligand_path, removeHs=True)), None)
-            if mol is None:
-                raise ValueError("pocket_ligand SDF could not be parsed.")
-            conf = mol.GetConformer()
-            pts = [[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y,
-                    conf.GetAtomPosition(i).z] for i in range(mol.GetNumAtoms())]
-        else:
-            st_l = gemmi.read_structure(ligand_path)
-            st_l.setup_entities()
-            pts = [[a.pos.x, a.pos.y, a.pos.z] for ch in st_l[0]
-                   for r in ch for a in r if a.element != gemmi.Element("H")]
-        if not pts:
-            raise ValueError(
-                "pocket_ligand resolved zero heavy atoms; check the file")
-        lig = np.array(pts, dtype=float)
-
-        st = gemmi.read_structure(protein_file)
-        st.setup_entities()
-        picked = []
-        for chain in st[0]:
-            for res in chain:
-                hit = False
-                for atom in res:
-                    if atom.element == gemmi.Element("H"):
-                        continue
-                    d = np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - lig
-                    if float(np.sqrt((d * d).sum(axis=1)).min()) <= 5.0:
-                        hit = True
-                        break
-                if hit:
-                    key = (chain.name, int(res.seqid.num))
-                    if key not in picked:
-                        picked.append(key)
-        if not picked:
-            raise ValueError(
-                "no receptor heavy atom lies within 5 A of the reference ligand")
-        return ",".join(f"{ch}:{num}" for ch, num in picked)
-
-    return None
-
-
-@celery_app.task(
-    bind=True, name="backend.worker.tasks.protenix2dock_task",
-    # Transient-infrastructure retry: refine tasks take 2-10 min, so the
-    # longer backoff gives the GPU time to drain before retrying
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=60,
-    retry_backoff_max=900,
-    retry_jitter=True,
-    max_retries=2,
-    acks_late=True,
-    reject_on_worker_lost=True,
-)
 
 def protenix2dock_task(self, score_args: dict):
     from backend.worker import tasks as _tasks
@@ -286,22 +171,7 @@ def protenix2dock_task(self, score_args: dict):
                 raise ValueError("protenix2dock dock mode requires ligand_smiles.")
             entry.extend(["--ligand_smiles", ligand_smiles])
             # Pocket conditioning for the sampler: every definition resolves to
-            # an explicit residue list (PocketPotential groups). No pocket
-            # anywhere -> BLIND dock (whole-surface search) — a valid choice,
-            # not an error.
-            pocket_residues = _resolve_dock_pocket_residues(
-                score_args, protein_file, task_temp_dir)
-            if pocket_residues:
-                entry.extend(["--pocket_res", pocket_residues])
-                entry.extend([
-                    "--pocket_upper",
-                    str(float(score_args.get("pocket_upper") or 6.0)),
-                ])
-                logger.info(
-                    "dock pocket guidance on %d residues",
-                    len(pocket_residues.split(",")))
-            else:
-                logger.info("dock mode: BLIND (no pocket definition given)")
+            logger.info("dock mode: BLIND (pocket guidance removed)")
         elif requested_mode not in ("score", "peptide"):
             if not ligand_file:
                 raise ValueError(f"protenix2dock {requested_mode} mode requires ligand_file.")
@@ -331,12 +201,8 @@ def protenix2dock_task(self, score_args: dict):
                 entry.extend(["--linker_chain", linker_chain, "--linker_ccd", linker_ccd])
             if bond_pairs:
                 entry.extend(["--bond_pairs", bond_pairs])
-            pocket_res = str(score_args.get("pocket_res") or "").strip()
-            if pocket_res:
-                entry.extend(["--pocket_res", pocket_res])
             entry.extend([
                 "--bond_upper", str(float(score_args.get("bond_upper") or 2.2)),
-                "--pocket_upper", str(float(score_args.get("pocket_upper") or 6.0)),
             ])
             if score_args.get("peptide_sequence"):
                 entry.extend(["--peptide_sequence", str(score_args["peptide_sequence"])])

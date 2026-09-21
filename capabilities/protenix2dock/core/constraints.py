@@ -1,6 +1,6 @@
 """TFG constraint builders for protenix2dock.
 
-Computes covalent bond/angle distance constraints, pocket guidance
+Computes covalent bond/angle distance constraints, steric-shell
 pairs, bond contact pairs, and VDW shell constraints — all in the
 official TFG PairwiseDistancePotential array format.
 """
@@ -11,6 +11,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+import os
 import numpy as np
 
 from core.geometry_tables import (
@@ -127,10 +128,21 @@ def compute_free_chain_tfg_constraints(
     elements = np.char.upper(np.asarray(info["elements"]).astype(str))
     asym_to_entity = info["asym_to_entity"]
 
+    # Aromatic side chains are hands-off here too (TFG runs): the projected channel's corrections on ring atoms are
+    # what buckled F/Y six-rings into boats wherever TFG ran (T1/T3 vs
+    # T2 control, 2026-09-21). Backbone atoms of aromatic residues stay.
+    _aro = {"PHE", "TYR", "TRP", "HIS"}
+
+    def _is_aro_side(i: int) -> bool:
+        if str(comp_of[i]).upper() not in _aro:
+            return False
+        return atom_names[i].lstrip("0123456789") not in (
+            "N", "CA", "C", "O", "OXT")
+
     groups: dict[tuple[int, int], list[int]] = {}
     order: dict[int, list[int]] = {}
     for i in range(len(asym)):
-        if mask[i] <= 0:
+        if mask[i] <= 0 or _is_aro_side(i):
             continue
         asym_v, rid = int(asym[i]), int(res_id[i])
         if free_entities is not None and asym_to_entity[asym_v] not in free_entities:
@@ -395,30 +407,6 @@ def compute_ligand_covalent_bands(
     return index, upper, lower
 
 
-# Shrake-Rupley SASA parameters for pocket validation. Thresholds are
-# calibrated on RANKL/5BNQ (156-residue receptor, 56-residue derived
-# interface): residue heavy-atom SASA separates cleanly at ~5 A^2 -- every
-# genuinely exposed interface residue sits at >= 10, the buried cluster
-# (residues one turn below the surface that a 10 A contact shell still
-# reaches) at <= 2.3. 8.0 A^2 is the separation line.
-# exposure rule, calibrated on RANKL/5BNQ (protein-protein epitope) and
-# 1H1Q/1HSG (small-molecule cavity): a peptide-scale probe (2.2 A) leaves
-# hermetic core residues at 0.0 A^2 while real walls -- including tight
-# cavity linings and ridge residues with narrow local geometry -- stay
-# >= 1.9. Reject only the hermetic set; marginal walls are legitimately
-# satisfiable by a protruding side chain.
-_SASA_PROBE_A = 2.2
-_SASA_MIN_RESIDUE_A2 = 1.0
-_SASA_POINTS = 92
-# single-linkage CA cutoff: a real epitope patch (5BNQ interface spans
-# 51 A) is one connected component at 12 A; two disjoint surface patches
-# are not a pocket and would stretch the binder between them
-_POCKET_CA_LINK_A = 12.0
-# below this upper bound the soft-min attraction forces near-contact and
-# manufactures clashes; boltz2's own default is 6.0
-_POCKET_UPPER_MIN = 4.5
-_VDW_RADII_A = {"C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80}
-
 
 def _sasa_per_atom(coords: np.ndarray, elements: np.ndarray,
                    probe: float = 1.4) -> np.ndarray:
@@ -460,216 +448,9 @@ def _sasa_sphere_points(n: int) -> np.ndarray:
                      np.cos(phi)], axis=1)
 
 
-def validate_pocket_definition(
-    info: dict[str, Any],
-    coords: np.ndarray,
-    pocket_residues: list[tuple[str, int]],
-    group_rows: list[list[int]],
-    upper: float,
-    binder_rows: list[int] | np.ndarray | None = None,
-) -> None:
-    """Reject pocket definitions that cannot guide to a physical pose.
-
-    Three failure classes, each raising ValueError with the offending
-    residues named (no silent shrinking -- the caller must fix the input):
-
-    - upper bound below 4.5 A: the soft-min attraction degenerates into
-      forced near-contact and manufactures clashes;
-    - buried residues (heavy-atom SASA < 8 A^2): purely attractive groups
-      drag the binder toward the protein CORE, and no pocket residue of a
-      real binding patch is buried;
-    - spatially disjoint patches: pocket groups pull the binder in
-      incompatible directions and stretch it across the surface.
-    """
-    if upper < _POCKET_UPPER_MIN:
-        raise ValueError(
-            f"pocket upper bound {upper:.2f} A is below the physical floor "
-            f"{_POCKET_UPPER_MIN} A -- the attraction would force near-"
-            "contact clashes; use >= 4.5 (boltz2 default 6.0)")
-
-    asym = np.asarray(info["asym"])
-    elements = np.asarray(info["elements"]).astype(str)
-    atom_names = np.asarray(info["atom_names"]).astype(str)
-    stripped = np.char.lstrip(atom_names, "0123456789")
-    is_h = np.char.startswith(stripped, "H") | np.char.startswith(stripped, "D") \
-        | (np.char.upper(elements) == "H")
-
-    # the binder must NOT occlude its own pocket: SASA is assessed on the
-    # apo receptor (dock mode stages the ligand inside the site, and its
-    # 45 heavy atoms read every cavity-lining residue to 0.0)
-    _binder = {int(r) for r in (binder_rows or [])}
-    receptor_rows = np.array(
-        [i for i in range(len(asym)) if not is_h[i] and i not in _binder])
-    sasa = _sasa_per_atom(coords[receptor_rows], elements[receptor_rows],
-                          probe=_SASA_PROBE_A)
-    row_to_sasa = {int(r): float(v) for r, v in zip(receptor_rows, sasa)}
-
-    buried = []
-    for (chain_id, resnum), rows in zip(pocket_residues, group_rows):
-        total = sum(row_to_sasa.get(int(r), 0.0) for r in rows)
-        if total < _SASA_MIN_RESIDUE_A2:
-            buried.append(f"{chain_id}:{resnum}({total:.1f} A^2)")
-    if buried:
-        raise ValueError(
-            f"pocket residues are buried inside the receptor (heavy-atom "
-            f"SASA < {_SASA_MIN_RESIDUE_A2:.0f} A^2 at the 2.2 A binder "
-            f"probe): "
-            + ", ".join(buried)
-            + " -- a purely attractive guidance group on a buried residue "
-            "drags the binder into the core; restrict the pocket to "
-            "surface-exposed residues")
-
-    ca_rows = [r for rows in group_rows for r in rows
-               if str(atom_names[r]).lstrip("0123456789") == "CA"]
-    if len(ca_rows) >= 2:
-        ca = coords[ca_rows]
-        d = np.linalg.norm(ca[:, None, :] - ca[None, :, :], axis=-1)
-        unvisited, components = set(range(len(ca_rows))), 0
-        while unvisited:
-            stack = [unvisited.pop()]
-            while stack:
-                for j in np.where(d[stack.pop()] <= _POCKET_CA_LINK_A)[0]:
-                    if j in unvisited:
-                        unvisited.remove(j)
-                        stack.append(int(j))
-            components += 1
-        if components > 1:
-            raise ValueError(
-                f"pocket residues form {components} spatially disjoint "
-                f"patches (single-linkage at {_POCKET_CA_LINK_A:.0f} A CA "
-                "distance) -- the groups would pull the binder apart; "
-                "define one contiguous patch")
 
 
-def compute_pocket_guidance_pairs(
-    info: dict[str, Any],
-    coords: np.ndarray,
-    pocket_residues: list[tuple[str, int]],
-    upper: float,
-    binder_rows: list[int] | np.ndarray,
-    staged_to_auto: dict[str, str] | None = None,
-    grouping: str = "per_residue",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Boltz2-style pocket guidance pairs for PocketPotential.
 
-    The definition is first validated (see ``validate_pocket_definition``):
-    buried residues, disjoint patches and sub-physical upper bounds raise
-    instead of steering the sampler into a clash. ``coords`` is the
-    assembled atom-table coordinate array from ``align_*_init_coords``.
-
-    For every named pocket residue, pair EVERY free binder atom with EVERY
-    heavy atom of that residue; the residue is the soft-min group. Pose-
-    independent by construction (row indices + flat upper bound only) — works
-    from a pure-noise start, unlike the removed posed-distance contact
-    anchors. ``binder_rows`` is the free entity's assembled atom rows
-    (ligand rows in dock mode, peptide entity rows in peptide mode).
-
-    Returns (pair_index [M,2] int64, group [M] int64, upper [M] float32)
-    ready for the PROTENIX_POCKET_GUIDANCE_PATH npz, or None when no pocket
-    atom resolves.
-    """
-    asym = info["asym"]
-    res_id = info["res_id"]
-    atom_names = info["atom_names"]
-    asym_to_letter: dict[int, str] = {}
-    for value in asym:
-        v = int(value)
-        if v not in asym_to_letter:
-            asym_to_letter[v] = chr(ord("A") + len(asym_to_letter))
-
-    def _auto_chain(chain: str) -> str:
-        if staged_to_auto is None:
-            return chain
-        return staged_to_auto.get(chain, chain)
-
-    # pocket residue -> atom rows (heavy atoms only; H names are 1-2 chars
-    # starting with H/D)
-    pocket_rows_by_group: list[list[int]] = []
-    unresolved: list[str] = []
-    for chain_raw, resnum in pocket_residues:
-        letter = _auto_chain(str(chain_raw))
-        rows = [
-            i for i in range(len(asym))
-            if asym_to_letter[int(asym[i])] == letter
-            and int(res_id[i]) == int(resnum)
-            and not str(atom_names[i]).lstrip("0123456789").startswith(("H", "D"))
-        ]
-        if rows:
-            pocket_rows_by_group.append(rows)
-        else:
-            unresolved.append(f"{chain_raw}:{resnum}")
-    if unresolved:
-        # every named residue must guide; silently dropping a subset would
-        # steer the sampler toward a weaker pocket than the user defined
-        raise ValueError(
-            f"pocket residues {', '.join(unresolved)} resolved no heavy atoms "
-            "in the assembled structure")
-    if not pocket_rows_by_group:
-        return None
-
-    peptide_rows = [int(r) for r in binder_rows]
-    if not peptide_rows:
-        return None
-
-    validate_pocket_definition(info, coords, pocket_residues,
-                               pocket_rows_by_group, upper,
-                               binder_rows=peptide_rows)
-
-    # grouping selects the guidance semantics for the binder class:
-    #   "per_residue" (boltz2 ContactPotential, small molecules): every
-    #     pocket RESIDUE is its own soft-min group -- for a compact ligand
-    #     full contact IS the physical binding mode;
-    #   "anchor" (macrocyclic peptides): a solvent-side soft box -- see
-    #     the branch below for why per-residue contact demands flatten
-    #     flexible binders into surface pancakes.
-    if grouping not in ("per_residue", "anchor"):
-        raise ValueError(f"unknown pocket grouping {grouping!r}")
-
-    pair_index: list[list[int]] = []
-    group: list[int] = []
-    if grouping == "anchor":
-        # SOLVENT-SIDE ANCHOR BOX: one anchor atom = the pocket atom
-        # nearest the external rim point (pocket centroid displaced outward
-        # along the receptor-centroid->pocket direction); every binder atom
-        # must sit within `upper` of it. Anchoring the region on the pocket
-        # ATOMS puts half the box inside the protein and drags the noise
-        # cloud onto the surface plane -- the denoiser then resolves the
-        # chain flat against it (measured: 100% contact, 1.4-1.8 A
-        # thickness, at both the 3.1 shell and the 2.6 guard). Anchoring on
-        # the solvent-side point keeps the cloud outside; the prior then
-        # builds a one-face surface pose, the physical binding mode.
-        pocket_rows = [r for rows in pocket_rows_by_group for r in rows]
-        pts = coords[np.asarray(pocket_rows, dtype=int)]
-        centroid = pts.mean(0)
-        all_rows = np.arange(len(np.asarray(info["asym"])))
-        binder_asym = {int(np.asarray(info["asym"])[r]) for r in binder_rows}
-        rec_rows = np.array([i for i in all_rows
-                             if int(np.asarray(info["asym"])[i]) not in binder_asym])
-        rec_center = coords[rec_rows].mean(0)
-        outward = centroid - rec_center
-        nrm = np.linalg.norm(outward)
-        outward = outward / nrm if nrm > 1e-6 else np.array([0., 0., 1.])
-        rim = centroid + outward * min(8.0, 0.5 * nrm)
-        anchor = pocket_rows[int(np.argmin(
-            np.linalg.norm(pts - rim[None, :], axis=1)))]
-        for g, p_row in enumerate(peptide_rows):
-            pair_index.append([int(p_row), int(anchor)])
-            group.append(g)
-        return (
-            np.asarray(pair_index, dtype=np.int64),
-            np.asarray(group, dtype=np.int64),
-            np.full(len(group), float(upper), dtype=np.float32),
-        )
-    for g, rows in enumerate(pocket_rows_by_group):
-        for p_row in peptide_rows:
-            for q_row in rows:
-                pair_index.append([int(p_row), int(q_row)])
-                group.append(g)
-    return (
-        np.asarray(pair_index, dtype=np.int64),
-        np.asarray(group, dtype=np.int64),
-        np.full(len(group), float(upper), dtype=np.float32),
-    )
 
 
 def compute_bond_contact_pairs(
@@ -866,11 +647,66 @@ def compute_ccd_bond_bands(
     atom_names = [str(a) for a in np.asarray(info["atom_names"]).astype(str)]
 
     plausible = {"CC", "CN", "CO", "CS", "SS", "CP", "OP", "NP", "SP"}
+    # AROMATIC SIDE CHAINS ARE HANDS-OFF: with the TFG guidance off, the
+    # raw model produces F/Y/W/H side chains with perfect CCD geometry
+    # (measured 2026-09-21 T2 control: ring planes 0.000-0.007 A, junction
+    # angles +-3 deg, OH in-plane) -- every distance projection we ran on
+    # those atoms (bond bands, ring bands, junction angle bands, TFG's own
+    # projected channel) only degraded them (boat rings to 0.53 A, OH 1.6 A
+    # out of plane). The bands therefore cover the backbone and the
+    # non-aromatic side chains only; aromatic side-chain atoms are excluded
+    # from every constraint family.
+    _aro_side = {"PHE", "TYR", "TRP", "HIS"}
+    aro_side_rows: set[int] = set()
+    for row in range(len(asym)):
+        if mask[row] <= 0:
+            continue
+        if free_entities is not None and asym_to_entity[int(asym[row])] not in free_entities:
+            continue
+        if str(comp_ids[row]).upper() in _aro_side:
+            nm = atom_names[row].lstrip("0123456789")
+            if nm not in ("N", "CA", "C", "O", "OXT"):
+                aro_side_rows.add(row)
     pairs: list[list[int]] = []
     rest: list[float] = []
+    angle_marks: list[int] = []  # indices into pairs of junction ANGLE pairs
+    # chi-dof groups for the steric-gradient torsion projection (engine
+    # side): per aromatic residue, rows = [CA, CB, CG, <side-chain
+    # atoms>]. The TFG mu-gradient on those atoms is re-expressed as a
+    # pure chi1/chi2 rotation (least-squares onto the two torsion
+    # velocity fields) so the steric push turns the side chain instead
+    # of deforming the ring (T5/T6: direct per-atom gradients measured
+    # ring buckling + junction-angle damage at every weight tried).
+    _bb_keep = ("N", "CA", "C", "O", "OXT")
+    aro_dof_rows: list[list[int]] = []
+    _dof_by_res: dict[tuple[int, int], list[int]] = {}
+    for row in range(len(asym)):
+        if row not in aro_side_rows and not (
+                str(comp_ids[row]).upper() in _aro_side
+                and atom_names[row].lstrip("0123456789") in ("CA", "CB", "CG")
+                and mask[row] > 0
+                and (free_entities is None
+                     or asym_to_entity[int(asym[row])] in free_entities)):
+            continue
+        if mask[row] <= 0:
+            continue
+        if free_entities is not None and asym_to_entity[int(asym[row])] not in free_entities:
+            continue
+        comp = str(comp_ids[row]).upper()
+        if comp not in _aro_side:
+            continue
+        nm = atom_names[row].lstrip("0123456789")
+        key = (int(asym[row]), int(res_ids[row]))
+        if nm in ("CA", "CB", "CG"):
+            _dof_by_res.setdefault(key, {})[nm] = row
+        elif nm not in _bb_keep:
+            _dof_by_res.setdefault(key, {}).setdefault("side", []).append(row)
+    for key, d in _dof_by_res.items():
+        if {"CA", "CB", "CG"} <= d.keys():
+            aro_dof_rows.append([d["CA"], d["CB"], d["CG"]] + d.get("side", []))
     rows_by_asym: dict[int, list[int]] = {}
     for i in range(len(asym)):
-        if mask[i] <= 0:
+        if mask[i] <= 0 or i in aro_side_rows:
             continue
         if free_entities is not None and asym_to_entity[int(asym[i])] not in free_entities:
             continue
@@ -902,19 +738,40 @@ def compute_ccd_bond_bands(
             rest.append(ideal if ideal is not None
                         else float(np.linalg.norm(coords[i] - coords[j])))
 
-    # Aromatic-ring distance bands: bonds + 1-3 pairs leave ring torsions
-    # free, so the denoiser folds six-rings to CG-CZ 1.5 A (native model
-    # behaviour, measured on every free-chain sample of the no-guidance
-    # control). Pin every intra-ring pair beyond a true bond to the CCD
-    # template distance -- rigid rings through the same projection.
+    # Aromatic side-chain geometry. Distance bands (any width) CANNOT
+    # enforce ring planarity: a buckled six-ring satisfies every pairwise
+    # distance within the +-0.12 band while its atoms sit ~0.95 A off the
+    # ring plane (measured 2026-09-20 on every sample of the aromatic
+    # 14-mer run: ring planarity RMSD 0.93-0.95 A, max intra-ring pair
+    # deviation exactly the 0.12 band width). Aromatic rings are therefore
+    # carried as RIGID TEMPLATES: the sampler Kabsch-fits the CCD-ideal
+    # ring onto the network's current ring each step and replaces the
+    # internal coordinates -- placement and orientation stay the
+    # network's decision, only the internal shape + planarity are pinned.
+    # TRP's fused indole (both rings + the shared edge) is ONE rigid body;
+    # TYR's phenol OH lies in the ring plane by sp2 chemistry and rides
+    # the same body (measured 1.4-1.8 A out of plane when left to the
+    # distance bands); PRO's pyrrolidine puckers physically and stays a
+    # distance band.
+    # Aromatic side-chain geometry. The sampler rebuilds each aromatic
+    # side chain ANALYTICALLY every step (CCD template placed on the
+    # network's N/CA/C frame, rotated to the network's chi1/chi2) -- the
+    # AF3/protenix construction principle: side-chain internal geometry
+    # comes from the CCD component template, never from pairwise
+    # distances. A rebuilt side chain satisfies every bond AND angle
+    # band exactly (the intersection point itself -- no Jacobi
+    # negotiation, which measured boat-shaped six-rings: CG +0.39 A
+    # toward CB, CD1/CD2 -0.25 A, all ring bonds inside their bands).
+    # chi1/chi2 stay fully network-owned; PRO's pyrrolidine puckers
+    # physically and stays a distance band.
+    _rigid_rings = {
+        "PHE": (("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"),),
+        "TYR": (("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"),),
+        "HIS": (("CB", "CG", "ND1", "CD2", "CE1", "NE2"),),
+        "TRP": (("CB", "CG", "CD1", "NE1", "CE2", "CD2",
+                 "CE3", "CZ3", "CH2", "CZ2"),),
+    }
     _ring_sets = {
-        "PHE": (("CG", "CD1", "CD2", "CE1", "CE2", "CZ"),),
-        "TYR": (("CG", "CD1", "CD2", "CE1", "CE2", "CZ"),),
-        "HIS": (("CG", "ND1", "CD2", "CE1", "NE2"),),
-        "TRP": (
-            ("CG", "CD1", "NE1", "CE2", "CD2"),
-            ("CD2", "CE2", "CE3", "CZ3", "CH2", "CZ2"),
-        ),
         "PRO": (("N", "CA", "CB", "CG", "CD"),),
     }
     bonded = {(min(i, j), max(i, j)) for i, j in pairs}
@@ -925,11 +782,76 @@ def compute_ccd_bond_bands(
         nm = atom_names[row].lstrip("0123456789")
         name_by_res.setdefault(
             (int(asym[row]), int(res_ids[row])), {})[nm] = row
+    rigid_rows: list[list[int]] = []
+    rigid_coords: list[np.ndarray] = []
+    rigid_bb_rows: list[list[int]] = []
+    rigid_bb_coords: list[np.ndarray] = []
+    # Rigid templates + junction angle bands exist ONLY for the explicit
+    # rebuild mode (PROTENIX_AROMATIC_REBUILD=1). The default route hands
+    # aromatic side chains to the network entirely (see aro_side_rows) --
+    # every constraint we ever placed on those atoms measured worse than
+    # the untouched network output.
+    _rebuild_mode = os.environ.get(
+        "PROTENIX_AROMATIC_REBUILD", "").strip() in ("1", "true")
     for (a, r), rnames in name_by_res.items():
         comp = str(comp_ids[np.where(
             (asym == a) & (res_ids == r))[0][0]]).upper()
+        tpl = _load_ccd_template(comp) or {}
+        # rigid aromatic templates supersede any ring bands for this
+        # residue -- exact internal geometry AND planarity in one body
+        body_names: set[str] = set()
+        for group in _rigid_rings.get(comp, ()) if _rebuild_mode else ():
+            members = [n for n in group if n in rnames and n in tpl]
+            if len(members) < 4:
+                continue
+            # analytic rebuild frame: the network's N/CA/C anchors the
+            # template; chi1/chi2 are read from the network's current
+            # side chain each step (generator side)
+            bb = [rnames[n] for n in ("N", "CA", "C") if n in rnames]
+            if len(bb) != 3 or not all(n in tpl for n in ("N", "CA", "C")):
+                continue
+            rigid_rows.append([rnames[n] for n in members])
+            rigid_coords.append(
+                np.asarray([tpl[n] for n in members], dtype=np.float32))
+            rigid_bb_rows.append(bb)
+            rigid_bb_coords.append(np.asarray(
+                [tpl[n] for n in ("N", "CA", "C")], dtype=np.float32))
+            body_names.update(members)
+        # Junction ANGLE bands across the rigid-body boundary: the rigid
+        # replacement fits the template onto the network's ring placement
+        # (total-RMSD), which drags the anchor atom CG and leaves the
+        # CA-CB-CG / CB-CG-CD1 angles free to wander (measured 2026-09-21:
+        # CA-CG and CB-CD deviations 0.1-0.6 A vs 0.01-0.06 in the staged
+        # reference, TYR OH 1.4-1.8 A out of plane). Pin every
+        # body/non-body atom pair at template 1-3 distance (<= 2.8 A):
+        # these distances are INVARIANT to both chi1 (rotation about
+        # CA-CB) and chi2 (rotation about CB-CG), so the junction angles
+        # lock while both torsions stay fully network-owned. Also the
+        # backbone N-CB pair (angle N-CA-CB): without it the model's raw
+        # backbone-angle noise shows at exactly these residues (measured
+        # 126.5 deg vs ideal 110 on the aromatic peptide, staged 110.4).
+        # Angle pairs ride the regular bond width (band, +-0.04 A =
+        # ~+-2.5 deg) -- the ring pair marker (negative) is reserved for
+        # the +-0.12 planarisation width.
+        if body_names and _rebuild_mode:
+            res_heavy = [n for n in rnames if n in tpl]
+            for xname in res_heavy:
+                if xname in body_names:
+                    continue          # x is outside, y inside -- each
+                for yname in res_heavy:   # boundary pair added once
+                    if yname not in body_names:
+                        if (xname, yname) != ("N", "CB"):
+                            continue    # outside-outside: only N-CB
+                    rx, ry = rnames[xname], rnames[yname]
+                    if (min(rx, ry), max(rx, ry)) in bonded:
+                        continue
+                    ideal13 = abs(float(np.linalg.norm(
+                        tpl[xname] - tpl[yname])))
+                    if ideal13 <= 2.8:
+                        pairs.append([rx, ry])
+                        rest.append(ideal13)
+                        angle_marks.append(len(pairs) - 1)
         for ring in _ring_sets.get(comp, ()):
-            tpl = _load_ccd_template(comp) or {}
             members = [n for n in ring if n in rnames and n in tpl]
             if len(members) < 4:
                 continue
@@ -969,8 +891,32 @@ def compute_ccd_bond_bands(
 
     if not pairs:
         return None
+    # Drop intra-template pairs from the DISTANCE bands: a pair with both
+    # atoms inside the same rigid aromatic template is already exact (the
+    # sampler re-places that template every step), and keeping it as a
+    # band only hands the Jacobi sweep a drift DOF -- measured 2026-09-21:
+    # the junction angle corrections propagate through those bands and
+    # buckle the six-rings into BOAT conformations (CG +0.39 A toward CB,
+    # CD1/CD2 -0.25 A behind, every ring bond still inside its +-0.04
+    # band: a boat satisfies all 1-2 distances). The fused 9-atom TRP
+    # template resisted only through its stiffer bond network; removing
+    # the intra-template pairs removes the propagation medium. Cross-
+    # boundary pairs (CB-CG bond, CA-CG / CB-CD1 / CB-CD2 angles) stay.
+    keep = np.ones(len(pairs), dtype=bool)
+    if rigid_rows:
+        row_sets = [set(r) for r in rigid_rows]
+        for pi, (a, b) in enumerate(pairs):
+            for rs in row_sets:
+                if a in rs and b in rs:
+                    keep[pi] = False
+                    break
+    angle_flags_all = np.zeros(len(pairs), dtype=bool)
+    angle_flags_all[angle_marks] = True
+    pairs = [p for p, k in zip(pairs, keep) if k]
+    rest = [v for v, k in zip(rest, keep) if k]
     index = np.asarray(pairs, dtype=np.int64)
     rest_arr = np.asarray(rest, dtype=np.float32)
+    angle_pair_flags = angle_flags_all[keep]
     widths = np.where(rest_arr < 0, np.float32(0.12), np.float32(band))
     rest_arr = np.abs(rest_arr)
     upper = rest_arr + widths
@@ -979,4 +925,25 @@ def compute_ccd_bond_bands(
                    if clash_pairs else None)
     clash_lower = (np.full(len(clash_pairs), 3.1, dtype=np.float32)
                    if clash_pairs else None)
-    return index, upper, lower, clash_index, clash_lower
+    # rigid aromatic templates as padded arrays: ring_rows [R, K] (-1 pad),
+    # ring_coords [R, K, 3]; None when the free chains carry no aromatics
+    if rigid_rows:
+        k = max(len(rows) for rows in rigid_rows)
+        rr = np.full((len(rigid_rows), k), -1, dtype=np.int64)
+        rc = np.zeros((len(rigid_rows), k, 3), dtype=np.float32)
+        for ri, (rows, txyz) in enumerate(zip(rigid_rows, rigid_coords)):
+            rr[ri, :len(rows)] = rows
+            rc[ri, :len(txyz)] = txyz
+        rigid = (rr, rc, np.asarray(rigid_bb_rows, dtype=np.int64),
+                 np.asarray(rigid_bb_coords, dtype=np.float32))
+    else:
+        rigid = None
+    if aro_dof_rows:
+        kk = max(len(r) for r in aro_dof_rows)
+        ad = np.full((len(aro_dof_rows), kk), -1, dtype=np.int64)
+        for ai, rows in enumerate(aro_dof_rows):
+            ad[ai, :len(rows)] = rows
+        aro_dof = ad
+    else:
+        aro_dof = None
+    return index, upper, lower, clash_index, clash_lower, rigid, aro_dof
