@@ -24,6 +24,91 @@ def get_redis_client():
     return redis.Redis(connection_pool=REDIS_CONNECTION_POOL)
 
 
+# NVML 盲区回退：长时间运行的 GPU worker 容器在宿主机 cgroup 重载后会丢失
+# NVML 初始化（"Failed to initialize NVML: Unknown Error"），本地 nvidia-smi 全部
+# 失败而 CUDA 任务照常可跑。此时新建的临时容器拿到干净的 device cgroup，NVML
+# 可用（nvidia-container-runtime 会把宿主机驱动带的 nvidia-smi 注入任何容器）。
+# 用最小通用镜像执行一次查询，把真实占用带回给准入检查，避免把已被池外训练
+# 占满的卡"乐观放行"出去导致 CUDA OOM。镜像候选只取本地已存在的（--pull=never）。
+_DOCKER_SMI_IMAGE_CANDIDATES = ("ubuntu:22.04", "ubuntu:24.04", "debian:bookworm-slim")
+_DOCKER_SMI_PROBE_STATE: dict = {"image": None, "disabled": False}
+
+
+def _nvidia_smi_query_via_docker(gpu_id: int, query: str) -> str | None:
+    if _DOCKER_SMI_PROBE_STATE["disabled"] or not shutil.which("docker"):
+        return None
+    candidates = (
+        [_DOCKER_SMI_PROBE_STATE["image"]]
+        if _DOCKER_SMI_PROBE_STATE["image"]
+        else list(_DOCKER_SMI_IMAGE_CANDIDATES)
+    )
+    for image in candidates:
+        try:
+            proc = subprocess.run(
+                [
+                    "docker", "run", "--rm", "--pull=never", "--network", "none",
+                    f"--gpus=device={int(gpu_id)}",
+                    "--entrypoint", "nvidia-smi", image,
+                    query, "--format=csv,noheader,nounits",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("docker nvidia-smi 探针执行失败 (GPU %s, %s): %s", gpu_id, image, exc)
+            continue
+        if proc.returncode == 0:
+            _DOCKER_SMI_PROBE_STATE["image"] = image
+            return proc.stdout
+        # 容器内可见的唯一 GPU 就是目标卡；镜像缺失/入口不存在都会走这里，换下一个候选。
+        logger.debug(
+            "docker nvidia-smi 探针未成功 (GPU %s, %s): %s",
+            gpu_id, image, (proc.stderr or "").strip()[:200],
+        )
+    return None
+
+
+def _nvidia_smi_query(gpu_id: int, query: str, *, docker_fallback: bool = False) -> str | None:
+    """在目标 GPU 上执行 nvidia-smi 查询；NVML 盲区时可回退 docker 临时容器探针。
+
+    query 只接受 "--query-gpu=memory.used" 或 "--query-compute-apps=used_memory"；
+    返回 stdout 文本，两路都失败才返回 None。容器内只映射了目标一张卡，无需 --id 过滤。
+    docker_fallback 仅在准入检查（acquire）路径开启：释放路径统计的是"整卡总占用"，
+    含池外进程显存，盲区下若也能查到真值会把带池外占用的卡永久滞留在 in-use
+    （真实回收阈值 200MiB 永远不满足）——那正是回退要避免的那类锁死，故释放路径
+    维持原有的乐观放行语义。
+    """
+    argv = ["nvidia-smi", f"--id={int(gpu_id)}", query, "--format=csv,noheader,nounits"]
+    stdout: str | None = None
+    if shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("查询 GPU %s 占用失败: %s", gpu_id, exc)
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            stdout = proc.stdout
+        elif proc is not None:
+            logger.warning(
+                "查询 GPU %s 占用失败 (%s): %s%s",
+                gpu_id, query, (proc.stderr or "").strip(),
+                "，尝试 docker 探针回退。" if docker_fallback else "",
+            )
+    if stdout is None and docker_fallback:
+        stdout = _nvidia_smi_query_via_docker(gpu_id, query)
+    return stdout
+
+
 def _read_gpu_pool_state(client: redis.Redis) -> tuple[set[int], list[int], dict[str, str]]:
     valid_raw = client.smembers(config.GPU_VALID_SET_KEY)
     available_raw = client.lrange(config.GPU_POOL_KEY, 0, -1)
@@ -202,7 +287,9 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
 # acquire 阻塞期间自动回收孤儿 lease 并重建 available，避免 worker 强杀 / NVML 失效等
 # 导致 lease 泄漏后永久死锁。复用现有 reconcile 原语，运行时不重置设备集合。
 RECONCILE_LOCK_KEY = "boltz_gpu_pool:reconcile_lock"  # 不加 namespace：全局单写者
-RECONCILE_LOCK_TTL_SECONDS = 30
+# must cover the worst-case reconcile duration: N dirty GPUs × the
+# 90s memory-reclaim wait each, plus nvidia-smi subprocess latency
+RECONCILE_LOCK_TTL_SECONDS = 300
 RECONCILE_MIN_INTERVAL_SECONDS = RECONCILE_LOCK_TTL_SECONDS
 
 
@@ -389,6 +476,19 @@ def ensure_gpu_pool(devices_to_use: list[int]):
     initialize_gpu_pool(devices_to_use)
 
 
+_CLAIM_LEASE_LUA = """
+local in_use = KEYS[1]
+local pool = KEYS[2]
+local gpu_id = ARGV[1]
+local task_id = ARGV[2]
+if redis.call('HEXISTS', in_use, gpu_id) == 1 then
+    return 0
+end
+redis.call('HSET', in_use, gpu_id, task_id)
+return 1
+"""
+
+
 def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
     """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；超时抛 TimeoutError。
 
@@ -400,7 +500,7 @@ def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
     pool_key = config.GPU_POOL_KEY
     timeout_seconds = max(0, int(timeout))
     deadline = time.monotonic() + timeout_seconds
-    blpop_slice = 30  # 与 RECONCILE_LOCK_TTL 对齐
+    blpop_slice = 30  # seconds to wait per blpop cycle before re-checking reconcile
 
     logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout_seconds}s)...")
 
@@ -420,13 +520,25 @@ def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
         result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
         if result is not None:
             gpu_id = int(result[1])
+            # Claim the lease ATOMICALLY before any slow check: between the
+            # blpop above and this claim, the GPU is visible to neither the
+            # pool nor in_use, and a concurrent reconcile would rebuild the
+            # pool to include it (double lease). The Lua script only writes
+            # when no existing lease is present; on conflict the GPU is
+            # returned to the pool and we retry.
+            claimed = client.eval(
+                _CLAIM_LEASE_LUA, 2,
+                config.GPU_IN_USE_HASH_KEY, pool_key,
+                str(gpu_id), task_id)
+            if not claimed:
+                continue  # another task holds the lease; retry blpop
             admitted, detail = _gpu_admission_check(gpu_id, task_id)
             if not admitted:
                 rejected_gpu_ids.add(gpu_id)
+                client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
                 client.rpush(pool_key, gpu_id)
                 time.sleep(0.5)
                 continue
-            client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
             logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
             return gpu_id
 
@@ -473,6 +585,16 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
     )
 
     last_reconcile = 0.0
+    # Ghost-waiter cap: a worker killed mid-wait leaks its entry in the
+    # waiting_non_peptide set (measured 2026-09-21: a stopped task's entry
+    # starved four peptide candidates against three idle GPUs for 3 h --
+    # the yield loop has no liveness check). Yield to non-peptide waiters
+    # for at most this long per acquisition, then proceed: a live waiter
+    # still gets its turn (its own acquire holds the reconcile lock and
+    # the pool order), only perpetual starvation of leaked entries is
+    # prevented.
+    _YIELD_GRACE_SECONDS = 300.0
+    first_yield_at: float | None = None
 
     while True:
         if deadline is None:
@@ -487,11 +609,25 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
         except Exception:
             waiting_non_peptide = 0
         if waiting_non_peptide > 0:
-            if remaining is None:
-                time.sleep(sleep_step)
+            now = time.monotonic()
+            if first_yield_at is None:
+                first_yield_at = now
+            elif now - first_yield_at > _YIELD_GRACE_SECONDS:
+                logger.warning(
+                    "任务 %s: waiting_non_peptide=%d 已持续 %d0+s（疑似幽灵条目），"
+                    "跳过礼让继续取卡。",
+                    task_id, waiting_non_peptide,
+                    int(now - first_yield_at),
+                )
+                first_yield_at = None  # re-arm only after a no-waiter cycle
             else:
-                time.sleep(min(sleep_step, max(0.2, remaining)))
-            continue
+                if remaining is None:
+                    time.sleep(sleep_step)
+                else:
+                    time.sleep(min(sleep_step, max(0.2, remaining)))
+                continue
+        else:
+            first_yield_at = None
 
         if remaining is None:
             blpop_timeout = max(1, int(round(sleep_step)))
@@ -505,40 +641,29 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
 
         _, gpu_id_str = result
         gpu_id = int(gpu_id_str)
+        # atomic lease claim (same race as acquire_gpu — see there)
+        claimed = client.eval(
+            _CLAIM_LEASE_LUA, 2,
+            config.GPU_IN_USE_HASH_KEY, config.GPU_POOL_KEY,
+            str(gpu_id), task_id)
+        if not claimed:
+            continue
         admitted, detail = _gpu_admission_check(gpu_id, task_id)
         if not admitted:
             # 池外计算型占用：放回队尾换下一块，等待语义由外层循环与 deadline 保证。
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
             client.rpush(config.GPU_POOL_KEY, gpu_id)
             time.sleep(min(sleep_step, 0.5))
             continue
-        client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
         logger.info(f"✅ 任务 {task_id}: 多肽子任务已获取 GPU {gpu_id}。")
         return gpu_id
 
-def _query_gpu_used_memory_mib(gpu_id: int) -> int | None:
-    if not shutil.which("nvidia-smi"):
+def _query_gpu_used_memory_mib(gpu_id: int, *, docker_fallback: bool = False) -> int | None:
+    result = _nvidia_smi_query(
+        gpu_id, "--query-gpu=memory.used", docker_fallback=docker_fallback)
+    if result is None:
         return None
-    try:
-        proc = subprocess.run(
-            [
-                "nvidia-smi",
-                f"--id={int(gpu_id)}",
-                "--query-gpu=memory.used",
-                "--format=csv,noheader,nounits",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except Exception as exc:
-        logger.warning("查询 GPU %s 显存失败: %s", gpu_id, exc)
-        return None
-    if proc.returncode != 0:
-        logger.warning("查询 GPU %s 显存失败: %s", gpu_id, (proc.stderr or "").strip())
-        return None
-    for line in (proc.stdout or "").splitlines():
+    for line in result.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -565,30 +690,12 @@ def _query_gpu_compute_memory_mib(gpu_id: int) -> int | None:
     而 Firefox/Chrome 等浏览器的图形（GL/Vulkan）上下文不会出现，因此这是
     区分"计算型占用"与"桌面型占用"的精确信号。
     """
-    if not shutil.which("nvidia-smi"):
-        return None
-    try:
-        proc = subprocess.run(
-            [
-                "nvidia-smi",
-                f"--id={int(gpu_id)}",
-                "--query-compute-apps=used_memory",
-                "--format=csv,noheader,nounits",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except Exception as exc:
-        logger.warning("查询 GPU %s 计算进程占用失败: %s", gpu_id, exc)
-        return None
-    if proc.returncode != 0:
-        logger.warning("查询 GPU %s 计算进程占用失败: %s", gpu_id, (proc.stderr or "").strip())
+    result = _nvidia_smi_query(
+        gpu_id, "--query-compute-apps=used_memory", docker_fallback=True)
+    if result is None:
         return None
     total = 0
-    for line in (proc.stdout or "").splitlines():
+    for line in result.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -623,7 +730,7 @@ def _gpu_admission_check(gpu_id: int, task_id: str) -> tuple[bool, str]:
         )
         return False, f"compute={compute_mem}MiB"
 
-    used = _query_gpu_used_memory_mib(gpu_id)
+    used = _query_gpu_used_memory_mib(gpu_id, docker_fallback=True)
     if used is None:
         logger.warning(
             "任务 %s: GPU %s 占用状态不可探测（NVML 盲区），按既有策略乐观放行。",
