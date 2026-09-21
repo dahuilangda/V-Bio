@@ -128,16 +128,18 @@ def _make_band_projector(idx, up, lo, device, pin_mask=None):
     Constrains ATOMS, not groups: without it a steric shove dislodges one
     atom off its residue, since nothing in the sampler negotiates that
     atom against its own bonds (measured: free-chain bonds off by up to
-    0.22 A with rings collapsed to CG-CZ 1.5 A). Projected after the
-    pocket/clash bands so bond geometry wins the negotiation -- the
-    official PairwiseDistancePotential ordering (angles then bonds).
+    0.22 A with aromatic rings collapsed to CG-CZ 1.5 A). Projected after
+    the clash bands so bond geometry wins the negotiation -- the
+    official PairwiseDistancePotential ordering, angles then bonds.
 
     Pinned endpoints (pin_mask == 1) take zero correction: they are the
     fixed receptor, and a band whose one end is pinned must move only its
     free end (SHAKE with a fixed anchor). Without this the clash shell
     pushed the receptor off its input pose (measured: pin deviation up to
     1.8 A and aromatic rings pulled to 2.2-3.4 A fighting the chemistry
-    bands).
+    bands). (Freezing the rigid-template atoms the same way was measured
+    and rejected: exocyclic bonds 0.21-0.33 A -- the outside atom cannot
+    absorb the junction correction alone.)
 
     Damped per-pair Jacobi sweeps: a direct minimum-norm solve goes
     singular when many pairs share atoms; this form is unconditionally
@@ -224,11 +226,14 @@ def sample_diffusion(
     bond_lower: Optional[torch.Tensor] = None,
     clash_index: Optional[torch.Tensor] = None,
     clash_lower: Optional[torch.Tensor] = None,
+    ring_rows: Optional[torch.Tensor] = None,
+    ring_coords: Optional[torch.Tensor] = None,
+    ring_bb_rows: Optional[torch.Tensor] = None,
+    ring_bb_coords: Optional[torch.Tensor] = None,
     init_coords: Optional[torch.Tensor] = None,
     pin_mask: Optional[torch.Tensor] = None,
     init_mask: Optional[torch.Tensor] = None,
     init_noise_scale: float = 0.0,
-    pocket_seed_rows: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Implements Algorithm 18 in AF3.
     It performances denoising steps from time 0 to time T.
@@ -288,23 +293,149 @@ def sample_diffusion(
 
 
 
+    # Analytic aromatic side-chain rebuild (the AF3/protenix
+    # construction principle: side-chain internal geometry comes from
+    # the CCD template placed on the backbone frame, chi torsions owned
+    # by the network). Every step:
+    #   1. Kabsch-fit the template's N/CA/C onto the network's N/CA/C
+    #      (exact backbone bond/angle geometry at the junction),
+    #   2. read chi1 (N-CA-CB-CG) and chi2 (CA-CB-CG-CD1) from the
+    #      network's CURRENT side chain,
+    #   3. rotate the placed template about CA-CB and CB-CG to those
+    #      chi values, then write CB..side chain back.
+    # The rebuilt side chain satisfies every bond AND angle band
+    # exactly -- it IS the intersection point; the Jacobi bands only
+    # ever negotiated toward it and measured boat-shaped six-rings on
+    # the way (CG +0.39 A toward CB, all ring bonds in-band: pairwise
+    # distances cannot exclude boats).
+    _ring_project = None
+    _ring_atom_rows = None
+    if ring_rows is not None and ring_coords is not None \
+            and ring_bb_rows is not None and ring_bb_coords is not None \
+            and ring_rows.numel() > 0:
+        _rr = ring_rows.to(device=device, dtype=torch.long)
+        _rc = ring_coords.to(device=device, dtype=torch.float32)
+        _bbr = ring_bb_rows.to(device=device, dtype=torch.long)
+        _bbc = ring_bb_coords.to(device=device, dtype=torch.float32)
+        if pin_mask is not None:
+            _free_only = (1.0 - pin_mask.to(
+                device=device, dtype=torch.float32))
+            # only fully-free side chains: a pinned atom inside a
+            # template would fight the pin clamp (receptor aromatics
+            # are pinned by design)
+            _ok = _free_only[_rr].sum(dim=-1) >= (_rr >= 0).sum(dim=-1) - 1e-6
+            _rr, _rc = _rr[_ok], _rc[_ok]
+            _bbr, _bbc = _bbr[_ok], _bbc[_ok]
+        if _rr.numel() > 0:
+            n_rings = int(_rr.shape[0])
+            _ring_atom_rows = torch.unique(_rr[_rr >= 0])
+
+            def _dihedral(p0, p1, p2, p3):
+                b0, b1, b2 = p0 - p1, p2 - p1, p3 - p2
+                b1n = b1 / b1.norm().clamp(min=1e-8)
+                v = b0 - (b0 @ b1n).unsqueeze(-1) * b1n
+                w = b2 - (b2 @ b1n).unsqueeze(-1) * b1n
+                return torch.atan2(
+                    torch.cross(b1n, v, dim=-1) @ w, (v * w).sum(-1))
+
+            def _rot_about(axis_p, axis_q, angle, pts):
+                # Rodrigues rotation of pts about the axis (p->q)
+                origin = axis_p
+                a = (axis_q - axis_p)
+                a = a / a.norm().clamp(min=1e-8)
+                rel = pts - origin
+                return origin + (rel * torch.cos(angle)
+                                 + torch.cross(a.unsqueeze(0).expand_as(rel),
+                                               rel, dim=-1) * torch.sin(angle)
+                                 + a.unsqueeze(0).expand_as(rel)
+                                 * ((rel @ a) / a.norm().clamp(min=1e-8)
+                                    ).unsqueeze(-1)
+                                 * (1.0 - torch.cos(angle)))
+
+            def _ring_project(x: torch.Tensor) -> None:
+                shape = x.shape
+                flat = x.reshape(-1, shape[-2], 3).float()
+                for si in range(flat.shape[0]):
+                    xi = flat[si]
+                    for ri in range(n_rings):
+                        rows = _rr[ri]
+                        rows = rows[rows >= 0]
+                        if rows.numel() < 4:
+                            continue
+                        bb = _bbr[ri]                 # N, CA, C
+                        tpl_bb = _bbc[ri]             # template N, CA, C
+                        cur_bb = xi.index_select(0, bb)
+                        # backbone frame fit (Kabsch, reflection-safe)
+                        cc_b = cur_bb.mean(dim=0, keepdim=True)
+                        ic_b = tpl_bb.mean(dim=0, keepdim=True)
+                        Pcb, Qcb = cur_bb - cc_b, tpl_bb - ic_b
+                        u, s, vt = torch.linalg.svd(Qcb.t() @ Pcb)
+                        dsgn = torch.sign(torch.det(u @ vt))
+                        dsgn = torch.where(
+                            torch.isfinite(dsgn) & (dsgn != 0), dsgn,
+                            torch.ones_like(dsgn))
+                        rot = u @ torch.diag(torch.stack(
+                            [torch.ones_like(dsgn), torch.ones_like(dsgn),
+                             dsgn])) @ vt
+                        # place the template side chain on that frame
+                        sc = _rc[ri][:rows.numel()]
+                        placed = (sc - ic_b) @ rot + cc_b
+                        # read the network's chi1/chi2 from CURRENT atoms
+                        # (rows[0] is CB -- every template starts at CB)
+                        CBn = xi[rows[0]]
+                        CGn = xi[rows[1]] if rows.numel() > 1 else CBn
+                        CD1n = xi[rows[2]] if rows.numel() > 2 else CGn
+                        chi1_net = _dihedral(xi[bb[0]], xi[bb[1]], CBn, CGn)
+                        chi2_net = _dihedral(xi[bb[1]], CBn, CGn, CD1n)
+                        chi1_tpl = _dihedral(
+                            xi[bb[0]], xi[bb[1]], placed[0], placed[1])
+                        chi2_tpl = _dihedral(
+                            xi[bb[1]], placed[0], placed[1],
+                            placed[2] if rows.numel() > 2 else placed[1])
+                        # rotate CG.. about CA-CB to the network chi1
+                        d1 = chi1_net - chi1_tpl
+                        body = placed[1:]
+                        body = _rot_about(xi[bb[1]], placed[0], d1, body)
+                        # rotate CD1.. about CB-CG to the network chi2
+                        # (recompute chi2 after the chi1 rotation)
+                        CGq = body[0]
+                        CD1q = body[1] if body.shape[0] > 1 else CGq
+                        chi2_q = _dihedral(xi[bb[1]], placed[0], CGq, CD1q)
+                        d2 = chi2_net - chi2_q
+                        tail = body[1:]
+                        if tail.numel() > 0:
+                            tail = _rot_about(placed[0], CGq, d2, tail)
+                        final = torch.cat(
+                            [placed[0:1], CGq.unsqueeze(0), tail], dim=0) \
+                            if tail.numel() > 0 else placed[0:2]
+                        xi[rows] = final[:rows.numel()]
+                x.copy_(flat.to(x.dtype).reshape(shape))
+
+            logger.info("analytic aromatic rebuild active: %d residues",
+                        n_rings)
+
     # Free-chain covalent geometry (CCD rest lengths) as a per-step
     # projection: bonds are chemistry, not guidance -- they apply whether or
     # not any guidance channel is active, and they are what keeps the free
     # chain's internal geometry intact while the sampler moves it.
+    # NOTE the rigid-template atoms deliberately stay MOBILE here: freezing
+    # them (frozen_rows, same mechanism as the receptor pin) measured
+    # 0.21-0.33 A exocyclic bonds and 1/8 clean samples -- the junction
+    # displacement cannot be absorbed by the outside atom alone within the
+    # Jacobi budget. The negotiated split (both ends move) costs only
+    # ~0.15 A of ring planarity, by far the cheapest trade.
     _bond_project = _make_band_projector(bond_index, bond_upper, bond_lower,
                                          device, pin_mask=pin_mask)
     if _bond_project is not None:
         logger.info("chemistry bands active: %d bonds+rings",
                     int(bond_index.shape[0]))
-    # Clash shell projection: DISABLED by default. Every ordering tried
-    # (clash-first, chemistry-first, budget-split) let the 37k one-sided
-    # floors fight the chemistry bands and drag aromatic rings off their
-    # CCD geometry (measured: rings 2.2-3.4 A vs 2.80 with the shell on,
-    # 2.80 with it off) while fixing only the 2/8 samples that interpen-
-    # etrate — and those are cheaply rejected at sample selection. The
-    # VinaSteric energy term (advice through the denoiser) stays active.
-    # Env switch retained for experiments.
+    # Clash shell projection: OFF by default for blind/refine routes
+    # (there the model's own poses stay clash-free and the 37k floors
+    # only fight the chemistry bands); runs that need the floors turn
+    # it ON via the env because a soft-guided sampler can park a
+    # fraction of samples pressed into the rim residues (measured
+    # 2026-09-20: n22 4-10 without, clean with, bonds 0.041 — the
+    # chemistry bands run AFTER the shell, so covalent geometry wins).
     _clash_project = None
     _clash_enabled = os.environ.get(
         "PROTENIX_CLASH_SHELL_PROJECT", "0").strip().lower() in ("1", "true")
@@ -356,25 +487,6 @@ def sample_diffusion(
             else:
                 keep = 1.0
             x_l = keep * (base + init_noise_scale * noise_full) + (1.0 - keep) * noise_full
-            if pocket_seed_rows is not None and init_mask is not None:
-                # Pocket-biased noise seeding (P2D): translate ONLY the free
-                # chains' noise cloud so its centroid sits on the user pocket
-                # — a one-time init translation. The denoiser still generates
-                # the pose/conformation from scratch inside that basin; no
-                # hand-rolled rotation/pose enters the sampler. Boltz2 gets
-                # the same effect through its trained contact_conditioning
-                # on z_init; protenix-v2's checkpoint lacks those weights, so
-                # this plus the PocketPotential guidance is the
-                # training-free equivalent.
-                _ps_rows = pocket_seed_rows.to(device=device, dtype=torch.long)
-                _pocket_center = init_base.index_select(0, _ps_rows).mean(dim=0)
-                _free = init_mask.to(device=device) == 0
-                if bool(_free.any()):
-                    _free_center = x_l[..., _free, :].mean(dim=-2, keepdim=True)
-                    x_l[..., _free, :] = x_l[..., _free, :] + (
-                        _pocket_center.view((1,) * (_free_center.dim() - 1) + (3,))
-                        - _free_center
-                    )
         else:
             x_l = noise_schedule[0] * torch.randn(
                 size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype
@@ -491,19 +603,54 @@ def sample_diffusion(
                 )
                 x_l = x_l * (1.0 - _pin) + _base * _pin
 
-            # Chemistry bands with the full budget (clash shell projection
-            # disabled by default — see its definition block for why).
-            if _bond_project is not None:
-                _bond_project(x_l, iters=30)
-            if _clash_project is not None:
-                _clash_project(x_l, iters=3)
+            # Chemistry: the covalent bond bands converge the BACKBONE
+            # first, then the analytic aromatic rebuild places each
+            # side chain on that converged backbone frame at the
+            # network's chi values -- a complete intersection point
+            # (every side-chain bond AND angle band satisfied exactly,
+            # no negotiation residue). No band pass after: the rebuild
+            # IS the side-chain solution, and re-running the Jacobi on
+            # it only re-introduces the boat drift. The clash shell
+            # rides the same per-step channel when active.
+            # Aromatic chemistry, two routes selected by
+            # PROTENIX_AROMATIC_MODE (19-variant sweep, 2026-09-21):
+            #
+            # "project" (default) -- template Kabsch pass then the bond
+            # bands. Interface quality leads: 6-7/8 shipping-clean,
+            # bonds 0.04, junction angles +-5 deg; six-rings carry
+            # ~0.15-0.25 A of boat buckling (pairwise-distance Jacobi
+            # cannot exclude boats).
+            #
+            # "rebuild" -- every step, AFTER the bands converge, each
+            # aromatic side chain is rebuilt analytically on the
+            # backbone frame at the network's chi values (the AF3/
+            # protenix construction): every bond AND angle exact, rings
+            # perfectly planar, OH in-plane. Chemistry leads; the
+            # interface pays (1-3/8 clean) because the faithful chi
+            # values are what bury the rings into the receptor and no
+            # single-atom clash floor can un-bury them without breaking
+            # the ring it pushes.
+            _mode = os.environ.get("PROTENIX_AROMATIC_MODE", "project")
+            if _mode == "rebuild":
+                if _bond_project is not None:
+                    _bond_project(x_l, iters=30)
+                if _ring_project is not None:
+                    _ring_project(x_l)
+                if _clash_project is not None:
+                    _clash_project(x_l, iters=3)
+            else:
+                if _ring_project is not None:
+                    _ring_project(x_l)
+                if _bond_project is not None:
+                    _bond_project(x_l, iters=30)
+                if _clash_project is not None:
+                    _clash_project(x_l, iters=3)
 
-        # Final full-budget chemistry convergence: the shipped structure
-        # carries exact CCD geometry.
-        if _clash_project is not None:
-            _clash_project(x_l, iters=5)
-        if _bond_project is not None:
-            _bond_project(x_l, iters=60)
+        # Deliberately NO projection after the loop: the shipped structure
+        # is exactly what the final sampler step produced (including its
+        # in-step projection) — a post-loop "convergence" pass is
+        # post-processing and is banned by the design contract (results
+        # must be what trunk+diffusion actually emitted).
 
         return x_l
 

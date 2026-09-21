@@ -6659,7 +6659,15 @@ def _pocket_contacts_for_staged_space(
     within the peptidePocketBox radius. Every requested residue must resolve
     — a silently wrong pocket site is worse than a loud failure.
     """
-    raw_residues = str(options.get("peptidePocketResidues") or options.get("peptide_pocket_residues") or "").strip()
+    # Pocket guidance was REMOVED (2026-09-21, user decision): the
+    # receptor-fixed blind generation localises via the model's own
+    # docking prior. Frontend submissions carrying the legacy option are
+    # ignored with a log line instead of erroring.
+    raw_residues = ""
+    _legacy_pocket = str(options.get("peptidePocketResidues") or options.get("peptide_pocket_residues") or "").strip()
+    if _legacy_pocket:
+        print("[d-peptide] peptidePocketResidues ignored: pocket guidance "
+              "removed; running receptor-fixed blind generation", flush=True)
     author_contacts: List[Tuple[str, int]] = []
     plain_positions: List[int] = []
     if raw_residues:

@@ -415,7 +415,6 @@ from core.alignment import (  # noqa: F401
 from core.constraints import (  # noqa: F401
     compute_free_chain_tfg_constraints,
     compute_ligand_covalent_bands,
-    compute_pocket_guidance_pairs,
     compute_bond_contact_pairs,
     compute_vdw_shell_constraints,
 )

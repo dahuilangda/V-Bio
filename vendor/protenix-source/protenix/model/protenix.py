@@ -59,7 +59,6 @@ def _load_p2d_side_channels():
         os.environ.get("PROTENIX_TFG_CONTACTS_PATH", ""),
         os.environ.get("PROTENIX_SCORE_ONLY", ""),
         os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", ""),
-        os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", ""),
         os.environ.get("PROTENIX_PIN_MASK_PATH", ""),
         os.environ.get("PROTENIX_CCD_BOND_BANDS_PATH", ""),
         os.environ.get("PROTENIX_CLASH_SHELL_PATH", ""),
@@ -96,6 +95,9 @@ def _load_p2d_side_channels():
         blob = np.load(tfg_const_path, allow_pickle=False)
         out["tfg_constraints"] = {k: blob[k] for k in blob.files}
     bands_path = os.environ.get("PROTENIX_CCD_BOND_BANDS_PATH", "").strip()
+    if os.environ.get("PROTENIX_DISABLE_CHEMISTRY", "").strip() in ("1", "true"):
+        # vanilla-protenix control: no CCD chemistry projections at all
+        bands_path = ""
     if bands_path and os.path.exists(bands_path):
         blob = np.load(bands_path, allow_pickle=False)
         out["ccd_bond_bands"] = {
@@ -103,20 +105,27 @@ def _load_p2d_side_channels():
             "upper": np.asarray(blob["upper"], dtype=np.float32),
             "lower": np.asarray(blob["lower"], dtype=np.float32),
         }
+        # rigid aromatic templates: ring_rows [R, K] (-1 pad) +
+        # ring_coords [R, K, 3]; distance bands alone cannot keep rings
+        # planar (a buckled ring satisfies every pair band)
+        if "aro_dof" in blob:
+            out["ccd_bond_bands"]["aro_dof"] = np.asarray(
+                blob["aro_dof"], dtype=np.int64)
+        if "ring_rows" in blob:
+            out["ccd_bond_bands"]["ring_rows"] = np.asarray(
+                blob["ring_rows"], dtype=np.int64)
+            out["ccd_bond_bands"]["ring_coords"] = np.asarray(
+                blob["ring_coords"], dtype=np.float32)
+            out["ccd_bond_bands"]["ring_bb_rows"] = np.asarray(
+                blob["ring_bb_rows"], dtype=np.int64)
+            out["ccd_bond_bands"]["ring_bb_coords"] = np.asarray(
+                blob["ring_bb_coords"], dtype=np.float32)
     clash_path = os.environ.get("PROTENIX_CLASH_SHELL_PATH", "").strip()
     if clash_path and os.path.exists(clash_path):
         blob = np.load(clash_path, allow_pickle=False)
         out["clash_shell"] = {
             "index": np.asarray(blob["pair_index"], dtype=np.int64),
             "lower": np.asarray(blob["lower"], dtype=np.float32),
-        }
-    pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
-    if pocket_path and os.path.exists(pocket_path):
-        blob = np.load(pocket_path, allow_pickle=False)
-        out["pocket_guidance"] = {
-            "index": np.asarray(blob["pair_index"], dtype=np.int64),
-            "group": np.asarray(blob["group"], dtype=np.int64),
-            "upper": np.asarray(blob["upper"], dtype=np.float32),
         }
     _load_p2d_side_channels._cache = (key, out)
     return out
@@ -134,7 +143,7 @@ def _p2d_tensor(p2d: dict[str, Any], key: str) -> Any:
 from protenix.model.modules.primitives import LinearNoBias
 from protenix.model.triangular.layers import LayerNorm
 from protenix.model.utils import simple_merge_dict_list
-from protenix.tfg.config import pocket_augmented_guidance
+from protenix.tfg.config import protenix2dock_guidance
 from protenix.utils.logger import get_logger
 from protenix.utils.offload import TensorOffloader
 from protenix.utils.permutation.permutation import SymmetricPermutation
@@ -466,7 +475,7 @@ class Protenix(nn.Module):
         )
         _configs.update(
             {
-                "guidance_configs": pocket_augmented_guidance(
+                "guidance_configs": protenix2dock_guidance(
                     self.configs.sample_diffusion.to_dict().get("guidance")
                 )
             }
@@ -800,7 +809,7 @@ class Protenix(nn.Module):
             # Mark contact pairs as the angle category: clash pairs lose their
             # upper bound (upper=inf) inside PairwiseDistancePotential, while
             # angle-category pairs keep a finite upper bound -- exactly the
-            # pocket-anchoring semantics protenix2dock needs.
+            # the semantics protenix2dock needs.
             input_feature_dict["pairwise_distance_is_angle"] = torch.cat(
                 [
                     input_feature_dict["pairwise_distance_is_angle"],
@@ -809,7 +818,7 @@ class Protenix(nn.Module):
                 dim=-1,
             )
             logger.info(
-                f"protenix2dock: injected {idx.shape[0]} pocket contact pairs into TFG."
+                f"protenix2dock: injected {idx.shape[0]} contact pairs into TFG."
             )
         # Free-chain covalent bonds also enter the official TFG soft channel
         # (is_bond=1): PairwiseDistancePotential applies its bond buffer,
@@ -817,6 +826,11 @@ class Protenix(nn.Module):
         # prediction of every guided step, keeping the denoiser's
         # clean-structure estimate chemically valid.
         constraints = p2d.get("tfg_constraints")
+        if os.environ.get("PROTENIX_TFG_ENERGY_ONLY", "").strip() in ("1", "true"):
+            # energy-only mode: the projected channel must stay EMPTY --
+            # these pairs' minimum-norm solve on x0 is the aromatic-ring
+            # boat mechanism (T1/T3 vs T2 control)
+            constraints = None
         if constraints and "pairwise_distance_index" in input_feature_dict:
             n = constraints["pairwise_distance_index"].shape[1] \
                 if constraints["pairwise_distance_index"].ndim == 2 \
@@ -843,20 +857,10 @@ class Protenix(nn.Module):
                 f"protenix2dock: injected {n_bond} bond + {n_angle} angle "
                 "constraints into TFG."
             )
-        pocket_guidance = p2d.get("pocket_guidance")
-        if pocket_guidance is not None:
-            pg_idx = torch.from_numpy(pocket_guidance["index"]).to(s_inputs.device)
-            pg_group = torch.from_numpy(pocket_guidance["group"]).to(s_inputs.device)
-            pg_upper = torch.from_numpy(pocket_guidance["upper"]).to(s_inputs.device)
-            if pg_idx.shape[0] != 2:
-                pg_idx = pg_idx.T
-            input_feature_dict["pocket_pair_index"] = pg_idx.long()
-            input_feature_dict["pocket_pair_group"] = pg_group.long()
-            input_feature_dict["pocket_pair_upper"] = pg_upper.float()
-            logger.info(
-                f"protenix2dock: pocket guidance active — {pg_idx.shape[1]} pairs "
-                f"over {int(pg_group.max().item()) + 1} pocket residue groups."
-            )
+        if p2d.get("ccd_bond_bands", {}).get("aro_dof") is not None:
+            input_feature_dict["aro_dof"] = torch.from_numpy(
+                p2d["ccd_bond_bands"]["aro_dof"]
+            ).to(s_inputs.device).long()
  
         if p2d.get("score_only") and p2d_coords is not None:
             # Score mode: skip diffusion entirely and evaluate the confidence
@@ -892,6 +896,30 @@ class Protenix(nn.Module):
                     .to(s_inputs.device)
                     if "ccd_bond_bands" in p2d else None
                 ),
+                ring_rows=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["ring_rows"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d
+                    and "ring_rows" in p2d["ccd_bond_bands"] else None
+                ),
+                ring_coords=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["ring_coords"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d
+                    and "ring_coords" in p2d["ccd_bond_bands"] else None
+                ),
+                ring_bb_rows=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["ring_bb_rows"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d
+                    and "ring_bb_rows" in p2d["ccd_bond_bands"] else None
+                ),
+                ring_bb_coords=(
+                    torch.from_numpy(p2d["ccd_bond_bands"]["ring_bb_coords"])
+                    .to(s_inputs.device)
+                    if "ccd_bond_bands" in p2d
+                    and "ring_bb_coords" in p2d["ccd_bond_bands"] else None
+                ),
                 clash_index=(
                     torch.from_numpy(p2d["clash_shell"]["index"])
                     .to(s_inputs.device)
@@ -923,23 +951,8 @@ class Protenix(nn.Module):
                     else None
                 ),
                 init_noise_scale=float(p2d.get("noise_scale", 0.0)),
-                # Pocket-biased noise seeding: with the guidance npz present
-                # the free chains' initial noise cloud starts centred on the
-                # user pocket (atom rows = unique second column of the
-                # guidance pairs). One-time init translation only — the pose
-                # and conformation remain fully model-generated; this is the
-                # training-free counterpart of boltz2's learned trunk pocket
-                # conditioning (protenix-v2's checkpoint has no pocket
-                # embedder weights, measured 0/4174 keys).
-                pocket_seed_rows=(
-                    torch.from_numpy(
-                        np.unique(p2d["pocket_guidance"]["index"][:, 1])
-                    ).to(s_inputs.device).long()
-                    if p2d_coords is not None and p2d.get("pocket_guidance") is not None
-                    else None
-                ),
                 # Free-chain covalent bonds as their OWN projection family:
-                # the generator projects them AFTER the pocket/clash bands
+                # the generator projects them AFTER the clash bands
                 # each step (official angle->bond ordering in
                 # tfg.potentials.PairwiseDistancePotential._project) so bond
                 # geometry wins the negotiation. Independent of the anchor

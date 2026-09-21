@@ -195,9 +195,6 @@ _REQUIRED_FEATURES: dict[str, set[str]] = {
     },
     "InterchainBondPotential": {"interchain_bond_index"},
     "PocketPotential": {
-        "pocket_pair_index",
-        "pocket_pair_group",
-        "pocket_pair_upper",
     },
     "VinaStericPotential": {
         "asym_id",
@@ -546,40 +543,53 @@ def parse_tfg_config(guidance_cfg: Mapping[str, Any] | None) -> TFGConfig:
     )
 
 
-def pocket_augmented_guidance(guidance_cfg):
-    """protenix2dock TFG augmentation: steric hardening always, pocket term
-    only when its features exist.
+def protenix2dock_guidance(guidance_cfg):
+    """protenix2dock TFG activation: steric hardening on the constraints
+    side channel. The stock config ships guidance ``enable: False``;
+    peptide/dock runs write the inter-chain VDW constraints npz, whose
+    presence activates a gentle VinaSteric mu-gradient (projected channel
+    EMPTY under energy-only -- the projected pairs are the aromatic-ring
+    boat mechanism, T1/T3 vs T2 control 2026-09-21).
 
-    Activation: ANY protenix2dock side channel (pocket npz OR the TFG
-    constraints npz that peptide mode always writes with the inter-chain
-    VDW shell). The stock config ships guidance ``enable: False`` — before
-    this gate covered the constraints npz too, BLIND peptide runs injected
-    118k clash-floor pairs into the input features that no potential ever
-    consumed (guidance off), and the eta=1.5 extrapolation alone jammed
-    every bound sample into the receptor (measured 2026-09-18: min
-    receptor-peptide heavy-atom distance 0.3-1.7 A in 7/8 samples of every
-    candidate, the 8th fully detached).
-    Modes:
-    - anchor (macrocyclic peptides): constant-weight solvent-side soft
-      box -- site localisation only, the denoiser owns the pose; the
-      boltz2 piecewise ramp below applies only to per-residue (ligand)
-      contact guidance.
-    mid-segment strength of boltz-2.2.1's contact guidance: on the
-    engine's normalized time axis (t=1 early/noisy, t=0 late/clean), a
-    linear ramp with start=0/end=1 gives weight 1.0 early (while the pose
-    is being chosen) decaying to 0.0 at the end (structure released for
-    refinement).
+    Env switches (checked in priority order):
+      PROTENIX_TFG_ENERGY_ONLY=1 -- keep only the soft steric mu-gradient,
+        zero projected steps, zero injected pairs (the blind default)
+      PROTENIX_DISABLE_TFG=1     -- force guidance.enable=False
     """
-    pocket_path = os.environ.get("PROTENIX_POCKET_GUIDANCE_PATH", "").strip()
-    has_pocket = bool(pocket_path) and os.path.exists(pocket_path)
     constraints_path = os.environ.get("PROTENIX_TFG_CONSTRAINTS_PATH", "").strip()
     has_constraints = bool(constraints_path) and os.path.exists(constraints_path)
-    if not has_pocket and not has_constraints:
+    if not has_constraints:
         return guidance_cfg
+    if os.environ.get("PROTENIX_TFG_ENERGY_ONLY", "").strip() in ("1", "true"):
+        if not isinstance(guidance_cfg, dict):
+            return guidance_cfg
+        out = dict(guidance_cfg)
+        out["enable"] = True
+        out["mu"] = max(float(out.get("mu") or 0.0), 0.3)
+        out["steps"] = dict(out.get("steps") or {})
+        out["steps"]["projection_outer"] = 0
+        out["steps"]["projection_inner"] = 0
+        out["terms"] = {
+            "VinaStericPotential": {
+                "interval": 1, "weight": 0.3, "buffer": 0.15}}
+        return out
+    if os.environ.get("PROTENIX_DISABLE_TFG", "").strip() in ("1", "true"):
+        # Force-disable, not just skip augmentation: run_protenix sets
+        # guidance.enable=true unless --no_guidance was passed, and the
+        # stock-true config carries the full physical-potential stack
+        # whose projected channel (the injected free-chain bond/angle
+        # pairs) buckles aromatic rings into boats (T1/T3 vs T2 control,
+        # 2026-09-21: ring planes 0.41-0.53 A with TFG, 0.000-0.007 A
+        # without).
+        if isinstance(guidance_cfg, dict):
+            out = dict(guidance_cfg)
+            out["enable"] = False
+            return out
+        return {"enable": False}
     if not isinstance(guidance_cfg, dict):
         logger.warning(
-            "protenix2dock: side channels present but guidance config is "
-            f"{type(guidance_cfg).__name__}; protenix2dock terms not activated"
+            "protenix2dock: constraints side channel present but guidance "
+            f"config is {type(guidance_cfg).__name__}; terms not activated"
         )
         return guidance_cfg
     augmented = dict(guidance_cfg)
@@ -591,27 +601,12 @@ def pocket_augmented_guidance(guidance_cfg):
     augmented["steps"]["projection_inner"] = max(
         int(augmented["steps"].get("projection_inner") or 0), 30)
     terms = dict(augmented.get("terms") or {})
-    # Steric repulsion must outmuscle the pocket pull: raise the weight
-    # and remove the buffer so the 2.6-3.4 A overlap band has gradient.
+    # Steric repulsion: moderate weight, no buffer so the overlap band
+    # carries gradient
     terms["VinaStericPotential"] = {
         "interval": 1,
         "weight": 0.6,
         "buffer": 0.0,
     }
-    single_group = os.environ.get(
-        "PROTENIX_POCKET_GROUPING", "").strip().lower() == "anchor"
-
-    if has_pocket:
-        terms["PocketPotential"] = {
-            "interval": 1,
-            **({"weight": 1.0} if single_group else
-               {"weight": {"type": "piecewise",
-                           "thresholds": [0.25, 0.75],
-                           "values": [0.0, 0.5, 1.0]}}),
-            "softmin_lambda": {"type": "exp_interpolation",
-                               "start": 8.0, "end": 0.0, "alpha": -2.0},
-            "enable_projection": False,
-        }
     augmented["terms"] = terms
     return augmented
-

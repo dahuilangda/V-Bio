@@ -540,6 +540,65 @@ class TFGEngine:
                 grad_x0 = torch.nan_to_num(
                     grad_x0, nan=0.0, posinf=_GRAD_LIMIT, neginf=-_GRAD_LIMIT
                 ).clamp(min=-_GRAD_LIMIT, max=_GRAD_LIMIT)
+                # Aromatic chi-subspace projection: re-express the
+                # gradient on each aromatic side chain (rows CA,CB,CG,
+                # side...) as a pure chi1/chi2 rotation -- the least-
+                # squares fit of the per-atom gradients onto the two
+                # torsion velocity fields. The steric push then TURNS the
+                # side chain out of the receptor instead of deforming the
+                # ring: per-atom gradients on ring atoms measured boat
+                # buckling and junction-angle damage at every weight
+                # tried (T5: w0.6 -> P N-CA-CB 146 deg; T6: w0.15 ->
+                # CB-CG-CD1 141 deg), while the untouched sampler keeps
+                # ring planes at 0.000-0.008 A.
+                dofs = input_feature_dict.get("aro_dof")
+                if dofs is not None and dofs.numel() > 0:
+                    with torch.autocast("cuda", enabled=False):
+                        lead = grad_x0.shape[:-2]
+                        n_atom = grad_x0.shape[-2]
+                        g32 = grad_x0.float().reshape(-1, n_atom, 3)
+                        x32 = x0_ref.float().reshape(-1, n_atom, 3)
+                        for gi in range(dofs.shape[0]):
+                            rows = dofs[gi]
+                            rows = rows[rows >= 0]
+                            if rows.numel() < 4:
+                                continue
+                            ca, cb, cg = rows[0], rows[1], rows[2]
+                            ring = rows[3:]
+                            u1 = x32[:, cb] - x32[:, ca]
+                            u1 = u1 / u1.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                            u2 = x32[:, cg] - x32[:, cb]
+                            u2 = u2 / u2.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                            # torsion velocity fields, EXPLICITLY expanded to
+                            # identical shapes (torch.cross broadcasting
+                            # [F,1,3]x[F,m,3] silently made [F,m,3] values
+                            # for the [F,3] CG slot -- measured crash)
+                            m = int(ring.numel())
+                            u1e = u1[:, None, :].expand(-1, m, 3)
+                            u2e = u2[:, None, :].expand(-1, m, 3)
+                            e1 = torch.linalg.cross(
+                                u1e, x32[:, ring] - x32[:, ca, None, :], dim=-1)
+                            e2 = torch.linalg.cross(
+                                u2e, x32[:, ring] - x32[:, cb, None, :], dim=-1)
+                            gr = g32[:, ring]
+                            a11 = (e1 * e1).sum(dim=(1, 2))
+                            a12 = (e1 * e2).sum(dim=(1, 2))
+                            a22 = (e2 * e2).sum(dim=(1, 2))
+                            b1 = (e1 * gr).sum(dim=(1, 2))
+                            b2 = (e2 * gr).sum(dim=(1, 2))
+                            det = a11 * a22 - a12 * a12
+                            det = torch.where(
+                                det.abs() < 1e-12, torch.ones_like(det), det)
+                            chi1 = ((a22 * b1 - a12 * b2) / det)[:, None, None]
+                            chi2 = ((a11 * b2 - a12 * b1) / det)[:, None, None]
+                            # CB lies on the chi1 axis (zero velocity);
+                            # CG lies on the chi2 axis (chi1 only)
+                            g32[:, cb] = 0.0
+                            g32[:, cg] = torch.linalg.cross(
+                                u1, x32[:, cg] - x32[:, ca], dim=-1) \
+                                * chi1[:, 0]
+                            g32[:, ring] = e1 * chi1 + e2 * chi2
+                        grad_x0 = g32.reshape(grad_x0.shape).to(grad_x0.dtype)
                 x0_ref = x0_ref + grad_x0 * float(self.cfg.mu)
 
             # one-shot forensic dump: the refined x0 vs the state that

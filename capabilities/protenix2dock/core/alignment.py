@@ -11,6 +11,7 @@ def align_init_coords(
     input_json_path: Path,
     chains: list[ProteinChainData],
     ligand_mol: Chem.Mol,
+    require_complete: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Align user coordinates onto Protenix's assembled atom order.
 
@@ -77,6 +78,13 @@ def align_init_coords(
         ligand_rows = np.array([], dtype=np.int64)
 
     n_missing = int((mask == 0).sum())
+    if require_complete and n_missing:
+        raise ValueError(
+            f"score mode requires every assembled atom to come from the "
+            f"input structure; {n_missing} atom(s) unmatched (coordinate "
+            "pass-through would fabricate or zero them). Strip hydrogens / "
+            "complete side chains in the input, or rescore a full-atom model."
+        )
     if n_missing:
         completed = _complete_missing_atoms(coords, mask, feat)
         if completed:
@@ -203,6 +211,7 @@ def align_complex_init_coords(
     input_json_path: Path,
     source_structure_path: Path,
     entity_chain_names: list[str],
+    require_complete: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Align the source complex's coordinates onto the assembled atom order.
 
@@ -265,6 +274,18 @@ def align_complex_init_coords(
         else:
             unmatched.append(f"{staged_chain}#{ordinal}({res_id[i]}){atom_names[i]}")
     if unmatched:
+        if require_complete:
+            # score mode: the output CIF must be the input structure,
+            # bit-exact. A CCD rebuild or a zeroed row would SHIFT residues
+            # in the shipped file (measured: user uploads with missing side
+            # atoms came back with fabricated/origin-collapsed atoms) —
+            # fail loudly instead.
+            raise ValueError(
+                f"score mode requires every assembled atom to come from "
+                f"the input complex; {len(unmatched)} unmatched (first: "
+                f"{', '.join(unmatched[:20])}). Complete the side chains "
+                "or fix the atom naming/numbering in the input file."
+            )
         # atoms absent from the source carry no coordinates; they are
         # rebuilt below from the CCD reference geometry where possible and
         # only the rest stay mask=0 (the sampler's designed unknown-atom
