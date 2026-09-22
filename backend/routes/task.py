@@ -10,8 +10,7 @@ from celery.result import AsyncResult
 from flask import jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 
-# A 200-compound screening ranking is a few hundred KB; 32 MB leaves orders of magnitude
-# of headroom while bounding decompression of a crafted archive member.
+# A 200-compound ranking is a few hundred KB; 32 MB bounds decompression of a crafted member.
 SCREENING_JSON_MAX_BYTES = 32 * 1024 * 1024
 
 
@@ -22,7 +21,6 @@ def register_task_routes(
     celery_app,
     task_monitor,
     predict_task,
-    config_module,
     logger,
     find_result_archive: Callable[[str], str | None],
     resolve_result_archive_path: Callable[[str], tuple[str, str]],
@@ -31,6 +29,7 @@ def register_task_routes(
     get_compact_prediction_metrics: Callable[[str], Dict[str, Any] | None],
     list_known_queues: Callable[[], list[str]],
     get_worker_capability_snapshot: Callable[[], Dict[str, Any]],
+    **extra,
 ) -> None:
     def _as_record(value: Any) -> Dict[str, Any]:
         return value if isinstance(value, dict) else {}
@@ -51,8 +50,7 @@ def register_task_routes(
         """Read results_summary.json / design_results.json from a result archive.
 
         Returns (design_summary, design_results); (None, None) when the archive
-        does not carry a completion summary (i.e. it is not evidence of a
-        finished task).
+        carries no completion summary.
         """
         try:
             directory = app.config['UPLOAD_FOLDER']
@@ -119,9 +117,8 @@ def register_task_routes(
     def _archive_completed_info(task_id: str, archive_name: str) -> Dict[str, Any]:
         """Build the completed-task info block from durable storage.
 
-        The result archive on disk is the source of truth for finished tasks;
-        this keeps /status (and the UI) fully independent of redis/celery
-        result-metadata retention.
+        The on-disk archive is the source of truth so /status stays independent
+        of redis/celery metadata retention.
         """
         info: Dict[str, Any] = {
             'status': 'Task completed successfully.',
@@ -148,8 +145,8 @@ def register_task_routes(
                 'progress_percent': 100,
                 'status_message': 'Task completed.',
             }
-            # Top-level confidences describe the featured (best-ranked) candidate
-            # so the UI list/detail never shows placeholder zeros for finished tasks.
+            # Top-level confidences describe the best-ranked candidate so the
+            # UI never shows placeholder zeros.
             for src_key, dst_key in (
                 ('iptm', 'iptm'),
                 ('pair_iptm', 'pair_iptm'),
@@ -174,11 +171,8 @@ def register_task_routes(
         return info
 
     def build_task_status_response(task_id: str) -> Dict[str, Any]:
-        # Completed results are served from durable storage: the result archive
-        # on disk is the source of truth for finished tasks, so /status never
-        # depends on redis/celery result-metadata retention. Celery is consulted
-        # only for tasks without a completion archive (queued / running / failed
-        # without artifacts).
+        # Finished tasks are served from the on-disk archive (source of truth);
+        # Celery is consulted only for tasks without one.
         archive_name = find_result_archive(task_id)
         if archive_name:
             design_summary, _ = _read_archive_result_payloads(archive_name)
@@ -474,8 +468,8 @@ def register_task_routes(
                     return jsonify({
                         'error': 'Result archive does not contain nesso/screening.json; only virtual-screening tasks produce a screening ranking.',
                     }), 404
-                # Cap the decompressed member size: archives are uploaded compressed, and a
-                # crafted member could otherwise decompress to gigabytes in memory.
+                # Cap decompressed member size: a crafted member could otherwise
+                # decompress to gigabytes in memory.
                 if archive.getinfo(member).file_size > SCREENING_JSON_MAX_BYTES:
                     logger.error(
                         'nesso/screening.json for task %s exceeds %d bytes.',
@@ -504,9 +498,8 @@ def register_task_routes(
     @app.route('/upload_result/<task_id>', methods=['POST'])
     @require_api_token
     def upload_result_from_worker(task_id):
-        # Authenticated (worker sends X-API-Token=BOLTZ_API_TOKEN): unauthenticated, any
-        # caller could POST '<task_id>_results.zip' and flip a QUEUED task to SUCCESS with
-        # forged metrics via the archive-presence inference.
+        # Worker-authenticated only: an unauthenticated caller could forge
+        # '<task_id>_results.zip' and flip a QUEUED task to SUCCESS.
         logger.info('Received file upload request from worker for task ID: %s', task_id)
 
         if 'file' not in request.files:
@@ -554,36 +547,6 @@ def register_task_routes(
                 pass
             logger.exception('An unexpected error occurred during file upload for task %s: %s', task_id, exc)
             return jsonify({'error': f'An unexpected error occurred: {exc}'}), 500
-
-    @app.route('/tasks', methods=['GET'])
-    @require_api_token
-    def list_tasks():
-        logger.debug('Received request to list all tasks.')
-        inspector = celery_app.control.inspect()
-
-        try:
-            active = inspector.active() or {}
-            reserved = inspector.reserved() or {}
-            scheduled = inspector.scheduled() or {}
-
-            all_tasks = {
-                'active': [task for worker_tasks in active.values() for task in worker_tasks],
-                'reserved': [task for worker_tasks in reserved.values() for task in worker_tasks],
-                'scheduled': [task for worker_tasks in scheduled.values() for task in worker_tasks],
-            }
-            logger.info(
-                'Successfully listed tasks. Active: %s, Reserved: %s, Scheduled: %s',
-                len(all_tasks['active']),
-                len(all_tasks['reserved']),
-                len(all_tasks['scheduled']),
-            )
-            return jsonify(all_tasks)
-        except Exception as exc:
-            logger.exception('Error inspecting Celery workers: %s. Ensure workers are running and reachable.', exc)
-            return jsonify({
-                'error': 'Could not inspect Celery workers. Ensure workers are running and reachable.',
-                'details': str(exc),
-            }), 500
 
     @app.route('/tasks/runtime_index', methods=['GET'])
     @require_api_token
@@ -691,70 +654,4 @@ def register_task_routes(
             logger.exception('Failed to terminate task %s: %s', task_id, exc)
             return jsonify({'error': 'Failed to terminate task runtime.', 'details': str(exc)}), 500
 
-    @app.route('/tasks/<task_id>/move', methods=['POST'])
-    @require_api_token
-    def move_task(task_id):
-        logger.info('Received request to move task ID: %s', task_id)
-        data = request.get_json()
-        if not data or 'target_queue' not in data:
-            logger.error("Invalid request to move task %s: missing 'target_queue'.", task_id)
-            return jsonify({'error': "Request body must be JSON and contain 'target_queue'."}), 400
-
-        target_queue = data['target_queue']
-        valid_queues = list_known_queues()
-        if target_queue not in valid_queues:
-            logger.error("Invalid target_queue '%s' for task %s. Allowed: %s", target_queue, task_id, valid_queues)
-            return jsonify({'error': f"Invalid 'target_queue'. Must be one of: {', '.join(valid_queues)}."}), 400
-
-        inspector = celery_app.control.inspect()
-        try:
-            active_queues_by_worker = inspector.active_queues() or {}
-            target_queue_online = False
-            for queue_rows in active_queues_by_worker.values():
-                if not isinstance(queue_rows, list):
-                    continue
-                for queue_row in queue_rows:
-                    queue_name = str((queue_row or {}).get('name') or '').strip()
-                    if queue_name == target_queue:
-                        target_queue_online = True
-                        break
-                if target_queue_online:
-                    break
-            if not target_queue_online:
-                logger.warning("Reject moving task %s: target queue '%s' has no online workers.", task_id, target_queue)
-                return jsonify({
-                    'error': f"Target queue '{target_queue}' has no online workers; refusing to move task.",
-                }), 409
-
-            reserved_tasks_by_worker = inspector.reserved() or {}
-            task_info = None
-            for _, tasks in reserved_tasks_by_worker.items():
-                for task in tasks:
-                    if task['id'] == task_id:
-                        task_info = task
-                        break
-                if task_info:
-                    break
-
-            if not task_info:
-                logger.warning('Task %s not found in reserved queue. It may be running, completed, or non-existent.', task_id)
-                return jsonify({'error': 'Task not found in reserved queue. It may be running, completed, or non-existent.'}), 404
-
-            celery_app.control.revoke(task_id, terminate=False, send_event=True)
-            logger.info('Revoked original task %s for moving.', task_id)
-
-            original_args = task_info.get('args', [])
-            original_kwargs = task_info.get('kwargs', {})
-            new_task = predict_task.apply_async(args=original_args, kwargs=original_kwargs, queue=target_queue)
-            logger.info('Task %s successfully moved to new task ID: %s in queue: %s.', task_id, new_task.id, target_queue)
-
-            return jsonify({
-                'status': 'moved',
-                'original_task_id': task_id,
-                'new_task_id': new_task.id,
-                'target_queue': target_queue,
-                'message': f'Task {task_id} was moved to a new task {new_task.id} in queue {target_queue}.',
-            }), 200
-        except Exception as exc:
-            logger.exception('Failed to move task %s: %s', task_id, exc)
-            return jsonify({'error': 'Failed to move task.', 'details': str(exc)}), 500
+    

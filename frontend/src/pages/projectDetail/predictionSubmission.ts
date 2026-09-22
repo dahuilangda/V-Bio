@@ -25,6 +25,8 @@ export interface PredictionDraftFields {
 }
 
 export interface PredictionSubmitDeps {
+  /** Logged-in user's email — the default notification recipient. */
+  notifyEmailFallback?: string;
   project: Project;
   draft: PredictionDraftFields;
   isPeptideDesignWorkflow?: boolean;
@@ -94,12 +96,9 @@ function resolveComponentIdByChainId(components: InputComponent[], chainId: stri
   return null;
 }
 
-// Reject constraints that reference a chain no longer present in the components. A stale
-// reference (e.g. a bond to a chain whose component was removed) is otherwise silently
-// mis-resolved by the runtime input builder and crashes the predictor — e.g. Protenix
-// "No atom found for N1 in entity 2 at position 1" when a dangling chain maps onto the wrong
-// residue. Surface it here instead of submitting invalid input. No fallback, no auto-fix:
-// the user must correct or remove the broken constraint.
+// Reject constraints referencing a chain not present in the components; a stale
+// reference is silently mis-resolved downstream and crashes the predictor. No
+// auto-fix: the user must correct or remove the broken constraint.
 function findInvalidConstraintChainReference(
   config: ProjectInputConfig,
   components: InputComponent[]
@@ -222,11 +221,10 @@ function buildPredictionSubmissionConfig(
   };
 }
 
-// Validate every manual backbone override that would ship to the backend. Mirrors the backend's
-// _residue_topology_from_backbone_override element+topology checks (run here via RDKit on the same
-// V2000 molblock) so a wrong assignment is blocked at submit with a precise message rather than
-// failing a GPU run. Path 1 (protein modifications) applies to every workflow — it is the shape of
-// the task that motivated this check; path 2 (peptide-design pool) is gated by the workflow flag.
+// Validate manual backbone overrides with the same element/topology checks the backend's
+// _residue_topology_from_backbone_override runs, so a wrong assignment fails at submit
+// with a precise message instead of wasting a GPU run. Covers protein modifications
+// (all workflows) and the peptide-design pool (workflow-gated).
 async function validateAllCustomResidueBackbones(
   components: InputComponent[],
   options: ProjectInputConfig['options'],
@@ -258,6 +256,7 @@ async function validateAllCustomResidueBackbones(
 
 export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps): Promise<void> {
   const {
+    notifyEmailFallback,
     project,
     draft,
     isPeptideDesignWorkflow = false,
@@ -300,408 +299,393 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     sortProjectTasks,
     saveProjectInputConfig
   } = deps;
-  // In-flight guard BEFORE any await: the async validations below (RDKit load on first
-  // submit) opened a double-submit window — a second click passed runControls' check and
-  // queued two backend tasks.
-  // In-flight guard BEFORE any await (the async validations below opened a double-submit
-  // window); the function's own finally resets it.
+  // in-flight guard before any await; try/finally releases it on every early return
   if (submitInFlightRef.current) return;
   submitInFlightRef.current = true;
+  try {
 
-  const effectiveBackend = isVirtualScreeningWorkflow ? 'nesso' : draft.backend;
-  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, effectiveBackend);
-  const submissionBaseConfigRaw = isPeptideDesignWorkflow
-    ? normalizeProjectInputConfig({ ...normalizedConfig, options: normalizedConfig.options })
-    : normalizedConfig;
-  const submissionBaseConfig = submissionBaseConfigRaw;
-  let submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
-  if (isVirtualScreeningWorkflow) {
-    const proteins = submissionConfig.components.filter((component) => component.type === 'protein');
-    const unsupported = submissionConfig.components.filter(
-      (component) => component.type !== 'protein' && component.type !== 'ligand'
-    );
-    if (unsupported.length > 0) {
-      setWorkspaceTab('components');
-      setError('Nesso-1 Virtual Screening supports protein and ligand components only; remove DNA/RNA components.');
-      return;
-    }
-    if (proteins.length === 0) {
-      setWorkspaceTab('components');
-      setError('Virtual Screening requires at least one target protein component.');
-      return;
-    }
-    if (proteins.some((component) => component.cyclic || (component.modifications || []).length > 0)) {
-      setWorkspaceTab('components');
-      setError('Nesso-1 does not support cyclic or modified protein components.');
-      return;
-    }
-    submissionConfig = {
-      ...submissionConfig,
-      components: submissionConfig.components.map((component) => component.type === 'protein'
-        ? { ...component, useMsa: false, cyclic: false, modifications: [] }
-        : component),
-      constraints: [],
-      properties: {
-        affinity: false,
-        target: null,
-        ligand: null,
-        binder: null
-      },
-      options: {
-        ...submissionConfig.options,
-        lowVram: false
-      }
-    };
-  }
-  const missingOrders = listIncompleteComponentOrders(submissionConfig.components);
-  if (missingOrders.length > 0) {
-    const maxShown = 3;
-    const shown = missingOrders
-      .slice(0, maxShown)
-      .map((order) => `#${order}`)
-      .join(', ');
-    const suffix = missingOrders.length > maxShown ? ` and ${missingOrders.length - maxShown} more` : '';
-    setWorkspaceTab('components');
-    setError(`Please complete all components before running. Missing input: ${shown}${suffix}.`);
-    return;
-  }
-
-  const activeComponents = submissionConfig.components;
-  if (isPeptideDesignWorkflow) {
-    // Serialize the pocket against what this submission actually carries: a
-    // target structure translates chain-prefixed picks; a sequence-only
-    // target carries plain sequence positions, and structure-frame
-    // definitions (chain-prefixed picks, explicit centers) have no meaning
-    // there.
-    const targetHasStructure = activeComponents.some(
-      (component) => component.type === 'protein'
-        && Boolean(proteinTemplates[component.id]?.content?.trim())
-    );
-    submissionConfig = {
-      ...submissionConfig,
-      options: pocketOptionsWithRestoredTemplate(
-        submissionConfig.options,
-        targetHasStructure
-      )
-    };
-  }
-  const validationError = validateComponents(activeComponents);
-  if (validationError) {
-    setError(validationError);
-    return;
-  }
-  if (isVirtualScreeningWorkflow) {
-    const screeningInput = String(submissionConfig.options.virtualScreeningInput || '');
-    const parsedScreening = parseVirtualScreeningInput(screeningInput);
-    if (parsedScreening.errors.length > 0) {
-      setWorkspaceTab('components');
-      setError(parsedScreening.errors.slice(0, 3).join(' '));
-      return;
-    }
-    if (parsedScreening.compounds.length === 0) {
-      setWorkspaceTab('components');
-      setError('Add at least one compound SMILES before running.');
-      return;
-    }
-    if (parsedScreening.compounds.length > 200) {
-      setWorkspaceTab('components');
-      setError('Virtual Screening accepts at most 200 compounds per batch.');
-      return;
-    }
-    const screeningValidation = await validateVirtualScreeningSmiles(parsedScreening.compounds);
-    if (screeningValidation.invalid.length > 0) {
-      setWorkspaceTab('components');
-      setError(screeningValidation.invalid.slice(0, 3).map((item) => item.message).join(' '));
-      return;
-    }
-    const contextLigands = submissionConfig.components
-      .map((component, index) => ({ component, index }))
-      .filter(({ component }) => component.type === 'ligand' && component.inputMethod !== 'ccd')
-      .map(({ component, index }) => ({
-        id: component.id || `context-ligand-${index + 1}`,
-        name: `Context ligand ${index + 1}`,
-        smiles: component.sequence,
-        sourceIndex: index + 1
-      }));
-    if (contextLigands.length > 0) {
-      const contextValidation = await validateVirtualScreeningSmiles(contextLigands);
-      if (contextValidation.invalid.length > 0) {
+    const effectiveBackend = isVirtualScreeningWorkflow ? 'nesso' : draft.backend;
+    const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, effectiveBackend);
+    const submissionBaseConfig = isPeptideDesignWorkflow
+      ? normalizeProjectInputConfig({ ...normalizedConfig, options: normalizedConfig.options })
+      : normalizedConfig;
+    let submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
+    if (isVirtualScreeningWorkflow) {
+      const proteins = submissionConfig.components.filter((component) => component.type === 'protein');
+      const unsupported = submissionConfig.components.filter(
+        (component) => component.type !== 'protein' && component.type !== 'ligand'
+      );
+      if (unsupported.length > 0) {
         setWorkspaceTab('components');
-        setError(`Invalid context ligand: ${contextValidation.invalid[0].message}`);
+        setError('Nesso-1 Virtual Screening supports protein and ligand components only; remove DNA/RNA components.');
         return;
       }
-    }
-  }
-
-  const constraintChainError = findInvalidConstraintChainReference(submissionConfig, activeComponents);
-  if (constraintChainError) {
-    setWorkspaceTab('constraints');
-    setError(constraintChainError);
-    return;
-  }
-
-  // Manual backbone overrides on custom residues must pass the same element/topology checks the
-  // backend enforces (custom_ccd_builder._residue_topology_from_backbone_override). Block at submit
-  // with a precise message instead of letting a wrong assignment waste a GPU run. Covers both the
-  // protein-modification path (every workflow) and the peptide-design pool path.
-  const backboneError = await validateAllCustomResidueBackbones(activeComponents, submissionConfig.options, isPeptideDesignWorkflow);
-  if (backboneError) {
-    setWorkspaceTab('components');
-    setError(backboneError);
-    return;
-  }
-
-  submitInFlightRef.current = true;
-  setSubmitting(true);
-  setError(null);
-  if (runRedirectTimerRef.current !== null) {
-    window.clearTimeout(runRedirectTimerRef.current);
-    runRedirectTimerRef.current = null;
-  }
-  setRunRedirectTaskId(null);
-  setRunSuccessNotice(null);
-  if (runSuccessNoticeTimerRef.current !== null) {
-    window.clearTimeout(runSuccessNoticeTimerRef.current);
-    runSuccessNoticeTimerRef.current = null;
-  }
-
-  try {
-    const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(submissionConfig);
-    const hasMsa = isVirtualScreeningWorkflow ? false : computeUseMsaFlag(activeComponents, draft.use_msa);
-    // Derive msa_mode from the first protein component's setting (or project default)
-    const firstProtein = activeComponents.find(c => c.type === 'protein');
-    const msaMode: 'none' | 'uniref' | 'env' = isVirtualScreeningWorkflow
-      ? 'none'
-      : (firstProtein?.msaMode ?? (hasMsa ? 'uniref' : 'none'));
-    const persistenceWarnings: string[] = [];
-    const peptideCustomCcdMolecules = isPeptideDesignWorkflow
-      ? selectedCustomResidueDefinitions(submissionConfig.options)
-      : [];
-    const persistedInputConfig = isVirtualScreeningWorkflow ? submissionConfig : submissionBaseConfig;
-    const taskProteinTemplates = isVirtualScreeningWorkflow ? {} : proteinTemplates;
-
-    saveProjectInputConfig(project.id, persistedInputConfig);
-    const nextDraft: PredictionDraftFields = {
-      taskName: draft.taskName.trim(),
-      taskSummary: normalizeTaskSummary(draft.taskSummary),
-      backend: effectiveBackend,
-      use_msa: hasMsa,
-      msa_mode: msaMode,
-      color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
-      inputConfig: persistedInputConfig
-    };
-    setDraft(nextDraft);
-    setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
-    setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
-    setSavedTemplateFingerprint(createProteinTemplatesFingerprint(taskProteinTemplates));
-    setRunMenuOpen(false);
-
-    try {
-      await patch({
-        backend: nextDraft.backend,
-        use_msa: nextDraft.use_msa,
-        msa_mode: nextDraft.msa_mode ?? 'uniref',
-        protein_sequence: proteinSequence,
-        ligand_smiles: ligandSmiles,
-        color_mode: nextDraft.color_mode,
-        status_text: 'Draft saved'
-      });
-    } catch (draftPersistError) {
-      persistenceWarnings.push(
-        `saving draft failed: ${draftPersistError instanceof Error ? draftPersistError.message : 'unknown error'}`
-      );
-    }
-
-    const submissionConfigWithTaskOptions: ProjectInputConfig = {
-      ...submissionConfig,
-      properties: mergeTaskInputOptionsIntoProperties(submissionConfig.properties, submissionConfig.options)
-    };
-    const snapshotComponents = addTemplatesToTaskSnapshotComponents(
-      submissionConfigWithTaskOptions.components,
-      taskProteinTemplates
-    );
-    const draftTaskRow = await persistDraftTaskSnapshot(submissionConfigWithTaskOptions, {
-      statusText: 'Draft snapshot prepared for run',
-      reuseTaskRowId: resolveEditableDraftTaskRowId(),
-      snapshotComponents
-    });
-    rememberTemplatesForTaskRow(draftTaskRow.id, taskProteinTemplates);
-
-    const activeAssignments = assignChainIdsForComponents(activeComponents);
-    const templateUploads: NonNullable<Parameters<typeof submitPrediction>[0]['templateUploads']> = [];
-    activeComponents.forEach((comp, index) => {
-      if (comp.type !== 'protein') return;
-      const template = taskProteinTemplates[comp.id];
-      if (!template) return;
-      const targetChainIds = activeAssignments[index] || [];
-      const suffix = template.format === 'pdb' ? '.pdb' : '.cif';
-      templateUploads.push({
-        fileName: `template_${comp.id}${suffix}`,
-        format: template.format,
-        content: template.content,
-        templateChainId: template.chainId,
-        targetChainIds
-      });
-    });
-
-    const taskId = await submitPrediction({
-      projectId: project.id,
-      projectName: project.name,
-      proteinSequence,
-      ligandSmiles,
-      workflow: isPeptideDesignWorkflow
-        ? 'peptide_design'
-        : isVirtualScreeningWorkflow
-          ? 'virtual_screening'
-          : 'prediction',
-      virtualScreeningInput: isVirtualScreeningWorkflow
-        ? submissionConfig.options.virtualScreeningInput
-        : undefined,
-      components: activeComponents,
-      constraints: submissionConfig.constraints,
-      properties: submissionConfig.properties,
-      peptideDesignOptions: isPeptideDesignWorkflow ? submissionConfig.options : undefined,
-      peptideDesignTargetChainId: isPeptideDesignWorkflow ? submissionConfig.properties.target : null,
-      peptideStructureUpload: isPeptideDesignWorkflow
-        ? (submissionConfig.options as { peptideStructureUpload?: Parameters<typeof submitPrediction>[0]['peptideStructureUpload'] }).peptideStructureUpload ?? null
-        : null,
-      seed: submissionConfig.options.seed,
-      backend: effectiveBackend,
-      useMsa: hasMsa,
-      templateUploads,
-      customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined,
-      lowVram: !isVirtualScreeningWorkflow && submissionConfig.options.lowVram === true
-    });
-
-    const queuedAt = new Date().toISOString();
-    const queuedTaskProperties: ProjectTask['properties'] = (() => {
-      if (!isPeptideDesignWorkflow) {
-        return mergeTaskInputOptionsIntoProperties(submissionConfig.properties, submissionConfig.options);
+      if (proteins.length === 0) {
+        setWorkspaceTab('components');
+        setError('Virtual Screening requires at least one target protein component.');
+        return;
       }
-      const preview = buildQueuedPeptidePreviewFromOptions(submissionConfig.options as unknown as Record<string, unknown>);
-      const propertiesWithTaskOptions = mergeTaskInputOptionsIntoProperties(
-        submissionConfig.properties,
-        submissionConfig.options
-      );
-      if (Object.keys(preview).length === 0) return propertiesWithTaskOptions;
-      return {
-        ...(propertiesWithTaskOptions as unknown as Record<string, unknown>),
-        [PEPTIDE_TASK_PREVIEW_KEY]: preview
-      } as unknown as ProjectTask['properties'];
-    })();
-    const queuedTaskPatch: Partial<ProjectTask> = {
-      name: nextDraft.taskName.trim(),
-      summary: nextDraft.taskSummary.trim(),
-      task_id: taskId,
-      task_state: 'QUEUED',
-      status_text: 'Task submitted and waiting in queue',
-      error_text: '',
-      backend: effectiveBackend,
-      seed: submissionConfig.options.seed ?? null,
-      protein_sequence: proteinSequence,
-      ligand_smiles: ligandSmiles,
-      components: snapshotComponents,
-      constraints: submissionConfig.constraints,
-      properties: queuedTaskProperties,
-      confidence: isPeptideDesignWorkflow
-        ? buildQueuedPeptideDesignConfidenceSnapshot(submissionConfig.options)
-        : {},
-      affinity: {},
-      structure_name: '',
-      submitted_at: queuedAt,
-      completed_at: null,
-      duration_seconds: null
-    };
-
-    try {
-      if (draftTaskRow.id.startsWith('local-')) {
-        await patchTask(draftTaskRow.id, queuedTaskPatch);
-      } else {
-        const queuedTaskRow = await updateProjectTask(draftTaskRow.id, queuedTaskPatch);
-        setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row))));
+      if (proteins.some((component) => component.cyclic || (component.modifications || []).length > 0)) {
+        setWorkspaceTab('components');
+        setError('Nesso-1 does not support cyclic or modified protein components.');
+        return;
       }
-    } catch (taskPersistError) {
-      // Unique task_id conflict: the gateway's submit snapshot already claimed this task_id
-      // (it inserts a backfill row right after the runtime accepts the task). One runtime
-      // task is exactly one row — adopt the existing row (it carries the user's name and
-      // full input now) and drop the local draft row, instead of failing a submit that the
-      // runtime already queued.
-      const conflictMessage = taskPersistError instanceof Error ? taskPersistError.message : String(taskPersistError);
-      const isUniqueConflict = /PostgREST 409|23505|duplicate key|unique_project_tasks_task_id/i.test(conflictMessage);
-      if (isUniqueConflict) {
-        const existingRow = await findProjectTaskByTaskId(taskId, project.id);
-        if (existingRow && existingRow.id !== draftTaskRow.id) {
-          const adoptedRow = await updateProjectTask(existingRow.id, queuedTaskPatch);
-          await deleteProjectTask(draftTaskRow.id).catch(() => { /* the draft row is redundant; deletion is best-effort */ });
-          setProjectTasks((prev) => sortProjectTasks([
-            adoptedRow,
-            ...prev.filter((row) => row.id !== adoptedRow.id && row.id !== draftTaskRow.id)
-          ]));
-        } else {
-          throw taskPersistError;
+      submissionConfig = {
+        ...submissionConfig,
+        components: submissionConfig.components.map((component) => component.type === 'protein'
+          ? { ...component, useMsa: false, cyclic: false, modifications: [] }
+          : component),
+        constraints: [],
+        properties: {
+          affinity: false,
+          target: null,
+          ligand: null,
+          binder: null
+        },
+        options: {
+          ...submissionConfig.options,
+          lowVram: false
         }
-      } else {
-        // The backend task was queued but the local DB row couldn't be persisted — terminate the
-        // orphaned backend task so it doesn't waste GPU compute. Fire-and-forget: the primary error
-        // is the persist failure, which the caller must handle; the termination is best-effort cleanup.
-        terminateTask(taskId).catch(() => { /* ignore termination errors */ });
-        throw new Error(
-          `Task submitted (${taskId}) but failed to persist queued task row: ${
-            taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
-          }`
-        );
+      };
+    }
+    const missingOrders = listIncompleteComponentOrders(submissionConfig.components);
+    if (missingOrders.length > 0) {
+      const maxShown = 3;
+      const shown = missingOrders
+        .slice(0, maxShown)
+        .map((order) => `#${order}`)
+        .join(', ');
+      const suffix = missingOrders.length > maxShown ? ` and ${missingOrders.length - maxShown} more` : '';
+      setWorkspaceTab('components');
+      setError(`Please complete all components before running. Missing input: ${shown}${suffix}.`);
+      return;
+    }
+
+    const activeComponents = submissionConfig.components;
+    if (isPeptideDesignWorkflow) {
+      // serialize the pocket against the actual target: a structure carries
+      // chain-prefixed picks, a sequence-only target plain positions
+      const targetHasStructure = activeComponents.some(
+        (component) => component.type === 'protein'
+          && Boolean(proteinTemplates[component.id]?.content?.trim())
+      );
+      submissionConfig = {
+        ...submissionConfig,
+        options: pocketOptionsWithRestoredTemplate(
+          submissionConfig.options,
+          targetHasStructure
+        )
+      };
+    }
+    const validationError = validateComponents(activeComponents);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    if (isVirtualScreeningWorkflow) {
+      const screeningInput = String(submissionConfig.options.virtualScreeningInput || '');
+      const parsedScreening = parseVirtualScreeningInput(screeningInput);
+      if (parsedScreening.errors.length > 0) {
+        setWorkspaceTab('components');
+        setError(parsedScreening.errors.slice(0, 3).join(' '));
+        return;
+      }
+      if (parsedScreening.compounds.length === 0) {
+        setWorkspaceTab('components');
+        setError('Add at least one compound SMILES before running.');
+        return;
+      }
+      if (parsedScreening.compounds.length > 200) {
+        setWorkspaceTab('components');
+        setError('Virtual Screening accepts at most 200 compounds per batch.');
+        return;
+      }
+      const screeningValidation = await validateVirtualScreeningSmiles(parsedScreening.compounds);
+      if (screeningValidation.invalid.length > 0) {
+        setWorkspaceTab('components');
+        setError(screeningValidation.invalid.slice(0, 3).map((item) => item.message).join(' '));
+        return;
+      }
+      const contextLigands = submissionConfig.components
+        .map((component, index) => ({ component, index }))
+        .filter(({ component }) => component.type === 'ligand' && component.inputMethod !== 'ccd')
+        .map(({ component, index }) => ({
+          id: component.id || `context-ligand-${index + 1}`,
+          name: `Context ligand ${index + 1}`,
+          smiles: component.sequence,
+          sourceIndex: index + 1
+        }));
+      if (contextLigands.length > 0) {
+        const contextValidation = await validateVirtualScreeningSmiles(contextLigands);
+        if (contextValidation.invalid.length > 0) {
+          setWorkspaceTab('components');
+          setError(`Invalid context ligand: ${contextValidation.invalid[0].message}`);
+          return;
+        }
       }
     }
 
-    const dbPayload: Partial<Project> = {
-      task_id: taskId,
-      task_state: 'QUEUED',
-      status_text: 'Task submitted and waiting in queue',
-      error_text: '',
-      submitted_at: queuedAt,
-      completed_at: null,
-      duration_seconds: null
-    };
+    const constraintChainError = findInvalidConstraintChainReference(submissionConfig, activeComponents);
+    if (constraintChainError) {
+      setWorkspaceTab('constraints');
+      setError(constraintChainError);
+      return;
+    }
 
-    try {
-      await patch(dbPayload);
-    } catch (dbError) {
-      setProject((prev) =>
-        prev
-          ? {
-              ...prev,
-              ...dbPayload
-            }
-          : prev
-      );
-      persistenceWarnings.push(`saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`);
+    // block wrong backbone assignments at submit instead of wasting a GPU run
+    const backboneError = await validateAllCustomResidueBackbones(activeComponents, submissionConfig.options, isPeptideDesignWorkflow);
+    if (backboneError) {
+      setWorkspaceTab('components');
+      setError(backboneError);
+      return;
     }
-    setStatusInfo(null);
-    // Stay on the current page after submit — no route change, no remount, no flash.
-    // The runtime polling effect will reflect the new task's QUEUED/RUNNING state in place.
-    // syncWorkspaceTaskRow updates the task row in the workspace without navigating away.
-    setRunRedirectTaskId(null);
-    syncWorkspaceTaskRow(draftTaskRow.id);
-    if (persistenceWarnings.length > 0) {
-      showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);
-    } else {
-      showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued.`);
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to submit prediction.';
+
+    setSubmitting(true);
+    setError(null);
     if (runRedirectTimerRef.current !== null) {
       window.clearTimeout(runRedirectTimerRef.current);
       runRedirectTimerRef.current = null;
     }
     setRunRedirectTaskId(null);
-    setError(message);
-    // Re-throw so the Copilot execution chain can detect the failure and record it.
-    // Without this, the submit Promise resolves as success even when the backend rejected it,
-    // and the Copilot writes an "applied" receipt for a task that was never submitted.
-    throw err;
+    setRunSuccessNotice(null);
+    if (runSuccessNoticeTimerRef.current !== null) {
+      window.clearTimeout(runSuccessNoticeTimerRef.current);
+      runSuccessNoticeTimerRef.current = null;
+    }
+
+    try {
+      const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(submissionConfig);
+      const hasMsa = isVirtualScreeningWorkflow ? false : computeUseMsaFlag(activeComponents, draft.use_msa);
+      // Derive msa_mode from the first protein component's setting (or project default)
+      const firstProtein = activeComponents.find(c => c.type === 'protein');
+      const msaMode: 'none' | 'uniref' | 'env' = isVirtualScreeningWorkflow
+        ? 'none'
+        : (firstProtein?.msaMode ?? (hasMsa ? 'uniref' : 'none'));
+      const persistenceWarnings: string[] = [];
+      const peptideCustomCcdMolecules = isPeptideDesignWorkflow
+        ? selectedCustomResidueDefinitions(submissionConfig.options)
+        : [];
+      const persistedInputConfig = isVirtualScreeningWorkflow ? submissionConfig : submissionBaseConfig;
+      const taskProteinTemplates = isVirtualScreeningWorkflow ? {} : proteinTemplates;
+
+      saveProjectInputConfig(project.id, persistedInputConfig);
+      const nextDraft: PredictionDraftFields = {
+        taskName: draft.taskName.trim(),
+        taskSummary: normalizeTaskSummary(draft.taskSummary),
+        backend: effectiveBackend,
+        use_msa: hasMsa,
+        msa_mode: msaMode,
+        color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
+        inputConfig: persistedInputConfig
+      };
+      setDraft(nextDraft);
+      setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+      setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
+      setSavedTemplateFingerprint(createProteinTemplatesFingerprint(taskProteinTemplates));
+      setRunMenuOpen(false);
+
+      try {
+        await patch({
+          backend: nextDraft.backend,
+          use_msa: nextDraft.use_msa,
+          msa_mode: nextDraft.msa_mode ?? 'uniref',
+          protein_sequence: proteinSequence,
+          ligand_smiles: ligandSmiles,
+          color_mode: nextDraft.color_mode,
+          status_text: 'Draft saved'
+        });
+      } catch (draftPersistError) {
+        persistenceWarnings.push(
+          `saving draft failed: ${draftPersistError instanceof Error ? draftPersistError.message : 'unknown error'}`
+        );
+      }
+
+      const submissionConfigWithTaskOptions: ProjectInputConfig = {
+        ...submissionConfig,
+        properties: mergeTaskInputOptionsIntoProperties(submissionConfig.properties, submissionConfig.options)
+      };
+      const snapshotComponents = addTemplatesToTaskSnapshotComponents(
+        submissionConfigWithTaskOptions.components,
+        taskProteinTemplates
+      );
+      const draftTaskRow = await persistDraftTaskSnapshot(submissionConfigWithTaskOptions, {
+        statusText: 'Draft snapshot prepared for run',
+        reuseTaskRowId: resolveEditableDraftTaskRowId(),
+        snapshotComponents
+      });
+      rememberTemplatesForTaskRow(draftTaskRow.id, taskProteinTemplates);
+
+      const activeAssignments = assignChainIdsForComponents(activeComponents);
+      const templateUploads: NonNullable<Parameters<typeof submitPrediction>[0]['templateUploads']> = [];
+      activeComponents.forEach((comp, index) => {
+        if (comp.type !== 'protein') return;
+        const template = taskProteinTemplates[comp.id];
+        if (!template) return;
+        const targetChainIds = activeAssignments[index] || [];
+        const suffix = template.format === 'pdb' ? '.pdb' : '.cif';
+        templateUploads.push({
+          fileName: `template_${comp.id}${suffix}`,
+          format: template.format,
+          content: template.content,
+          templateChainId: template.chainId,
+          targetChainIds
+        });
+      });
+
+      const taskId = await submitPrediction({
+        projectId: project.id,
+        projectName: project.name,
+        proteinSequence,
+        ligandSmiles,
+        workflow: isPeptideDesignWorkflow
+          ? 'peptide_design'
+          : isVirtualScreeningWorkflow
+            ? 'virtual_screening'
+            : 'prediction',
+        virtualScreeningInput: isVirtualScreeningWorkflow
+          ? submissionConfig.options.virtualScreeningInput
+          : undefined,
+        components: activeComponents,
+        constraints: submissionConfig.constraints,
+        properties: submissionConfig.properties,
+        peptideDesignOptions: isPeptideDesignWorkflow ? submissionConfig.options : undefined,
+        peptideDesignTargetChainId: isPeptideDesignWorkflow ? submissionConfig.properties.target : null,
+        peptideStructureUpload: isPeptideDesignWorkflow
+          ? (submissionConfig.options as { peptideStructureUpload?: Parameters<typeof submitPrediction>[0]['peptideStructureUpload'] }).peptideStructureUpload ?? null
+          : null,
+        seed: submissionConfig.options.seed,
+        msaMode,
+        notifyEmail: submissionConfig.options.notifyEmail || notifyEmailFallback || undefined,
+        backend: effectiveBackend,
+        useMsa: hasMsa,
+        templateUploads,
+        customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined,
+        lowVram: !isVirtualScreeningWorkflow && submissionConfig.options.lowVram === true
+      });
+
+      const queuedAt = new Date().toISOString();
+      const queuedTaskProperties: ProjectTask['properties'] = (() => {
+        if (!isPeptideDesignWorkflow) {
+          return mergeTaskInputOptionsIntoProperties(submissionConfig.properties, submissionConfig.options);
+        }
+        const preview = buildQueuedPeptidePreviewFromOptions(submissionConfig.options as unknown as Record<string, unknown>);
+        const propertiesWithTaskOptions = mergeTaskInputOptionsIntoProperties(
+          submissionConfig.properties,
+          submissionConfig.options
+        );
+        if (Object.keys(preview).length === 0) return propertiesWithTaskOptions;
+        return {
+          ...(propertiesWithTaskOptions as unknown as Record<string, unknown>),
+          [PEPTIDE_TASK_PREVIEW_KEY]: preview
+        } as unknown as ProjectTask['properties'];
+      })();
+      const queuedTaskPatch: Partial<ProjectTask> = {
+        name: nextDraft.taskName.trim(),
+        summary: nextDraft.taskSummary.trim(),
+        task_id: taskId,
+        task_state: 'QUEUED',
+        status_text: 'Task submitted and waiting in queue',
+        error_text: '',
+        backend: effectiveBackend,
+        seed: submissionConfig.options.seed ?? null,
+        protein_sequence: proteinSequence,
+        ligand_smiles: ligandSmiles,
+        components: snapshotComponents,
+        constraints: submissionConfig.constraints,
+        properties: queuedTaskProperties,
+        confidence: isPeptideDesignWorkflow
+          ? buildQueuedPeptideDesignConfidenceSnapshot(submissionConfig.options)
+          : {},
+        affinity: {},
+        structure_name: '',
+        submitted_at: queuedAt,
+        completed_at: null,
+        duration_seconds: null
+      };
+
+      try {
+        if (draftTaskRow.id.startsWith('local-')) {
+          await patchTask(draftTaskRow.id, queuedTaskPatch);
+        } else {
+          const queuedTaskRow = await updateProjectTask(draftTaskRow.id, queuedTaskPatch);
+          setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row))));
+        }
+      } catch (taskPersistError) {
+        // task_id conflict: the gateway's backfill row already claimed it — adopt
+        // that row and drop the local draft instead of failing the queued submit
+        const conflictMessage = taskPersistError instanceof Error ? taskPersistError.message : String(taskPersistError);
+        const isUniqueConflict = /PostgREST 409|23505|duplicate key|unique_project_tasks_task_id/i.test(conflictMessage);
+        if (isUniqueConflict) {
+          const existingRow = await findProjectTaskByTaskId(taskId, project.id);
+          if (existingRow && existingRow.id !== draftTaskRow.id) {
+            const adoptedRow = await updateProjectTask(existingRow.id, queuedTaskPatch);
+            await deleteProjectTask(draftTaskRow.id).catch(() => { /* the draft row is redundant; deletion is best-effort */ });
+            setProjectTasks((prev) => sortProjectTasks([
+              adoptedRow,
+              ...prev.filter((row) => row.id !== adoptedRow.id && row.id !== draftTaskRow.id)
+            ]));
+          } else {
+            throw taskPersistError;
+          }
+        } else {
+          // queued but unpersistable: terminate the orphaned backend task
+          // (best-effort) and surface the persist error
+          terminateTask(taskId).catch(() => { /* ignore termination errors */ });
+          throw new Error(
+            `Task submitted (${taskId}) but failed to persist queued task row: ${
+              taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
+            }`
+          );
+        }
+      }
+
+      const dbPayload: Partial<Project> = {
+        task_id: taskId,
+        task_state: 'QUEUED',
+        status_text: 'Task submitted and waiting in queue',
+        error_text: '',
+        submitted_at: queuedAt,
+        completed_at: null,
+        duration_seconds: null
+      };
+
+      try {
+        await patch(dbPayload);
+      } catch (dbError) {
+        setProject((prev) =>
+          prev
+            ? {
+                ...prev,
+                ...dbPayload
+              }
+            : prev
+        );
+        persistenceWarnings.push(`saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`);
+      }
+      setStatusInfo(null);
+      // stay on the page; polling reflects the new task's state in place
+      setRunRedirectTaskId(null);
+      syncWorkspaceTaskRow(draftTaskRow.id);
+      if (persistenceWarnings.length > 0) {
+        showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);
+      } else {
+        showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued.`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to submit prediction.';
+      if (runRedirectTimerRef.current !== null) {
+        window.clearTimeout(runRedirectTimerRef.current);
+        runRedirectTimerRef.current = null;
+      }
+      setRunRedirectTaskId(null);
+      setError(message);
+      // re-throw so Copilot records the failure instead of a false "applied" receipt
+      throw err;
+    } finally {
+      setSubmitting(false);
+    }
   } finally {
     submitInFlightRef.current = false;
-    setSubmitting(false);
   }
 }
 

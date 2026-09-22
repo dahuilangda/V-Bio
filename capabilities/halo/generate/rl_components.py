@@ -16,7 +16,7 @@ import random
 from collections import deque
 
 import numpy as np
-from rdkit import Chem, DataStructs
+from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit.Chem.Scaffolds import MurckoScaffold
 

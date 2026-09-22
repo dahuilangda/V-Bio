@@ -1,13 +1,8 @@
-"""GRPO for the peptide agent (HALO GRPOUpdater, residue-token adaptation).
-
-Advantages normalized within groups sharing a proposal context (edit parent /
-length bucket for de novo) and reward source; frozen old log-probs per update
-keep the PPO clip a real trust region; quadratic KL to the Tier-1 prior guards
-against surrogate/oracle reward hacking; truncated importance sampling keeps
-rare-but-good completions (novel NCAAs!) from losing their gradient.
-Conditioned trajectories carry a prompt length so prompt tokens are masked out
-of the policy-gradient — RL then improves the edit operator itself.
-"""
+"""GRPO for the peptide agent: group-relative advantages (grouped by
+proposal context and reward source), PPO clip over frozen old log-probs,
+quadratic KL to the Tier-1 prior, truncated importance sampling.
+Conditioned trajectories carry a prompt length so prompt tokens are
+masked out of the policy gradient."""
 
 from __future__ import annotations
 
@@ -25,11 +20,8 @@ class GRPOUpdater:
                  ent_coef: float = 0.003, tis_cap: float = 2.0,
                  max_len: int = 96,
                  kl_target: float | None = 0.01):
-        # kl_target enables the OpenRLHF AdaptiveKLController pattern: beta
-        # tracks the measured KL-to-prior with a deadband, guarding both
-        # failure modes of a fixed beta — prior collapse (beta too weak for
-        # a reward-hacking oracle) and frozen policy (beta too strong early
-        # in the loop). None keeps the legacy fixed beta.
+        # kl_target: adaptive beta tracks measured KL-to-prior with a
+        # deadband; None keeps a fixed beta
         self.agent = agent
         self.prior = prior
         self.vocab = vocab
@@ -40,10 +32,29 @@ class GRPOUpdater:
         self.tis_cap = tis_cap
         self.max_len = max_len
         self.kl_target = kl_target
+        self.kl_beta0 = self.kl_beta  # adaptive-controller floor/ceiling anchor
         self.opt = torch.optim.Adam(agent.parameters(), lr=lr)
         self.prior.eval()
 
     def _group_advantage(self, keys, rewards, sources):
+        """Tuple rewards get a group-relative advantage per dimension,
+        then averaged."""
+        if rewards and isinstance(rewards[0], (tuple, list)):
+            n_dims = len(rewards[0])
+            all_advantages = []
+            for dim in range(n_dims):
+                dim_rewards = [float(r[dim]) for r in rewards]
+                dim_advantages = self._single_dim_advantage(keys, dim_rewards, sources)
+                all_advantages.append(dim_advantages)
+            n = len(rewards)
+            return [
+                sum(all_advantages[d][i] for d in range(n_dims)) / n_dims
+                for i in range(n)
+            ]
+        else:
+            return self._single_dim_advantage(keys, rewards, sources)
+
+    def _single_dim_advantage(self, keys, rewards, sources):
         groups: dict[tuple, list[int]] = {}
         for i, (k, src) in enumerate(zip(keys, sources)):
             groups.setdefault((k, src), []).append(i)
@@ -62,8 +73,10 @@ class GRPOUpdater:
 
     def update(self, samples, epochs: int = 2, batch_size: int = 64,
                log=None) -> dict:
-        """samples: (tokens, reward, group_key, source, prompt_len).
-        tokens is the full token list (dev tag + structure + residues)."""
+        """samples: (tokens, reward, group_key, source, prompt_len[, ss]).
+        tokens includes the conditioning prefix; ss is an optional SS-track
+        id list aligned to the token stream (rows without one train on the
+        plain token stream)."""
         norm = []
         for s in samples:
             if not isinstance(s, (tuple, list)) or len(s) < 2:
@@ -103,15 +116,15 @@ class GRPOUpdater:
         for r_i, plen in enumerate(plens):
             if plen > 0:
                 tok_mask[r_i, :plen] = 0.0
-        # additive ss track (v8): per-row id lists align to the encoded
-        # tokens; rows without a track train on the plain token stream
+        # ss ids align to the encoded token stream; enc = [bos] + tokens +
+        # [eos] reserves column 0 for the bos slot, so ids start at column 1
         ss_all = None
         if any(ss for ss in sss):
             ss_all = torch.zeros_like(x_all)
             for r_i, (e, ss) in enumerate(zip(enc, sss)):
                 if ss:
-                    n = min(len(ss), len(e))
-                    ss_all[r_i, :n] = torch.tensor(ss[:n], dtype=torch.long)
+                    n = min(len(ss), len(e) - 1)
+                    ss_all[r_i, 1:n + 1] = torch.tensor(ss[:n], dtype=torch.long)
 
         self.agent.eval()
         with torch.no_grad():
@@ -134,10 +147,14 @@ class GRPOUpdater:
                 o_lp, r_lp = old_lp[sel], ref_lp[sel]
                 ss = ss_all[sel] if ss_all is not None else None
                 if ss is not None:
-                    logits = self.agent.gpt(inputs_embeds=self.agent._embed(
-                        x[:, :-1], ss[:, :-1])).logits
+                    # left-shift: position i predicts token i+1
+                    logits = self.agent.gpt(
+                        inputs_embeds=self.agent._embed(x[:, :-1], ss[:, 1:]),
+                        attention_mask=(~x.eq(self.agent.pad)).long()[:, :-1]).logits
                 else:
-                    logits = self.agent.gpt(x[:, :-1]).logits
+                    logits = self.agent.gpt(
+                        x[:, :-1],
+                        attention_mask=(~x.eq(self.agent.pad)).long()[:, :-1]).logits
                 lp = F.log_softmax(logits.float(), dim=-1)
                 tgt = x[:, 1:]
                 new_lp = lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
@@ -155,14 +172,14 @@ class GRPOUpdater:
                 ent = -(lp.exp() * lp).sum(-1)
                 ent_b = (ent * m).sum() / denom
                 loss = pg_loss + self.kl_beta * kl - self.ent_coef * ent_b
-                # adaptive KL: deadband ±2x around target, beta bounded
-                # [beta/10, beta*10]; measured on the pre-update KL estimate
+                # adaptive KL: deadband ±2x around target; beta bounded to
+                # [beta0/10, beta0*10] (beta0 = constructor value)
                 if self.kl_target is not None:
                     kl_hat = float(kl.detach())
                     if kl_hat > 2.0 * self.kl_target:
-                        self.kl_beta = min(10.0 * 0.02, self.kl_beta * 1.5)
+                        self.kl_beta = min(self.kl_beta0 * 10.0, self.kl_beta * 1.5)
                     elif kl_hat < 0.5 * self.kl_target:
-                        self.kl_beta = max(0.002, self.kl_beta / 1.5)
+                        self.kl_beta = max(self.kl_beta0 / 10.0, self.kl_beta / 1.5)
                 self.opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.agent.parameters(), 1.0)

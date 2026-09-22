@@ -2,7 +2,7 @@ import { limitTaskSummary, TASK_SUMMARY_MAX_LENGTH } from '../../utils/taskMetad
 import { Field } from '../common/Field';
 
 interface ProjectBasicsMetadataFormProps {
-  canEdit: boolean;
+  isEditable: boolean;
   taskName: string;
   taskSummary: string;
   onTaskNameChange: (value: string) => void;
@@ -10,7 +10,7 @@ interface ProjectBasicsMetadataFormProps {
 }
 
 export function ProjectBasicsMetadataForm({
-  canEdit,
+  isEditable,
   taskName,
   taskSummary,
   onTaskNameChange,
@@ -21,7 +21,7 @@ export function ProjectBasicsMetadataForm({
   return (
     <section className="panel subtle basics-panel">
       <Field label="Task Name (optional)">
-        <input value={taskName} onChange={(e) => onTaskNameChange(e.target.value)} disabled={!canEdit} />
+        <input value={taskName} onChange={(e) => onTaskNameChange(e.target.value)} disabled={!isEditable} />
       </Field>
 
       <label className="field">
@@ -34,7 +34,7 @@ export function ProjectBasicsMetadataForm({
           rows={3}
           maxLength={TASK_SUMMARY_MAX_LENGTH}
           onChange={(e) => onTaskSummaryChange(limitTaskSummary(e.target.value))}
-          disabled={!canEdit}
+          disabled={!isEditable}
         />
       </label>
     </section>

@@ -9,7 +9,7 @@ Boltz-2/Protenix oracle → GRPO 策略学习 → surrogate 主动学习门控�
 ## 架构
 
 **Tier 1 — 现代主干先验**（`peplm/models/llama_prior.py`，`--arch modern`）
-- Llama 式解码器：RoPE / SwiGLU / RMSNorm（不再是 2018 年的 GPT-2）
+- Llama 式解码器：RoPE / SwiGLU / RMSNorm
 - 辅助性质回归头（溶解度/可合成性/liability，multi-task LM 预训练）
 - 三性质条件标签 + 长度桶 token（IgLM/ProGen 式控制标签）
 - 50% FIM(PSM) 训练（span infilling 从预训练开始——PepMLM/ProtFIM 配方）
@@ -75,11 +75,36 @@ python scripts/summarize_bench.py /data/vbio_runs/peptide_lm/bench*/report.json
 
 ## 生产接入（默认引擎）
 
-backend 肽设计路径**只**使用 PeptideLM（`peplm/integrate/backend_proposer.py`）：
-先验采样 + FIM 编辑 + NCAA 点移动，每代 GRPO 在线学习，支持用户残基池/
-固定残基/自适应长度；失败即上报（无回退无兜底）；打分/调度/进度上报复用
-现有管线。详见 [docs/BACKEND_INTEGRATION.md](docs/BACKEND_INTEGRATION.md)
-与 [REPORT.md](REPORT.md)。
+backend 肽设计路径**只**使用 PeptideLM（`peplm/integrate/backend_proposer.py`）。
+提供受体序列时，生产管线由 **PepMLM-650M**（ChatterjeeLab, Nat Biotech 2025，
+`models/external/pepmlm650/`）承担。研究管线（`peplm/models/esm3_policy.py`）
+提供 ESM3-open-1.4B + LoRA + GRPO 在线强化学习路径（`peplm/loop/esm3_loop.py`，
+驱动 `scripts/run_esm3_loop.py`）：d2 逐步 PPO 比率、Dr.GRPO 优势、k3 KL 锚定
+adapter-disabled 基座。奖励为轮内相对 z-score（冷启动策略的全部候选都过不了任何
+绝对门——常数奖励使组优势恒零，实测确认），训练信号用稠密界面 PAE，ipSAE 作
+验收指标；逐残基 pLDDT+界面 PAE 构成 credit 向量，驱动父代弱位重掩码与 GRPO
+逐 token 优势权重。父代兄弟 refill 组成独立 GRPO 组（≥2 成员）。oracle 为
+protenix2dock 肽模式盲对接（溶剂侧锚盒定位 + 2.6Å 深埋护栏 + 主链立体守卫：
+全残基 CA 手性/omega 平面性/芳香环平面性），样本选择按真实结合肽包络
+（3LNJ 晶体 D 肽：最小间距 2.52Å、CA-CA 3.73、接触分数 0.81）分档：
+立体化学纯净 → 骨架完好 → 无深埋 → 界面 PAE。提案格式为受体+全掩码肽连续拼接
+（ESM3 开放权重单链预训练，无 chainbreak）。
+
+- **de novo**：掩码填充采样（探索），NCAA 在合法位随机插入；
+- **natural refine**：mask 精英中 oracle 逐残基 pLDDT 最弱的残基再补全
+  （定向修复），精英的 NCAA 位点原样保留——模型围绕非天然残基重优化
+  天然上下文；
+- **NCAA evolve**：迁移/换型一个精英 NCAA（利用）——迁移优先落到 oracle
+  低置信位（柔性点正是构象约束单体发挥作用的位点），换型在用户池内
+  遵守放置规则。
+
+解码严格尊重前端残基池选择（屏蔽的氨基酸不出现），环肽/直链模式自动
+屏蔽游离 Cys；排名用天然 base 序列的 pseudo-PPL（模型词表仅天然氨基酸，
+对 NCAA 移动不敏感——因此各流用保留配额而非纯 PPL 竞争）。无受体时走
+Tier-1 属性先验（性质标签 + SS 条件化 + FIM 编辑 + NCAA 点移动，每代
+GRPO 在线学习）。两条路径失败即上报（无回退无兜底）；打分/调度/进度
+上报复用现有管线。详见
+[docs/BACKEND_INTEGRATION.md](docs/BACKEND_INTEGRATION.md)。
 
 ## 与现有系统的关系
 

@@ -1,10 +1,8 @@
-"""Score-mode validation of a D-target + L-peptide complex (validated T1/E6).
+"""Score-mode validation of a D-target + L-peptide complex.
 
 Score mode never runs diffusion: coordinates pass through the Boltz2
-confidence head unchanged (measured 0.000 A identity; ipTM 0.89-0.95 on
-transferred/native poses). This is the ONLY validated way to certify a pose —
-diffusion refinement actively destroys correct poses (E1: a perfect 0.00 A
-initial drifted to 11.8 A without MSA).
+confidence head unchanged. This is the only safe way to certify a pose —
+diffusion refinement actively drifts correct poses without MSA.
 """
 
 from __future__ import annotations
@@ -16,9 +14,15 @@ from .docking import install_fixed_receptor_sampler, set_fixed_receptor_config
 
 
 def _boltz_root() -> Path:
+    """Boltz-2 package root: the platform's own boltz2score venv site-packages."""
     import os
+    import sysconfig
 
-    return Path(os.environ.get("DPEPTIDE_BOLTZ_ROOT", "/data/Boltz2Score"))
+    venv_site = (
+        Path(__file__).resolve().parents[3]
+        / "boltz2score" / ".venv" / "lib"
+        / f"python{sysconfig.get_python_version()}" / "site-packages")
+    return Path(os.environ.get("DPEPTIDE_BOLTZ_ROOT", venv_site))
 
 
 def _boltz_cache() -> Path:
@@ -36,8 +40,10 @@ def _ensure_sys_path() -> None:
 
 
 def load_model_once(cache_dir: Path | None = None, **overrides):
-    cache_dir = Path(cache_dir or __import__("os").environ.get("DPEPTIDE_BOLTZ_CACHE", "/data/boltz_cache"))
     """Load the Boltz2 confidence checkpoint (reuse the project's loader)."""
+    import os
+
+    cache_dir = Path(cache_dir or os.environ.get("DPEPTIDE_BOLTZ_CACHE", "/data/boltz_cache"))
     _ensure_sys_path()
     from core.inference import load_score_model
 
@@ -78,11 +84,10 @@ def _use_msa() -> bool:
 def _assert_msa_fetched(work_dir: Path) -> None:
     """Fail fast unless every protein chain carries an MSA source.
 
-    Ground truth is the featurized record: each protein chain must reference a
-    non-sentinel msa_id whose npz exists under processed/msa (receptor MSAs may
-    legitimately live in the shared sequence cache instead of the task dir, and
-    a designed peptide chain may legitimately be query-only — the record view
-    covers both without false positives).
+    Ground truth is the featurized record: each receptor must reference a
+    non-sentinel msa_id whose npz exists under processed/msa (receptor
+    MSAs may live in the shared sequence cache; designed peptide chains
+    may legitimately be query-only).
     """
     import json
 
@@ -99,9 +104,8 @@ def _assert_msa_fetched(work_dir: Path) -> None:
         protein_chains = [c for c in record.get("chains", []) if c.get("mol_type") == 0]
         if not protein_chains:
             continue
-        # the RECEPTOR (largest protein chain) must carry an MSA source; a
-        # designed peptide chain may legitimately be query-only (the L-flow
-        # likewise ships a _disabled.a3m for binder chains)
+        # the RECEPTOR (largest protein chain) must carry an MSA source;
+        # a designed peptide chain may legitimately be query-only
         receptor_chain = max(
             protein_chains, key=lambda c: int(c.get("num_residues") or 0))
         msa_id = receptor_chain.get("msa_id")
@@ -235,7 +239,7 @@ def dock_peptide(
     seed: int = 7,
     pocket_box: float = 6.0,
 ) -> dict:
-    """Fixed-D-target pocket docking (E5 protocol)."""
+    """Fixed-D-target pocket docking."""
     set_fixed_receptor_config(
         enabled=True, peptide_init="input",
         pocket_box_radius=float(pocket_box), debug=False,

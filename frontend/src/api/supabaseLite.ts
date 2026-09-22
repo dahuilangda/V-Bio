@@ -16,6 +16,13 @@ import type {
 } from '../types/models';
 import { ENV } from '../utils/env';
 import { PEPTIDE_TASK_PREVIEW_KEY } from '../utils/peptideTaskPreview';
+import {
+  appendCopilotMessageCache,
+  copilotMessageCacheKey,
+  filterCopilotMessageCache,
+  readCachedCopilotMessages,
+  writeCopilotMessageCache
+} from './copilotLocalCache';
 
 const configuredBaseUrl = ENV.supabaseRestUrl.replace(/\/$/, '');
 const SUPABASE_TIMEOUT_MS = 15000;
@@ -135,8 +142,7 @@ async function request<T>(
       return [] as T;
     }
 
-    // Some PostgREST responses (e.g. POST with no Prefer: return=representation) return 200/201
-    // with an empty body. Guard against JSON parse failure on empty responses.
+    // Some PostgREST writes return 200/201 with an empty body; guard the JSON parse.
     const text = await res.text();
     if (!text || !text.trim()) {
       return [] as T;
@@ -152,8 +158,7 @@ async function request<T>(
   throw new Error(`Supabase-lite request failed. Tried: ${candidates.join(', ')}.${detail}`);
 }
 
-// A `return=representation` write must return the row; an empty result means nothing matched or
-// RLS blocked the read — surface it instead of returning undefined typed as the row.
+// A representation write must return the row; empty means nothing matched or RLS blocked the read.
 function _requireSingleRow<T>(rows: T[]): T {
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error('Write returned no rows — the target may not exist or RLS blocked the read.');
@@ -164,9 +169,8 @@ function _requireSingleRow<T>(rows: T[]): T {
 async function listUsersByIds(userIds: string[]): Promise<AppUser[]> {
   const idFilter = buildInFilter(userIds);
   if (!idFilter) return [];
-  // No deleted_at filter here on purpose: the app_users_anon_display RLS policy enforces
-  // `deleted_at IS NULL` server-side, and anonymous callers hold no SELECT grant on that
-  // column — filtering on it locally would fail with permission denied.
+  // No deleted_at filter: the RLS policy enforces deleted_at IS NULL server-side, and
+  // anonymous callers have no SELECT grant on that column.
   return request<AppUser[]>('/app_users', undefined, {
     select: 'id,username,name,avatar_url,created_at,last_login_at',
     id: idFilter
@@ -313,11 +317,8 @@ export function sanitizeProjectForTaskShare(project: Project, tasks: ProjectTask
   };
 }
 
-// app_users access note: since the F2 lockdown the anonymous role holds SELECT grants on
-// display columns only, and all user reads/writes beyond listUsersByIds go through the
-// management API's server-side endpoints (see api/authServerApi.ts). The former client-side
-// list/find/insert/update helpers were removed — keeping them would invite 401s (permission
-// denied for table app_users) if anything ever called them again.
+// app_users: anon SELECT covers display columns only; user management beyond
+// listUsersByIds lives in api/authServerApi.ts.
 
 interface ListProjectsOptions {
   userId?: string;
@@ -570,13 +571,8 @@ interface ProjectTaskAccessOptions {
   editableTaskIds?: string[];
 }
 
-/**
- * Precise task-row count for a project in one cheap request
- * (PostgREST `Prefer: count=exact` + limit=1 → Content-Range). Used by the
- * Excel export to know the full total before the paginated task list has
- * finished loading in the background. Throws on failure — callers must not
- * silently substitute an estimate.
- */
+// Exact task-row count in one request (Prefer: count=exact + limit=1 → Content-Range);
+// throws on failure rather than letting callers substitute an estimate.
 export async function countProjectTasks(
   projectId: string,
   options?: ProjectTaskAccessOptions
@@ -708,8 +704,7 @@ export async function listProjectTasksForList(
     'backend',
     'seed',
     'ligand_smiles',
-    // Small scalar jsonb; the Excel export reads it from the already-loaded rows
-    // so the worker does not have to open every result archive for it.
+    // small scalar jsonb; the Excel export reads it from loaded rows without opening archives
     'affinity',
     ...(includePropertiesSummary
       ? [
@@ -2179,78 +2174,27 @@ function isMissingRelationError(error: unknown, relationName: string): boolean {
   return message.includes('42P01') || message.includes(`relation "public.${relationName}" does not exist`);
 }
 
-function createLocalId(prefix: string): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `local:${crypto.randomUUID()}`;
-  }
-  return `local:${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+// Fire-and-forget cache writes, logged so a broken cache stays visible.
+function trackCacheWrite(promise: Promise<unknown>): void {
+  promise.catch((error) => {
+    console.error('[copilot] transcript cache write failed', error);
+  });
 }
 
-// localStorage holds up to 200 copilot rows per key (multi-MB with long transcripts). Every
-// message insert used to re-read AND re-parse the whole blob, then re-serialize it — several
-// synchronous multi-hundred-ms stalls per turn. The parsed array stays warm behind a raw-string
-// identity check, so an insert pays only the serialize side, while an external write (another
-// tab) still invalidates the cache correctly.
-const LOCAL_ROWS_CACHE_LIMIT = 8;
-const localRowsCache = new Map<string, { raw: string; rows: unknown[] }>();
-
-function readLocalRowsCache(key: string): { raw: string; rows: unknown[] } | undefined {
-  const cached = localRowsCache.get(key);
-  if (cached) {
-    // Refresh recency for the LRU bound.
-    localRowsCache.delete(key);
-    localRowsCache.set(key, cached);
-  }
-  return cached;
-}
-
-function putLocalRowsCache(key: string, raw: string, rows: unknown[]) {
-  localRowsCache.delete(key);
-  localRowsCache.set(key, { raw, rows });
-  if (localRowsCache.size > LOCAL_ROWS_CACHE_LIMIT) {
-    const oldest = localRowsCache.keys().next().value;
-    if (oldest !== undefined) localRowsCache.delete(oldest);
-  }
-}
-
-function readLocalRows<T>(key: string): T[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(key) || '[]';
-    const cached = readLocalRowsCache(key);
-    if (cached && cached.raw === raw) return cached.rows as T[];
-    const parsed = JSON.parse(raw);
-    const rows = Array.isArray(parsed) ? (parsed as T[]) : [];
-    putLocalRowsCache(key, raw, rows as unknown[]);
-    return rows;
-  } catch {
-    return [];
-  }
-}
-
-function writeLocalRows<T>(key: string, rows: T[]) {
-  if (typeof window === 'undefined') return;
-  const capped = rows.slice(-200);
-  const serialized = JSON.stringify(capped);
-  window.localStorage.setItem(key, serialized);
-  putLocalRowsCache(key, serialized, capped as unknown[]);
-}
-
-function copilotLocalStorageKey(input: {
+function copilotCacheKeyFor(input: {
   contextType: ProjectCopilotMessage['context_type'];
   projectId?: string | null;
   projectTaskId?: string | null;
   userId?: string | null;
   conversationScope?: string | null;
 }): string {
-  return [
-    'vbio:project-copilot:v2',
-    String(input.userId || 'anonymous').trim().toLowerCase() || 'anonymous',
-    String(input.conversationScope || 'scoped'),
-    normalizeCopilotContextType(input.contextType),
-    String(input.projectId || 'project-null'),
-    String(input.projectTaskId || 'task-null')
-  ].join(':');
+  return copilotMessageCacheKey({
+    contextType: normalizeCopilotContextType(input.contextType),
+    projectId: input.projectId,
+    projectTaskId: input.projectTaskId,
+    userId: input.userId,
+    conversationScope: input.conversationScope
+  });
 }
 
 function copilotStateLocalStorageKey(userId: string, stateKey: string): string {
@@ -2371,11 +2315,8 @@ export async function deleteProjectCopilotState(userId: string, stateKey: string
   }
 }
 
-// Column projection for the Copilot transcript LIST query. planner_trace is deliberately
-// EXCLUDED: it is the single heaviest metadata field (dozens of steps per turn) and the UI
-// renders it inside a disclosure that starts collapsed — it is fetched per message on first
-// expand instead (fetchProjectCopilotMessageTrace). Everything else the modal reads is kept
-// so the list is one round trip.
+// planner_trace is excluded here (the heaviest field; fetched per message on first expand
+// via fetchProjectCopilotMessageTrace) so the list stays one round trip.
 const COPILOT_MESSAGE_LIST_SELECT = [
   'id',
   'context_type',
@@ -2401,9 +2342,7 @@ const COPILOT_MESSAGE_LIST_SELECT = [
   'meta_attachments:metadata->attachments'
 ].join(',');
 
-// Reassemble the metadata object from the projected columns (mirrors the writers: keys are
-// dropped when the underlying value is null/absent so `planner_trace === undefined` marks a
-// lazily-loadable trace).
+// Rebuild metadata from projected columns; undefined planner_trace means lazily loadable.
 function rebuildCopilotMessageMetadata(row: Partial<ProjectCopilotMessage> & Record<string, unknown>): Record<string, unknown> {
   const metadata: Record<string, unknown> = {};
   const pairs: Array<[string, unknown]> = [
@@ -2464,28 +2403,16 @@ export async function listProjectCopilotMessages(input: {
   if (conversationScope) {
     query['metadata->>conversation_scope'] = `eq.${conversationScope}`;
   }
-  let rows: Array<Partial<ProjectCopilotMessage>>;
-  try {
-    rows = await request<Array<Partial<ProjectCopilotMessage>>>('/project_copilot_messages', undefined, query);
-  } catch (error) {
-    if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
-    return readLocalRows<Partial<ProjectCopilotMessage>>(
-      copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId: normalizedUserId, conversationScope })
-    )
-      .map(normalizeProjectCopilotMessage)
-      .filter((row) => {
-        return row.user_id === normalizedUserId || String(row.metadata?.owner_user_id || '') === normalizedUserId;
-      });
-  }
-  rows = rows.filter((row) => {
+  const rows = await request<Array<Partial<ProjectCopilotMessage>>>('/project_copilot_messages', undefined, query);
+  const ownedRows = rows.filter((row) => {
     const projected = row as Partial<ProjectCopilotMessage> & Record<string, unknown>;
     const ownerFromProjection = String(projected.meta_owner_user_id ?? asObjectRecord(row.metadata).owner_user_id ?? '').trim();
     return String(row.user_id || '') === normalizedUserId || ownerFromProjection === normalizedUserId;
   });
-  const userIds = Array.from(new Set(rows.map((row) => String(row.user_id || '').trim()).filter(Boolean)));
+  const userIds = Array.from(new Set(ownedRows.map((row) => String(row.user_id || '').trim()).filter(Boolean)));
   const users = await listUsersByIds(userIds);
   const userById = new Map(users.map((user) => [user.id, user] as const));
-  const normalizedRows = rows.map((row) => {
+  const normalizedRows = ownedRows.map((row) => {
     const user = row.user_id ? userById.get(String(row.user_id)) : null;
     const projected = row as Partial<ProjectCopilotMessage> & Record<string, unknown>;
     return normalizeProjectCopilotMessage({
@@ -2495,24 +2422,27 @@ export async function listProjectCopilotMessages(input: {
       user_name: user?.name || ''
     });
   }).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  writeLocalRows(copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId: normalizedUserId, conversationScope }), normalizedRows);
+  trackCacheWrite(writeCopilotMessageCache(
+    copilotCacheKeyFor({ contextType, projectId, projectTaskId, userId: normalizedUserId, conversationScope }),
+    normalizedRows
+  ));
   return normalizedRows;
 }
 
-export function readCachedProjectCopilotMessages(input: {
+export async function readCachedProjectCopilotMessages(input: {
   contextType: ProjectCopilotMessage['context_type'];
   projectId?: string | null;
   projectTaskId?: string | null;
   userId?: string | null;
   conversationScope?: string | null;
-}): ProjectCopilotMessage[] {
+}): Promise<ProjectCopilotMessage[]> {
   const contextType = normalizeCopilotContextType(input.contextType);
   const projectId = String(input.projectId || '').trim();
   const projectTaskId = String(input.projectTaskId || '').trim();
   const userId = String(input.userId || '').trim();
   const conversationScope = String(input.conversationScope || '').trim();
   if (!userId) return [];
-  return readLocalRows<Partial<ProjectCopilotMessage>>(copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId, conversationScope }))
+  return (await readCachedCopilotMessages(copilotCacheKeyFor({ contextType, projectId, projectTaskId, userId, conversationScope })))
     .map(normalizeProjectCopilotMessage)
     .filter((row) => row.user_id === userId || String(row.metadata?.owner_user_id || '') === userId);
 }
@@ -2537,68 +2467,40 @@ export async function insertProjectCopilotMessage(input: {
     ...(conversationScope ? { conversation_scope: conversationScope } : {}),
     ...(ownerUserId ? { owner_user_id: ownerUserId } : {})
   };
-  try {
-    const rows = await request<ProjectCopilotMessage[]>(
-      '/project_copilot_messages',
-      {
-        method: 'POST',
-        headers: { Prefer: 'return=representation' },
-        body: JSON.stringify({
-          context_type: contextType,
-          project_id: input.projectId || null,
-          project_task_id: input.projectTaskId || null,
-          user_id: input.userId || null,
-          role: normalizeChatMessageRole(input.role),
-          content,
-          metadata
-        })
-      },
-      { select: '*' }
-    );
-    // A 2xx with an EMPTY body (proxy stripped Prefer, RLS blocked representation) must not
-    // produce an id-less row (breaks React keys, skips deletion) — treat it as the local path.
-    const returned = rows.length > 0 ? rows[0] : null;
-    if (!returned || !String((returned as unknown as Record<string, unknown>).id || '').trim()) {
-      throw new Error('project_copilot_messages insert returned no row');
-    }
-    const row = normalizeProjectCopilotMessage(returned);
-    const key = copilotLocalStorageKey({
-      contextType,
-      projectId: input.projectId || null,
-      projectTaskId: input.projectTaskId || null,
-      userId: ownerUserId,
-      conversationScope
-    });
-    writeLocalRows(key, [...readLocalRows<ProjectCopilotMessage>(key), row]);
-    return row;
-  } catch (error) {
-    if (
-      !isMissingRelationError(error, 'project_copilot_messages') &&
-      !/returned no row/.test(String((error as Error)?.message || ''))
-    ) throw error;
-    const now = new Date().toISOString();
-    const row = normalizeProjectCopilotMessage({
-      id: createLocalId('copilot'),
-      context_type: contextType,
-      project_id: input.projectId || null,
-      project_task_id: input.projectTaskId || null,
-      user_id: input.userId || null,
-      role: normalizeChatMessageRole(input.role),
-      content,
-      metadata,
-      created_at: now,
-      updated_at: now
-    });
-    const key = copilotLocalStorageKey({
-      contextType,
-      projectId: input.projectId || null,
-      projectTaskId: input.projectTaskId || null,
-      userId: ownerUserId,
-      conversationScope
-    });
-    writeLocalRows(key, [...readLocalRows<ProjectCopilotMessage>(key), row]);
-    return row;
+  const rows = await request<ProjectCopilotMessage[]>(
+    '/project_copilot_messages',
+    {
+      method: 'POST',
+      headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({
+        context_type: contextType,
+        project_id: input.projectId || null,
+        project_task_id: input.projectTaskId || null,
+        user_id: input.userId || null,
+        role: normalizeChatMessageRole(input.role),
+        content,
+        metadata
+      })
+    },
+    { select: '*' }
+  );
+  // A 2xx with an empty body is a hard error; an id-less row breaks React keys and deletion.
+  const returned = rows.length > 0 ? rows[0] : null;
+  if (!returned || !String((returned as unknown as Record<string, unknown>).id || '').trim()) {
+    throw new Error('project_copilot_messages insert returned no row');
   }
+  const row = normalizeProjectCopilotMessage(returned);
+  trackCacheWrite(appendCopilotMessageCache(
+    copilotCacheKeyFor({
+      contextType,
+      projectId: input.projectId || null,
+      projectTaskId: input.projectTaskId || null,
+      userId: ownerUserId,
+      conversationScope
+    }),
+    row
+  ));
+  return row;
 }
 
 export async function deleteProjectCopilotMessagesBySession(input: {
@@ -2618,14 +2520,10 @@ export async function deleteProjectCopilotMessagesBySession(input: {
   const userId = String(input.userId || '').trim();
   const conversationScope = String(input.conversationScope || '').trim();
   const messageIds = Array.from(
-    new Set((input.messageIds || []).map((value) => String(value || '').trim()).filter((value) => value && !value.startsWith('local:')))
+    new Set((input.messageIds || []).map((value) => String(value || '').trim()).filter(Boolean))
   );
   if (messageIds.length > 0) {
-    try {
-      await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, { id: buildInFilter(messageIds) });
-    } catch (error) {
-      if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
-    }
+    await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, { id: buildInFilter(messageIds) });
   }
   const query: Record<string, string> = {
     context_type: `eq.${contextType}`,
@@ -2637,31 +2535,21 @@ export async function deleteProjectCopilotMessagesBySession(input: {
   if (conversationScope) {
     query['metadata->>conversation_scope'] = `eq.${conversationScope}`;
   }
-  try {
-    await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, query);
-    if (userId) {
-      await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, {
-        context_type: `eq.${contextType}`,
-        project_id: projectId ? `eq.${projectId}` : 'is.null',
-        project_task_id: projectTaskId ? `eq.${projectTaskId}` : 'is.null',
-        'metadata->>session_id': `eq.${sessionId}`,
-        ...(conversationScope ? { 'metadata->>conversation_scope': `eq.${conversationScope}` } : {}),
-        user_id: `eq.${userId}`
-      });
-    }
-    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId, conversationScope });
-    const rows = readLocalRows<ProjectCopilotMessage>(key).filter(
-      (row) => String(row.metadata?.session_id || 'default') !== sessionId || String(row.metadata?.owner_user_id || row.user_id || '') !== userId
-    );
-    writeLocalRows(key, rows);
-  } catch (error) {
-    if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
-    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId, conversationScope });
-    const rows = readLocalRows<ProjectCopilotMessage>(key).filter(
-      (row) => String(row.metadata?.session_id || 'default') !== sessionId || String(row.metadata?.owner_user_id || '') !== userId
-    );
-    writeLocalRows(key, rows);
+  await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, query);
+  if (userId) {
+    await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, {
+      context_type: `eq.${contextType}`,
+      project_id: projectId ? `eq.${projectId}` : 'is.null',
+      project_task_id: projectTaskId ? `eq.${projectTaskId}` : 'is.null',
+      'metadata->>session_id': `eq.${sessionId}`,
+      ...(conversationScope ? { 'metadata->>conversation_scope': `eq.${conversationScope}` } : {}),
+      user_id: `eq.${userId}`
+    });
   }
+  trackCacheWrite(filterCopilotMessageCache(
+    copilotCacheKeyFor({ contextType, projectId, projectTaskId, userId, conversationScope }),
+    (row) => String(row.metadata?.session_id || 'default') !== sessionId || String(row.metadata?.owner_user_id || row.user_id || '') !== userId
+  ));
 }
 
 export async function listIncomingProjectShares(userId: string): Promise<ProjectShareRecord[]> {
@@ -2858,9 +2746,7 @@ export async function listOutgoingTaskShares(userId: string): Promise<ProjectTas
   });
 }
 
-// api_tokens CRUD lives server-side (api/authServerApi.ts) since the F2 lockdown — the
-// anonymous role has zero access to that table, so client-side helpers were removed.
-// Only usage-log reads remain here (api_token_usage keeps anonymous read access).
+// api_tokens CRUD lives in api/authServerApi.ts; only usage-log reads remain here.
 
 function parseTotalFromContentRange(value: string | null): number {
   if (!value) return 0;

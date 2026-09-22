@@ -46,11 +46,8 @@ MODE_CONFIGS: dict[str, dict[str, object]] = {
         "diffusion_samples": 5,
         "input_init_noise_scale": 0.0,
     },
-    # Docking is generation, not refinement: the full de-novo noise
-    # schedule re-poses the ligand conditioned on the input protein and the
-    # pocket contact guidance.  The 0.02-0.05 sigma ladder above polishes an
-    # existing pose and cannot escape a bad initial placement (see
-    # docs/docking.md for the CDK2/CDK8 validation numbers).
+    # Docking is de-novo generation, not pose polishing: the small sigma ladder
+    # above cannot escape a bad initial placement (validation: docs/docking.md).
     DOCK_MODE: {
         "name": "dock_default",
         "sigma_max": 160.0,
@@ -121,9 +118,9 @@ def _build_trial_command(
         str(args.trainer_precision),
         "--structure_refine",
         "--anchor_contact_cutoff",
-        str(args.anchor_contact_cutoff),
+        str(args.anchor_contact_cutoff if args.anchor_contact_cutoff is not None else 5.0),
         "--anchor_max_distance",
-        str(float(args.anchor_max_distance) if args.anchor_max_distance is not None else float(config["anchor_max_distance"])),
+        str(float(args.anchor_max_distance) if args.anchor_max_distance is not None else float(config.get("anchor_max_distance", 8.0))),
         "--anchor_max_residues",
         str(args.anchor_max_residues),
         "--pose_anchor_atoms",
@@ -244,11 +241,9 @@ def _clear_output_dir(output_dir: Path) -> None:
 def _select_dock_ensemble_winners(output_dir: Path) -> None:
     """Collapse the dock pose ensemble to one record per input ligand.
 
-    With ``--dock_poses > 1`` every initial placement is scored as its own
-    record named ``<ligand>__poseNN``.  Poses of one ligand are ranked by
-    the interface-aware score from their rerank summary; losing records are
-    deleted so the archive holds exactly one docked pose per ligand.  The
-    full ranking is written to ``dock_ensemble_selection.json``.
+    Poses of one ligand are ranked by the interface-aware rerank score; losing
+    records are deleted. The full ranking is written to
+    ``dock_ensemble_selection.json``.
     """
     pose_groups: dict[str, list[Path]] = {}
     for record_dir in sorted(set(discover_record_dirs(output_dir).values())):

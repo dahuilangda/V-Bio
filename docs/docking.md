@@ -59,3 +59,38 @@ cd capabilities/boltz2score
 低 pLDDT 是置信度头对**姿态质量**的正确打分，不是打分 bug（同一条打分管线：
 原生姿态 79.1、质心平移 52.6、移出 8 Å 34.2）。修复前 dock 的摆放姿态本身带几十个重原子
 clash（CDK2 上任意随机摆放 23–79 个 clash），而 0.05 调度无法让模型摆脱它。
+## Protenix2Dock 的 pocket 引导与 blind 模式（2026-09-12）
+
+protenix2dock 的 dock 模式与 boltz2score 同为全噪声盲 inpainting（受体钉住、配体纯噪声、
+sigma 160 / 200 步），但口袋条件化走 **PocketPotential**（与 D-肽设计同一条引导链）：
+
+- **Pocket 模式**：`--pocket_res A:145,A:146,...`（上传文件的 author 编号）。每个口袋残基
+  作为一组 soft-min 上界（`--pocket_upper`，默认 6.0 Å，boltz2 pocket max_distance 同值），
+  与配体全部自由原子配对，早期强、末期归零的线性 ramp——与盲起点（纯噪声配体）天然兼容。
+  author→组装序号的翻译在引擎侧完成（`core/structure.py::translate_pocket_residues`，经
+  `seqids` 表），被解析器丢弃的残基（无原子/非聚合）响亮报错。
+- **Blind 模式**：不给 `--pocket_res` 即全表面搜索，合法模式而非错误。前端 dock 面板有
+  Blind 开关；网关对 protenix 后端放行无口袋提交（boltz2score 仍要求口袋）。
+- **三种口袋定义**（worker 侧统一解析为残基列表）：`pocket_residues` 直通、
+  center+size 盒子选盒内残基、参考配体 5 Å 邻域残基。
+
+### 实测（362 aa 蛋白 + 对乙酰氨基酚，API 全链路，seed 42）
+
+| 模式 | ipTM | 界面接触对 | 配体到口袋残基最小距离（5 样本） |
+| --- | ---: | ---: | --- |
+| Pocket（3 残基引导） | 0.966 | 28 | **6.6–7.9 Å**（5/5 落在引导位点） |
+| Blind | 0.962 | 19 | 11.2–12.6 Å（落在另一位点） |
+
+### 回归判据
+
+引擎侧引导激活的判据：容器日志出现
+`dock mode: pocket-guided — N pairs over M pocket residues`（blind 则为
+`dock mode: BLIND — no pocket given`）。
+
+## 邮件通知（2026-09-12）
+
+提交时可带 `notify_email`（前端肽设计确认对话框有输入框，预填账号邮箱；项目级
+选项，同项目 affinity 提交同样生效）。任务到达终态（SUCCESS/FAILURE）时由执行
+worker 经 SMTP_SSL 直发。通知是辅助通道：发送失败只记 ERROR 日志，绝不影响
+任务本身的状态。网关校验邮箱格式（400）。配置见 `deploy/docker/*.env` 的
+`SMTP_*` 与 `FRONTEND_URL`（邮件内深链）。

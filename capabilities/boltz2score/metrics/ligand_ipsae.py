@@ -13,9 +13,8 @@ import numpy as np
 from utils.result_utils import confidence_model_stem, select_confidence_file
 
 
-# Standard polymer residue codes (20 amino acids + DNA/RNA nucleotides + common caps). Used only
-# by the expanded fallback to tell modified residues (UAAs), which Protenix tokenizes per-atom in
-# the PAE, apart from standard residues that stay one token.
+# Standard polymer residue codes; the expanded fallback uses them to find
+# modified residues, which Protenix tokenizes per-atom in the PAE.
 STANDARD_POLYMER_COMPS = {
     "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
     "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
@@ -23,12 +22,9 @@ STANDARD_POLYMER_COMPS = {
     "ACE", "NMA",
 }
 
-# When the "ligand" chain is a polymer (peptide/protein binder), its tokens are
-# one representative atom (CB/CA) per residue. The atom-level heavy-atom cutoff
-# (5 A) then finds almost no interface pairs — a side-chain contact only implies
-# CA/CB < ~10 A — and the score collapses to a few tokens regardless of interface
-# quality. Residue-level contacts therefore use the standard 10 A CA/CB proxy
-# (same rationale as peplm oracle chain_ipsae.py).
+# Polymer ligands (peptide binders) get one CB/CA token per residue, so the
+# atom-level 5 A cutoff finds almost no interface pairs; use the standard
+# 10 A CA/CB proxy instead (same rationale as peplm oracle chain_ipsae.py).
 RESIDUE_LIGAND_DIST_CUTOFF = 10.0
 
 
@@ -144,11 +140,10 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
             dtype=float,
         )
 
-        # Non-polymer atoms map 1:1 to PAE tokens. Protenix writes ligands AND custom residues
-        # (UAAs on protein chains) as HETATM records that still carry a label_seq_id, so we also
-        # treat HETATM records as atom-level — otherwise they collapse to one residue token and
-        # the PAE token count no longer matches. Safe for AF3/Boltz: their polymer atoms are ATOM
-        # records (unchanged) and their HETATM atoms already have a missing label_seq_id.
+        # Non-polymer atoms map 1:1 to PAE tokens. Protenix writes custom
+        # residues (UAAs on protein chains) as HETATM records that still carry
+        # a label_seq_id, so treat all HETATM as atom-level or the PAE token
+        # count no longer matches; AF3/Boltz polymer atoms are ATOM records.
         is_non_polymer = residue_seq_num == "." or group_pdb == "HETATM"
         if is_non_polymer:
             if chain_id == ligand_chain_id:
@@ -227,12 +222,11 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
 
 
 def _build_tokens_expanded(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], list[Token]]:
-    """Fallback token builder for backends that tokenize modified (non-standard) residues
-    per-atom in the PAE — Protenix does this for custom residues (UAAs) on protein chains, so a
-    CIF with N polymer residues can have many more PAE tokens. Emitting tokens in CIF order and
-    expanding non-standard residues (by comp_id) to one token per atom matches both the PAE token
-    count and ordering. Standard residues stay one token. Only invoked when the default builder's
-    token count does not match the PAE, so AF3/Boltz (which match already) are unaffected.
+    """Fallback token builder for backends that tokenize modified residues
+    per-atom in the PAE (Protenix does this for UAAs on protein chains):
+    emit tokens in CIF order, expanding non-standard residues to one token
+    per atom, to match the PAE token count and ordering. Only invoked when
+    the default builder's token count does not match the PAE.
     """
     fields, rows = _read_atom_rows(cif_path)
     idx = {name: pos for pos, name in enumerate(fields)}
@@ -359,9 +353,8 @@ def compute_ligand_ipsae_from_files(
 
     protein_tokens, ligand_tokens = _build_tokens(cif_path, ligand_chain_id)
     if len(protein_tokens) + len(ligand_tokens) != pae.shape[0]:
-        # Backends like Protenix tokenize modified (non-standard) residues per-atom in the PAE,
-        # so the default (one token per polymer residue) undercounts. Retry with the expanded
-        # builder, which emits non-standard residues as one token per atom, in CIF order.
+        # Protenix tokenizes modified residues per-atom; retry with the
+        # expanded builder when the token counts do not match.
         protein_tokens, ligand_tokens = _build_tokens_expanded(cif_path, ligand_chain_id)
     if not protein_tokens:
         raise RuntimeError("No protein tokens found for IPSAE.")
@@ -476,22 +469,3 @@ def compute_ligand_ipsae_from_files(
     }
 
 
-def compute_ligand_ipsae(
-    result_dir: Path,
-    pae_cutoff: float,
-    dist_cutoff: float,
-    model_index: int | None = None,
-) -> dict[str, object]:
-    conf_path, cif_path, pae_path, chain_map_path = _resolve_layout_paths(
-        result_dir=result_dir,
-        model_index=model_index,
-    )
-    return compute_ligand_ipsae_from_files(
-        confidence_path=conf_path,
-        cif_path=cif_path,
-        pae_path=pae_path,
-        pae_cutoff=pae_cutoff,
-        dist_cutoff=dist_cutoff,
-        chain_map_path=chain_map_path,
-        result_dir=result_dir,
-    )

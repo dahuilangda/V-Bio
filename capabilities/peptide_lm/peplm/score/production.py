@@ -1,13 +1,12 @@
 """Production composite score (V-Bio backend, verbatim semantics).
 
-This is the *reporting* metric for benchmarks — both arms (PeptideLM and the
-GA baseline) are scored with this exact formula so numbers are comparable to
-the production system.
+Both benchmark arms are scored with this exact formula so numbers stay
+comparable to the production system.
 """
 
 from __future__ import annotations
 
-import math
+
 from collections import Counter
 from typing import Optional
 

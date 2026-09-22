@@ -21,7 +21,7 @@ import json
 import random
 from pathlib import Path
 
-from halo.score.properties import compute_descriptors, descriptor_vector
+from halo.score.properties import compute_descriptors
 
 
 class FeedbackBatch:

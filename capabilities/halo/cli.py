@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+
 from pathlib import Path
 
 import torch
@@ -178,10 +178,7 @@ def cmd_pretrain(args) -> None:
 
 
 def load_corpus_smiles(path: Path, limit: int | None) -> list[str]:
-    """Load a corpus .smi/.txt file (tab or space separated, header tolerant).
-
-    Lines that are already canonical single-fragment SMILES (e.g. exported
-    """
+    """Load a corpus .smi/.txt file (tab or space separated, header tolerant)."""
     path = Path(path)
     if path.name.endswith(".tsv") or path.name.endswith(".txt"):
         from halo.data.ligands import load_chembl_tsv
@@ -204,10 +201,9 @@ def load_corpus_smiles(path: Path, limit: int | None) -> list[str]:
 def cmd_focus(args) -> None:
     """Focused prior: continue-pretrain a base prior on neighbours of a reference.
 
-    The REINVENT lead-opt recipe: given a reference compound (arbitrary user
-    lead, optionally plus a target's ligand series), retrieve its nearest
-    ChEMBL36 neighbours and transfer-learn the prior onto that focused corpus
-    so generation starts inside the right chemical space.
+    Retrieve the nearest ChEMBL neighbours of the reference lead (optionally
+    plus a target's ligand series) and transfer-learn the prior onto that
+    corpus so generation starts in the right chemical space.
     """
     import json as _json
 
@@ -317,7 +313,7 @@ def cmd_optimize(args) -> None:
     if not protein.exists():
         raise SystemExit(f"protein not found: {protein}")
 
-    # ---- build the target: reference ligand bookkeeping ----
+    # build the target: reference ligand bookkeeping
     refs: list[str] = []
     ligand_sdf = run_dir / "reference.sdf"
     if args.reference:
@@ -344,8 +340,7 @@ def cmd_optimize(args) -> None:
                 refs.append(smi)
         w.close()
     elif args.keep_fragment:
-        # scenario c: no full reference; use the fragment (placed at pocket) as
-        # alignment seed and constraint
+        # scenario c: use the fragment (placed at pocket) as alignment seed and constraint
         kf = Chem.MolFromSmiles(args.keep_fragment)
         if kf is None:
             raise SystemExit("keep_fragment is not valid SMILES")

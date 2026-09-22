@@ -1,8 +1,7 @@
 """Single-candidate D-oracle CLI: mirror-space dock/score in ONE process.
 
-Executed inside the engine runtime container (protenix or boltz image via
-the platform's docker task skeleton) — this module owns ALL heavy state:
-model loading, sampler patching, input prep, inference, and product flip.
+Runs inside the engine runtime container and owns all heavy state (model
+loading, sampler patching, input prep, inference, product flip).
 
 Contract:
   python -m peplm.dpeptide.cli \
@@ -34,9 +33,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     peplm_root = Path(__file__).resolve().parents[3]
-    for p in (str(peplm_root), "/data/Boltz2Score"):
-        if p not in sys.path:
-            sys.path.insert(0, p)
+    if str(peplm_root) not in sys.path:
+        sys.path.insert(0, str(peplm_root))
 
     from peplm.dpeptide.scoring import (
         dock_peptide,
@@ -57,8 +55,8 @@ def main(argv=None) -> int:
             seed=args.seed, pocket_box=float(args.pocket_box),
         )
     else:
-        # Route-one validation: score mode — the confidence head scores the
-        # staged coordinates as-is (0.000 A pass-through, no re-diffusion).
+        # score mode: confidence head scores the staged coordinates as-is
+        # (no re-diffusion)
         conf = score_complex(Path(args.staged), Path(args.out_dir), seed=args.seed)
 
     out_dir = Path(args.out_dir)

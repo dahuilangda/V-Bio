@@ -1,27 +1,57 @@
 {
- "model": "ModernPrior (Llama-style decoder: RoPE/SwiGLU/RMSNorm + property aux heads)",
- "checkpoint": "models/prior.pt",
- "arch": "modern",
- "size": 104160460,
- "vocab": "70 tokens (natural 20 + NCAA 18 + modality/conditioning + FIM)",
- "training_corpus": "runs/data (UniRef90 chopped 12M + PDB binder 2257 x6 + PeptideGPT 10.4k + FIM 50% + modality 8/8 + NCAA aug 10%)",
- "main_training_metrics": {
-  "epochs": 2,
-  "val_loss": 2.4132
- },
- "evaluation": {
-  "mean_dev_hi": 0.8448531910291359,
-  "n_hi": 300,
-  "median_len_hi": 17,
-  "max_len_hi": 19,
-  "unique_hi": 300,
-  "mean_dev_lo": 0.5817091074709106,
-  "n_lo": 300,
-  "median_len_lo": 17,
-  "max_len_lo": 19,
-  "unique_lo": 300,
-  "tag_separation": 0.2631440835582253,
-  "fim_token_acc": 0.21833333333333332
- },
- "computed_at": "2026-08-23"
+ "package_version": "1.0.0",
+ "updated": "2026-09-14",
+ "models": [
+  {
+   "name": "ss_track.pt",
+   "role": "Tier-1 prior with the additive SS track — used when the caller supplies an SS profile (peptideSSProfile)",
+   "arch": "modern (ModernPrior: Llama-style decoder RoPE/SwiGLU/RMSNorm + property aux heads + additive ss_track)",
+   "size_bytes": 349874797,
+   "params": "87.5M (d768/12L/12H)",
+   "vocab": "89 tokens (natural 20 + NCAA 18 + <h>/<e>/<l>/<s> SS tokens + length buckets to 120)",
+   "mechanism": "additive_ss_track (left-shifted): per-position SS3 embedding summed onto the residue stream; position i's embedding carries the SS label of residue i+1",
+   "training_data": "SS-annotated corpus + AFDB SS fragments + upsampled PDB binder peptides",
+   "training_metrics": {
+    "ss_conditioning_contrast": 0.11,
+    "samples": "1.2M"
+   }
+  },
+  {
+   "name": "prior.pt",
+   "role": "Base Tier-1 prior (no SS track) — property-tag conditioned generation, FIM editing, GRPO policy anchor",
+   "arch": "modern",
+   "size_bytes": 104160460,
+   "params": "31M (d512/8L/8H)",
+   "vocab": "70 tokens",
+   "training_data": "UniRef90 chopped 12M + PDB binders 2257 x6 + PeptideGPT 10.4k; FIM 50%, modality aug, NCAA aug 10%",
+   "training_metrics": {
+    "epochs": 2,
+    "val_loss": 2.4132
+   },
+   "evaluation": {
+    "mean_dev_hi": 0.8449,
+    "mean_dev_lo": 0.5817,
+    "tag_separation": 0.2631,
+    "fim_token_acc": 0.2183
+   }
+  }
+ ],
+ "external_models": [
+  {
+   "name": "external/pepmlm650/",
+   "role": "PepMLM-650M — the receptor-conditioned prior (ChatterjeeLab, Nat Biotech 2025). Required whenever a target receptor is supplied; there is no fallback.",
+   "arch": "EsmForMaskedLM (ESM-2 650M fine-tune), HF transformers format",
+   "size_bytes": 2609625722,
+   "source": "huggingface.co/ChatterjeeLab/PepMLM-650M",
+   "protocol": "receptor + <mask>*N one-shot parallel top-k=3 decoding; one-mask-at-a-time pseudo-PPL ranking; mask & re-infill elite refinement"
+  },
+  {
+   "name": "external/esm3_sm_open_v1.pth",
+   "role": "ESM3-open 1.4B — the trainable policy backbone for the online RL loop (LoRA adapters; proposal policy improves per target via ipSAE+pLDDT rewards)",
+   "arch": "ESM3 (masked multimodal LM), d1536/48L, 64-token sequence vocab (canonical L-20 only)",
+   "size_bytes": 2803646068,
+   "source": "huggingface.co/evolutionaryscale/esm3-sm-open-v1",
+   "license": "Cambrian Non-Commercial (adapters inherit)"
+  }
+ ]
 }

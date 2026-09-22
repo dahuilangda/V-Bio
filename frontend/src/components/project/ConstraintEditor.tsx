@@ -26,14 +26,14 @@ interface ConstraintEditorProps {
   onSelectedConstraintIdChange?: (id: string | null) => void;
   onConstraintClick?: (id: string, options?: { toggle: boolean; range: boolean }) => void;
   onClearSelection?: () => void;
-  showAffinitySection?: boolean;
+  isAffinitySectionVisible?: boolean;
   allowedConstraintTypes?: PredictionConstraintType[];
   onConstraintsChange: (constraints: PredictionConstraint[]) => void;
   onPropertiesChange: (properties: PredictionProperties) => void;
   onPickSlotFocus?: (constraintId: string, slot: 'first' | 'second') => void;
   endpointTargets?: ReactNode;
   activeResiduePicker?: ReactNode;
-  disabled?: boolean;
+  isDisabled?: boolean;
 }
 
 export interface ConstraintResiduePick {
@@ -136,14 +136,14 @@ export function ConstraintEditor({
   onSelectedConstraintIdChange,
   onConstraintClick,
   onClearSelection,
-  showAffinitySection = true,
+  isAffinitySectionVisible = true,
   allowedConstraintTypes = ALL_CONSTRAINT_TYPES,
   onConstraintsChange,
   onPropertiesChange,
   onPickSlotFocus,
   endpointTargets,
   activeResiduePicker,
-  disabled = false
+  isDisabled = false
 }: ConstraintEditorProps) {
   const activeComponents = components.filter((item) => item.sequence.trim());
   const chainInfos = buildChainInfos(activeComponents);
@@ -156,9 +156,7 @@ export function ConstraintEditor({
   const collapsedCount = useMemo(() => constraints.filter((item) => collapsedById[item.id]).length, [constraints, collapsedById]);
   const allCollapsed = constraints.length > 0 && collapsedCount === constraints.length;
 
-  // Render-time adjustment (not an effect): prune stale collapse flags as soon
-  // as the constraint list changes instead of after paint.
-  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  // Render-time adjustment (not an effect): prune stale collapse flags when the list changes.
   const [prevConstraints, setPrevConstraints] = useState(constraints);
   if (constraints !== prevConstraints) {
     setPrevConstraints(constraints);
@@ -228,7 +226,7 @@ export function ConstraintEditor({
               type="button"
               className="icon-btn constraint-head-icon-btn"
               onClick={() => setAllCollapsed(!allCollapsed)}
-              disabled={disabled}
+              disabled={isDisabled}
               title={allCollapsed ? 'Expand all constraints' : 'Collapse all constraints'}
               aria-label={allCollapsed ? 'Expand all constraints' : 'Collapse all constraints'}
             >
@@ -237,7 +235,7 @@ export function ConstraintEditor({
           </div>
         )}
       </div>
-      {showAffinitySection && (
+      {isAffinitySectionVisible && (
         <div className="constraint-section panel subtle">
         <div className="constraint-section-title">
           <Radar size={14} />
@@ -248,7 +246,7 @@ export function ConstraintEditor({
           <input
             type="checkbox"
             checked={properties.affinity}
-            disabled={disabled}
+            disabled={isDisabled}
             onChange={(e) => {
               const nextAffinity = e.target.checked;
               const nextBinder =
@@ -267,7 +265,7 @@ export function ConstraintEditor({
           <Field label="Binder Chain">
             <select
               value={properties.binder || ''}
-              disabled={disabled || chainIds.length === 0}
+              disabled={isDisabled || chainIds.length === 0}
               onChange={(e) =>
                 onPropertiesChange({
                   ...properties,
@@ -336,7 +334,7 @@ export function ConstraintEditor({
                     event.stopPropagation();
                     toggleCollapsed(item.id);
                   }}
-                  disabled={disabled}
+                  disabled={isDisabled}
                   title={isCollapsed ? 'Expand constraint' : 'Collapse constraint'}
                   aria-label={isCollapsed ? 'Expand constraint' : 'Collapse constraint'}
                   aria-expanded={!isCollapsed}
@@ -353,7 +351,7 @@ export function ConstraintEditor({
                     event.stopPropagation();
                     removeConstraint(item.id);
                   }}
-                  disabled={disabled}
+                  disabled={isDisabled}
                   title="Delete constraint"
                 >
                   <Trash2 size={14} />
@@ -367,7 +365,7 @@ export function ConstraintEditor({
                   {isSelected && endpointTargets}
                   {isSelected && activeResiduePicker}
                   <Field label="Constraint Type">
-                    <select value={item.type} disabled={disabled} onChange={(e) => setType(e.target.value as PredictionConstraintType)}>
+                    <select value={item.type} disabled={isDisabled} onChange={(e) => setType(e.target.value as PredictionConstraintType)}>
                       {typeOptions.map((type) => (
                         <option key={`constraint-type-${item.id}-${type}`} value={type}>
                           {constraintTypeLabel(type)}
@@ -382,7 +380,7 @@ export function ConstraintEditor({
                       chainInfos={chainInfos}
                       pickedResidue={pickedResidue}
                       structureAtomOptionsByChain={structureAtomOptionsByChain}
-                      disabled={disabled}
+                      isDisabled={isDisabled}
                       onPickSlotFocus={(slot) => onPickSlotFocus?.(item.id, slot)}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
@@ -394,7 +392,7 @@ export function ConstraintEditor({
                       chainInfos={chainInfos}
                       pickedResidue={pickedResidue}
                       structureAtomOptionsByChain={structureAtomOptionsByChain}
-                      disabled={disabled}
+                      isDisabled={isDisabled}
                       onPickSlotFocus={(slot) => onPickSlotFocus?.(item.id, slot)}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
@@ -406,7 +404,7 @@ export function ConstraintEditor({
                       chainInfos={chainInfos}
                       pickedResidue={pickedResidue}
                       structureAtomOptionsByChain={structureAtomOptionsByChain}
-                      disabled={disabled}
+                      isDisabled={isDisabled}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
                   )}
@@ -423,19 +421,19 @@ export function ConstraintEditor({
           <span className="muted small">The selected backend does not support prediction constraints.</span>
         )}
         {allowedTypeSet.has('contact') && (
-          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('contact')} disabled={disabled}>
+          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('contact')} disabled={isDisabled}>
             <Plus size={14} />
             Contact
           </button>
         )}
         {allowedTypeSet.has('bond') && (
-          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('bond')} disabled={disabled}>
+          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('bond')} disabled={isDisabled}>
             <Link2 size={14} />
             Bond
           </button>
         )}
         {allowedTypeSet.has('pocket') && (
-          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('pocket')} disabled={disabled}>
+          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('pocket')} disabled={isDisabled}>
             <Target size={14} />
             Pocket
           </button>
@@ -450,7 +448,7 @@ interface SharedFieldsProps<T> {
   chainInfos: ReturnType<typeof buildChainInfos>;
   pickedResidue?: ConstraintResiduePick | null;
   structureAtomOptionsByChain?: StructureAtomOptionsByChain;
-  disabled: boolean;
+  isDisabled: boolean;
   onPickSlotFocus?: (slot: 'first' | 'second') => void;
   onChange: (next: T) => void;
 }
@@ -458,22 +456,20 @@ interface SharedFieldsProps<T> {
 function ChainSelect({
   value,
   chainInfos,
-  disabled,
+  isDisabled,
   onChange
 }: {
   value: string;
   chainInfos: ReturnType<typeof buildChainInfos>;
-  disabled: boolean;
+  isDisabled: boolean;
   onChange: (value: string) => void;
 }) {
-  // If the stored chain no longer matches any component (e.g. its component was removed),
-  // render it explicitly as "missing" and selected. A plain <select value="D"> with only
-  // A/B/C options would silently display the first option while the data still says "D",
-  // hiding the stale reference that crashes the predictor at run time.
+  // A stored chain with no matching component is rendered as "missing" rather than
+  // silently swapping to the first option, which would hide the stale reference.
   const knownChainIds = new Set(chainInfos.map((info) => info.id));
   const isStaleChain = Boolean(value) && !knownChainIds.has(value);
   return (
-    <select value={value} disabled={disabled || chainInfos.length === 0} onChange={(e) => onChange(e.target.value)}>
+    <select value={value} disabled={isDisabled || chainInfos.length === 0} onChange={(e) => onChange(e.target.value)}>
       {chainInfos.length === 0 && <option value="">No chain available</option>}
       {isStaleChain && <option value={value}>{value} · missing component</option>}
       {chainInfos.map((info) => (
@@ -485,12 +481,12 @@ function ChainSelect({
   );
 }
 
-function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus, onChange }: SharedFieldsProps<ContactConstraint>) {
+function ContactConstraintFields({ value, chainInfos, isDisabled, onPickSlotFocus, onChange }: SharedFieldsProps<ContactConstraint>) {
   return (
     <div className="constraint-grid">
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Token 1 Chain</span>
-        <ChainSelect value={value.token1_chain} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, token1_chain: next })} />
+        <ChainSelect value={value.token1_chain} chainInfos={chainInfos} isDisabled={isDisabled} onChange={(next) => onChange({ ...value, token1_chain: next })} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Token 1 Residue</span>
@@ -498,13 +494,13 @@ function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus,
           type="number"
           min={1}
           value={value.token1_residue}
-          disabled={disabled}
+          disabled={isDisabled}
           onChange={(e) => onChange({ ...value, token1_residue: clampPositiveInt(Number(e.target.value)) })}
         />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Token 2 Chain</span>
-        <ChainSelect value={value.token2_chain} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, token2_chain: next })} />
+        <ChainSelect value={value.token2_chain} chainInfos={chainInfos} isDisabled={isDisabled} onChange={(next) => onChange({ ...value, token2_chain: next })} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Token 2 Residue</span>
@@ -512,7 +508,7 @@ function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus,
           type="number"
           min={1}
           value={value.token2_residue}
-          disabled={disabled}
+          disabled={isDisabled}
           onChange={(e) => onChange({ ...value, token2_residue: clampPositiveInt(Number(e.target.value)) })}
         />
       </label>
@@ -522,7 +518,7 @@ function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus,
           min={1}
           step={0.5}
           value={value.max_distance}
-          disabled={disabled}
+          disabled={isDisabled}
           onChange={(e) => onChange({ ...value, max_distance: Math.max(1, Number(e.target.value) || 5) })}
         />
       </Field>
@@ -530,7 +526,7 @@ function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus,
         <input
           type="checkbox"
           checked={value.force}
-          disabled={disabled}
+          disabled={isDisabled}
           onChange={(e) => onChange({ ...value, force: e.target.checked })}
         />
         <span>Force</span>
@@ -566,21 +562,21 @@ function BondResidueSelect({
   chainId,
   value,
   structureAtomOptionsByChain,
-  disabled,
+  isDisabled,
   onChange
 }: {
   chainId: string;
   value: number;
   structureAtomOptionsByChain?: StructureAtomOptionsByChain;
-  disabled: boolean;
+  isDisabled: boolean;
   onChange: (value: number) => void;
 }) {
   const options = residueOptionsForChain(structureAtomOptionsByChain, chainId, value);
   if (options.length === 0) {
-    return <input type="number" min={1} value={value} disabled={disabled} onChange={(e) => onChange(clampPositiveInt(Number(e.target.value)))} />;
+    return <input type="number" min={1} value={value} disabled={isDisabled} onChange={(e) => onChange(clampPositiveInt(Number(e.target.value)))} />;
   }
   return (
-    <select value={value} disabled={disabled} onChange={(e) => onChange(clampPositiveInt(Number(e.target.value)))}>
+    <select value={value} disabled={isDisabled} onChange={(e) => onChange(clampPositiveInt(Number(e.target.value)))}>
       {options.map((item) => (
         <option key={`${chainId}:${item.residue}`} value={item.residue}>
           {item.residueName ? `${item.residue} · ${item.residueName}` : item.residue}
@@ -595,14 +591,14 @@ function BondAtomSelect({
   residue,
   value,
   structureAtomOptionsByChain,
-  disabled,
+  isDisabled,
   onChange
 }: {
   chainId: string;
   residue: number;
   value: string;
   structureAtomOptionsByChain?: StructureAtomOptionsByChain;
-  disabled: boolean;
+  isDisabled: boolean;
   onChange: (value: string) => void;
 }) {
   const options = atomOptionsForResidue(structureAtomOptionsByChain, chainId, residue, value);
@@ -610,7 +606,7 @@ function BondAtomSelect({
     return <select value="" disabled title="No atom names are available for this residue/component."><option value="">No atoms</option></select>;
   }
   return (
-    <select value={options.includes(String(value || '').trim().toUpperCase()) ? String(value || '').trim().toUpperCase() : options[0]} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+    <select value={options.includes(String(value || '').trim().toUpperCase()) ? String(value || '').trim().toUpperCase() : options[0]} disabled={isDisabled} onChange={(e) => onChange(e.target.value)}>
       {options.map((atom) => (
         <option key={`${chainId}:${residue}:${atom}`} value={atom}>
           {atom}
@@ -620,7 +616,7 @@ function BondAtomSelect({
   );
 }
 
-function BondConstraintFields({ value, chainInfos, structureAtomOptionsByChain, disabled, onPickSlotFocus, onChange }: SharedFieldsProps<BondConstraint>) {
+function BondConstraintFields({ value, chainInfos, structureAtomOptionsByChain, isDisabled, onPickSlotFocus, onChange }: SharedFieldsProps<BondConstraint>) {
   const updateAtom1Chain = (chainId: string) => {
     const residues = residueOptionsForChain(structureAtomOptionsByChain, chainId, value.atom1_residue);
     const residue = residues[0]?.residue || value.atom1_residue;
@@ -646,37 +642,37 @@ function BondConstraintFields({ value, chainInfos, structureAtomOptionsByChain, 
     <div className="constraint-grid">
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Atom 1 Chain</span>
-        <ChainSelect value={value.atom1_chain} chainInfos={chainInfos} disabled={disabled} onChange={updateAtom1Chain} />
+        <ChainSelect value={value.atom1_chain} chainInfos={chainInfos} isDisabled={isDisabled} onChange={updateAtom1Chain} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Atom 1 Residue</span>
-        <BondResidueSelect chainId={value.atom1_chain} value={value.atom1_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={updateAtom1Residue} />
+        <BondResidueSelect chainId={value.atom1_chain} value={value.atom1_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} isDisabled={isDisabled} onChange={updateAtom1Residue} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Atom 1 Name</span>
-        <BondAtomSelect chainId={value.atom1_chain} residue={value.atom1_residue} value={value.atom1_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={(atom) => onChange({ ...value, atom1_atom: atom })} />
+        <BondAtomSelect chainId={value.atom1_chain} residue={value.atom1_residue} value={value.atom1_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} isDisabled={isDisabled} onChange={(atom) => onChange({ ...value, atom1_atom: atom })} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Atom 2 Chain</span>
-        <ChainSelect value={value.atom2_chain} chainInfos={chainInfos} disabled={disabled} onChange={updateAtom2Chain} />
+        <ChainSelect value={value.atom2_chain} chainInfos={chainInfos} isDisabled={isDisabled} onChange={updateAtom2Chain} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Atom 2 Residue</span>
-        <BondResidueSelect chainId={value.atom2_chain} value={value.atom2_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={updateAtom2Residue} />
+        <BondResidueSelect chainId={value.atom2_chain} value={value.atom2_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} isDisabled={isDisabled} onChange={updateAtom2Residue} />
       </label>
       <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Atom 2 Name</span>
-        <BondAtomSelect chainId={value.atom2_chain} residue={value.atom2_residue} value={value.atom2_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={(atom) => onChange({ ...value, atom2_atom: atom })} />
+        <BondAtomSelect chainId={value.atom2_chain} residue={value.atom2_residue} value={value.atom2_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} isDisabled={isDisabled} onChange={(atom) => onChange({ ...value, atom2_atom: atom })} />
       </label>
     </div>
   );
 }
 
-function PocketConstraintFields({ value, chainInfos, disabled, onChange }: SharedFieldsProps<PocketConstraint>) {
+function PocketConstraintFields({ value, chainInfos, isDisabled, onChange }: SharedFieldsProps<PocketConstraint>) {
   return (
     <div className="constraint-grid constraint-grid-pocket">
       <Field label="Binder Chain">
-        <ChainSelect value={value.binder} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, binder: next })} />
+        <ChainSelect value={value.binder} chainInfos={chainInfos} isDisabled={isDisabled} onChange={(next) => onChange({ ...value, binder: next })} />
       </Field>
 
       <Field label="Max Distance (Å)">
@@ -685,7 +681,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
           min={1}
           step={0.5}
           value={value.max_distance}
-          disabled={disabled}
+          disabled={isDisabled}
           onChange={(e) => onChange({ ...value, max_distance: Math.max(1, Number(e.target.value) || 6) })}
         />
       </Field>
@@ -694,7 +690,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
         <input
           type="checkbox"
           checked={value.force}
-          disabled={disabled}
+          disabled={isDisabled}
           onChange={(e) => onChange({ ...value, force: e.target.checked })}
         />
         <span>Force</span>
@@ -709,7 +705,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
               <ChainSelect
                 value={contact[0]}
                 chainInfos={chainInfos}
-                disabled={disabled}
+                isDisabled={isDisabled}
                 onChange={(nextChain) => {
                   const nextContacts = value.contacts.map((row, rowIndex) =>
                     rowIndex === index ? ([nextChain, row[1]] as [string, number]) : row
@@ -721,7 +717,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
                 type="number"
                 min={1}
                 value={contact[1]}
-                disabled={disabled}
+                disabled={isDisabled}
                 onChange={(e) => {
                   const nextResidue = clampPositiveInt(Number(e.target.value));
                   const nextContacts = value.contacts.map((row, rowIndex) =>
@@ -733,7 +729,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
               <button
                 type="button"
                 className="icon-btn"
-                disabled={disabled}
+                disabled={isDisabled}
                 onClick={() => {
                   const nextContacts = value.contacts.filter((_, rowIndex) => rowIndex !== index);
                   onChange({ ...value, contacts: nextContacts });
@@ -749,7 +745,7 @@ function PocketConstraintFields({ value, chainInfos, disabled, onChange }: Share
         <button
           type="button"
           className="btn btn-ghost top-margin"
-          disabled={disabled}
+          disabled={isDisabled}
           onClick={() => {
             const fallback = chainInfos[0]?.id || 'A';
             onChange({ ...value, contacts: [...value.contacts, [fallback, 1]] });

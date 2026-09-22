@@ -1,29 +1,9 @@
-"""Constraint plan: decode-time enforcement for Tier-2 design constraints.
-
-Upgrade-3 core: move constraint satisfaction from post-hoc sequence repair
-into the autoregressive sampler, so the sequence the model scores is the
-sequence it generates. Guarantees provided AT DECODE TIME:
-
-  * fixed residues (user-pinned positions -> hard-forced tokens; positions
-    are counted in emitted residues, so FIM fills and de novo sampling are
-    handled uniformly)
-  * NCAA pool legality (strict: off-pool bracket tokens are banned) and an
-    optional soft bias toward pool tokens (fixes the measured NCAA avoidance)
-  * bicyclic Cys anchors — three explicit user positions when given, else
-    the first/interior/last layout. Known length -> all anchors are
-    decode-time hard-forced and non-anchor Cys banned (when extra Cys are
-    not allowed); adaptive length -> terminal/interior anchors come from a
-    single bounded post-edit at EOS
-
-Design notes (engineering-grade):
-  * a plan is immutable; build_plan() derives it from the loop config once
-    per round (length may change between rounds in adaptive mode)
-  * apply() mutates logits in place; hard-forcing (fixed/anchor positions)
-    and soft biasing (ncaa lambda) are the only two mechanisms — no
-    rejection sampling, no post-hoc overwrite cascades
-  * GRPO text stays the *final* candidate text: the policy trains on what
-    was actually scored (no train/serve skew from repair)
-"""
+"""Decode-time constraint plan: fixed residues, NCAA pool legality, and
+bicyclic Cys anchors enforced inside the autoregressive sampler, so the
+sequence the model scores is the sequence it generates. apply() only
+hard-forces (fixed/anchor positions) or softly biases (ncaa lambda)
+logits — no rejection sampling, no post-hoc repair, so GRPO trains on
+the final emitted text."""
 
 from __future__ import annotations
 
@@ -31,7 +11,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from peplm.models.gpt2 import PlacementMask
+
 from peplm.vocab import Vocab
 
 
@@ -53,7 +33,6 @@ class ConstraintPlan:
     allow_extra_cys: bool = False                    # keep non-anchor Cys
     ban_cys: bool = False                            # ban "C" outside anchors at decode
 
-    # ------------------------------------------------------------------
     def ncaa_ids(self) -> set[int]:
         return {self.vocab.stoi[t] for t in self.ncaa_pool if t in self.vocab.stoi}
 
@@ -85,9 +64,8 @@ class ConstraintPlan:
         if ban:
             logits.index_fill_(0, torch.tensor(sorted(ban), device=logits.device),
                                float("-inf"))
-        # NCAA minimum as a decode guarantee: with < 2 steps left to max_len
-        # and the quota unmet, deterministically force the first placement-
-        # legal pool token (no RNG, no post-hoc random injection)
+        # NCAA minimum guarantee: near max_len with quota unmet, force the
+        # first placement-legal pool token (deterministic)
         if self.ncaa_min > 0 and ncaa_used < self.ncaa_min \
                 and emitted >= self.max_len - 2:
             from peplm.residues import placement_lookup
@@ -121,9 +99,9 @@ def choose_bicyclic_anchors(length: int, fixed: dict | None = None,
                             cys_positions: tuple = ()) -> tuple:
     """The 3 anchor positions for a bicyclic candidate of this length.
 
-    Explicit user positions win when all three fit the length; otherwise the
-    first/interior/last layout applies, with the interior anchor chosen as:
-    user-pinned C > first valid explicit position > nearest free midpoint.
+    Explicit user positions win when all three fit; otherwise the
+    first/interior/last layout, the interior anchor chosen as: user-pinned
+    C > first valid explicit position > nearest free midpoint.
     """
     fixed = fixed or {}
     explicit = sorted({int(p) for p in cys_positions
@@ -152,9 +130,8 @@ def choose_bicyclic_anchors(length: int, fixed: dict | None = None,
 
 def _ratio_anchor(length: int, pct: float) -> int:
     """Scale one percentage to a 0-based position, mirroring the 1-based
-    frontend math in peptideCysLayout.ts exactly: p1 = clamp(round-half-up,
-    1..L), then shift to 0-based. floor(x + 0.5) on BOTH sides (Python
-    round() is banker's rounding and drifts from JS Math.round)."""
+    frontend math (peptideCysLayout.ts) exactly: floor(x + 0.5) on both
+    sides — Python round() is banker's rounding, JS Math.round is not."""
     one_based = max(1, min(length, int((pct / 100.0) * length + 0.5)))
     return one_based - 1
 
@@ -164,21 +141,17 @@ def resolve_bicyclic_anchors(length: int, fixed: dict | None = None,
                              cys_layout: dict | None = None) -> tuple:
     """Resolve the 3 anchors (0-based) for one candidate of this length.
 
-    cys_layout (optional) supersedes cys_positions and makes the anchors a
-    FUNCTION of the candidate length, so manual topologies survive adaptive
-    design lengths:
+    cys_layout, when set, supersedes cys_positions and makes the anchors
+    a function of length, so manual topologies survive adaptive design:
 
       * {"mode": "ring", "ring1": r1, "ring2": r2} — C-terminus-anchored
-        rigid block: cys3 rides the last residue, ring sizes stay exactly
-        r1/r2 at every length, the N-flank absorbs the range. None when the
-        candidate is shorter than the core (r1 + r2 + 3).
+        rigid block: ring sizes stay r1/r2 at every length. None when the
+        candidate is shorter than r1 + r2 + 3.
       * {"mode": "ratio", "pct1", "pct2", "pct3"} — percentage-scaled
-        anchors (shape preserved, ring sizes flex), forward-fixed so
-        adjacent anchors keep >= 2 residues between them; None when even
-        the fix cannot fit three anchors.
+        anchors, forward-fixed so adjacent anchors keep >= 2 residues
+        between them. None when three anchors cannot fit.
 
-    Without a layout dict this falls back to choose_bicyclic_anchors
-    (explicit absolute positions / auto first-interior-last).
+    Without a layout dict, falls back to choose_bicyclic_anchors.
     """
     layout = cys_layout if isinstance(cys_layout, dict) else None
     mode = str(layout.get("mode") or "") if layout else ""
@@ -249,9 +222,8 @@ def build_plan(cfg, vocab: Vocab, length: int | None = None,
                                                 cys_layout)
             anchors = resolved if resolved is not None else ()
         else:
-            # adaptive: length-function layouts resolve fully in the
-            # post-edit (nothing is known yet); auto keeps the position-0
-            # decode-time anchor
+            # adaptive: length-fn layouts resolve fully in the post-edit;
+            # auto keeps the position-0 decode-time anchor
             anchors = () if layout_is_length_fn else (0,)
             post_edit = ("interior_terminal", "C")
     return ConstraintPlan(
@@ -282,10 +254,9 @@ def plan_for_post_edit(fixed: dict, vocab: Vocab,
 def apply_post_edit(tokens: list[str], plan: ConstraintPlan,
                     layout: str = "first_last") -> list[str]:
     """Bounded post-edit for what decoding cannot know (adaptive-length
-    terminal/interior anchors). Exactly the plan.post_edit slots — never a
-    general repair cascade. `layout` selects the anchor policy (only
-    first_last today); the function runs whenever the plan carries a
-    post_edit marker, regardless of the layout string's spelling."""
+    anchors): exactly the plan.post_edit slots, never a general repair
+    cascade. Runs whenever the plan carries a post_edit marker, regardless
+    of the layout string's spelling."""
     if not plan.post_edit:
         return tokens
     out = list(tokens)

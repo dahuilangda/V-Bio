@@ -16,8 +16,7 @@ from utils.docking import (
 def run_high_level_mode_pipeline(args: argparse.Namespace, output_dir: Path) -> None:
     """Dispatch pose/refine/interface/dock to the flexible-optimization trial.
 
-    Dock prepares its ligand SDF first (conformers from SMILES placed at the
-    pocket); the other modes take the user's posed SDF as-is.
+    Dock prepares its ligand SDF first; the other modes take the posed SDF as-is.
     """
     if args.mode == DOCK_MODE:
         _prepare_dock_input(args, output_dir)
@@ -32,15 +31,17 @@ def run_high_level_mode_pipeline(args: argparse.Namespace, output_dir: Path) -> 
                 f"--mode {args.mode!r} requires an SDF ligand file. Got: {ligand_path.name}"
             )
 
+    if args.anchor_contact_cutoff is None:
+        # dock resolves its own (pocket-radius) default inside _prepare_dock_input
+        args.anchor_contact_cutoff = 5.0
     print(f"[Info] Running high-level pipeline mode: {args.mode}")
     print(f"[Info] Flexible optimization mode={args.mode} -> {output_dir}")
     run_flexible_optimization(args=args, output_dir=output_dir)
 
 
 def _prepare_dock_input(args: argparse.Namespace, output_dir: Path) -> None:
-    """Generate ETKDG conformers from SMILES, place them at the pocket, and
-    wire the resulting SDF into ``args`` so the downstream flexible-optimization
-    pipeline picks it up transparently.
+    """Generate ETKDG conformers from SMILES, place them at the pocket, and set
+    args.ligand_file to the resulting SDF.
     """
     if args.protein_file is None:
         raise ValueError("dock mode requires --protein_file.")
@@ -73,10 +74,8 @@ def _prepare_dock_input(args: argparse.Namespace, output_dir: Path) -> None:
 
     args.ligand_file = str(dock_sdf)
 
-    # Dock mode uses a wider anchor_contact_cutoff to capture the full
-    # pocket around the placed conformer.  Override the default (5.0)
-    # with the resolved pocket radius.
-    if args.anchor_contact_cutoff == 5.0:
+    # Dock uses the pocket radius as the anchor cutoff to capture the full pocket.
+    if args.anchor_contact_cutoff is None:
         args.anchor_contact_cutoff = pocket_radius
         print(f"[Dock] Using anchor_contact_cutoff={pocket_radius:.1f} Å")
         # max_distance = cutoff + 1.0 Å

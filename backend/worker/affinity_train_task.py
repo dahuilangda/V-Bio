@@ -1,12 +1,8 @@
-"""protenix2dock affinity-head training task (V-Bio task system integration).
+"""protenix2dock affinity-head training task.
 
-Long-running job: runs capabilities/protenix2dock/train_affinity.py inside
-the Protenix runtime image. Supports sharded epochs via --resume_ckpt so a
-multi-day training run can be split across sequential tasks (each shard
-persists a checkpoint the next shard resumes from).
-
-Route: POST /api/affinity_train (backend/worker registered here; see
-backend/routes/affinity.py for the endpoint).
+Runs capabilities/protenix2dock/train_affinity.py inside the Protenix
+runtime image. Sharded epochs via --resume_ckpt: each shard persists a
+checkpoint the next resumes from. Route: POST /api/affinity_train.
 """
 
 from __future__ import annotations
@@ -45,6 +41,7 @@ def affinity_train_task(self, train_args: dict):
     task_id = self.request.id
     redis_client = get_redis_client()
     tracker = _tasks.TaskProgressTracker(task_id, redis_client)
+    tracker.start_heartbeat()
     gpu_id = -1
 
     try:
@@ -58,9 +55,8 @@ def affinity_train_task(self, train_args: dict):
         work_dir = train_args.get("work_dir") or os.path.join(task_temp_dir, "work")
         os.makedirs(work_dir, exist_ok=True)
 
-        # NOTE: inputs live on the HOST; the training container (launched via
-        # docker CLI from this worker) mounts them directly. This worker
-        # container may not share those mounts, so no host-path existence
+        # Inputs live on the HOST and are mounted into the training container;
+        # this worker container may not share those mounts, so no existence
         # checks here — the training entry validates inside its container.
         index_csv = train_args.get("index_csv") or os.path.join(_TRAIN_DATA_ROOT, "curated_300k/train.csv")
         val_csv = train_args.get("val_csv") or os.path.join(_TRAIN_DATA_ROOT, "curated_300k/val.csv")
@@ -82,8 +78,7 @@ def affinity_train_task(self, train_args: dict):
         resume = train_args.get("resume_ckpt")
         if resume:
             entry.extend(["--resume_ckpt", str(resume)])
-        # Shard override wins over the default index csv; never emit two
-        # --index_csv flags (argparse would silently keep the last one).
+        # Never emit two --index_csv flags; argparse would silently keep the last one.
         if train_args.get("shard_csv"):
             entry[entry.index("--index_csv") + 1] = str(train_args["shard_csv"])
         if train_args.get("msa_server_url") is not None:
@@ -91,7 +86,6 @@ def affinity_train_task(self, train_args: dict):
         # the runtime mount exposes the shared MSA cache at /data/msa_cache
         entry.extend(["--msa_cache_dir", str(train_args.get("msa_cache_dir") or "/data/msa_cache")])
 
-        # Docker: protenix runtime image with training data + msa cache mounted.
         from backend.worker import docker_cmd
 
         command, container_name = docker_cmd.build_task_docker_skeleton(
@@ -101,9 +95,9 @@ def affinity_train_task(self, train_args: dict):
         command.extend([
             "--volume", f"{_TRAIN_DATA_ROOT}:{_TRAIN_DATA_ROOT}",
             "--workdir", "/workspace/vbio/capabilities/protenix2dock",
-            # The image's default entrypoint is the protenix CLI; the
-            # PROTENIX_DOCKER_EXTRA_ARGS default (--entrypoint=) overrides it
-            # so we can run arbitrary python commands.
+            # The image's default entrypoint is the protenix CLI;
+            # PROTENIX_DOCKER_EXTRA_ARGS (--entrypoint=) overrides it so
+            # arbitrary python commands can run.
             *shlex.split(str(getattr(config, "PROTENIX_DOCKER_EXTRA_ARGS", "") or "")),
         ])
         image, python_bin = docker_cmd.image_and_python()
@@ -159,7 +153,6 @@ def affinity_train_task(self, train_args: dict):
                 f"affinity training failed (exit {rc}). Tail:\n{tail_text}"
             )
 
-        # Package artifacts: checkpoints + val log.
         tracker.update_status("processing_output", "Packaging training artifacts")
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
         with zipfile.ZipFile(output_archive_path, "w") as zipf:
@@ -198,10 +191,11 @@ def affinity_train_task(self, train_args: dict):
         raise
     except Exception as e:  # noqa: BLE001
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        tracker.update_status("failed", _tasks._truncate_text(e, 4000))
+        tracker.update_status("failed", _tasks._truncate_text(e, _tasks.MAX_STATUS_DETAILS_CHARS))
         self.update_state(state="FAILURE", meta=_tasks._build_failure_meta(e))
         raise
     finally:
+        tracker.stop_heartbeat()
         _tasks._terminate_task_containers_by_task_id(task_id)
         if gpu_id != -1:
             release_gpu(gpu_id=gpu_id, task_id=task_id)

@@ -1,4 +1,6 @@
-# PeptideLM runtime requirements (satisfied by /data/Boltz2Score/.venv)
+esm>=3.4
+# PeptideLM runtime requirements
+# (esm = EvolutionaryScale ESM3; shares this env with the HF stack)
 # pinned versions from that environment
 torch>=2.1
 transformers>=4.38

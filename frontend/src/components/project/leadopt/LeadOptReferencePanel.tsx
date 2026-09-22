@@ -7,10 +7,10 @@ import { Field } from '../../common/Field';
 
 interface LeadOptReferencePanelProps {
   sectionId?: string;
-  canEdit: boolean;
-  loading: boolean;
-  submitting: boolean;
-  referenceReady: boolean;
+  isEditable: boolean;
+  isLoading: boolean;
+  isSubmitting: boolean;
+  isReferenceReady: boolean;
   previewStructureText: string;
   previewStructureFormat: 'cif' | 'pdb';
   previewOverlayStructureText: string;
@@ -26,16 +26,16 @@ interface LeadOptReferencePanelProps {
   highlightedPocketResidues: MolstarResidueHighlight[];
   activeMolstarAtom: MolstarAtomHighlight | null;
   onResiduePick: (pick: MolstarResiduePick) => void;
-  onTargetFileChange: (file: File | null) => Promise<void>;
-  onLigandFileChange: (file: File | null) => Promise<void>;
+  targetFileChangeAction: (file: File | null) => Promise<void>;
+  ligandFileChangeAction: (file: File | null) => Promise<void>;
 }
 
 export function LeadOptReferencePanel({
   sectionId,
-  canEdit,
-  loading,
-  submitting,
-  referenceReady,
+  isEditable,
+  isLoading,
+  isSubmitting,
+  isReferenceReady,
   previewStructureText,
   previewStructureFormat,
   previewOverlayStructureText,
@@ -48,8 +48,8 @@ export function LeadOptReferencePanel({
   highlightedPocketResidues,
   activeMolstarAtom,
   onResiduePick,
-  onTargetFileChange,
-  onLigandFileChange
+  targetFileChangeAction,
+  ligandFileChangeAction
 }: LeadOptReferencePanelProps) {
   const activeLigandResidue = useMemo<MolstarResidueHighlight | null>(() => {
     const anchor = activeMolstarAtom || highlightedLigandAtoms[0] || null;
@@ -91,10 +91,10 @@ export function LeadOptReferencePanel({
             onChange={async (event) => {
               const input = event.currentTarget;
               const nextTarget = event.target.files?.[0] || null;
-              await onTargetFileChange(nextTarget);
+              await targetFileChangeAction(nextTarget);
               input.value = '';
             }}
-            disabled={!canEdit || loading || submitting}
+            disabled={!isEditable || isLoading || isSubmitting}
           />
         </Field>
         <Field label="Ligand (SDF/MOL2/PDB/CIF)">
@@ -105,18 +105,18 @@ export function LeadOptReferencePanel({
             onChange={async (event) => {
               const input = event.currentTarget;
               const nextLigand = event.target.files?.[0] || null;
-              await onLigandFileChange(nextLigand);
+              await ligandFileChangeAction(nextLigand);
               input.value = '';
             }}
-            disabled={!canEdit || loading || submitting}
+            disabled={!isEditable || isLoading || isSubmitting}
           />
         </Field>
       </div>
       <div className="lead-opt-reference-status">
         <p className="small muted">
-          {loading
+          {isLoading
             ? 'Parsing reference…'
-            : referenceReady
+            : isReferenceReady
               ? (
                 <>
                   Reference ready
@@ -125,7 +125,7 @@ export function LeadOptReferencePanel({
               )
               : 'Upload target + ligand to start.'}
         </p>
-        {referenceReady ? pocketToolbar : null}
+        {isReferenceReady ? pocketToolbar : null}
       </div>
       <div className="lead-opt-structure-panel">
         {hasStructure ? (
@@ -138,16 +138,16 @@ export function LeadOptReferencePanel({
             ligandFocusChainId={ligandChain}
             onResiduePick={onResiduePick}
             highlightResidues={highlightedPocketResidues}
-            suppressResidueSelection
+            isResidueSelectionSuppressed
             highlightAtoms={displayLigandAtoms}
             activeResidue={activeLigandResidue}
             activeAtom={null}
             interactionGranularity="element"
-            suppressAutoFocus={false}
+            isAutoFocusSuppressed={false}
           />
         ) : (
           <div className="ligand-preview-empty">
-            {loading ? 'Rendering reference…' : 'Upload reference target+ligand to view 3D.'}
+            {isLoading ? 'Rendering reference…' : 'Upload reference target+ligand to view 3D.'}
           </div>
         )}
         {hasStructure ? pocketControls : null}

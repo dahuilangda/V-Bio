@@ -9,7 +9,10 @@ import type {
   VirtualScreeningPredictionRecord
 } from '../../types/models';
 import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
-import { deleteProjectTask } from '../../api/supabaseLite';
+import { deleteProjectTask, getProjectTaskById } from '../../api/supabaseLite';
+import { isProjectTaskRow } from '../projectTasks/taskDataCore';
+import { updateProfile } from '../../api/authServerApi';
+import { readTaskInputOptions } from './projectTaskSnapshot';
 import { createInputComponent, saveProjectInputConfig } from '../../utils/projectInputs';
 import type { LeadOptHaloCandidate } from '../../components/project/leadopt/hooks/useLeadOptHaloRun';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
@@ -32,6 +35,8 @@ import { useProjectSidebarActions } from './useProjectSidebarActions';
 import { useProjectWorkflowSectionProps } from './useProjectWorkflowSectionProps';
 import { useProjectRunState } from './useProjectRunState';
 import { usePredictionWorkspaceProps } from './usePredictionWorkspaceProps';
+import { buildStagedProgressText } from '../../components/project/peptideDesignResults/parseHelpers';
+import { PeptideSubmitConfirmDialog, type PeptideSubmitSummary } from './PeptideSubmitConfirmDialog';
 import { useProjectDetailRuntimeContext } from './useProjectDetailRuntimeContext';
 import { useAuth } from '../../hooks/useAuth';
 import {
@@ -77,10 +82,8 @@ export function useProjectDetailWorkspaceView() {
   const runtime = useProjectDetailRuntimeContext();
   const { locationSearch, entryRoutingResolved, loading, error, project, draft } = runtime;
 
-  // Stale-while-revalidate: a refetch of the SAME project (submit, copilot prefill, param
-  // change) keeps the current workspace on screen — the full-screen "Loading project..."
-  // placeholder unmounted everything and remounted it, which the user saw as a flash. The
-  // placeholder stays only for a genuinely new project (or the very first load).
+  // Stale-while-revalidate: keep the workspace mounted on a refetch of the
+  // same project; the placeholder is only for a genuinely new project.
   const projectId = String(runtime.projectId || '');
   if (!entryRoutingResolved || (loading && (!project || project.id !== projectId))) {
     const query = new URLSearchParams(locationSearch);
@@ -113,12 +116,21 @@ export function useProjectDetailWorkspaceView() {
   return <ProjectDetailWorkspaceLoaded runtime={runtime as WorkspaceRuntimeReady} />;
 }
 
+
 function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeReady }) {
   const { session } = useAuth();
+
+
+
   const copilotAvailable = useCopilotAvailability();
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
-  // Result-archive download can take seconds (full blob fetch before the save
-  // dialog); the header button must show progress instead of feeling dead.
+  const [peptideSubmitConfirmOpen, setPeptideSubmitConfirmOpen] = useState(false);
+  // Locked from Confirm-click until the submit cycle completes or errors,
+  // so async validations before setSubmitting still show feedback.
+  const [peptideConfirmSubmitting, setPeptideConfirmSubmitting] = useState(false);
+  const [peptideConfirmSawSubmitting, setPeptideConfirmSawSubmitting] = useState(false);
+  const [peptideConfirmErrorAtConfirm, setPeptideConfirmErrorAtConfirm] = useState<string | null>(null);
+  // Full blob fetch before the save dialog; the button shows progress.
   const [downloadingResult, setDownloadingResult] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }));
   useEffect(() => {
@@ -127,11 +139,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
 
   const {
+    locationSearch,
     loading,
     error,
-    setError,
     project,
     draft,
+    setError,
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
     isVirtualScreeningWorkflow,
@@ -280,6 +293,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     topRunButtonRef,
     affinityDockPocket,
     onAffinityDockPocketChange,
+    affinityDockBlind,
+    onAffinityDockBlindChange,
     snapshotPic50,
     snapshotPic50Mw,
     displaySubmittedAt,
@@ -295,6 +310,57 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityLigandFile
   } = runtime;
 
+
+  // Clone & re-run: hydrate the draft from the task row's stored input options.
+  // Strip the URL param via the router (React Router ignores raw history writes)
+  // and keep deps primitive — runtime has a fresh identity every render.
+  const clonedTaskRowId = new URLSearchParams(locationSearch).get('clone_task_row_id')?.trim() || '';
+  const runtimeLoading = runtime.loading;
+  const runtimeProjectId = runtime.projectId;
+  const runtimeSubmitting = runtime.submitting;
+  const cloneHydratedRef = useRef<string>('');
+  useEffect(() => {
+    if (!clonedTaskRowId || cloneHydratedRef.current === clonedTaskRowId) return;
+    if (runtimeLoading || runtimeSubmitting) return;
+    if (!project || project.id !== runtimeProjectId) return;
+    if (isLeadOptimizationWorkflow) return; // parity with the row-button gate
+    cloneHydratedRef.current = clonedTaskRowId;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const row = await getProjectTaskById(clonedTaskRowId);
+        if (cancelled || !isProjectTaskRow(row)) return;
+        const taskOptions = readTaskInputOptions(row);
+        if (Object.keys(taskOptions).length === 0) {
+          setError('This task has no stored parameters to clone.');
+          return;
+        }
+        setDraft((prev) => prev && ({
+          ...prev,
+          backend: row.backend || prev.backend,
+          inputConfig: {
+            ...prev.inputConfig,
+            // full reproduction needs the task's components/constraints too
+            components: Array.isArray(row.components) && row.components.length > 0
+              ? row.components
+              : prev.inputConfig.components,
+            constraints: Array.isArray(row.constraints)
+              ? row.constraints
+              : prev.inputConfig.constraints,
+            options: { ...prev.inputConfig.options, ...taskOptions }
+          }
+        }));
+        setWorkspaceTab('basics');
+        runtime.setRunSuccessNotice(
+          `Parameters loaded from "${row.name?.trim() || 'task'}" — review and press Run.`
+        );
+      } finally {
+        navigate(`/projects/${runtimeProjectId}`, { replace: true });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [clonedTaskRowId, runtimeLoading, runtimeSubmitting, project, runtimeProjectId,
+      isLeadOptimizationWorkflow, setDraft, setWorkspaceTab, setError, navigate, runtime]);
 
   const handleLeadOptHaloTaskCompleted = async (payload: {
     taskId: string;
@@ -453,8 +519,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
         if (target) onAffinityTargetFileChange(target.file);
         if (isAffinityWorkflow && ligand) onAffinityLigandFileChange(ligand.file);
-        // The target/ligand editors and 3D preview only render on the Components
-        // tab; switch there so the applied files are actually visible.
+        // the editors and 3D preview only render on the Components tab
         if (isAffinityWorkflow && (target || ligand)) setWorkspaceTab('components');
         return;
       }
@@ -714,8 +779,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     [projectTasks]
   );
 
-  // HALO snapshot: candidates/rounds persisted on the task row by the run
-  // handlers below (live runs carry their own copy inside the workspace).
+  // HALO snapshot: candidates/rounds persisted on the task row by the run handlers.
   const leadOptHaloSnapshot = useMemo(() => {
     const row = preferredLeadOptSnapshotTask || requestedStatusTaskRow || statusContextTaskRow || activeResultTask || null;
     const confidence = asRecord(row?.confidence);
@@ -798,6 +862,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityPreviewError: String(affinityPreviewError || ''),
     affinityDockMode: affinityMode === 'dock',
     affinityDockPocketPresent: Boolean(affinityDockPocket),
+    affinityDockBlind,
+    hasUnsavedChanges,
     affinityTargetChainCount: affinityTargetChainIds.length,
     affinityLigandChainId,
     affinityLigandSmiles,
@@ -1151,8 +1217,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
     if (!screeningTaskRow?.id) return;
     const sourceProperties = (screeningTaskRow.properties || nextConfig.properties) as ProjectInputConfig['properties'];
-    // Persist ONLY the job records. Merging the live draft options here would
-    // write unsaved editor state into the viewed row's stored options.
+    // persist only the job records; the live draft may be unsaved
     const patchPayload = {
       properties: mergeTaskInputOptionsIntoProperties(sourceProperties, {
         virtualScreeningPredictions: normalizedRecords
@@ -1248,6 +1313,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityPreviewLigandSmiles: String(affinityPreview?.ligandSmiles || ''),
     affinityMode,
     affinityDockPocket,
+    affinityDockBlind,
     affinityConfidenceOnlyUiValue,
     affinityConfidenceOnlyUiLocked,
     affinityPreviewStructureText,
@@ -1259,6 +1325,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onAffinityConfidenceOnlyChange,
     onAffinityModeChange,
     onAffinityDockPocketChange,
+    onAffinityDockBlindChange,
     setAffinityLigandSmiles,
     leadOptProteinSequence: leadOptPrimary.proteinSequence,
     leadOptLigandSmiles: leadOptPrimary.ligandSmiles,
@@ -1308,13 +1375,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     peptideDesignMode: draft.inputConfig.options.peptideDesignMode ?? 'linear',
     peptideChirality: draft.inputConfig.options.peptideChirality ?? 'l',
     peptideBinderLength: draft.inputConfig.options.peptideBinderLength ?? 20,
-    // display defaults fall back to the ACTUAL submission source (the legacy
-    // single binder length) so the range inputs never show a window that
-    // would not be submitted
+    // display fallbacks mirror submission: a locked or unset range collapses
+    // to the legacy single length, never a 10-25 window
     peptideLengthMin: draft.inputConfig.options.peptideLengthMin
-      ?? draft.inputConfig.options.peptideBinderLength ?? 10,
+      ?? draft.inputConfig.options.peptideBinderLength ?? 20,
     peptideLengthMax: draft.inputConfig.options.peptideLengthMax
-      ?? draft.inputConfig.options.peptideBinderLength ?? 25,
+      ?? draft.inputConfig.options.peptideBinderLength ?? 20,
     peptideUseInitialSequence: draft.inputConfig.options.peptideUseInitialSequence ?? false,
     peptideInitialSequence: draft.inputConfig.options.peptideInitialSequence ?? '',
     peptideStructureUpload: draft.inputConfig.options.peptideStructureUpload ?? null,
@@ -1393,6 +1459,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   }, [project.id, taskListPage]);
   const {
     handleRunAction,
+    handleConfirmedRunAction,
     handleRunCurrentDraft,
     handleRestoreSavedDraft,
     handleResetFromHeader,
@@ -1413,8 +1480,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     navigate,
   });
 
-  // Lead-opt runs from the Optimization panel's own Run button; the header
-  // Run stays disabled for this workflow with a pointer to the panel.
+  // lead-opt runs from the panel's own Run button, not the header Run
   const effectiveRunDisabled = runDisabled || isLeadOptimizationWorkflow;
   const effectiveRunBlockedReason = isLeadOptimizationWorkflow
     ? 'Use the Run Optimization button in the Lead Optimization workspace.'
@@ -1434,6 +1500,55 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     readText(activeResultTask?.task_id).trim() ||
     readText(project.task_id).trim();
   const headerRuntimeStateToken = readText(displayTaskState || project.task_state).trim().toUpperCase();
+  useEffect(() => {
+    if (peptideConfirmSubmitting && submitting) {
+      setPeptideConfirmSawSubmitting(true);
+    }
+  }, [peptideConfirmSubmitting, submitting]);
+
+  useEffect(() => {
+    if (!peptideConfirmSubmitting) return;
+    // submit cycle finished (submitting rose and fell): close quietly
+    if (peptideConfirmSawSubmitting && !submitting) {
+      setPeptideConfirmSubmitting(false);
+      setPeptideConfirmSawSubmitting(false);
+      setPeptideSubmitConfirmOpen(false);
+      return;
+    }
+    // validation failure before submitting rose: close only for an error that
+    // appeared after the Confirm click, so a stale error can't close mid-validation
+    if (!peptideConfirmSawSubmitting && error && error !== peptideConfirmErrorAtConfirm) {
+      setPeptideConfirmSubmitting(false);
+      setPeptideConfirmSawSubmitting(false);
+      setPeptideSubmitConfirmOpen(false);
+    }
+  }, [peptideConfirmSubmitting, peptideConfirmSawSubmitting, submitting, error, peptideConfirmErrorAtConfirm]);
+
+
+
+  const stagedProgressText = useMemo(
+    () =>
+      headerRuntimeStateToken === 'RUNNING' && statusInfo && typeof statusInfo === 'object'
+        ? buildStagedProgressText(statusInfo as Record<string, unknown>)
+        : null,
+    [headerRuntimeStateToken, statusInfo]
+  );
+  const peptideSubmitSummary = useMemo<PeptideSubmitSummary | null>(() => {
+    if (!isPeptideDesignWorkflow || !draft) return null;
+    const options = draft.inputConfig.options;
+    const lengthMin = options.peptideLengthMin ?? options.peptideBinderLength ?? 20;
+    const lengthMax = options.peptideLengthMax ?? options.peptideBinderLength ?? 20;
+    return {
+      backend: draft.backend,
+      designMode: options.peptideDesignMode ?? 'linear',
+      chirality: options.peptideChirality ?? 'l',
+      binderLengthLabel: lengthMin === lengthMax ? `${lengthMin} aa` : `${lengthMin}–${lengthMax} aa (adaptive)`,
+      iterations: options.peptideIterations ?? 12,
+      populationSize: options.peptidePopulationSize ?? 16,
+      eliteSize: options.peptideEliteSize ?? 5,
+      hasPocket: Boolean(options.peptidePocketResidues || options.peptidePocketCenter)
+    };
+  }, [isPeptideDesignWorkflow, draft]);
   const showHeaderStopAction =
     isPeptideDesignWorkflow &&
     Boolean(headerRuntimeTaskId) &&
@@ -1442,6 +1557,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const headerStopRunDisabled = !showHeaderStopAction || headerStopRunPending || runSubmitting;
   const handleHeaderRunAction = () => {
     if (isLeadOptimizationWorkflow) {
+      return;
+    }
+    // long GPU jobs: confirm the parameter summary + resource estimate first
+    if (peptideSubmitSummary !== null) {
+      setPeptideSubmitConfirmOpen(true);
       return;
     }
     handleRunAction();
@@ -1596,9 +1716,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
             const type = readText(raw.type).trim();
             const sequence = readText(raw.sequence).trim();
             if (!type || !sequence) return null;
-            // Fill defaults the InputComponent type requires but the planner may omit.
-            // Ligands with a SMILES sequence default to inputMethod 'smiles' (the sequence IS the
-            // SMILES string); proteins default useMsa to false.
+            // fill defaults the type requires but the planner may omit:
+            // ligand SMILES -> inputMethod 'smiles', protein useMsa false
             const isLigand = type === 'ligand';
             const inputMethod = readText(raw.inputMethod).trim() || (isLigand ? 'smiles' : undefined);
             return {
@@ -1646,10 +1765,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     }
     if (action.id === 'task_detail:apply_parameter_patch') {
       applyPatch();
-      // Wait for React to commit the setDraft state updates, then save via saveDraftRef.current —
-      // the ref points at the saveDraft of the render that committed the PATCHED draft, so its
-      // closure reads the patched values (not the stale pre-patch draft). The double-rAF flush
-      // makes the render commit; the ref makes the save read the new render's closure.
+      // wait for the patched draft's render commit (double rAF), then save
+      // via the ref so the closure reads the patched values, not the stale draft
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
@@ -1707,14 +1824,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         : action.payload?.fileName;
       const { fileName, format, contentText } = await fetchValidatedStructure(structureUrl, targetFileName);
       const file = new File([contentText], fileName, { type: format === 'pdb' ? 'chemical/x-pdb' : 'chemical/x-cif' });
-      // onTargetFileChange resets ligand-dependent state INCLUDING the SMILES the
-      // user may have just had copilot fill in — a target swap must not discard an
-      // independently-valid ligand SMILES, so capture and restore it.
+      // onTargetFileChange resets ligand state including the SMILES; capture and restore it
       const ligandSmilesBefore = String(affinityLigandSmiles || '').trim();
       onAffinityTargetFileChange(file);
       if (ligandSmilesBefore) setAffinityLigandSmiles(ligandSmilesBefore);
-      // The target viewer + preview pipeline only live on the Components tab; without
-      // this switch the apply is invisible (the exact "applied but nothing loaded" bug).
+      // the target viewer and preview only live on the Components tab
       setWorkspaceTab('components');
       return 'Docking target structure applied. Switched to the Components tab — the 3D preview is being prepared.';
     }
@@ -1723,8 +1837,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (!isAffinityWorkflow) throw new Error('Docking ligand SMILES are only supported for docking tasks.');
       const smiles = String(action.payload?.smiles || '').trim();
       if (!smiles) throw new Error('No SMILES was provided.');
-      // The SMILES is only consumed in dock mode; in pose/refine/interface the submit validation
-      // requires an uploaded ligand file and this value would be silently ignored.
+      // SMILES is only consumed in dock mode; other modes require an uploaded ligand file
       const modeSwitched = affinityMode !== 'dock';
       if (modeSwitched) onAffinityModeChange('dock');
       setAffinityLigandSmiles(smiles);
@@ -1745,17 +1858,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         throw new Error('No target structure is uploaded yet — apply the docking target first.');
       }
       const structureText = await affinityTargetFile.text();
-      // Name first, content sniff second (shared policy): a target applied without a
-      // recognizable extension must still box instead of failing the whole docking chain
-      // on its file name.
+      // name first, content sniff second (shared policy)
       const format = resolveStructureFormat(affinityTargetFile.name, structureText);
       if (!format) throw new Error('The uploaded target file is not a .pdb, .ent, .cif or .mmcif structure.');
       if (mode !== 'auto' && mode !== 'protein') {
         throw new Error('mode must be "auto" (ligand pocket if present, else whole protein) or "protein".');
       }
-      // "auto": co-crystallized ligand pocket first, whole protein as fallback.
-      // "protein": whole-protein box explicitly (strip heteroatoms so a co-crystal ligand
-      // cannot pull the box off-center).
+      // "auto": ligand pocket first, whole protein fallback; "protein":
+      // whole-protein box with heteroatoms stripped
       const chosen = computeAutoPocketBox(
         mode === 'protein' ? structureText.replace(/^HETATM.*$/gm, '') : structureText,
         format
@@ -1779,12 +1889,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (runDisabledRef.current) {
         throw new Error(runBlockedReasonRef.current || 'Current task cannot be submitted yet.');
       }
-      // Honest precondition (pi: actionable errors at the decision point): submit silently
-      // no-ops without a pocket in dock mode — surface it HERE with the fix, so the receipt
-      // is a failed one carrying next steps instead of a false "queued".
-      if (isAffinityWorkflow && affinityMode === 'dock' && !affinityDockPocket) {
+      // surface the missing-pocket precondition here instead of letting submit silently no-op
+      if (
+        isAffinityWorkflow && affinityMode === 'dock' && !affinityDockPocket
+        && !draft.inputConfig.options.affinityDockBlind
+      ) {
         throw new Error(
-          'Dock mode requires a pocket box — apply task_detail:set_docking_pocket_box (mode "auto") first: it boxes the co-crystallized ligand site or the whole protein.'
+          'Dock mode requires a pocket box — apply task_detail:set_docking_pocket_box (mode "auto") first: it boxes the co-crystallized ligand site or the whole protein. For whole-surface search, enable Blind docking instead.'
         );
       }
       await submitTaskRef.current();
@@ -1826,8 +1937,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       navigate(`/projects/${project.id}/tasks`, { replace: true });
       return 'Task deleted.';
     }
-    // An unrecognized task-detail action must fail loudly: returning undefined would make the
-    // Copilot panel record an `applied` receipt for a silent no-op.
+    // unknown actions must fail loudly, not record a false `applied` receipt
     throw new Error(`Unsupported Copilot task-detail action: ${action.id}`);
   }, [
     affinityDockPocket,
@@ -1933,8 +2043,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       },
       affinityUploads: isAffinityWorkflow
         ? {
-            // PERSISTED uploads win over the transient File: the File hydrates only on the
-            // Components tab, so a truth-lie here made the planner re-apply an existing target.
+            // persisted uploads win over the transient File (hydrates only on the Components tab)
             targetFileName:
               runtime.affinityCurrentUploads?.target?.fileName || affinityTargetFile?.name || '',
             ligandFileName:
@@ -2004,6 +2113,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         workflowShortTitle: workflow.shortTitle,
         isActiveRuntime,
         progressPercent,
+        stagedProgressText,
         submittedAt: displaySubmittedAt,
         totalRuntimeSeconds
       }}
@@ -2012,46 +2122,45 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         onOpenTaskHistory: handleOpenTaskHistory,
         onDownloadResult: handleDownloadResult,
         canDownloadResult: Boolean(defaultDownloadTaskId),
-        downloadingResult,
-        onSaveDraft: () => {
+        isDownloadingResult: downloadingResult,
+        saveDraftAction: () => {
           void saveDraft();
         },
-        canEdit,
-        saving,
+        isEditable: canEdit,
+        isSaving: saving,
         hasUnsavedChanges,
         onReset: handleResetFromHeader,
-        loading,
-        submitting,
-        runSubmitting,
+        isLoading: loading,
+        isSubmitting: submitting,
+        isRunSubmitting: runSubmitting,
         runActionRef: runActionRef as RefObject<HTMLDivElement>,
         topRunButtonRef: topRunButtonRef as RefObject<HTMLButtonElement>,
-        onRunAction: handleHeaderRunAction,
-        runDisabled: effectiveRunDisabled,
+        runAction: handleHeaderRunAction,
+        isRunDisabled: effectiveRunDisabled,
         runBlockedReason: effectiveRunBlockedReason,
         workflowRunLabel: workflow.runLabel,
         isRunRedirecting,
-        canOpenRunMenu,
-        runMenuOpen,
+        isRunMenuAllowed: canOpenRunMenu,
+        isRunMenuOpen: runMenuOpen,
         onRestoreSavedDraft: handleRestoreSavedDraft,
         onRunCurrentDraft: handleRunCurrentDraft,
-        showRunAction: true,
-        showStopAction: showHeaderStopAction,
-        stopSubmitting: headerStopRunPending,
-        stopDisabled: headerStopRunDisabled,
+        isRunActionVisible: true,
+        isStopActionVisible: showHeaderStopAction,
+        isStopSubmitting: headerStopRunPending,
+        isStopDisabled: headerStopRunDisabled,
         stopTitle: headerStopRunTitle,
-        onStopAction: handleHeaderStopAction
+        stopAction: handleHeaderStopAction
       }}
       overlaysProps={{
         runSuccessNotice,
         taskHistoryPath,
         onOpenTaskHistory: handleOpenTaskHistory,
-        isRunRedirecting,
-        showQuickRunFab,
-        onRunAction: handleHeaderRunAction,
-        runDisabled: effectiveRunDisabled,
+        isQuickRunFabVisible: showQuickRunFab,
+        runAction: handleHeaderRunAction,
+        isRunDisabled: effectiveRunDisabled,
         runBlockedReason: effectiveRunBlockedReason,
         workflowRunLabel: workflow.runLabel,
-        submitting: runSubmitting,
+        isSubmitting: runSubmitting,
         error,
         resultError,
         affinityPreviewError,
@@ -2070,8 +2179,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         workspaceTab,
         componentStepLabel,
         projectResultsSectionProps,
-        onSaveDraft: handleWorkspaceFormSubmit,
-        canEdit,
+        saveDraftAction: handleWorkspaceFormSubmit,
+        isEditable: canEdit,
         taskName: draft.taskName,
         taskSummary: draft.taskSummary,
         onTaskNameChange: handleTaskNameChange,
@@ -2090,7 +2199,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     />
     {copilotAvailable && session?.userId ? (
       <ProjectCopilotModal
-        open={copilotOpen}
+        isOpen={copilotOpen}
         title="Copilot"
         subtitle={`${workflow.shortTitle} · ${project.name}`}
         contextType="task_detail"
@@ -2099,10 +2208,44 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         currentUserId={session.userId}
         currentUsername={session.username}
         contextPayload={copilotContextPayload}
-        onApplyPlanAction={applyTaskDetailCopilotAction}
-        onSendAttachments={handleCopilotAttachments}
+        applyPlanAction={applyTaskDetailCopilotAction}
+        sendAttachmentsAction={handleCopilotAttachments}
         onOpen={() => setCopilotOpen(true)}
         onClose={() => setCopilotOpen(false)}
+      />
+    ) : null}
+    {peptideSubmitSummary !== null ? (
+      <PeptideSubmitConfirmDialog
+        isOpen={peptideSubmitConfirmOpen}
+        isSubmitting={peptideConfirmSubmitting}
+        defaultNotifyEmail={draft.inputConfig.options.notifyEmail ?? session?.email ?? ''}
+        summary={peptideSubmitSummary}
+        onCancel={() => setPeptideSubmitConfirmOpen(false)}
+        onConfirm={(notifyEmail) => {
+          setDraft((prev) => prev && ({
+            ...prev,
+            inputConfig: {
+              ...prev.inputConfig,
+              options: { ...prev.inputConfig.options, notifyEmail: notifyEmail || null }
+            }
+          }));
+          // typing an email here also saves it to the account for future runs
+          const email = notifyEmail.trim();
+          if (email && email !== (session?.email || '')) {
+            updateProfile({ email }).catch(() => {
+              // profile save is auxiliary; options persist the address either way
+            });
+          }
+          // re-check blockers: close so the header can surface the current one
+          if (runDisabled) {
+            setPeptideSubmitConfirmOpen(false);
+            return;
+          }
+          setPeptideConfirmSubmitting(true);
+          setPeptideConfirmSawSubmitting(false);
+          setPeptideConfirmErrorAtConfirm(error);
+          handleConfirmedRunAction(email);
+        }}
       />
     ) : null}
     </>

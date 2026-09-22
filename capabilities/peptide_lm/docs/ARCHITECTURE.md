@@ -30,7 +30,7 @@ GRPO（组相对优势按 (编辑上下文, 奖励来源) 分组; KL 二次上�
 风险厌恶 surrogate 打分防止未验证分子占便宜；pose 证据门控亲和力防 reward
 hacking。CDK2 基准 best pIC50 8.88（已知配体 8.25）。
 
-### 0.2 V-Bio 历史多肽设计（已被 PeptideLM 替换的基线）
+### 0.2 V-Bio 原多肽设计基线（对照）
 
 生产端（run_single_prediction.py）：
 - GA：策略 exploit(0.48)/diversify(0.24)/explore(0.18)/crossover(0.10)，
@@ -181,7 +181,7 @@ span 替换后让模型补全（HALO per-atom pLDDT 编辑图的残基级对应�
 
 ## 6. 与生产的当前关系
 
-backend 肽设计循环的提案步骤由 PeptideLM 独占（历史上该步骤为遗传算法，
+backend 肽设计循环的提案步骤由 PeptideLM 独占（对照基线为遗传算法，
 已整体移除）：候选生成/约束/学习全部在 `peplm`（先验 + GRPO 闭环 +
 解码期约束计划）内完成；Boltz/Protenix/AF3 子任务调度、打分后处理与
 进度上报复用现有管线。前端选项：Design Mode / Peptide Length（可省略，

@@ -41,7 +41,7 @@ export interface VirtualScreeningLibraryChange {
 }
 
 export interface VirtualScreeningWorkflowSectionProps {
-  visible: boolean;
+  isVisible: boolean;
   canEdit: boolean;
   componentsWorkspaceRef: RefObject<HTMLDivElement | null>;
   isComponentsResizing: boolean;
@@ -94,7 +94,7 @@ function componentTypeIcon(type: MoleculeType) {
 }
 
 export function VirtualScreeningWorkflowSection({
-  visible,
+  isVisible,
   canEdit,
   componentsWorkspaceRef,
   isComponentsResizing,
@@ -198,7 +198,7 @@ export function VirtualScreeningWorkflowSection({
     };
   }, [parsed.compounds, parsed.errors.length]);
 
-  if (!visible) return null;
+  if (!isVisible) return null;
 
   const handleComponentsChange = (nextComponents: InputComponent[]) => {
     onComponentsChange(nextComponents.map((component) => (
@@ -286,16 +286,16 @@ export function VirtualScreeningWorkflowSection({
         <ComponentInputEditor
           components={components}
           onChange={handleComponentsChange}
-          allowProteinMsa={false}
-          allowProteinTemplates={false}
-          allowProteinCyclic={false}
-          allowProteinModifications={false}
+          isProteinMsaAllowed={false}
+          isProteinTemplatesAllowed={false}
+          isProteinCyclicAllowed={false}
+          isProteinModificationsAllowed={false}
           disabledComponentTypes={DISABLED_COMPONENT_TYPES}
           selectedComponentId={activeComponentId}
           onSelectedComponentIdChange={onActiveComponentIdChange}
-          showQuickAdd={false}
-          disabled={!canEdit}
-          compact
+          isQuickAddVisible={false}
+          isDisabled={!canEdit}
+          isCompact
         />
 
         <section className="component-card component-tone-slate panel subtle virtual-screening-library-card">

@@ -480,9 +480,7 @@ export function ApiAccessPage() {
         throw new Error('Please select a project.');
       }
       const label = newTokenName.trim() || shortUuidLike();
-      // Server-side mint (F2): the plaintext is generated on the server, returned ONCE for
-      // this display, and only the sha256 hash is stored — the browser never writes
-      // api_tokens nor sees other users' rows.
+      // server-side mint: the plaintext is returned once, only the sha256 hash is stored
       const minted = await createApiTokenServer({
         name: label,
         project_id: selectedProjectId,
@@ -491,9 +489,7 @@ export function ApiAccessPage() {
         allow_cancel: allowCancel
       });
       const plain = minted.token_plain;
-      // The list rows never carry the plaintext (hash-only storage); attaching it to the
-      // in-memory row keeps it visible in the Builder's "Token Plaintext" field for this
-      // session — a reload clears it back to the shown-once model.
+      // attach the plaintext to the in-memory row for this session only; a reload clears it
       const saved: ApiToken = { ...toApiToken(minted.token), token_plain: plain };
 
       setTokens((prev) => {
@@ -735,12 +731,10 @@ export function ApiAccessPage() {
 
   useEffect(() => {
     if (!isAffinityWorkflow) return;
-    // A task-scoped builder (task_row_id in the URL) is prefilled from the task snapshot;
-    // the reset must not wipe that prefill when the async workflow flag flips after it lands.
+    // a task-scoped builder keeps its snapshot prefill; don't wipe it when the
+    // async workflow flag flips after the prefill lands
     if (isProjectScoped && scopedTaskRowId) return;
-    // Reset on PROJECT IDENTITY only: depending on selectedProject?.use_msa made this effect
-    // re-fire when the projects list resolved AFTER a task prefill, wiping the prefill back
-    // to defaults (mode/seed/chains/SMILES).
+    // reset on project identity only, so a late projects-list load can't wipe a prefill
     setBuilderAffinityMode('dock');
     setBuilderAffinitySeed(null);
     setBuilderAffinityConfidenceOnly(true);
@@ -852,9 +846,8 @@ export function ApiAccessPage() {
             );
             if (screeningInput.trim()) {
               setBuilderVirtualScreeningInput(screeningInput);
-              // The snapshot carries an inline library; a library path left over from a
-              // different task would silently drop the prefilled compounds (file mode
-              // disables the textarea) and submit the wrong file channel.
+              // inline library wins: a stale library path would silently drop the
+              // prefilled compounds and submit the wrong file channel
               setBuilderVsLibraryPath('');
             }
             const target = taskComponents.find((component) => component.type === 'protein');
@@ -876,8 +869,8 @@ export function ApiAccessPage() {
     return () => {
       cancelled = true;
     };
-    // isAffinityWorkflow re-fires when the async projects list resolves; without it the
-    // affinity reset effect wipes a task prefill that landed before the workflow was known.
+    // isAffinityWorkflow re-fires when the async projects list resolves, so the
+    // reset effect can't wipe a prefill that landed before the workflow was known
   }, [isProjectScoped, isVirtualScreeningWorkflow, isAffinityWorkflow, scopedProjectId, scopedTaskRowId]);
 
   const filteredTokens = useMemo(() => {
@@ -1228,9 +1221,8 @@ export function ApiAccessPage() {
       return isSamePredictionProperties(base, normalized) ? prev : normalized;
     });
   }, [isPredictionWorkflow, predictionTargetChainOptions, predictionChainOptions]);
-  // Library upload mode: when a compounds_file path is set, the library travels as its own
-  // multipart part and the generated YAML carries only the target sequences — the two
-  // channels are mutually exclusive by contract.
+  // compounds_file mode: the library travels as its own part; the inline library
+  // and the file channel are mutually exclusive
   const vsLibraryFileMode = isVirtualScreeningWorkflow && Boolean(builderVsLibraryPath.trim());
   useEffect(() => {
     if (!isVirtualScreeningWorkflow) return;
@@ -1295,16 +1287,15 @@ export function ApiAccessPage() {
   const affinityTargetChain = String(builderAffinityTargetChain || '').trim();
   const affinityLigandChain = String(builderAffinityLigandChain || '').trim();
   const affinityLigandSmiles = String(builderAffinityLigandSmiles || '').trim();
-  // Affinity-mode semantics (dock pocket, SMILES-vs-file ligand) only apply inside the affinity
-  // builder; the state default 'dock' must not leak hints or flags into other workflows' commands.
+  // affinity-mode semantics only apply inside the affinity builder; the default
+  // 'dock' must not leak hints or flags into other workflows' commands
   const isDockAffinityMode = builderWorkflowKey === 'affinity' && isDockBuilderMode;
   const affinityCanEnableActivity =
     !builderAffinityConfidenceOnly &&
     Boolean(affinityTargetChain && affinityLigandChain && affinityLigandSmiles);
   const affinityActivityFlags = (effectiveAffinityBackend === 'boltz') && (affinityCanEnableActivity || (isDockAffinityMode && affinityLigandSmiles))
     ? (() => {
-        // Dock mode always scores the docked pose (the workspace submits enable_affinity with
-        // target chain A / ligand chain L); Confidence Only applies to the score-mode family.
+        // dock mode always scores the docked pose; Confidence Only applies to score-mode
         const targetChain = affinityTargetChain || 'A';
         const ligandChain = affinityLigandChain || 'L';
         const affinitySmilesMap = escapeForDoubleQuotedShell(
@@ -1327,10 +1318,8 @@ export function ApiAccessPage() {
     sy: builderDockSizeY ? Number(builderDockSizeY) : 22,
     sz: builderDockSizeZ ? Number(builderDockSizeZ) : 22,
   };
-  // The backend accepts exactly one pocket method: explicit center axes, a
-  // pocket_residues list, or a pocket_ligand reference compound whose pose
-  // defines the pocket (server-side auto detection). Size axes are optional
-  // extras for every method (omitted -> server default radius).
+  // exactly one pocket method: center axes, pocket_residues, or pocket_ligand;
+  // size axes are optional extras for every method
   const pocketResiduesTrimmed = builderPocketResidues.trim();
   const pocketResiduesValid = /^[A-Za-z]+:\d+(\s*,\s*[A-Za-z]+:\d+)*$/.test(pocketResiduesTrimmed);
   const pocketLigandPath = builderPocketLigandPath.trim() || './reference_ligand.sdf';
@@ -1512,8 +1501,7 @@ ${submitTaskIdCapture}`;
     setRegistryScopeProjectId(isProjectScoped ? scopedProjectId : null);
   };
 
-  // WAI-ARIA dialog behaviour (Escape / focus management / containment) for the
-  // three modal-mask dialogs this page hosts.
+  // dialog behaviour (Escape / focus / containment) for the three modal dialogs
   const yamlBuilderDialogProps = useModalDialog(yamlBuilderOpen, () => setYamlBuilderOpen(false));
   const projectTokenDialogProps = useModalDialog(
     projectTokenPanelProjectId !== null,
@@ -1774,7 +1762,7 @@ ${submitTaskIdCapture}`;
       {!isProjectScoped && (
       <ProjectStatsPanel
         filteredProjectStatsRows={filteredProjectStatsRows}
-        projectStatsLoading={projectStatsLoading}
+        isProjectStatsLoading={projectStatsLoading}
         projectStatsPage={projectStatsPage}
         projectStatsPageCount={projectStatsPageCount}
         projectStatsSearch={projectStatsSearch}
@@ -1882,7 +1870,7 @@ ${submitTaskIdCapture}`;
                   builderLeadOptTargetChain={builderLeadOptTargetChain}
                   builderLeadOptLigandChain={builderLeadOptLigandChain}
                   builderLeadOptObjectiveProfile={builderLeadOptObjectiveProfile}
-                  builderLeadOptEnableAffinity={builderLeadOptEnableAffinity}
+                  isBuilderLeadOptAffinityEnabled={builderLeadOptEnableAffinity}
                   onTargetConfigPathChange={setBuilderLeadOptTargetConfigPath}
                   onInputCompoundChange={setBuilderLeadOptInputCompound}
                   onTargetChainChange={setBuilderLeadOptTargetChain}
@@ -2061,7 +2049,7 @@ ${submitTaskIdCapture}`;
               isAffinityWorkflow={isAffinityWorkflow}
               isDockBuilderMode={isDockBuilderMode}
               normalizeMode={normalizeAffinityBuilderMode}
-              builderAffinityConfidenceOnly={builderAffinityConfidenceOnly}
+              isBuilderAffinityConfidenceOnly={builderAffinityConfidenceOnly}
               builderAffinityMode={builderAffinityMode}
               builderAffinitySeed={builderAffinitySeed}
               builderTargetPath={builderTargetPath}
@@ -2122,15 +2110,15 @@ ${submitTaskIdCapture}`;
           <ApiCommandRightColumn
             clipboard={{
               copiedActionId,
-              copyText,
+              copyTextAction: copyText,
               commandHistory,
               setCommandHistory,
-              applyCommandHistory
+              onApplyCommandHistory: applyCommandHistory
             }}
             commands={{
               commandEnv,
               yamlBuilderText,
-              downloadGeneratedYaml,
+              onDownloadGeneratedYaml: downloadGeneratedYaml,
               commandSubmitWithHints,
               commandStatus,
               commandResults,
@@ -2190,14 +2178,14 @@ ${submitTaskIdCapture}`;
             builderYamlComponents,
             builderYamlCollapsed,
             builderCustomResidueValidity,
-            addYamlBuilderComponent,
-            updateYamlBuilderComponent,
-            toggleYamlBuilderComponentCollapsed,
-            removeYamlBuilderComponent,
-            addYamlBuilderModification,
-            patchYamlBuilderModification,
-            removeYamlBuilderModification,
-            validateBuilderCustomSmiles
+            onAddComponent: addYamlBuilderComponent,
+            onUpdateComponent: updateYamlBuilderComponent,
+            onToggleComponentCollapsed: toggleYamlBuilderComponentCollapsed,
+            onRemoveComponent: removeYamlBuilderComponent,
+            onAddModification: addYamlBuilderModification,
+            onPatchModification: patchYamlBuilderModification,
+            onRemoveModification: removeYamlBuilderModification,
+            onValidateCustomSmiles: validateBuilderCustomSmiles
           }}
           templates={{
             builderYamlTemplates,
@@ -2209,7 +2197,7 @@ ${submitTaskIdCapture}`;
             setBuilderYamlConstraints,
             builderYamlProperties,
             setBuilderYamlProperties,
-            builderYamlConstraintsOpen,
+            isBuilderYamlConstraintsOpen: builderYamlConstraintsOpen,
             setBuilderYamlConstraintsOpen,
             normalizedYamlBuilderComponents
           }}
@@ -2217,8 +2205,8 @@ ${submitTaskIdCapture}`;
             yamlComponentStats,
             yamlBuilderText,
             copiedActionId,
-            copyText,
-            downloadGeneratedYaml
+            copyTextAction: copyText,
+            onDownloadGeneratedYaml: downloadGeneratedYaml
           }}
         />
       )}
@@ -2234,9 +2222,9 @@ ${submitTaskIdCapture}`;
           setSelectedTokenId={setSelectedTokenId}
           tokenRevokingId={tokenRevokingId}
           tokenDeletingId={tokenDeletingId}
-          revokeToken={revokeToken}
-          removeToken={removeToken}
-          openTokenRegistryForProject={openTokenRegistryForProject}
+          revokeTokenAction={revokeToken}
+          removeTokenAction={removeToken}
+          onOpenTokenRegistry={openTokenRegistryForProject}
         />
       )}
 
@@ -2244,27 +2232,27 @@ ${submitTaskIdCapture}`;
         <ApiTokenRegistryModal
           registryScopeProject={registryScopeProject}
           tokenRegistryDialogProps={tokenRegistryDialogProps}
-          closeTokenRegistry={closeTokenRegistry}
-          createApiToken={createApiToken}
-          tokenCreating={tokenCreating}
+          onClose={closeTokenRegistry}
+          createTokenAction={createApiToken}
+          isTokenCreating={tokenCreating}
           newTokenName={newTokenName}
           setNewTokenName={setNewTokenName}
           newTokenExpiresDays={newTokenExpiresDays}
           setNewTokenExpiresDays={setNewTokenExpiresDays}
           newTokenPlainText={newTokenPlainText}
           setNewTokenPlainText={setNewTokenPlainText}
-          allowSubmit={allowSubmit}
+          isSubmitAllowed={allowSubmit}
           setAllowSubmit={setAllowSubmit}
-          allowDelete={allowDelete}
+          isDeleteAllowed={allowDelete}
           setAllowDelete={setAllowDelete}
-          allowCancel={allowCancel}
+          isCancelAllowed={allowCancel}
           setAllowCancel={setAllowCancel}
           projects={projects}
-          projectLoading={projectLoading}
+          isProjectLoading={projectLoading}
           selectedProjectId={selectedProjectId}
           setSelectedProjectId={setSelectedProjectId}
-          showRegistryProjectColumn={showRegistryProjectColumn}
-          tokenLoading={tokenLoading}
+          isRegistryProjectColumnVisible={showRegistryProjectColumn}
+          isTokenLoading={tokenLoading}
           tokenQuery={tokenQuery}
           setTokenQuery={setTokenQuery}
           tokenPage={tokenPage}
@@ -2275,10 +2263,10 @@ ${submitTaskIdCapture}`;
           setSelectedTokenId={setSelectedTokenId}
           tokenRevokingId={tokenRevokingId}
           tokenDeletingId={tokenDeletingId}
-          revokeToken={revokeToken}
-          removeToken={removeToken}
+          revokeTokenAction={revokeToken}
+          removeTokenAction={removeToken}
           copiedActionId={copiedActionId}
-          copyText={copyText}
+          copyTextAction={copyText}
         />
       )}
     </div>

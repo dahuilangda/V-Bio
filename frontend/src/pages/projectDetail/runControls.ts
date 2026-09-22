@@ -18,13 +18,16 @@ export function showRunQueuedNotice(params: {
   }, 4200);
 }
 
-export function handleRunAction(params: { runDisabled: boolean; submitTask: () => Promise<void> }): void {
-  const { runDisabled, submitTask } = params;
+export function handleRunAction(params: {
+  runDisabled: boolean;
+  submitTask: (notifyEmailOverride?: string) => Promise<void>;
+  notifyEmailOverride?: string;
+}): void {
+  const { runDisabled, submitTask, notifyEmailOverride } = params;
   if (runDisabled) return;
-  // The submit function re-throws backend errors (for the Copilot chain to detect failures).
-  // The error is already surfaced via setError inside the submit's own catch block — this .catch
-  // prevents an unhandled promise rejection on the manual Run button path.
-  void submitTask().catch(() => {});
+  // submit re-throws for the Copilot chain and already surfaced the error via
+  // setError; this .catch keeps the Run button path from an unhandled rejection
+  void submitTask(notifyEmailOverride).catch(() => {});
 }
 
 export function handleRunCurrentDraft(params: {
@@ -61,16 +64,19 @@ export function handleResetFromHeader(params: {
 }
 
 export async function submitTaskByWorkflow(params: {
+  /** Dialog-confirmed email riding WITH this submit (beats the draft-write race). */
+  notifyEmailOverride?: string;
   project: Project | null;
   draft: unknown;
   submitInFlightRef: MutableRefObject<boolean>;
   workflowKey: string;
   getWorkflowDefinition: (taskType: string) => { key: string; title: string };
   setError: Dispatch<SetStateAction<string | null>>;
-  submitAffinityTask: () => Promise<void>;
-  submitPredictionTask: () => Promise<void>;
+  submitAffinityTask: (notifyEmailOverride?: string) => Promise<void>;
+  submitPredictionTask: (notifyEmailOverride?: string) => Promise<void>;
 }): Promise<void> {
   const {
+    notifyEmailOverride,
     project,
     draft,
     submitInFlightRef,
@@ -85,7 +91,7 @@ export async function submitTaskByWorkflow(params: {
   if (submitInFlightRef.current) return;
 
   if (workflowKey === 'affinity') {
-    await submitAffinityTask();
+    await submitAffinityTask(notifyEmailOverride);
     return;
   }
   if (workflowKey === 'lead_optimization') {
@@ -99,5 +105,5 @@ export async function submitTaskByWorkflow(params: {
     return;
   }
 
-  await submitPredictionTask();
+  await submitPredictionTask(notifyEmailOverride);
 }

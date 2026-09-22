@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import math
+
 from pathlib import Path
 from typing import Sequence
 
@@ -12,16 +12,6 @@ BEST_CONFIDENCE_NAME = "best_confidence.json"
 BEST_STRUCTURE_NAMES = ("best_model.cif", "best_model.mmcif")
 BEST_IPSAE_NAME = "best_ipsae.json"
 
-
-def coerce_float(value) -> float:
-    if value is None:
-        return math.nan
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(value)
-    except Exception:
-        return math.nan
 
 
 def confidence_model_stem(conf_path: Path) -> str:

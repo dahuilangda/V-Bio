@@ -3,6 +3,7 @@ import { normalizeComponentSequence } from '../utils/projectInputs';
 import { buildVirtualScreeningYaml, validateVirtualScreeningSmiles } from '../utils/virtualScreening';
 import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { API_HEADERS, requestBackend } from './backendClient';
+import { isValidNotifyEmail } from '../utils/projectInputs';
 
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
   const workflow =
@@ -22,9 +23,14 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   const constraintsForBackend =
     backend === 'nesso'
       ? []
-      : (input.constraints || []).filter((constraint) =>
-          backend === 'alphafold3' || backend === 'protenix' ? constraint.type === 'bond' : true
-        );
+      : (input.constraints || []).filter((constraint) => {
+          if (backend !== 'alphafold3' && backend !== 'protenix') return true;
+          // Protenix supports pocket constraints only; AlphaFold3 supports neither.
+          if (backend === 'protenix') {
+            return constraint.type === 'bond' || constraint.type === 'pocket';
+          }
+          return constraint.type === 'bond';
+        });
   const normalizedComponents = (input.components || [])
     .map((comp) => ({
       ...comp,
@@ -167,6 +173,12 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     form.append('seed', String(Math.max(0, Math.floor(input.seed))));
   }
   form.append('low_vram', String(backend !== 'nesso' && input.lowVram === true));
+  if (input.msaMode) {
+    form.append('msa_mode', input.msaMode);
+  }
+  if (input.notifyEmail && isValidNotifyEmail(input.notifyEmail)) {
+    form.append('notify_email', input.notifyEmail);
+  }
   const customCcdMolecules = backend === 'nesso'
     ? []
     : input.customCcdMolecules || collectCustomCcdMoleculesFromComponents(componentsForYaml);

@@ -72,3 +72,15 @@ docs/apis/external-system-login.md
 ```text
 docs/deployment/model-services.md
 ```
+
+
+## 通知 / 配额 / 镜像
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FRONTEND_URL` | 空 | 邮件内前端深链基址 |
+| `SMTP_HOST/PORT/USER/PASS/SENDER_NAME` | — | 任务完成/密码重置邮件（SMTP_SSL，465） |
+| `NOTIFY_DIGEST_WINDOW_SECONDS` | 900 | 任务邮件合并窗口秒数（0=逐任务即发） |
+| `TENANT_MAX_DAILY` | 50 | 每 API 租户每日 /predict 配额（<=0 禁用） |
+| `PROTENIX2DOCK_AFFINITY_CKPT` | 空 | protenix2dock 任务挂载的亲和头权重 |
+| `P2D_IMAGE` | vbio-protenix-v2-runtime:2.0.0 | protenix 嵌套容器镜像 tag |

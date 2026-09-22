@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from core.modes import SCORE_MODE, DOCK_MODE, mode_help_text, normalize_mode_name
 
@@ -151,7 +151,7 @@ def _add_refinement_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--noise_scale", type=float, default=None, help="Override Boltz2 diffusion noise_scale during structure refinement.")
     group.add_argument("--gamma_0", type=float, default=None, help="Override Boltz2 diffusion gamma_0 during structure refinement.")
     group.add_argument("--gamma_min", type=float, default=None, help="Override Boltz2 diffusion gamma_min during structure refinement.")
-    group.add_argument("--anchor_contact_cutoff", type=float, default=5.0, help="Select pocket residues within this heavy-atom distance of the input ligand pose.")
+    group.add_argument("--anchor_contact_cutoff", type=float, default=None, help="Select pocket residues within this heavy-atom distance of the input ligand pose. Defaults depend on the mode / pocket.")
     group.add_argument("--anchor_max_distance", type=float, default=None, help="Contact upper bound used by anchored refinement guidance. Defaults depend on the mode / pocket.")
     group.add_argument("--anchor_max_residues", type=int, default=16, help="Maximum number of closest pocket residues to constrain during anchored refinement.")
     group.add_argument("--pose_anchor_atoms", type=int, default=4, help="Number of ligand heavy-atom anchors used to preserve the input pose orientation during anchored refinement.")
@@ -245,8 +245,8 @@ def normalize_main_args(
     except ValueError as exc:
         parser.error(str(exc))
     if args.accelerator is None:
-        # Deferred import: high-level modes (dock/pose/refine/interface) only
-        # spawn a score-mode subprocess and never touch torch themselves.
+        # Deferred import: high-level modes only spawn a score-mode subprocess
+        # and never touch torch themselves.
         import torch
 
         args.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
@@ -258,7 +258,7 @@ def _validate_main_args(args: argparse.Namespace, parser: argparse.ArgumentParse
         raise ValueError("Cannot set both --structure_refine and --no_structure_refine.")
     if args.anchored_refine and not args.structure_refine:
         raise ValueError("--anchored_refine requires --structure_refine.")
-    if args.anchor_contact_cutoff <= 0:
+    if args.anchor_contact_cutoff is not None and args.anchor_contact_cutoff <= 0:
         raise ValueError("--anchor_contact_cutoff must be positive.")
     if args.anchor_max_distance is not None and args.anchor_max_distance <= 0:
         raise ValueError("--anchor_max_distance must be positive.")
@@ -376,12 +376,9 @@ def _resolve_sampling_defaults(args: argparse.Namespace) -> tuple[bool, int, int
             args.sampling_steps if args.sampling_steps is not None else 200,
             args.diffusion_samples if args.diffusion_samples is not None else 5,
         )
-    # Score mode skips diffusion entirely (structure is taken from the input),
-    # so the expensive Pairformer recycling has almost no effect on the
-    # confidence head output.  Empirically recycling_steps=1 gives scores within
-    # ~0.5% of recycling_steps=20 while being ~5x faster on the forward pass.
-    # Users who need bit-for-bit parity with full Boltz2 can still pass
-    # --recycling_steps 20 explicitly.
+    # Score mode skips diffusion (structure comes from the input), so recycling
+    # barely affects the confidence head: recycling_steps=1 scores within ~0.5%
+    # of 20 at ~5x speed. Pass --recycling_steps 20 for bit-for-bit parity.
     return (
         structure_refine,
         args.recycling_steps if args.recycling_steps is not None else 1,

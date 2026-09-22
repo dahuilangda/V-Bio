@@ -7,67 +7,67 @@ export interface ProjectHeaderActionsProps {
   onOpenTaskHistory: (event: MouseEvent<HTMLElement>) => void;
   onDownloadResult: () => void;
   canDownloadResult: boolean;
-  downloadingResult?: boolean;
-  onSaveDraft: () => void;
-  canEdit: boolean;
-  saving: boolean;
+  isDownloadingResult?: boolean;
+  saveDraftAction: () => void;
+  isEditable: boolean;
+  isSaving: boolean;
   hasUnsavedChanges: boolean;
   onReset: () => void;
-  loading: boolean;
-  submitting: boolean;
-  runSubmitting: boolean;
+  isLoading: boolean;
+  isSubmitting: boolean;
+  isRunSubmitting: boolean;
   runActionRef: RefObject<HTMLDivElement>;
   topRunButtonRef: RefObject<HTMLButtonElement>;
-  onRunAction: () => void;
-  runDisabled: boolean;
+  runAction: () => void;
+  isRunDisabled: boolean;
   runBlockedReason: string;
   workflowRunLabel: string;
   isRunRedirecting: boolean;
-  canOpenRunMenu: boolean;
-  runMenuOpen: boolean;
+  isRunMenuAllowed: boolean;
+  isRunMenuOpen: boolean;
   onRestoreSavedDraft: () => void;
   onRunCurrentDraft: () => void;
-  showRunAction?: boolean;
-  showStopAction?: boolean;
-  stopSubmitting?: boolean;
-  stopDisabled?: boolean;
+  isRunActionVisible?: boolean;
+  isStopActionVisible?: boolean;
+  isStopSubmitting?: boolean;
+  isStopDisabled?: boolean;
   stopTitle?: string;
-  onStopAction?: () => void;
+  stopAction?: () => void;
 }
 
 export function ProjectHeaderActions({
   onOpenTaskHistory,
   onDownloadResult,
-  downloadingResult = false,
+  isDownloadingResult = false,
   canDownloadResult,
-  onSaveDraft,
-  canEdit,
-  saving,
+  saveDraftAction,
+  isEditable,
+  isSaving,
   hasUnsavedChanges,
   onReset,
-  loading,
-  submitting,
-  runSubmitting,
+  isLoading,
+  isSubmitting,
+  isRunSubmitting,
   runActionRef,
   topRunButtonRef,
-  onRunAction,
-  runDisabled,
+  runAction,
+  isRunDisabled,
   runBlockedReason,
   workflowRunLabel,
   isRunRedirecting,
-  canOpenRunMenu,
-  runMenuOpen,
+  isRunMenuAllowed,
+  isRunMenuOpen,
   onRestoreSavedDraft,
   onRunCurrentDraft,
-  showRunAction = true,
-  showStopAction = false,
-  stopSubmitting = false,
-  stopDisabled = false,
+  isRunActionVisible = true,
+  isStopActionVisible = false,
+  isStopSubmitting = false,
+  isStopDisabled = false,
   stopTitle = '',
-  onStopAction
+  stopAction
 }: ProjectHeaderActionsProps) {
   const runTitle =
-    runSubmitting
+    isRunSubmitting
       ? 'Submitting'
       : isRunRedirecting
         ? 'Opening task history'
@@ -78,7 +78,7 @@ export function ProjectHeaderActions({
             : workflowRunLabel;
 
   const runAriaLabel =
-    runSubmitting
+    isRunSubmitting
       ? 'Submitting'
       : isRunRedirecting
         ? 'Opening task history'
@@ -100,67 +100,67 @@ export function ProjectHeaderActions({
       <button type="button"
         className="task-row-action-btn"
         onClick={onDownloadResult}
-        disabled={!canDownloadResult || downloadingResult}
-        title={downloadingResult ? 'Downloading result' : 'Download result'}
-        aria-label={downloadingResult ? 'Downloading result' : 'Download result'}
-        aria-busy={downloadingResult}
+        disabled={!canDownloadResult || isDownloadingResult}
+        title={isDownloadingResult ? 'Downloading result' : 'Download result'}
+        aria-label={isDownloadingResult ? 'Downloading result' : 'Download result'}
+        aria-busy={isDownloadingResult}
       >
-        {downloadingResult ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
+        {isDownloadingResult ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
       </button>
       <button
         className="task-row-action-btn"
         type="button"
-        onClick={onSaveDraft}
-        disabled={!canEdit || saving || !hasUnsavedChanges}
-        title={saving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
-        aria-label={saving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
+        onClick={saveDraftAction}
+        disabled={!isEditable || isSaving || !hasUnsavedChanges}
+        title={isSaving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
+        aria-label={isSaving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
       >
-        {saving ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
+        {isSaving ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
       </button>
       <button
         type="button"
         className="task-row-action-btn"
         onClick={onReset}
-        disabled={loading || saving || submitting || !hasUnsavedChanges}
+        disabled={isLoading || isSaving || isSubmitting || !hasUnsavedChanges}
         title={hasUnsavedChanges ? 'Discard unsaved edits' : 'No unsaved edits'}
         aria-label={hasUnsavedChanges ? 'Discard unsaved edits' : 'No unsaved edits'}
       >
         <RefreshCcw size={14} />
       </button>
-      {showStopAction ? (
+      {isStopActionVisible ? (
         <button
           type="button"
           className="task-row-action-btn"
-          onClick={onStopAction}
-          disabled={stopDisabled || !onStopAction}
+          onClick={stopAction}
+          disabled={isStopDisabled || !stopAction}
           title={stopTitle}
           aria-label={stopTitle || 'Stop run'}
         >
-          {stopSubmitting ? <LoaderCircle size={14} className="spin" /> : <Square size={14} />}
+          {isStopSubmitting ? <LoaderCircle size={14} className="spin" /> : <Square size={14} />}
         </button>
       ) : null}
-      {showRunAction ? (
+      {isRunActionVisible ? (
         <div className="run-action" ref={runActionRef}>
           <button
             className="task-row-action-btn task-row-action-btn-primary"
             type="button"
             ref={topRunButtonRef}
-            onClick={onRunAction}
-            disabled={runDisabled}
+            onClick={runAction}
+            disabled={isRunDisabled}
             title={runTitle}
             aria-label={runAriaLabel}
-            aria-haspopup={canOpenRunMenu ? 'menu' : undefined}
-            aria-expanded={canOpenRunMenu ? runMenuOpen : undefined}
+            aria-haspopup={isRunMenuAllowed ? 'menu' : undefined}
+            aria-expanded={isRunMenuAllowed ? isRunMenuOpen : undefined}
           >
-            {runSubmitting || isRunRedirecting ? <LoaderCircle size={14} className="spin" /> : <RunPlayIcon size={14} />}
+            {isRunSubmitting || isRunRedirecting ? <LoaderCircle size={14} className="spin" /> : <RunPlayIcon size={14} />}
           </button>
-          {runMenuOpen && hasUnsavedChanges && (
+          {isRunMenuOpen && hasUnsavedChanges && (
             <div className="run-action-menu" role="menu" aria-label="Run options">
               <button
                 type="button"
                 className="run-action-item"
                 onClick={onRestoreSavedDraft}
-                disabled={loading || saving || submitting}
+                disabled={isLoading || isSaving || isSubmitting}
               >
                 Restore Saved
               </button>
@@ -168,7 +168,7 @@ export function ProjectHeaderActions({
                 type="button"
                 className="run-action-item primary"
                 onClick={onRunCurrentDraft}
-                disabled={loading || saving || submitting}
+                disabled={isLoading || isSaving || isSubmitting}
               >
                 Run Current
               </button>

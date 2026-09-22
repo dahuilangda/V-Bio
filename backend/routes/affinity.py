@@ -14,14 +14,14 @@ VALID_BOLTZ2SCORE_MODES = {"score", "pose", "refine", "interface", "dock"}
 
 
 def _parse_dock_pocket_fields(request_form, request_files):
-    """Parse and validate dock-mode pocket definition fields.
+    """Parse and validate dock-mode pocket fields.
 
-    Exactly one method must be supplied: explicit center axes (optionally
-    with size axes), pocket residues, or a reference ligand file.
-    Returns (dict of pocket args or None, error string or None).
+    Returns (pocket dict or None, error string or None, missing_pocket).
+    missing_pocket=True marks the plain "nothing provided" case — the only
+    one a protenix backend may treat as BLIND; contradictory or malformed
+    definitions stay errors.
     """
-    # Coordinates travel into the GPU pipeline as floats; NaN/Inf parse fine but poison
-    # every downstream computation silently, so finiteness and magnitude are entry gates.
+    # NaN/Inf parse fine but poison downstream computation; gate at entry.
     _COORD_LIMIT = 1e4
 
     def num(field):
@@ -69,9 +69,9 @@ def _parse_dock_pocket_fields(request_form, request_files):
     methods = sum([has_all_center, bool(pocket_residues), bool(has_pocket_ligand)])
     if methods == 0:
         return None, ("dock mode requires a pocket definition: provide center_x/center_y/center_z "
-                      "(with optional size_x/size_y/size_z), pocket_residues, or a pocket_ligand file.")
+                      "(with optional size_x/size_y/size_z), pocket_residues, or a pocket_ligand file."), True
     if methods > 1:
-        return None, "Provide exactly one pocket definition method (center coordinates, pocket_residues, or pocket_ligand)."
+        return None, "Provide exactly one pocket definition method (center coordinates, pocket_residues, or pocket_ligand).", False
 
     pocket: Dict[str, Any] = {}
     if has_all_center:
@@ -82,17 +82,16 @@ def _parse_dock_pocket_fields(request_form, request_files):
         try:
             pocket_ligand_content = pocket_ligand.read().decode('utf-8')
         except UnicodeDecodeError:
-            return None, "pocket_ligand is not valid UTF-8 text."
+            return None, "pocket_ligand is not valid UTF-8 text.", False
         except (IOError, OSError):
-            return None, "Could not read the uploaded pocket_ligand file."
+            return None, "Could not read the uploaded pocket_ligand file.", False
         pocket['pocket_ligand_content'] = pocket_ligand_content
         pocket['pocket_ligand_filename'] = secure_filename(pocket_ligand.filename) or 'pocket_ligand.sdf'
     if has_all_size:
-        # Box sizes apply to every pocket method — the capability honors size_x/y/z with
-        # residues/ligand pockets too; dropping them here would silently fall back to the
-        # 7 Å radius default instead of the requested box.
+        # Box sizes apply to every pocket method; dropping them would silently
+        # fall back to the 7 Å radius default.
         pocket['size_x'], pocket['size_y'], pocket['size_z'] = size_vals
-    return pocket, None
+    return pocket, None, False
 
 
 def _parse_ligand_smiles_map(raw: Optional[str]) -> Dict[str, str]:
@@ -261,14 +260,23 @@ def register_affinity_routes(
             return jsonify({'error': f"Unsupported mode '{requested_mode}'."}), 400
         requested_compute_interactions = parse_bool(request.form.get('compute_interactions'), True)
 
+        # backend=protenix routes to protenix2dock (same five-mode semantics); else boltz2score.
+        requested_backend = (request.form.get('backend') or 'boltz').strip().lower()
+        is_protenix_backend = requested_backend in ('protenix', 'protenix2dock', 'p2d')
+
         dock_pocket = None
         if requested_mode == 'dock':
             try:
-                dock_pocket, pocket_error = _parse_dock_pocket_fields(request.form, request.files)
+                dock_pocket, pocket_error, missing_pocket = _parse_dock_pocket_fields(request.form, request.files)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
             if pocket_error:
-                return jsonify({'error': pocket_error}), 400
+                # Only "no pocket provided" is a valid BLIND dock for protenix2dock;
+                # malformed pocket definitions stay 400.
+                if not is_protenix_backend or not missing_pocket:
+                    return jsonify({'error': pocket_error}), 400
+                logger.info('protenix2dock blind dock (no pocket fields) from %s.', request.remote_addr)
+                dock_pocket = None
 
         msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
         if not msa_server_url:
@@ -371,8 +379,8 @@ def register_affinity_routes(
             if requested_mode == 'dock' and not has_ligand_smiles:
                 return jsonify({'error': "dock mode requires a ligand defined by SMILES (drawn or pasted)."}), 400
             if requested_mode == 'dock' and has_ligand_file:
-                # The dock pipeline builds the ligand from SMILES; a staged ligand_file would be
-                # silently discarded downstream and the job would fail after GPU allocation.
+                # dock builds the ligand from SMILES; a staged ligand_file would be
+                # silently discarded after GPU allocation.
                 return jsonify({'error': "dock mode takes the ligand as SMILES only; remove ligand_file."}), 400
 
             if has_ligand_file:
@@ -418,21 +426,28 @@ def register_affinity_routes(
         score_args['structure_refine'] = requested_structure_refine
         score_args['use_msa_server'] = requested_use_msa_server
         score_args['compute_interactions'] = requested_compute_interactions
+        # The protenix2dock worker consumes this (fp32 vs low-VRAM engine mode).
+        requested_low_vram = parse_bool(request.form.get('low_vram'), False)
+        if requested_low_vram:
+            score_args['low_vram'] = True
+
+        notify_email = str(request.form.get('notify_email') or '').strip()
+        if notify_email:
+            from backend.services.mailer import is_valid_notify_email
+            if not is_valid_notify_email(notify_email):
+                return jsonify({'error': "notify_email must be a valid email address."}), 400
+            score_args['notify_email'] = notify_email
 
         priority = request.form.get('priority', 'default').lower()
         if priority not in ['high', 'default']:
             logger.warning("Invalid priority '%s' provided by client %s. Defaulting to 'default'.", priority, request.remote_addr)
             priority = 'default'
 
-        # backend=protenix routes to the protenix2dock engine (same five-mode
-        # semantics on the Protenix runtime); anything else stays boltz2score.
-        requested_backend = (request.form.get('backend') or 'boltz').strip().lower()
-        if requested_backend in ('protenix', 'protenix2dock', 'p2d'):
+        if is_protenix_backend:
             from backend.worker.protenix2dock_task import protenix2dock_task
 
-            # Surface options this engine genuinely ignores so a caller
-            # cannot silently believe they took effect. sampling_steps and
-            # diffusion_samples ARE forwarded to the CLI — never listed here.
+            # Surface options this engine ignores so callers can't believe they took effect.
+            # sampling_steps and diffusion_samples ARE forwarded — never listed here.
             ignored_fields = [
                 key for key, enabled in (
                     ('enable_affinity', parse_bool(request.form.get('enable_affinity'), False)),
@@ -441,9 +456,15 @@ def register_affinity_routes(
                     ('max_parallel_samples', requested_max_parallel_samples is not None),
                     ('structure_refine', parse_bool(request.form.get('structure_refine'), False)),
                     ('compute_interactions', parse_bool(request.form.get('compute_interactions'), True)),
-                    ('compute_ipsae', parse_bool(request.form.get('compute_ipsae'), True)),
+                    ('compute_ipsae', requested_compute_ipsae),
                     ('ligand_chain', bool((request.form.get('ligand_chain') or '').strip())),
                     ('ligand_smiles_map', bool((request.form.get('ligand_smiles_map') or '').strip())),
+                    # box sizes only feed center-box residue selection; protenix
+                    # derives residues itself for residues/ligand pockets
+                    ('size_x/size_y/size_z',
+                     bool(request.form.get('pocket_residues')
+                          or (request.files.get('pocket_ligand') is not None
+                              and getattr(request.files.get('pocket_ligand'), 'filename', '')))),
                 ) if enabled
             ]
             if ignored_fields:

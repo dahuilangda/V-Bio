@@ -14,7 +14,7 @@ from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import rdFingerprintGenerator
 
-from halo.score.properties import compute_descriptors, descriptor_vector
+from halo.score.properties import compute_descriptors
 
 _fp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
@@ -40,10 +40,8 @@ def pose_evidence(iptm: float, ipsae: float, plddt: float) -> float:
     """Pose-evidence weight in [0,1].
 
     Boltz-2's affinity head is unreliable when the pose is wrong (Corso et
-    al. 2025): ipTM / ipSAE / ligand pLDDT quantify how much the predicted
-    complex supports the affinity number. We use this evidence to GATE the
-    affinity reward - a high affinity score on an ill-posed complex earns
-    almost nothing.
+    al. 2025); ipTM / ipSAE / ligand pLDDT gate the affinity reward, so a
+    high affinity score on an ill-posed complex earns almost nothing.
     """
     w_iptm = float(np.clip((iptm - 0.35) / 0.35, 0, 1)) ** 0.5
     w_ipsae = float(np.clip(ipsae / 0.5, 0, 1)) ** 0.5
@@ -124,10 +122,9 @@ class RewardFunction:
             eff_pic50 = affinity_pic50 - conservative_sigma  # risk-averse surrogate score
         parts["affinity_raw"] = affinity_term(affinity_pic50, self.target_pic50)
         if surrogate_uncertainty is not None:
-            # surrogate row: pose evidence from pessimistic ipsae/plddt and a
-            # discounted iptm prior (no measured value exists) - removes the
-            # systematic gate advantage unverified molecules had over
-            # oracle-verified ones
+            # surrogate row: pose evidence from pessimistic ipsae/plddt plus
+            # a discounted iptm prior, removing the gate advantage unverified
+            # molecules had over oracle-verified ones
             s_ips, s_pl = surrogate_uncertainty
             ipsae = float(ipsae or 0) - 0.5 * float(s_ips or 0)
             plddt = float(plddt or 0) - 0.5 * float(s_pl or 0)

@@ -1,29 +1,21 @@
 """Tier-1 pretraining corpus.
 
-Training-data design (each piece motivated by the SOTA survey):
-  * FIM (PSM) transformation on 50% of lines — span infilling trained from
-    the start (Bavarian 2207.14255 / ProtFIM / IgLM / IDiom): this is the LM
-    analogue of ProteinMPNN's fixed-context redesign and powers the Tier-2
-    edit operator.
-  * Per-property conditioning tags <sol_x><syn_x><liab_x> (x = h/m/l),
-    quantile-calibrated independently (ProGen control-tag style; the single
-    a single monolithic tag carried almost no signal).
-  * Explicit length-bucket token <Lnn> (IgLM-style chain tags) so length is
-    a controllable conditioning variable.
-  * Staged data (field consensus): UniRef90 chopped windows (bulk, 12M) +
-    PDB binder peptides mined at scale (x6) + PeptideGPT property sets
-    (experimental labels override the corresponding tag).
+50% of lines get the PSM/FIM transform (powers the Tier-2 edit operator);
+per-property conditioning tags <sol_x><syn_x><liab_x> are quantile-
+calibrated independently; explicit <Lnn> length buckets. Staged data:
+UniRef90 windows (bulk) + PDB binder peptides + PeptideGPT property
+sets (experimental labels override the corresponding tag).
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+
 import random
 from collections import Counter
 from pathlib import Path
 
-from peplm.props.descriptors import compute_props, solubility_score, \
+from peplm.props.descriptors import solubility_score, \
     synthesizability_score
 from peplm.props.liability import liability_score
 from peplm.vocab import parse_tokens
@@ -33,7 +25,7 @@ CLASS_KEEP = {"hi": 1.0, "md": 0.6, "lo": 0.25}
 AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 
-# ---------------------------------------------------------------- helpers
+# helpers
 def props_of(seq: str) -> tuple[float, float, float]:
     toks = list(seq)
     return (solubility_score(toks), synthesizability_score(toks),
@@ -69,7 +61,7 @@ def plain_line(tokens: list[str]) -> str:
     return "".join(tokens)
 
 
-# ------------------------------------------------------------- worker pass
+# worker pass
 def _process_chunk(args):
     path, start, end, rate, seed, mode, cuts, fim_rate = args
     rng = random.Random(seed)
@@ -142,7 +134,7 @@ def _percentile_cuts(scores, lo_pct=25, hi_pct=55) -> dict:
     return cuts
 
 
-# ---------------------------------------------------------------- binder
+# binder
 def load_binder_lines(pdb_dir: Path, weight: int, cuts: dict,
                       rng: random.Random, fim_rate: float) -> list[str]:
     f = pdb_dir / "binder_peptides.txt"
@@ -208,7 +200,7 @@ def load_pepgpt_lines(pepgpt_dir: Path, cuts: dict, rng: random.Random,
     return lines
 
 
-# ------------------------------------------------------------------- main
+# main
 def main():
     import multiprocessing as mp
 

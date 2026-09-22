@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { CUSTOM_RESIDUE_SCAFFOLD_SMILES } from '../../pages/projectDetail/peptideCustomResidues';
 import { ChevronDown, ChevronRight, Dna, FlaskConical, Plus, Trash2 } from 'lucide-react';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, InputComponent, LigandInputMethod, MoleculeType, ProteinModification, ProteinModificationInputMethod, ProteinModificationTerminal, ProteinTemplateUpload } from '../../types/models';
 import { componentTypeLabel, createInputComponent, normalizeComponentSequence, randomId } from '../../utils/projectInputs';
@@ -17,8 +18,8 @@ interface ComponentInputEditorProps {
   components: InputComponent[];
   onChange: (components: InputComponent[]) => void;
   proteinTemplates?: Record<string, ProteinTemplateUpload>;
-  allowProteinMsa?: boolean;
-  allowProteinTemplates?: boolean;
+  isProteinMsaAllowed?: boolean;
+  isProteinTemplatesAllowed?: boolean;
   customResidueLibrary?: CustomCcdMoleculeInput[];
   onCustomResidueLibraryChange?: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange?: (componentId: string, upload: ProteinTemplateUpload | null) => void;
@@ -28,18 +29,17 @@ interface ComponentInputEditorProps {
   renderTargetPocketPanel?: (args: { component: InputComponent; upload: ProteinTemplateUpload | null }) => ReactNode;
   selectedComponentId?: string | null;
   onSelectedComponentIdChange?: (id: string) => void;
-  showQuickAdd?: boolean;
+  isQuickAddVisible?: boolean;
   disabledComponentTypes?: MoleculeType[];
-  allowProteinCyclic?: boolean;
-  allowProteinModifications?: boolean;
-  disabled?: boolean;
-  compact?: boolean;
+  isProteinCyclicAllowed?: boolean;
+  isProteinModificationsAllowed?: boolean;
+  isDisabled?: boolean;
+  isCompact?: boolean;
 }
 
 const TYPE_OPTIONS: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const LIGAND_INPUT_OPTIONS: LigandInputMethod[] = ['smiles', 'ccd', 'jsme'];
 const QUICK_ADD_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
-const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@@H](C)C(=O)O';
 const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number], string> = {
   n: 'N',
@@ -127,14 +127,14 @@ function ProteinSequenceModificationPreview({
   sequence,
   modifications,
   activeModificationId,
-  disabled = false,
+  isDisabled = false,
   onSelectModification,
   onPlaceActiveModification
 }: {
   sequence: string;
   modifications: ProteinModification[];
   activeModificationId: string | null;
-  disabled?: boolean;
+  isDisabled?: boolean;
   onSelectModification: (id: string, scrollToRow?: boolean) => void;
   onPlaceActiveModification: (position: number) => void;
 }) {
@@ -171,7 +171,7 @@ function ProteinSequenceModificationPreview({
               canClick ? 'selectable' : ''
             }`}
             onClick={() => {
-              if (disabled || !canClick) return;
+              if (isDisabled || !canClick) return;
               if (target) {
                 onSelectModification(target.mod.id, true);
               } else {
@@ -185,7 +185,7 @@ function ProteinSequenceModificationPreview({
                   ? `Move selected modification to residue ${position}`
                   : `Residue ${position}`
             }
-            disabled={disabled || !canClick}
+            disabled={isDisabled || !canClick}
           >
             <span className="protein-sequence-residue-index">{position}</span>
             <span className="protein-sequence-residue-letter">{residue}</span>
@@ -204,32 +204,28 @@ function CustomResiduePreview({
   onSlotErrorsChange,
   backbone,
   onBackboneChange,
-  disabled,
+  isDisabled,
   onSaveToLibrary,
-  saveDisabled,
-  amidated
+  isSaveDisabled,
+  isAmidated
 }: {
   smiles: string;
   onValidityChange: (valid: boolean) => void;
   onSlotErrorsChange?: (errors: BackboneSlotErrors) => void;
   backbone: CustomResidueBackbone | undefined;
   onBackboneChange: (next: CustomResidueBackbone | undefined) => void;
-  disabled?: boolean;
+  isDisabled?: boolean;
   onSaveToLibrary?: () => void;
-  saveDisabled?: boolean;
-  amidated?: boolean;
+  isSaveDisabled?: boolean;
+  isAmidated?: boolean;
 }) {
   const [valid, setValid] = useState(false);
   const [armedSlot, setArmedSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
-  // The five picks, kept here while editing (a residue can only store a complete set). Sent up
-  // via onBackboneChange once all five are filled, or cleared to undefined.
+  // The five picks, kept local until complete; sent up via onBackboneChange once all five are set.
   const [slots, setSlots] = useState<Partial<CustomResidueBackbone>>(backbone ?? {});
-  // Surfaces why an explicit Auto run found nothing (e.g. a C-terminal amide without the
-  // amidation flag) without wiping the user's manual picks.
+  // Surfaces why an explicit Auto run found nothing without wiping the manual picks.
   const [autoStatus, setAutoStatus] = useState<'idle' | 'failed'>('idle');
-  // Per-slot errors for the manual backbone override (empty = valid). Recomputed by the dedicated
-  // effect below whenever picks/SMILES/amidation change; surfaced inline (red pill + red atom) and
-  // up to the parent so Save/submit can block. Never silently cleared for a complete-but-wrong set.
+  // Per-slot errors (empty = valid); surfaced inline and up to the parent so Save can block.
   const [slotErrors, setSlotErrors] = useState<BackboneSlotErrors>({});
 
   const allSet = (value: Partial<CustomResidueBackbone>) =>
@@ -239,21 +235,15 @@ function CustomResiduePreview({
   const slotsDiffer = (a: Partial<CustomResidueBackbone>, b: Partial<CustomResidueBackbone>) =>
     CUSTOM_BACKBONE_SLOTS.some((slot) => a[slot] !== b[slot]);
 
-  // Skip one detect after adopting a saved assignment (mount or library apply) so it is kept
-  // rather than immediately replaced.
+  // Skip one detect after adopting a saved assignment so it is kept.
   const skipNextDetectRef = useRef(Boolean(backbone && allSet(backbone)));
-  // Track amidation so toggling it re-detects the 5th slot (OXT oxygen <-> NXT nitrogen) while
-  // keeping the N/CA/C/O picks.
-  const prevAmidatedRef = useRef(Boolean(amidated));
-  // True once the user has clicked any atom themselves. While set, SMILES edits must NOT
-  // auto-detect over their picks — each pick is validated against the new structure instead (kept
-  // if still on the right element, dropped if its atom vanished/shifted). Cleared by the Auto
-  // button so an explicit re-detect is allowed.
+  // Toggling amidation re-detects the 5th slot (OXT <-> NXT), keeping the N/CA/C/O picks.
+  const prevAmidatedRef = useRef(Boolean(isAmidated));
+  // True once the user has clicked any atom: SMILES edits then validate the picks against
+  // the new structure instead of auto-detecting over them. Cleared by the Auto button.
   const manualOverrideRef = useRef(false);
 
-  // A saved assignment arriving on the prop (e.g. reusing a library residue) is adopted only
-  // when it actually differs from the current picks; a matching value is our own update coming
-  // back, which we ignore so nothing churns.
+  // Adopt a prop assignment only when it differs; a match is our own update coming back.
   useEffect(() => {
     if (backbone && allSet(backbone) && !samePicks(backbone, slots)) {
       setSlots(backbone);
@@ -264,8 +254,8 @@ function CustomResiduePreview({
 
   useEffect(() => {
     let cancelled = false;
-    const amidatedChanged = prevAmidatedRef.current !== Boolean(amidated);
-    prevAmidatedRef.current = Boolean(amidated);
+    const amidatedChanged = prevAmidatedRef.current !== Boolean(isAmidated);
+    prevAmidatedRef.current = Boolean(isAmidated);
     // Debounce so drawing in JSME (many SMILES changes in a row) doesn't flicker the picks.
     const timer = window.setTimeout(() => {
       const run = async () => {
@@ -282,23 +272,20 @@ function CustomResiduePreview({
           setValid(hasBackbone);
           onValidityChange(hasBackbone);
 
-          // Amidation toggle re-canonicalizes the SMILES and flips the terminal element; re-detect
-          // keeping the user's N/CA/C/O picks (the OXT/NXT terminal is re-resolved by the SMARTS).
+          // Amidation toggle: re-detect keeping the N/CA/C/O picks (OXT/NXT re-resolved by SMARTS).
           if (amidatedChanged) {
             skipNextDetectRef.current = false;
             const anchors = manualOverrideRef.current ? slots : {};
-            const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, anchors, amidated) ?? undefined : undefined;
+            const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, anchors, isAmidated) ?? undefined : undefined;
             setSlots(detected ?? {});
             onBackboneChange(detected);
             setAutoStatus('idle');
             return;
           }
 
-          // The user has manually picked atoms: do NOT auto-detect over them on a structure edit.
-          // Validate each pick against the new structure and keep only the ones still on the right
-          // element (drops picks whose atom vanished or shifted index).
+          // Manual picks are never auto-detected over; validate them against the new structure.
           if (manualOverrideRef.current) {
-            const kept = validateBackboneSlots(rdkit, text, slots, Boolean(amidated));
+            const kept = validateBackboneSlots(rdkit, text, slots, Boolean(isAmidated));
             if (slotsDiffer(kept, slots)) {
               setSlots(kept);
               onBackboneChange(allSet(kept) ? (kept as CustomResidueBackbone) : undefined);
@@ -311,7 +298,7 @@ function CustomResiduePreview({
             return;
           }
           // No manual intervention yet — offer a fresh auto-detection as the starting suggestion.
-          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, {}, amidated) ?? undefined : undefined;
+          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, {}, isAmidated) ?? undefined : undefined;
           setSlots(detected ?? {});
           onBackboneChange(detected);
           setAutoStatus('idle');
@@ -329,12 +316,10 @@ function CustomResiduePreview({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [smiles, amidated]);
+  }, [smiles, isAmidated]);
 
-  // Recompute backbone slot errors whenever the picks or structure change. Independent of the
-  // detect effect above so a click (which only touches local `slots`) still re-validates. A
-  // complete-but-wrong set is reported, never silently passed; an incomplete set is treated as
-  // "no override yet" (the backend auto-detects) and yields no error.
+  // Recompute slot errors on pick/structure change. A complete-but-wrong set is reported;
+  // an incomplete set means "no override yet" and yields no error.
   useEffect(() => {
     let cancelled = false;
     const recompute = async () => {
@@ -348,7 +333,7 @@ function CustomResiduePreview({
       try {
         const rdkit = await loadRDKitModule();
         if (cancelled) return;
-        const errors = validateCustomResidueBackbone(rdkit, smiles.trim(), slots as CustomResidueBackbone, Boolean(amidated));
+        const errors = validateCustomResidueBackbone(rdkit, smiles.trim(), slots as CustomResidueBackbone, Boolean(isAmidated));
         if (!cancelled) {
           setSlotErrors(errors);
           onSlotErrorsChange?.(errors);
@@ -363,16 +348,15 @@ function CustomResiduePreview({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slots, smiles, amidated]);
+  }, [slots, smiles, isAmidated]);
 
   const runAutoDetect = async () => {
     manualOverrideRef.current = false;
     const text = smiles.trim();
     const rdkit = await loadRDKitModule();
-    // Re-detect with the current picks as anchors: atoms the user already set stay; only the
-    // empty slots are filled.
+    // Re-detect with the current picks as anchors; only empty slots are filled.
     const detected = text && rdkitMolHasAminoAcidBackbone(rdkit, text, true)
-      ? detectCustomResidueBackbone(rdkit, text, slots, amidated) ?? undefined
+      ? detectCustomResidueBackbone(rdkit, text, slots, isAmidated) ?? undefined
       : undefined;
     skipNextDetectRef.current = false;
     if (detected) {
@@ -386,7 +370,7 @@ function CustomResiduePreview({
   };
 
   const slotLabel = (slot: (typeof CUSTOM_BACKBONE_SLOTS)[number]) =>
-    slot === 'oxt' && amidated ? 'NXT' : CUSTOM_BACKBONE_SLOT_LABELS[slot];
+    slot === 'oxt' && isAmidated ? 'NXT' : CUSTOM_BACKBONE_SLOT_LABELS[slot];
 
   const assignedIndices = CUSTOM_BACKBONE_SLOTS.map((slot) => slots[slot]).filter(
     (idx): idx is number => idx !== undefined
@@ -422,8 +406,7 @@ function CustomResiduePreview({
     setArmedSlot(nextUnset ?? null);
   };
 
-  // Wrongly-assigned backbone atoms (any slot with an error) are painted red on top of the
-  // normal pick highlight, matching the red pill + error text below.
+  // Wrongly-assigned atoms are painted red, matching the error text below.
   const errorAtomIndices = (CUSTOM_BACKBONE_SLOTS as readonly (keyof CustomResidueBackbone)[])
     .filter((slot) => Boolean(slotErrors[slot]))
     .map((slot) => slots[slot])
@@ -441,7 +424,7 @@ function CustomResiduePreview({
         highlightAtomIndices={assignedIndices.length ? assignedIndices : undefined}
         highlightAtomColorsOverride={highlightAtomColorsOverride}
         atomLabels={atomLabels}
-        onAtomClick={armedSlot && !disabled ? handleAtomClick : undefined}
+        onAtomClick={armedSlot && !isDisabled ? handleAtomClick : undefined}
       />
       <div className="peptide-custom-backbone-slots" role="group" aria-label="Backbone atom slots">
         {CUSTOM_BACKBONE_SLOTS.map((slot) => {
@@ -452,7 +435,7 @@ function CustomResiduePreview({
               key={slot}
               type="button"
               className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}${slotErrors[slot] ? ' error' : ''}`}
-              disabled={disabled}
+              disabled={isDisabled}
               onClick={() => setArmedSlot((prev) => (prev === slot ? null : slot))}
               title={
                 armed
@@ -473,7 +456,7 @@ function CustomResiduePreview({
         <button
           type="button"
           className="peptide-custom-backbone-reset"
-          disabled={disabled}
+          disabled={isDisabled}
           onClick={() => void runAutoDetect()}
           title="Re-detect the backbone from the current structure"
         >
@@ -483,7 +466,7 @@ function CustomResiduePreview({
           <button
             type="button"
             className="btn btn-ghost btn-compact"
-            disabled={saveDisabled}
+            disabled={isSaveDisabled}
             onClick={onSaveToLibrary}
             title="Save this residue to the project library"
           >
@@ -505,8 +488,8 @@ export function ComponentInputEditor({
   components,
   onChange,
   proteinTemplates = {},
-  allowProteinMsa = true,
-  allowProteinTemplates = true,
+  isProteinMsaAllowed = true,
+  isProteinTemplatesAllowed = true,
   customResidueLibrary = [],
   onCustomResidueLibraryChange,
   onProteinTemplateChange,
@@ -515,12 +498,12 @@ export function ComponentInputEditor({
   renderTargetPocketPanel,
   selectedComponentId = null,
   onSelectedComponentIdChange,
-  showQuickAdd = true,
+  isQuickAddVisible = true,
   disabledComponentTypes = [],
-  allowProteinCyclic = true,
-  allowProteinModifications = true,
-  disabled = false,
-  compact = false
+  isProteinCyclicAllowed = true,
+  isProteinModificationsAllowed = true,
+  isDisabled = false,
+  isCompact = false
 }: ComponentInputEditorProps) {
   const [templateErrors, setTemplateErrors] = useState<Record<string, string>>({});
   const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
@@ -544,9 +527,7 @@ export function ComponentInputEditor({
     }
   }, [selectedComponentId]);
 
-  // Render-time adjustment (not an effect): prune stale collapse flags as soon
-  // as the component list changes instead of after paint.
-  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  // Render-time adjustment (not an effect): prune stale collapse flags when the list changes.
   const [prevComponents, setPrevComponents] = useState(components);
   if (components !== prevComponents) {
     setPrevComponents(components);
@@ -605,8 +586,7 @@ export function ComponentInputEditor({
     const modifications = (component.modifications || []).map((mod) => {
       if (mod.id !== modificationId) return mod;
       const next = { ...mod, ...patch };
-      // A C-terminal amidated residue can only occupy the last position (its backbone C has no
-      // leaving atom), so lock it to the C-terminus whenever amidation is on.
+      // An amidated residue can only occupy the last position; lock it to the C-terminus.
       if (next.cTerminalAmidated) {
         next.terminal = 'c_term';
         next.position = sequenceLength(component.sequence) || 1;
@@ -772,7 +752,7 @@ export function ComponentInputEditor({
     }
   };
 
-  const ligandJsmeHeight = compact ? 400 : 460;
+  const ligandJsmeHeight = isCompact ? 400 : 460;
 
   const handleProteinTemplateUpload = async (componentId: string, file: File | null) => {
     if (!file) {
@@ -823,7 +803,7 @@ export function ComponentInputEditor({
 
   return (
     <div className="component-editor">
-      {showQuickAdd && (
+      {isQuickAddVisible && (
         <div className="component-editor-head">
           <div className="component-add-quick">
             {QUICK_ADD_TYPES.map((type) => (
@@ -831,7 +811,7 @@ export function ComponentInputEditor({
                 key={type}
                 type="button"
                 className={`btn btn-ghost btn-compact component-add-kind type-${type}`}
-                disabled={disabled || disabledComponentTypeSet.has(type)}
+                disabled={isDisabled || disabledComponentTypeSet.has(type)}
                 onClick={() => addComponent(type)}
                 title={`Add ${componentTypeLabel(type)}`}
               >
@@ -857,7 +837,7 @@ export function ComponentInputEditor({
           const hasLigandJsmeViewer = isLigand && method === 'jsme';
           const proteinModifications = comp.modifications || [];
           const hasProteinModifications =
-            allowProteinModifications && comp.type === 'protein' && proteinModifications.length > 0;
+            isProteinModificationsAllowed && comp.type === 'protein' && proteinModifications.length > 0;
           const areModificationsCollapsed = Boolean(modificationsCollapsedById[comp.id]);
           const collapsedSummary =
             comp.type === 'ligand'
@@ -886,7 +866,7 @@ export function ComponentInputEditor({
                       e.stopPropagation();
                       toggleCollapsed(comp.id);
                     }}
-                    disabled={disabled}
+                    disabled={isDisabled}
                     title={isCollapsed ? 'Expand component' : 'Collapse component'}
                     aria-label={isCollapsed ? 'Expand component' : 'Collapse component'}
                     aria-expanded={!isCollapsed}
@@ -900,7 +880,7 @@ export function ComponentInputEditor({
                       e.stopPropagation();
                       removeOne(comp.id);
                     }}
-                    disabled={disabled || components.length <= 1}
+                    disabled={isDisabled || components.length <= 1}
                     title="Remove component"
                   >
                     <Trash2 size={14} />
@@ -912,11 +892,11 @@ export function ComponentInputEditor({
 
               {!isCollapsed && (
                 <>
-              <div className={`component-meta ${compact ? 'component-meta-compact' : ''}`}>
+              <div className={`component-meta ${isCompact ? 'component-meta-compact' : ''}`}>
                 <Field label="Type">
                   <select
                     value={comp.type}
-                    disabled={disabled}
+                    disabled={isDisabled}
                     onChange={(e) =>
                       patchOne(comp.id, {
                         type: e.target.value as MoleculeType,
@@ -939,7 +919,7 @@ export function ComponentInputEditor({
                     min={1}
                     max={20}
                     value={numberDrafts[`copies:${comp.id}`] ?? String(comp.numCopies)}
-                    disabled={disabled}
+                    disabled={isDisabled}
                     onChange={(e) => setNumberDraft(`copies:${comp.id}`, e.target.value)}
                     onBlur={() => commitCopiesDraft(comp)}
                     onKeyDown={(e) => {
@@ -954,13 +934,13 @@ export function ComponentInputEditor({
 
                 {comp.type === 'protein' && (
                   <>
-                    {allowProteinMsa && (
+                    {isProteinMsaAllowed && (
                       <label className="switch-field switch-tight">
                         <span>MSA</span>
                         <select
                           className="msa-mode-select"
                           value={comp.msaMode ?? (comp.useMsa !== false ? 'uniref' : 'none')}
-                          disabled={disabled}
+                          disabled={isDisabled}
                           onChange={(e) => {
                             const mode = e.target.value as 'none' | 'uniref' | 'env';
                             patchOne(comp.id, { msaMode: mode, useMsa: mode !== 'none' });
@@ -972,12 +952,12 @@ export function ComponentInputEditor({
                         </select>
                       </label>
                     )}
-                    {allowProteinCyclic && (
+                    {isProteinCyclicAllowed && (
                       <label className="switch-field switch-tight">
                         <input
                           type="checkbox"
                           checked={Boolean(comp.cyclic)}
-                          disabled={disabled}
+                          disabled={isDisabled}
                           onChange={(e) => patchOne(comp.id, { cyclic: e.target.checked })}
                         />
                         <span>Cyclic</span>
@@ -991,7 +971,7 @@ export function ComponentInputEditor({
                 <>
                 <div className="component-content-split">
                   <div className="component-content-main">
-                    {allowProteinTemplates && (
+                    {isProteinTemplatesAllowed && (
                     <>
                     <div className="field protein-template-upload">
                       <span>Protein Structure (optional)</span>
@@ -999,7 +979,7 @@ export function ComponentInputEditor({
                         type="file"
                         className="file-input-unified"
                         accept=".pdb,.cif,.mmcif"
-                        disabled={disabled}
+                        disabled={isDisabled}
                         onChange={(event) => {
                           const input = event.currentTarget;
                           const file = input.files?.[0] || null;
@@ -1016,7 +996,7 @@ export function ComponentInputEditor({
                           <button
                             type="button"
                             className="btn btn-ghost btn-compact"
-                            disabled={disabled}
+                            disabled={isDisabled}
                             onClick={() => patchTemplate(comp.id, null)}
                           >
                             Remove
@@ -1030,7 +1010,7 @@ export function ComponentInputEditor({
                       <Field label="Template Chain">
                         <select
                           value={templateUpload.chainId}
-                          disabled={disabled}
+                          disabled={isDisabled}
                           onChange={(e) => applyTemplateChain(comp.id, e.target.value)}
                         >
                           {templateChainIds.map((chainId) => (
@@ -1052,22 +1032,22 @@ export function ComponentInputEditor({
                     {!hasProteinModifications ? (
                       <Field label="Protein Sequence">
                         <textarea
-                          rows={compact ? 4 : 6}
+                          rows={isCompact ? 4 : 6}
                           placeholder="Example: MKTIIALSYIFCLVFA..."
                           value={comp.sequence}
-                          disabled={disabled}
+                          disabled={isDisabled}
                           onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                         />
                       </Field>
                     ) : null}
 
-                    {allowProteinModifications ? (
+                    {isProteinModificationsAllowed ? (
                       <>
                     <ProteinSequenceModificationPreview
                       sequence={comp.sequence}
                       modifications={proteinModifications}
                       activeModificationId={activeModificationId}
-                      disabled={disabled}
+                      isDisabled={isDisabled}
                       onSelectModification={selectProteinModification}
                       onPlaceActiveModification={(position) => {
                         const active = (comp.modifications || []).find((item) => item.id === activeModificationId);
@@ -1096,7 +1076,7 @@ export function ComponentInputEditor({
                         <button
                           type="button"
                           className="btn btn-ghost btn-compact"
-                          disabled={disabled || !comp.sequence.trim()}
+                          disabled={isDisabled || !comp.sequence.trim()}
                           onClick={() => addProteinModification(comp.id)}
                         >
                           <Plus size={12} />
@@ -1134,7 +1114,7 @@ export function ComponentInputEditor({
                                     min={1}
                                     max={Math.max(1, comp.sequence.replace(/\s+/g, '').length || 1)}
                                     value={numberDrafts[`mod-position:${mod.id}`] ?? String(mod.position)}
-                                    disabled={disabled || Boolean(mod.cTerminalAmidated)}
+                                    disabled={isDisabled || Boolean(mod.cTerminalAmidated)}
                                     title={mod.cTerminalAmidated ? 'Amidated residue is locked to the C-terminus' : undefined}
                                     onChange={(e) => setNumberDraft(`mod-position:${mod.id}`, e.target.value)}
                                     onBlur={() => commitModificationPositionDraft(comp, mod)}
@@ -1151,7 +1131,7 @@ export function ComponentInputEditor({
                                   <span>Site</span>
                                   <select
                                     value={terminal}
-                                    disabled={disabled || Boolean(mod.cTerminalAmidated)}
+                                    disabled={isDisabled || Boolean(mod.cTerminalAmidated)}
                                     title={mod.cTerminalAmidated ? 'Amidated residue is locked to the C-terminus' : undefined}
                                     onChange={(e) => {
                                       const nextTerminal = e.target.value as ProteinModificationTerminal;
@@ -1176,7 +1156,7 @@ export function ComponentInputEditor({
                                   <span>Source</span>
                                   <select
                                     value={mod.inputMethod}
-                                    disabled={disabled}
+                                    disabled={isDisabled}
                                     onChange={(e) => {
                                       const nextMethod = e.target.value as ProteinModificationInputMethod;
                                       const builtin = BUILT_IN_PROTEIN_MODIFICATIONS.find((item) => item.baseResidue === (residueAtPosition || mod.baseResidue)) || BUILT_IN_PROTEIN_MODIFICATIONS[0];
@@ -1186,8 +1166,7 @@ export function ComponentInputEditor({
                                         smiles: nextMethod === 'jsme' ? mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES : undefined,
                                         label: nextMethod === 'jsme' ? 'Custom residue' : builtin.label,
                                         customEditorCollapsed: nextMethod === 'jsme' ? true : undefined,
-                                        // Backbone override only applies to a drawn (jsme) residue; reset on any source switch
-                                        // so a stale assignment from another structure/input doesn't carry over.
+                                        // Backbone override only applies to a drawn (jsme) residue; reset on source switch.
                                         backbone: undefined
                                       });
                                     }}
@@ -1201,7 +1180,7 @@ export function ComponentInputEditor({
                                     <span>Modification</span>
                                     <select
                                       value={builtinValue}
-                                      disabled={disabled}
+                                      disabled={isDisabled}
                                       onChange={(e) => {
                                         const selected = BUILT_IN_PROTEIN_MODIFICATIONS.find((item) => item.ccd === e.target.value);
                                         if (selected) {
@@ -1236,7 +1215,7 @@ export function ComponentInputEditor({
                                 <button
                                   type="button"
                                   className="icon-btn protein-mod-remove"
-                                  disabled={disabled}
+                                  disabled={isDisabled}
                                   title="Remove modification"
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -1251,7 +1230,7 @@ export function ComponentInputEditor({
                                       <button
                                         type="button"
                                         className="btn btn-ghost btn-compact protein-mod-jsme-toggle"
-                                        disabled={disabled}
+                                        disabled={isDisabled}
                                         aria-expanded={!customCollapsed}
                                         onClick={(e) => {
                                           e.stopPropagation();
@@ -1270,7 +1249,7 @@ export function ComponentInputEditor({
                                           <div className="jsme-editor-container component-jsme-shell protein-mod-jsme-shell">
                                             <JSMEEditor
                                               smiles={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
-                                              height={compact ? 420 : 500}
+                                              height={isCompact ? 420 : 500}
                                               onSmilesChange={(value) => patchProteinModification(comp.id, mod.id, { smiles: value })}
                                             />
                                           </div>
@@ -1281,7 +1260,7 @@ export function ComponentInputEditor({
                                               <Field label="Library">
                                                 <select
                                                   value=""
-                                                  disabled={disabled}
+                                                  disabled={isDisabled}
                                                   onChange={(e) => {
                                                     if (e.target.value) applyLibraryResidueToModification(comp.id, mod.id, e.target.value);
                                                   }}
@@ -1300,7 +1279,7 @@ export function ComponentInputEditor({
                                                     key={`library-remove-${item.ccd}`}
                                                     type="button"
                                                     className="btn btn-ghost btn-compact"
-                                                    disabled={disabled}
+                                                    disabled={isDisabled}
                                                     title={`Delete ${item.ccd} from project library`}
                                                     onClick={(e) => {
                                                       e.stopPropagation();
@@ -1316,7 +1295,7 @@ export function ComponentInputEditor({
                                           <Field label="Name">
                                             <input
                                               value={mod.label || ''}
-                                              disabled={disabled}
+                                              disabled={isDisabled}
                                               placeholder="Custom residue"
                                               onChange={(e) => patchProteinModification(comp.id, mod.id, { label: e.target.value })}
                                             />
@@ -1324,7 +1303,7 @@ export function ComponentInputEditor({
                                           <Field label="Custom Residue SMILES">
                                             <input
                                               value={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
-                                              disabled={disabled}
+                                              disabled={isDisabled}
                                               placeholder="Modified residue SMILES"
                                               onChange={(e) => patchProteinModification(comp.id, mod.id, { smiles: e.target.value })}
                                             />
@@ -1333,12 +1312,11 @@ export function ComponentInputEditor({
                                             <input
                                               type="checkbox"
                                               checked={Boolean(mod.cTerminalAmidated)}
-                                              disabled={disabled}
+                                              disabled={isDisabled}
                                               onChange={async (e) => {
                                                 const nextAmidated = e.target.checked;
                                                 const currentSmiles = String(mod.smiles || '').trim() || CUSTOM_RESIDUE_SCAFFOLD_SMILES;
-                                                // Flip the backbone's terminal atom (OXT <-> NXT), honoring the user's OXT pick.
-                                                // Atomic: if the terminal can't be resolved, leave flag and SMILES unchanged.
+                                                // Flip the terminal atom (OXT <-> NXT); if unresolvable, leave flag and SMILES unchanged.
                                                 const transformed = await toggleTerminalAmide(currentSmiles, mod.backbone, nextAmidated);
                                                 if (!transformed || transformed === currentSmiles) return;
                                                 patchProteinModification(comp.id, mod.id, { cTerminalAmidated: nextAmidated, smiles: transformed });
@@ -1349,11 +1327,11 @@ export function ComponentInputEditor({
                                           <CustomResiduePreview
                                             smiles={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
                                             backbone={mod.backbone}
-                                            amidated={mod.cTerminalAmidated}
-                                            disabled={disabled}
+                                            isAmidated={mod.cTerminalAmidated}
+                                            isDisabled={isDisabled}
                                             onBackboneChange={(next) => patchProteinModification(comp.id, mod.id, { backbone: next })}
                                             onSaveToLibrary={() => saveModificationToLibrary(mod)}
-                                            saveDisabled={disabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]?.hasBackbone || !customResidueValidity[mod.id]?.slotErrorsEmpty}
+                                            isSaveDisabled={isDisabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]?.hasBackbone || !customResidueValidity[mod.id]?.slotErrorsEmpty}
                                             onValidityChange={(isValid) =>
                                               setCustomResidueValidity((prev) => {
                                                 const cur = prev[mod.id];
@@ -1391,7 +1369,7 @@ export function ComponentInputEditor({
                   <div className="component-template-full component-target-pocket">
                     {renderTargetPocketPanel({ component: comp, upload: templateUpload })}
                   </div>
-                ) : allowProteinTemplates && templateUpload && renderProteinTemplateViewer ? (
+                ) : isProteinTemplatesAllowed && templateUpload && renderProteinTemplateViewer ? (
                   <div className="field component-template-full">
                     {renderProteinTemplateViewer({ component: comp, upload: templateUpload })}
                   </div>
@@ -1402,10 +1380,10 @@ export function ComponentInputEditor({
               {comp.type === 'dna' && (
                 <Field label="DNA Sequence">
                   <textarea
-                    rows={compact ? 4 : 6}
+                    rows={isCompact ? 4 : 6}
                     placeholder="Example: ATGGCC..."
                     value={comp.sequence}
-                    disabled={disabled}
+                    disabled={isDisabled}
                     onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                   />
                 </Field>
@@ -1414,10 +1392,10 @@ export function ComponentInputEditor({
               {comp.type === 'rna' && (
                 <Field label="RNA Sequence">
                   <textarea
-                    rows={compact ? 4 : 6}
+                    rows={isCompact ? 4 : 6}
                     placeholder="Example: AUGGCC..."
                     value={comp.sequence}
-                    disabled={disabled}
+                    disabled={isDisabled}
                     onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                   />
                 </Field>
@@ -1428,7 +1406,7 @@ export function ComponentInputEditor({
                   <Field label="Ligand Input Mode">
                     <select
                       value={method}
-                      disabled={disabled}
+                      disabled={isDisabled}
                       onChange={(e) => patchOne(comp.id, { inputMethod: e.target.value as LigandInputMethod, sequence: '' })}
                     >
                       {LIGAND_INPUT_OPTIONS.map((item) => (
@@ -1443,7 +1421,7 @@ export function ComponentInputEditor({
                     <input
                       placeholder="Example: ATP, NAD, HEM"
                       value={comp.sequence}
-                      disabled={disabled}
+                      disabled={isDisabled}
                       onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                     />
                   </Field>
@@ -1456,7 +1434,7 @@ export function ComponentInputEditor({
                     <Field label="Ligand Input Mode">
                       <select
                         value={method}
-                        disabled={disabled}
+                        disabled={isDisabled}
                         onChange={(e) => patchOne(comp.id, { inputMethod: e.target.value as LigandInputMethod, sequence: '' })}
                       >
                         {LIGAND_INPUT_OPTIONS.map((item) => (
@@ -1470,7 +1448,7 @@ export function ComponentInputEditor({
                       <input
                         placeholder="Example: CC(=O)NC1=CC=C(C=C1)O"
                         value={comp.sequence}
-                        disabled={disabled}
+                        disabled={isDisabled}
                         onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                       />
                     </Field>

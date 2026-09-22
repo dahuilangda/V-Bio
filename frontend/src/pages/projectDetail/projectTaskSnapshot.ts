@@ -45,7 +45,6 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'peptidePopulationSize',
   'peptideEliteSize',
   'peptideResiduePool',
-  'peptideCustomResidueDefinitions',
   'peptideNonNaturalMin',
   'peptideNonNaturalMax',
   'peptideBicyclicLinkerCcd',
@@ -153,11 +152,9 @@ export function readTaskInputOptions(task: ProjectTask | null): Partial<Predicti
   };
 }
 
-export function hasStoredTaskInputOptions(task: { properties?: unknown } | null | undefined): boolean {
-  if (!task) return false;
-  const properties = asRecord(task.properties);
-  const options = asRecord(properties[TASK_INPUT_OPTIONS_KEY]);
-  return Object.keys(options).length > 0;
+export function hasStoredTaskInputOptions(task: { properties?: unknown; confidence?: unknown } | null): boolean {
+  // confidence-recovered options count too (readTaskInputOptions merges both)
+  return Object.keys(readTaskInputOptions(task as ProjectTask | null)).length > 0;
 }
 
 export function mergeTaskPropertiesPreservingInputOptions(
@@ -572,10 +569,9 @@ export function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task
   const taskOptions = readTaskInputOptions(task);
   const taskSeed = typeof task.seed === 'number' && Number.isFinite(task.seed) ? Math.max(0, Math.floor(task.seed)) : null;
 
-  // Use task-specific options as the primary source to prevent leakage between tasks.
-  // When a task has stored options, use them directly (not baseConfig.options which may
-  // contain values from a different task). Fall back to baseConfig only when the task
-  // has no stored options at all (e.g. a legacy task without per-task option storage).
+  // task-specific options are the primary source to prevent leakage between
+  // tasks; baseConfig.options is only the fallback for tasks without stored
+  // options (e.g. legacy tasks)
   const hasTaskOptions = Object.keys(taskOptions).length > 0;
   const optionsBase = hasTaskOptions ? {} : baseConfig.options;
 

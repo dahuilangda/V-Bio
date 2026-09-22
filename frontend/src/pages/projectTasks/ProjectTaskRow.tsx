@@ -1,5 +1,6 @@
-import { ExternalLink, LoaderCircle, Share2, Square, Trash2 } from 'lucide-react';
+import { ExternalLink, LoaderCircle, Share2, Square, Trash2, History } from 'lucide-react';
 import { memo } from 'react';
+import { hasStoredTaskInputOptions } from '../projectDetail/projectTaskSnapshot';
 import { MemoLigand2DPreview as Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import type { InputComponent, ProjectTask } from '../../types/models';
 import { canEditTask } from '../../utils/accessControl';
@@ -28,10 +29,9 @@ interface ProjectTaskRowProps {
   row: TaskListRow;
   mode: 'default' | 'lead_opt' | 'peptide';
   visibleMetricColumns: TaskMetricColumnKey[];
-  canManageShares: boolean;
-  /** Null when no row is being renamed; non-editing rows receive '' (see
-   *  ProjectTasksTable) so memo comparison is not invalidated for every row on
-   *  each keystroke in the rename input. */
+  isShareManagementAllowed: boolean;
+  /** Null when no row is renamed; non-editing rows receive '' so memo
+   *  comparison is not invalidated on every rename keystroke. */
   editingTaskNameId: string | null;
   editingTaskNameValue: string;
   savingTaskNameId: string | null;
@@ -39,24 +39,25 @@ interface ProjectTaskRowProps {
   deletingTaskId: string | null;
   terminatingTaskId: string | null;
   onOpenTask: (task: ProjectTask) => Promise<void> | void;
-  onTerminateTask: (task: ProjectTask) => Promise<void> | void;
-  onRemoveTask: (task: ProjectTask) => Promise<void> | void;
+  /** Clone & re-run: reload this task's stored parameters into the editor. Hidden when the row carries no stored options. */
+  cloneTaskAction: (task: ProjectTask) => Promise<void> | void;
+  canCloneTask: boolean;
+  terminateTaskAction: (task: ProjectTask) => Promise<void> | void;
+  removeTaskAction: (task: ProjectTask) => Promise<void> | void;
   onOpenShareTask: (task: ProjectTask) => Promise<void> | void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
-  onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => Promise<void> | void;
+  saveTaskNameEditAction: (task: ProjectTask, displayName: string) => Promise<void> | void;
   onEditingTaskNameValueChange: (value: string) => void;
 }
 
-// Memoized: the page re-renders on every poll tick, filter keystroke and
-// rename keystroke; rows whose data did not change must not re-render (each
-// one hosts a ligand preview subtree). Props are stable identities from the
-// parent (useCallback handlers, memoized row arrays, useState column list).
+// Memoized: the page re-renders on every poll tick and keystroke, and each
+// row hosts a ligand preview subtree; props are stable parent identities.
 function ProjectTaskRowImpl({
   row,
   mode,
   visibleMetricColumns,
-  canManageShares,
+  isShareManagementAllowed,
   editingTaskNameId,
   editingTaskNameValue,
   savingTaskNameId,
@@ -64,12 +65,14 @@ function ProjectTaskRowImpl({
   deletingTaskId,
   terminatingTaskId,
   onOpenTask,
-  onTerminateTask,
-  onRemoveTask,
+  cloneTaskAction,
+  canCloneTask,
+  terminateTaskAction,
+  removeTaskAction,
   onOpenShareTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
-  onSaveTaskNameEdit,
+  saveTaskNameEditAction,
   onEditingTaskNameValueChange
 }: ProjectTaskRowProps) {
   const { task, metrics } = row;
@@ -265,7 +268,7 @@ function ProjectTaskRowImpl({
               className="task-submitted-title-input"
               value={editingTaskNameValue}
               onChange={(event) => onEditingTaskNameValueChange(event.target.value)}
-              onBlur={() => void onSaveTaskNameEdit(task, taskName)}
+              onBlur={() => void saveTaskNameEditAction(task, taskName)}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') {
                   event.preventDefault();
@@ -274,7 +277,7 @@ function ProjectTaskRowImpl({
                 }
                 if (event.key === 'Enter') {
                   event.preventDefault();
-                  void onSaveTaskNameEdit(task, taskName);
+                  void saveTaskNameEditAction(task, taskName);
                 }
               }}
               placeholder={defaultTaskName}
@@ -321,7 +324,7 @@ function ProjectTaskRowImpl({
           >
             {openingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <ExternalLink size={14} />}
           </button>
-          {canManageShares ? (
+          {isShareManagementAllowed ? (
             <button
               type="button"
               className="task-row-action-btn"
@@ -333,11 +336,23 @@ function ProjectTaskRowImpl({
               <Share2 size={14} />
             </button>
           ) : null}
+          {canCloneTask && hasStoredTaskInputOptions(task) ? (
+            <button
+              type="button"
+              className="task-row-action-btn"
+              onClick={() => void cloneTaskAction(task)}
+              disabled={!canCloneTask || terminatingThisTask || deletingTaskId === task.id}
+              title="Clone & re-run: load this task's parameters into the editor"
+              aria-label="Clone and re-run task"
+            >
+              <History size={14} />
+            </button>
+          ) : null}
           {canTerminateTask || showTerminateHint ? (
             <button
               type="button"
               className="task-row-action-btn"
-              onClick={() => void onTerminateTask(task)}
+              onClick={() => void terminateTaskAction(task)}
               disabled={!canEdit || !canTerminateTask || terminatingThisTask || deletingTaskId === task.id}
               title={
                 !canTerminateTask
@@ -362,7 +377,7 @@ function ProjectTaskRowImpl({
           <button
             type="button"
             className="task-row-action-btn danger"
-            onClick={() => void onRemoveTask(task)}
+            onClick={() => void removeTaskAction(task)}
             disabled={!canEdit || deletingTaskId === task.id || terminatingThisTask}
             title={canEdit ? 'Delete task' : 'Shared tasks are read-only'}
             aria-label="Delete task"

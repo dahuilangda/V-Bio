@@ -1,17 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Minus, Plus, RotateCcw, X } from 'lucide-react';
 import { buildPocketBoxPdb, computePocketBoxFromResiduePicks, detectLigands, computePocketBoxFromLigandAtoms, type DetectedLigand } from '../../utils/pocketBox';
+import type { AffinityDockPocket as DockPocket } from '../../types/models';
 import type { MolstarResiduePick } from './MolstarViewer';
 
-export interface DockPocket {
-  centerX: number;
-  centerY: number;
-  centerZ: number;
-  sizeX: number;
-  sizeY: number;
-  sizeZ: number;
-  method: 'residues' | 'manual' | 'ligand';
-}
 
 interface PocketBoxControlsProps {
   pocket: DockPocket | null;
@@ -21,8 +13,8 @@ interface PocketBoxControlsProps {
   pickedResidues: MolstarResiduePick[];
   onBoxWireframeChange: (pdb: string) => void;
   onCollapse: () => void;
-  canEdit: boolean;
-  submitting: boolean;
+  isEditable: boolean;
+  isSubmitting: boolean;
 }
 
 const SIZE_STEP = 2;
@@ -90,18 +82,17 @@ export function PocketBoxControls({
   pickedResidues,
   onBoxWireframeChange,
   onCollapse,
-  canEdit,
-  submitting
+  isEditable,
+  isSubmitting
 }: PocketBoxControlsProps) {
-  const disabled = !canEdit || submitting;
+  const disabled = !isEditable || isSubmitting;
   const bounds = useProteinBounds(proteinStructureText, proteinStructureFormat);
   const detectedLigands = useMemo(
     () => detectLigands(proteinStructureText, proteinStructureFormat),
     [proteinStructureText, proteinStructureFormat]
   );
   const wireframeTimerRef = useRef<number | null>(null);
-  const initialCenterRef = useRef<DockPocket | null>(null);
-  const autoLigandRef = useRef<DetectedLigand | null>(null);
+  const initialCenterRef = useRef<(DockPocket & { bounds: typeof bounds | null }) | null>(null);
 
   // Drag state for floating panel
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -125,7 +116,8 @@ export function PocketBoxControls({
     dragRef.current = null;
   }, []);
 
-  // Auto-initialize pocket at first detected ligand, else protein center
+  // Auto-init at the first detected ligand, else protein center. initialCenterRef
+  // follows the current bounds so reset restores the NEW structure's center.
   useEffect(() => {
     if (!bounds) return;
     const defaults: DockPocket = {
@@ -135,13 +127,12 @@ export function PocketBoxControls({
       sizeX: 22, sizeY: 22, sizeZ: 22,
       method: 'manual'
     };
-    if (!initialCenterRef.current) {
-      initialCenterRef.current = defaults;
+    if (initialCenterRef.current?.bounds !== bounds) {
+      initialCenterRef.current = { ...defaults, bounds };
     }
     if (!pocket) {
       const first = detectedLigands[0];
       if (first) {
-        autoLigandRef.current = first;
         const lb = computePocketBoxFromLigandAtoms(first);
         if (lb) {
           onPocketChange({
@@ -170,7 +161,9 @@ export function PocketBoxControls({
         sizeX: Math.min(MAX_SIZE, Math.round(box.sizeX)),
         sizeY: Math.min(MAX_SIZE, Math.round(box.sizeY)),
         sizeZ: Math.min(MAX_SIZE, Math.round(box.sizeZ)),
-        method: 'residues'
+        method: 'residues',
+        // Author-numbered picks ride along for explicit PocketPotential residue groups.
+        residues: pickedResidues.map((pick) => `${pick.chainId}:${pick.residue}`).join(',')
       });
     }
   }, [pickedResidues, proteinStructureText, proteinStructureFormat, onPocketChange]);
@@ -202,7 +195,7 @@ export function PocketBoxControls({
         const max = (bounds as any)[axis.replace('center', 'max')] ?? Infinity;
         v = Math.max(min, Math.min(max, v));
       }
-      onPocketChange({ ...pocket, [axis]: v, method: 'manual' });
+      onPocketChange({ ...pocket, [axis]: v, method: 'manual', residues: undefined });
     },
     [pocket, bounds, onPocketChange]
   );
@@ -212,26 +205,26 @@ export function PocketBoxControls({
       if (!pocket || !Number.isFinite(value)) return;
       let v = value;
       if (axis.startsWith('size')) v = Math.max(MIN_SIZE, Math.min(MAX_SIZE, v));
-      onPocketChange({ ...pocket, [axis]: v, method: 'manual' });
+      onPocketChange({ ...pocket, [axis]: v, method: 'manual', residues: undefined });
     },
     [pocket, onPocketChange]
   );
 
   const setAllSizes = useCallback((size: number) => {
     if (!pocket) return;
-    onPocketChange({ ...pocket, sizeX: size, sizeY: size, sizeZ: size, method: 'manual' });
+    onPocketChange({ ...pocket, sizeX: size, sizeY: size, sizeZ: size, method: 'manual', residues: undefined });
   }, [pocket, onPocketChange]);
 
   const resetBox = useCallback(() => {
     if (initialCenterRef.current) {
-      onPocketChange({ ...initialCenterRef.current, method: 'manual' });
+      const { bounds: _boundsTag, ...centerDefaults } = initialCenterRef.current;
+      onPocketChange({ ...centerDefaults, method: 'manual', residues: undefined });
     }
   }, [onPocketChange]);
 
   const applyLigandPocket = useCallback((ligand: DetectedLigand) => {
     const box = computePocketBoxFromLigandAtoms(ligand);
     if (box) {
-      autoLigandRef.current = ligand;
       onPocketChange({
         centerX: Math.round(box.centerX),
         centerY: Math.round(box.centerY),

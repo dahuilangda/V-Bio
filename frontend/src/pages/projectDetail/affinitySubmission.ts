@@ -16,6 +16,8 @@ export interface AffinityDraftFields {
 }
 
 export interface AffinitySubmitDeps {
+  /** Logged-in user's email — the default notification recipient. */
+  notifyEmailFallback?: string;
   project: Project;
   draft: AffinityDraftFields;
   affinityTargetFile: File | null;
@@ -85,6 +87,7 @@ export interface AffinitySubmitDeps {
 
 export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Promise<void> {
   const {
+  notifyEmailFallback,
     project,
     draft,
     affinityTargetFile,
@@ -161,6 +164,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     ? draft.inputConfig.options.affinityMode
     : 'dock';
   const dockPocket = affinityMode === 'dock' ? (draft.inputConfig.options.affinityDockPocket || null) : null;
+  const dockBlind = affinityMode === 'dock' && draft.inputConfig.options.affinityDockBlind === true;
   const targetChains = affinityTargetChainIds.filter((item) => item.trim());
   const ligandChain = affinityLigandChainId.trim() || (affinityMode === 'dock' ? 'L' : '');
   const previewLigandSmiles = String(affinityPreview?.ligandSmiles || '').trim();
@@ -175,12 +179,11 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
   if (affinityMode === 'dock' && !ligandSmiles) {
     const msg = 'Dock mode requires a ligand SMILES (draw or paste it in the editor).';
     setError(msg);
-    // Throw so programmatic callers (Copilot submit) record an honest failed receipt
-    // instead of resolving as if a task had been queued.
+    // throw so programmatic callers record a failed receipt, not a false queued one
     throw new Error(msg);
   }
-  if (affinityMode === 'dock' && !dockPocket) {
-    setError('Dock mode requires a pocket box: pick residues in the 3D view, set a center manually, or upload a reference ligand.');
+  if (affinityMode === 'dock' && !dockPocket && !dockBlind) {
+    setError('Dock mode requires a pocket box: pick residues in the 3D view, set a center manually, upload a reference ligand — or enable Blind docking.');
     return;
   }
   if (affinityMode !== 'score' && affinityMode !== 'dock' && !usingSeparateInputs) {
@@ -295,7 +298,9 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       targetChainIds: ligandChain ? targetChains : [],
       ligandChainId: ligandChain,
       useMsa: nextDraft.use_msa,
-      dockPocket
+      dockPocket,
+      dockBlind,
+      notifyEmail: configWithAffinity.options.notifyEmail || notifyEmailFallback || undefined
     });
 
     const queuedAt = new Date().toISOString();
@@ -329,9 +334,8 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
         setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row))));
       }
     } catch (taskPersistError) {
-      // Unique task_id conflict: the gateway's submit snapshot already claimed this task_id.
-      // One runtime task is exactly one row — adopt the existing row and drop the local draft
-      // row instead of failing a submit the runtime already queued.
+      // task_id conflict: the gateway's backfill row already claimed it —
+      // adopt that row and drop the local draft
       const conflictMessage = taskPersistError instanceof Error ? taskPersistError.message : String(taskPersistError);
       const isUniqueConflict = /PostgREST 409|23505|duplicate key|unique_project_tasks_task_id/i.test(conflictMessage);
       if (isUniqueConflict) {
@@ -347,9 +351,8 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
           throw taskPersistError;
         }
       } else {
-        // The backend task was queued but the local DB row couldn't be persisted — terminate the
-        // orphaned backend task so it doesn't waste GPU compute. Fire-and-forget: the primary error
-        // is the persist failure, which the caller must handle; the termination is best-effort cleanup.
+        // queued but unpersistable: terminate the orphaned backend task
+        // (best-effort) and surface the persist error
         terminateTask(taskId).catch(() => { /* ignore termination errors */ });
         throw new Error(
           `Task submitted (${taskId}) but failed to persist queued task row: ${

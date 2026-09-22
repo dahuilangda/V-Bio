@@ -5,23 +5,22 @@
 # single RTX 4090.  Times wall clock per mode (sequential, GPU 0).
 #
 # Usage:  bash benchmarks/bench_modes.sh  [<cdk2_chainA.pdb> <ligands.sdf> <out_dir>]
-# Results appended to <out_dir>/BENCH_RESULTS.txt.  The p2d rows use the
-# protenix2dock runtime image directly (docker), the boltz-predict row uses the
-# installed boltz CLI with the MSA server.
+# Results appended to <out_dir>/BENCH_RESULTS.txt; p2d rows run via docker,
+# boltz-predict via the installed boltz CLI + MSA server.
 #
 # Measured (2026-08-24, venv boltz 2.2.1 / vbio-protenix-v2-runtime:2.0.0):
 #   full(200x5,R3,bf16) 63.1s | b2s score 53.9s | pose 92.2* | refine 59.0
 #   interface 59.0 | dock(160/200/16) 123.9s | p2d score 360.4(冷)/37.9(热)
 #   p2d dock 129.4(热 44.3) | b2s 批量5配体单进程 79.3s (15.9s/配体)
 #   (*pose 为模块缓存冷写噪声；模型加载缓存后：b2s 启动~12s、boltz 完整预测 31s→1s、
-#    p2d 构造 83s→3s —— 见 docs/deployment/model-services.md)
+#    p2d 构造 83s→3s，见 docs/deployment/model-services.md)
 set -u
 B2S_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROT="${1:-/data/Boltz2Score/data/cdk2/1h1q-chainA-prepared.pdb}"
-LIG="${2:-/data/Boltz2Score/data/cdk2/ligands.sdf}"
+PROT="${1:?pass the protein pdb path}"
+LIG="${2:?pass the ligand sdf path}"
 OUT="${3:-/tmp/bench_modes}"
 SMILES="Brc1cccc(Nc2nc(OCC3CCCCC3)c3nc[nH]c3n2)c1"
-PY="${BOLTZ2_VENV_PYTHON:-/data/Boltz2Score/.venv/bin/python}"
+PY="${BOLTZ2_VENV_PYTHON:?set BOLTZ2_VENV_PYTHON to a python with boltz installed}"
 MSA="${MSA_SERVER_URL:-http://172.17.3.200:8080}"
 mkdir -p "$OUT"
 
@@ -34,7 +33,6 @@ run_timed() {
   echo "=== BENCH DONE $name rc=$rc wall=${wall}s $(date -u +%H:%M:%S)" | tee -a "$OUT/BENCH_RESULTS.txt"
 }
 
-# full prediction baseline (boltz predict CLI; needs BOLTZ_CACHE with mols.tar + boltz2_conf.ckpt)
 # full prediction baseline (boltz predict CLI; needs BOLTZ_CACHE with mols.tar + boltz2_conf.ckpt)
 FULL_SEQ="$(grep -v '^>' /tmp/cdk2_chainA.fasta 2>/dev/null | tr -d '\n')"
 if [ -n "${FULL_SEQ:-}" ] && [ ! -f "$OUT/cdk2_complex.yaml" ]; then

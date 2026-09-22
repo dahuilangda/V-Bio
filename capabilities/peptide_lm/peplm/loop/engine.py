@@ -1,20 +1,6 @@
-"""PeptideLM closed-loop engine (HALO loop structure, peptide semantics).
-
-Per round:
-  1. propose   - agent de novo (dev-tag + structure-token conditioned, NCAA
-                 placement-masked decoding), structure-guided edits of elites
-                 (prefix kept, tail regenerated), NCAA point moves
-  2. filter    - hard windows (length, NCAA count/placement, developability
-                 floor), duplicate memory
-  3. gate      - surrogate UCB selects which candidates earn real Boltz calls
-  4. score     - Boltz-2 co-folding: ipTM / pair ipTM / ipSAE / pLDDT
-  5. reward    - pose-gated geometric reward + batch z-norm mixing; surrogate
-                 rows get risk-averse scores (cannot out-earn verified rows)
-  6. learn     - GRPO on the full pool (grouped by proposal context), KL-anchored
-  7. report    - production composite (V-Bio formula) for comparability
-
-All state persists under run_dir (resumable, analyzable).
-"""
+"""PeptideLM closed-loop engine: propose (de novo / structure-guided
+edits / point moves), filter, surrogate-gate, Boltz score, reward, GRPO
+learn, report. All state persists under run_dir."""
 
 from __future__ import annotations
 
@@ -34,7 +20,6 @@ from peplm.loop.constraints import (
     build_plan,
     choose_bicyclic_anchors,
     resolve_bicyclic_anchors,
-    plan_for_post_edit as _plan_for_post_edit_import,
 )
 from peplm.props.descriptors import compute_props
 from peplm.score.production import production_composite
@@ -57,16 +42,15 @@ class PeptideLoop:
         self.rng = random.Random(cfg.seed)
         torch.manual_seed(cfg.seed)
 
-        # agent = trainable copy of the Tier-1 prior (prior stays frozen as
-        # the KL anchor)
+        # agent = trainable copy of the prior (prior stays frozen as the
+        # KL anchor)
         import copy
 
         self.agent = copy.deepcopy(prior)
         self.agent.to(cfg.device)
         self.prior.to(cfg.device)
-        # arbitrary user residues: register + extend both vocabularies
-        # identically (prior embedding rows are copied from the agent so the
-        # KL anchor starts exact on new tokens)
+        # user residues: extend both vocabularies identically (prior rows
+        # copied from the agent so the KL anchor starts exact)
         from peplm.residues import register_user_residues
 
         if cfg.user_residues:
@@ -90,9 +74,8 @@ class PeptideLoop:
                                    kl_beta=cfg.kl_beta)
         self.reward_fn = PeptideReward(ncaa_range=tuple(cfg.ncaa_range),
                                        len_range=tuple(cfg.len_range))
-        # user-fixed residues sanity: fixed positions must not collide with
-        # the bicyclic Cys anchors (auto layout pins position 1 and the
-        # terminal) — that is a config error, not a silent layout corruption
+        # fixed positions must not collide with the bicyclic Cys anchors —
+        # a config error, not a silent layout corruption
         if cfg.design_mode == "bicyclic" and cfg.fixed_residues:
             fixed = self._fixed_map()
             Lmax = cfg.len_range[1]
@@ -123,7 +106,7 @@ class PeptideLoop:
         self.rounds_log: list[dict] = []
         self.seed_sequences: list[str] = []
 
-    # ------------------------------------------------------------- helpers
+    # helpers
     def _struct_token(self) -> str:
         if self.cfg.design_mode == "bicyclic":
             return "<bicy>"
@@ -148,10 +131,9 @@ class PeptideLoop:
         return [f"[{c}]" for c in ccds]
 
     def _passes_filters(self, cand: Candidate) -> bool:
-        """Validation-only (upgrade 3): constraints are enforced at DECODE
-        time by the ConstraintPlan; here we only check invariants and reject
-        violations. The only post-hoc op is the bounded bicycle post-edit
-        (adaptive-length interior/terminal anchors — nothing else)."""
+        """Validation only: constraints are enforced at decode time by the
+        ConstraintPlan; the only post-hoc op is the bounded bicycle
+        post-edit."""
         if self.cfg.design_mode == "bicyclic":
             from peplm.loop.constraints import (
                 apply_post_edit,
@@ -215,7 +197,7 @@ class PeptideLoop:
         self.seen.add(key)
         return True
 
-    # ------------------------------------------------------------- propose
+    # propose
     def _propose(self) -> list[Candidate]:
         cfg = self.cfg
         out: list[Candidate] = []
@@ -223,13 +205,13 @@ class PeptideLoop:
         target_len = self.rng.randint(*cfg.len_range)
         parents = self.elites[-8:]
         if self.cfg.anchor_seed and self.anchor_elites:
-            # lead-opt: the seed lead is always an edit parent (after the
-            # round-1 scoring it carries the pLDDT edit map)
+            # lead-opt: the seed lead is always an edit parent (it carries
+            # the pLDDT edit map after round-1 scoring)
             parents = self.anchor_elites + parents
         n_agent = cfg.n_agent
         if not parents:
-            # round 1: no edit/mut parents yet -> fold their budget into
-            # de novo sampling so the pool stays full
+            # round 1: fold the edit/mut budget into de novo so the pool
+            # stays full
             n_agent += cfg.n_edit + cfg.n_mut
         fixed_abs = self._fixed_map()
         pool_tokens = self._ncaa_pool_tokens()
@@ -257,9 +239,8 @@ class PeptideLoop:
                                        if not t.startswith("<")],
                                      cyclic=cfg.cyclic, origin="agent"))
         for p in parents[:4]:
-            # FIM edits: fixed residues mapping to EMITTED positions is built
-            # inside edit_candidates (the span origin is only known there);
-            # the prefix is already fixed by being prompt context.
+            # FIM edits: the emitted-position fixed map is built inside
+            # edit_candidates (only there is the span origin known)
             plan_kwargs = {
                 "len_range": tuple(cfg.len_range),
                 "design_mode": cfg.design_mode,
@@ -299,7 +280,7 @@ class PeptideLoop:
                     ncaa_max=cfg.ncaa_range[1]))
         return out
 
-    # ---------------------------------------------------------------- gate
+    # gate
     def _select_for_oracle(self, pool: list[Candidate]) -> list[Candidate]:
         cfg = self.cfg
         budget = min(cfg.oracle_budget, len(pool))
@@ -328,7 +309,7 @@ class PeptideLoop:
             chosen.append(pool[i])
         return chosen
 
-    # --------------------------------------------------------------- reward
+    # reward
     def _compute_rewards(self, pool: list[Candidate],
                          scored_keys: set[str]) -> list[Candidate]:
         unscored = [c for c in pool if c.key not in scored_keys]
@@ -350,15 +331,14 @@ class PeptideLoop:
                 c.reward, parts = self.reward_fn.machine_reward(
                     c, surrogate_pred=pred, surrogate_sigma=s)
             parts_list.append(parts)
-        # Batch z-norm mixing (30%) — HALO's anti-saturation blend. A failure
-        # here is a reward-configuration bug; it propagates rather than
-        # silently dropping the batch normalization term.
+        # batch z-norm mixing (30%); a failure propagates rather than
+        # silently dropping the normalization term
         normed = self.reward_fn.combine_batch(parts_list)
         for c, n in zip(pool, normed):
             c.final_reward = 0.7 * c.reward + 0.3 * n
         return pool
 
-    # ------------------------------------------------------------------ run
+    # run
     def run(self, n_rounds: int | None = None) -> dict:
         n_rounds = n_rounds or self.cfg.n_rounds
         t_start = time.time()
@@ -378,8 +358,8 @@ class PeptideLoop:
                     selected = [anchor] + list(selected)
             if selected:
                 self.oracle.score(selected, tag=f"r{self.round_i:03d}")
-                # production composite (reporting) + ipSAE-led best (ranking
-                # when cfg.best_metric="ipSAE"); both land in scored.jsonl
+                # production composite (reporting) + ipSAE-led best
+                # (ranking); both land in scored.jsonl
                 for c in selected:
                     base, _ = to_modifications(c.residues)
                     comp = production_composite(c.metrics, base)
@@ -399,8 +379,8 @@ class PeptideLoop:
                     [c for c in selected if c.metrics])
             self._compute_rewards(pool, scored_keys)
 
-            # lead-opt anchor: once scored, it joins the elites and the GRPO
-            # batch as a strong positive trajectory
+            # lead-opt anchor: once scored, joins the elites and the GRPO
+            # batch
             anchor = self.anchor_elites[0] if self.cfg.anchor_seed and self.anchor_elites else None
             if anchor is not None and anchor.metrics and anchor.reward is None:
                 anchor.reward, _ = self.reward_fn.machine_reward(anchor)
@@ -419,9 +399,8 @@ class PeptideLoop:
                     self.elites.append(c)
                     elite_keys.add(c.key)
             self.elites = self.elites[-16:]
-            # cross-round best-by-composite pool (the reported metric): the
-            # elites list ranks by final reward, so a top-composite candidate
-            # must be tracked separately or it is lost between rounds
+            # cross-round best pool, tracked separately from the elites
+            # (those rank by final reward, not the reported metric)
             scored_now = [c for c in pool if c.metrics.get("best") is not None]
             if scored_now:
                 merged = self.best + scored_now
@@ -451,8 +430,8 @@ class PeptideLoop:
             upd = self.updater.update(samples, epochs=self.cfg.rl_epochs,
                                       log=self.log) if len(samples) >= 4 else {}
 
-            # persist every oracle-scored candidate (full audit trail; the
-            # winning sequence must be recoverable from the run dir alone)
+            # full audit trail: every oracle-scored candidate must be
+            # recoverable from the run dir alone
             with open(self.run_dir / "scored.jsonl", "a") as f:
                 for c in selected:
                     if not c.metrics:

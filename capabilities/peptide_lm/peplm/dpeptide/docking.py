@@ -1,19 +1,17 @@
-"""Fixed-D-target peptide docking driver (validated E5/T10 protocol).
+"""Fixed-D-target peptide docking driver.
 
 Monkey-patches Boltz2's diffusion sampler with an inpainting-style
-fixed-receptor version and runs the Boltz2Score inference stack in-process:
+fixed-receptor version and runs the Boltz2Score inference stack
+in-process:
 
   - receptor (the mirrored D-target) is reset exactly at every stage
-    (noisy input, x0 prediction, post-Euler) — measured 0.000 A fidelity;
+    (noisy input, x0 prediction, post-Euler);
   - SE(3) augmentation disabled (stable frame; the receptor defines it);
-  - optional pocket anchoring box: rigidly confines the peptide centroid to
-    the pocket (validated; peptide-only shift — a whole-system shift gets
+  - optional pocket anchoring box: rigidly confines the peptide centroid
+    to the pocket (peptide-only shift — a whole-system shift gets
     swallowed by the joint recentering);
-  - gamma_0 = 0.0 recommended (deterministic descent; gamma=0.8 makes the
-    mid-sigma noise random-walk eject the peptide).
-
-Validated results (3LNJ mirror): ipTM 0.95-0.96 for 4 random pocket
-orientations; output peptide 11/11 L chirality; product flips to D.
+  - gamma_0 = 0.0 recommended (deterministic descent; higher gamma makes
+    the mid-sigma noise random-walk eject the peptide).
 """
 
 from __future__ import annotations
@@ -26,7 +24,8 @@ from typing import Optional
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path("/data/Boltz2Score")
+# Capability-local root; all artifacts stay inside peptide_lm.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _FIXED_RECEPTOR_CONFIG: dict = {
     "enabled": False,
@@ -40,23 +39,6 @@ def set_fixed_receptor_config(**kwargs) -> None:
     _FIXED_RECEPTOR_CONFIG.update(kwargs)
 
 
-def _kabsch_align_batch(coords: torch.Tensor, mask: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    out = coords.clone()
-    ref_m = ref[mask]
-    mu_ref = ref_m.mean(dim=0)
-    for b in range(coords.size(0)):
-        mob = coords[b][mask]
-        mu_mob = mob.mean(dim=0)
-        P = mob - mu_mob
-        Q = ref_m - mu_ref
-        H = (P.T @ Q).to(torch.float64)
-        U, S, Vt = torch.linalg.svd(H)
-        d = torch.sign(torch.det(U @ Vt))
-        D = torch.diag(torch.tensor([1.0, 1.0, d], dtype=torch.float64, device=coords.device))
-        R = ((U @ D @ Vt).T).to(coords.dtype)
-        out[b] = (R @ (coords[b] - mu_mob).T).T + mu_ref
-    return out
-
 
 def install_fixed_receptor_sampler(model_module) -> None:
     """Attach the inpainting sampler to a loaded Boltz2ScoreModel instance."""
@@ -64,9 +46,8 @@ def install_fixed_receptor_sampler(model_module) -> None:
     sm.sample = MethodType(_sample_fixed_receptor, sm)
     # keep Boltz2ScoreModel._configure_structure_sampling from replacing it
     sm._boltz2score_input_init_patch = True
-    # The pinned receptor already defines a stable frame, so the reverse-step
-    # rigid alignment is unnecessary — and its SVD occasionally diverges on
-    # degenerate point clouds (bf16 trajectories), corrupting the sample.
+    # The pinned receptor already defines a stable frame, and the
+    # reverse-step alignment's SVD can diverge on degenerate point clouds.
     sm.alignment_reverse_diff = False
 
 
@@ -110,10 +91,8 @@ def _sample_fixed_receptor(
         atom_to_token = a2t.long()
     atom_asym = token_asym[atom_to_token].long().clamp(min=0).flatten()
     atom_present = atom_pad.bool().flatten()
-    # The staged complex's design contract: the LARGEST chain is the fixed
-    # D-target; every other chain (binder peptide, covalent linker) is free.
-    # An argmin-atom-count heuristic here once froze the peptide and re-docked
-    # only a 9-atom linker instead.
+    # Staged complex contract: the LARGEST chain is the fixed D-target;
+    # every other chain (binder peptide, covalent linker) is free.
     counts = torch.bincount(atom_asym[atom_present])
     receptor_asym = int(torch.argmax(counts).item())
     fixed_mask = (atom_asym == receptor_asym).to(self.device)
@@ -211,9 +190,8 @@ def _sample_fixed_receptor(
                                     parameters,
                                 ).to(atom_coords_denoised.dtype)
                         except torch._C._LinAlgError:
-                            # Rare: the align SVD hits repeated singular values
-                            # for one batch element. Drop this gradient
-                            # contribution; the step continues unguided.
+                            # rare align-SVD failure for one batch element:
+                            # drop this gradient, continue unguided
                             pass
                 guidance_update -= energy_gradient
             atom_coords_denoised += guidance_update
@@ -230,10 +208,8 @@ def _sample_fixed_receptor(
                         atom_mask.float(),
                     ).to(atom_coords_denoised)
                 except torch._C._LinAlgError:
-                    # Rare: this step's point cloud has a degenerate covariance
-                    # (repeated singular values) and the align SVD diverges.
-                    # The align only stabilizes the reverse step; continue the
-                    # step unaligned instead of corrupting the trajectory.
+                    # rare degenerate covariance -> align SVD diverges; the
+                    # align only stabilizes the step, so continue unaligned
                     pass
 
         atom_coords_noisy = atom_coords_noisy * (~fm).float() + fixed_coords.unsqueeze(0) * fm.float()
@@ -242,8 +218,8 @@ def _sample_fixed_receptor(
         atom_coords = atom_coords_noisy + step_scale * (sigma_t - t_hat) * denoised_over_sigma
         atom_coords = atom_coords * (~fm).float() + fixed_coords.unsqueeze(0) * fm.float()
 
-        # pocket anchoring box: peptide-only rigid translation (validated —
-        # a whole-system shift is cancelled by the next joint recentering)
+        # pocket anchoring box: peptide-only rigid translation (a
+        # whole-system shift is cancelled by the next joint recentering)
         if box_radius > 0 and pocket_center is not None:
             pep_now = atom_coords[:, pep_sel]
             if pep_now.numel():

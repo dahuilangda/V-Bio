@@ -1,15 +1,7 @@
-# /V-Bio/designer/design_utils.py
+"""蛋白质/糖肽设计的核心数据结构与工具函数。
 
-"""
-design_utils.py
-
-该模块提供了蛋白质和糖肽设计所需的核心数据结构和辅助工具函数。
-功能包括：
-- 定义氨基酸、单糖和糖基化位点的常量。
-- 提供基于BLOSUM62矩阵的氨基酸替换分数。
-- 实现序列生成、突变和结构预测结果解析的功能。
-
-所有函数均为无状态的，不依赖于外部类实例。
+包含氨基酸、单糖和糖基化位点常量，BLOSUM62 替换分数，以及序列生成、
+突变和结构预测结果解析。所有函数均无状态。
 """
 
 import random
@@ -22,16 +14,14 @@ from pathlib import Path
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple, Optional
 
-# --- 初始化日志记录器 ---
-# 该模块的日志记录器将继承主入口点的配置
 logger = logging.getLogger(__name__)
 
-# --- 核心常量 ---
+# 核心常量
 
 AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 AMINO_ACIDS_NO_CYS = "ARNDQEGHILKMFPSTWYV" # 用于禁用半胱氨酸的设计，避免生成额外的Cys
 
-# --- 双环肽连接子 ---
+# 双环肽连接子
 BICYCLIC_LINKERS = {
     'SEZ': {
         'ccd': 'SEZ',
@@ -47,7 +37,7 @@ BICYCLIC_LINKERS = {
     },
 }
 
-# --- 糖化学常量 ---
+# 糖化学常量
 MONOSACCHARIDES = {
     # 最常见的N-连接糖基化起始糖
     'NAG': {
@@ -60,7 +50,7 @@ MONOSACCHARIDES = {
         'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
     },
     
-    # 常见的高甘露糖型糖链组分，C1位羟基氧原子在脱水缩合后成为连接Ser/Thr的桥梁氧原子
+    # 常见的高甘露糖型糖链组分
     'MAN': {
         'atom': 'C1', 
         'type': ['N-linked', 'O-linked'], 
@@ -155,7 +145,7 @@ MONOSACCHARIDES = {
         'linkage_atoms': {'O-linked': 'OG'}
     },
     
-    # 历史兼容性保留（SIA是旧的神经氨酸代号）
+    # 兼容旧代号，同 NAN
     'SIA': {
         'atom': 'C2', 
         'type': ['O-linked'], 
@@ -166,7 +156,7 @@ MONOSACCHARIDES = {
         'linkage_atoms': {'O-linked': 'OG'}
     },
     
-    # 扩展的糖基库 - 用于复杂糖基化模式
+    # 扩展糖基库，用于复杂糖基化模式
     'RHAB': {
         'atom': 'C1',
         'type': ['O-linked'],
@@ -246,107 +236,76 @@ def get_valid_residues_for_glycan(glycan_ccd: str) -> list:
     return list(set(valid_residues))
 
 def generate_random_bicyclic_sequence(length: int) -> str:
-    """
-    为双环肽设计生成一个随机序列，包含三个Cys，其中一个在末尾。
-    确保序列中恰好包含3个半胱氨酸，不多不少。
-    """
+    """为双环肽生成随机序列：恰好三个Cys，其中一个固定在末端。"""
     if length < 3:
         raise ValueError("Sequence length must be at least 3 for bicyclic peptide design.")
-    
-    # 1. 生成不含Cys的随机序列
+
     seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
-    
-    # 2. 在末尾放置一个Cys（固定末端Cys）
+
     seq[-1] = 'C'
-    
-    # 3. 在其余位置随机选择两个不同位置放置Cys
+
     available_indices = list(range(length - 1))  # 不包括末尾位置
     if len(available_indices) < 2:
         raise ValueError("Sequence length too short for bicyclic peptide (need at least 3 positions)")
-    
+
     cys_pos1, cys_pos2 = random.sample(available_indices, 2)
     seq[cys_pos1] = 'C'
     seq[cys_pos2] = 'C'
-    
+
     final_sequence = "".join(seq)
-    
-    # 验证结果
+
     cys_count = final_sequence.count('C')
     if cys_count != 3:
         raise ValueError(f"Generated bicyclic sequence has {cys_count} Cys, expected 3")
     
     return final_sequence
 
-# def generate_random_sequence(length: int, modification_site: int = None, glycan_modification: str = None) -> str:
-#     """生成一个随机的氨基酸序列。"""
-#     seq = list("".join(random.choice(AMINO_ACIDS) for _ in range(length)))
-#     if modification_site is not None:
-#         if 0 <= modification_site < length:
-#             # 由于现在使用预生成的糖肽修饰（如MANS），我们不需要验证特定残基
-#             # 而是使用任何适合糖基化的残基
-#             valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) + 
-#                             list(GLYCOSYLATION_SITES['O-linked'].keys()) + 
-#                             list(GLYCOSYLATION_SITES['C-linked'].keys()))
-#             seq[modification_site] = random.choice(valid_residues)
-#         else:
-#             raise ValueError("modification_site index is out of bounds for the given sequence length.")
-#     return "".join(seq)
 
 def generate_random_sequence(length: int, design_params: dict) -> str:
     """根据设计参数生成一个随机的氨基酸序列。"""
     design_type = design_params.get('design_type', 'linear')
     include_cysteine = design_params.get('include_cysteine', True)
     sequence_mask = design_params.get('sequence_mask')
-    
-    # 选择氨基酸字符串
+
     if include_cysteine:
         amino_acid_set = AMINO_ACIDS
     else:
         amino_acid_set = AMINO_ACIDS_NO_CYS
-    
-    # 处理sequence_mask
+
     if sequence_mask:
-        # 移除分隔符并转换为大写
         mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
         if len(mask_clean) != length:
             raise ValueError(f"Sequence mask length ({len(mask_clean)}) must match binder length ({length})")
-        
-        # 根据mask生成序列
+
         seq = []
         for i, char in enumerate(mask_clean):
             if char == 'X':
                 seq.append(random.choice(amino_acid_set))
             else:
-                seq.append(char)  # 固定氨基酸
+                seq.append(char)
     else:
-        # 原有逻辑：根据设计类型生成序列
         seq = []
-        
-        # --- 双环肽的特殊生成逻辑 ---
+
         if design_type == 'bicyclic':
             if length < 3:
                 raise ValueError("Bicyclic peptide length must be at least 3.")
             # 双环肽需要Cys，即使用户禁用了半胱氨酸
             seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
-            
-            # 固定最后一个位置为Cys
+
             seq[-1] = 'C'
-            
-            # 确定另外两个Cys的位置
+
             cys_positions = design_params.get('cys_positions')
             if cys_positions and len(cys_positions) == 2:
                 pos1, pos2 = cys_positions[0], cys_positions[1]
             else:
-                # 随机选择两个不与末端重复的位置
                 available_indices = list(range(length - 1))
                 pos1, pos2 = random.sample(available_indices, 2)
-            
+
             seq[pos1] = 'C'
             seq[pos2] = 'C'
-            
+
             return "".join(seq)
 
-        # --- 糖肽的特殊生成逻辑 ---
         elif design_type == 'glycopeptide':
             seq = list("".join(random.choice(amino_acid_set) for _ in range(length)))
             modification_site = design_params.get('modification_site')
@@ -360,95 +319,12 @@ def generate_random_sequence(length: int, design_params: dict) -> str:
                     raise ValueError("modification_site index is out of bounds for the given sequence length.")
             return "".join(seq)
 
-        # --- 默认线性多肽逻辑 ---
         else:
             seq = [random.choice(amino_acid_set) for _ in range(length)]
-    
+
     return "".join(seq)
 
 
-# def mutate_sequence(
-#     sequence: str,
-#     mutation_rate: float = 0.1,
-#     plddt_scores: list = None,
-#     temperature: float = 1.0,
-#     modification_site: int = None,
-#     glycan_modification: str = None,
-#     position_selection_temp: float = 1.0
-# ) -> str:
-#     """
-#     对序列进行点突变，突变过程受pLDDT和BLOSUM62矩阵指导。
-
-#     - **突变位置选择**: 优先选择pLDDT分数较低（即模型预测的低置信度）的区域。
-#       `position_selection_temp` 参数用于调节该选择压力：
-#         - temp=1.0: 标准权重。
-#         - temp>1.0: 降低pLDDT的影响，位置选择更趋于随机，增强探索性。
-#         - temp<1.0: 增强pLDDT的影响，位置选择更集中于低分区域，增强利用性。
-#     - **氨基酸替换选择**: 通过带温度的Softmax函数和BLOSUM62矩阵进行加权。
-#     - **糖基化位点保护**: 指定的糖基化位点将被保护，确保其残基始终与指定的聚糖类型兼容。
-
-#     Args:
-#         sequence (str): 原始氨基酸序列。
-#         mutation_rate (float): 序列中要突变的残基比例。
-#         plddt_scores (list, optional): 与序列对应的pLDDT分数列表。
-#         temperature (float): Softmax函数的温度因子，用于氨基酸替换选择。
-#         modification_site (int, optional): 要保护的糖基化位点（0-based索引）。
-#         glycan_modification (str, optional): 糖肽修饰的CCD代码，用于验证修饰位点。
-#         position_selection_temp (float): 用于调节pLDDT指导位置选择的温度因子。
-
-#     Returns:
-#         str: 突变后的新序列。
-#     """
-#     new_sequence = list(sequence)
-#     num_mutations = max(1, int(len(sequence) * mutation_rate))
-
-#     # --- 步骤 1: 选择突变位置 (pLDDT指导) ---
-#     available_indices = list(range(len(sequence)))
-#     if modification_site is not None and modification_site in available_indices:
-#         available_indices.remove(modification_site)
-
-#     if not available_indices:
-#         logger.warning("No available positions to mutate after excluding the glycosylation site. Returning original sequence.")
-#         return sequence
-
-#     positions_to_mutate = []
-#     if plddt_scores and len(plddt_scores) == len(sequence):
-#         # 根据 (100 - pLDDT) 对位置进行加权，优先选择低置信度区域
-#         # 应用 position_selection_temp 来调整选择压力
-#         safe_temp = max(position_selection_temp, 1e-6) # 避免除以零
-#         weights = [(100.0 - plddt_scores[i]) / safe_temp for i in available_indices]
-        
-#         total_weight = sum(weights)
-#         if total_weight > 0:
-#             probabilities = [w / total_weight for w in weights]
-#             k = min(num_mutations, len(available_indices))
-#             positions_to_mutate = np.random.choice(available_indices, size=k, replace=False, p=probabilities)
-#         else:
-#             # 如果所有pLDDT都为100或权重因其他原因失效，则随机选择
-#             logger.debug("All pLDDT scores are high; falling back to random position selection.")
-#             positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
-#     else:
-#         if plddt_scores:
-#             logger.warning("pLDDT scores length mismatch or not provided. Falling back to random position selection.")
-#         # 如果没有提供pLDDT，则随机选择突变位置
-#         positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
-
-#     # --- 步骤 2: 选择替换的氨基酸 (BLOSUM62) ---
-#     for pos in positions_to_mutate:
-#         original_aa = new_sequence[pos]
-#         substitution_scores = BLOSUM62.get(original_aa, {})
-#         possible_aas = [aa for aa in AMINO_ACIDS if aa != original_aa]
-#         if not possible_aas: continue
-
-#         scores = [substitution_scores.get(aa, 0) for aa in possible_aas]
-#         scores_array = np.array(scores) / temperature
-#         probabilities = np.exp(scores_array - np.max(scores_array)) # Softmax
-#         probabilities /= np.sum(probabilities)
-
-#         new_aa = np.random.choice(possible_aas, p=probabilities)
-#         new_sequence[pos] = new_aa
-    
-#     return "".join(new_sequence)
 
 def mutate_sequence(
     sequence: str,
@@ -456,7 +332,7 @@ def mutate_sequence(
     plddt_scores: list = None,
     design_params: dict = None,
     position_selection_temp: float = 1.0,
-    temperature: float = 1.0 # 兼容旧版调用
+    temperature: float = 1.0
 ) -> str:
     """
     对序列进行点突变，突变过程受pLDDT和BLOSUM62矩阵指导。
@@ -467,17 +343,15 @@ def mutate_sequence(
     design_type = design_params.get('design_type', 'linear') if design_params else 'linear'
     sequence_mask = design_params.get('sequence_mask') if design_params else None
 
-    # --- 步骤 1: 确定可突变的位置 ---
+    # 步骤 1: 确定可突变的位置
     protected_indices = set()
-    
-    # 处理sequence_mask约束
+
     if sequence_mask:
         mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
         for i, char in enumerate(mask_clean):
             if char != 'X':  # 非X位置是固定位置，不能突变
                 protected_indices.add(i)
-    
-    # 其他设计类型的保护位置
+
     if design_type == 'glycopeptide':
         mod_site = design_params.get('modification_site') if design_params else None
         if mod_site is not None:
@@ -485,50 +359,44 @@ def mutate_sequence(
     elif design_type == 'bicyclic':
         # 双环肽中，半胱氨酸数量必须恰好为3个
         cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
-        
-        # 验证当前序列的Cys数量
+
         if len(cys_indices) != 3:
             logger.warning(f"Bicyclic sequence has {len(cys_indices)} Cys, correcting to 3")
-            # 如果Cys数量不对，重新生成符合要求的序列
             try:
                 corrected_seq = list(sequence)
-                # 移除所有Cys
                 for i in range(len(corrected_seq)):
                     if corrected_seq[i] == 'C':
                         corrected_seq[i] = random.choice(AMINO_ACIDS_NO_CYS)
-                
-                # 重新添加3个Cys
+
                 corrected_seq[-1] = 'C'  # 末端Cys
                 available_indices = list(range(len(corrected_seq) - 1))
                 if len(available_indices) >= 2:
                     pos1, pos2 = random.sample(available_indices, 2)
                     corrected_seq[pos1] = 'C'
                     corrected_seq[pos2] = 'C'
-                
+
                 sequence = "".join(corrected_seq)
                 new_sequence = list(sequence)
                 cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
             except Exception as e:
                 logger.error(f"Failed to correct bicyclic sequence: {e}")
-        
+
         # 双环肽突变策略：以一定概率移动一个Cys的位置
         CYS_MOVE_PROBABILITY = 0.15  # 降低概率避免过度变化
         if random.random() < CYS_MOVE_PROBABILITY and len(cys_indices) == 3:
             variable_cys_indices = sorted(list(cys_indices - {len(sequence) - 1}))
             if len(variable_cys_indices) == 2:
                 cys_to_move = random.choice(variable_cys_indices)
-                
-                available_swap_indices = [i for i in range(len(sequence) - 1) 
+
+                available_swap_indices = [i for i in range(len(sequence) - 1)
                                         if i not in cys_indices and i not in protected_indices]
                 if available_swap_indices:
                     new_pos = random.choice(available_swap_indices)
-                    
-                    # 交换位置，并用随机氨基酸填充旧的Cys位置
+
                     new_sequence[cys_to_move] = random.choice(AMINO_ACIDS_NO_CYS)
                     new_sequence[new_pos] = 'C'
                     logger.debug(f"Bicyclic mutation: Moved Cys from {cys_to_move+1} to {new_pos+1}")
-                    
-                    # 更新序列和Cys位置
+
                     sequence = "".join(new_sequence)
                     cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
 
@@ -539,18 +407,17 @@ def mutate_sequence(
     if not available_indices:
         logger.warning("No available positions to mutate after excluding protected sites. Returning current sequence.")
         return "".join(new_sequence)
-    
-    # --- 步骤 2: 选择突变位置 (pLDDT指导) ---
+
+    # 步骤 2: 选择突变位置 (pLDDT指导)
     k = min(num_mutations, len(available_indices))
     if plddt_scores and len(plddt_scores) == len(sequence):
         safe_temp = max(position_selection_temp, 1e-6)
         weights = np.array([(100.0 - plddt_scores[i]) for i in available_indices])
-        
-        # 应用温度调整
+
         probabilities = np.exp(weights / safe_temp)
         probabilities /= np.sum(probabilities)
 
-        if np.isnan(probabilities).any(): # 如果概率计算出错，回退到随机选择
+        if np.isnan(probabilities).any(): # 概率计算出错则回退到随机选择
              positions_to_mutate = random.sample(available_indices, k=k)
         else:
              positions_to_mutate = np.random.choice(available_indices, size=k, replace=False, p=probabilities)
@@ -559,22 +426,19 @@ def mutate_sequence(
             logger.warning("pLDDT scores length mismatch. Falling back to random position selection.")
         positions_to_mutate = random.sample(available_indices, k=k)
 
-    # --- 步骤 3: 选择替换的氨基酸 (BLOSUM62指导) ---
+    # 步骤 3: 选择替换的氨基酸 (BLOSUM62指导)
     include_cysteine = design_params.get('include_cysteine', True) if design_params else True
-    
+
     for pos in positions_to_mutate:
         original_aa = new_sequence[pos]
         substitution_scores = BLOSUM62.get(original_aa, {})
-        
-        # 选择可用的氨基酸集合
+
         if design_type == 'bicyclic':
-            # 双环肽设计中，确保不会突变为Cys（Cys位置由设计类型控制）
+            # 双环肽不能突变为Cys（Cys位置由设计类型控制）
             possible_aas = [aa for aa in AMINO_ACIDS_NO_CYS if aa != original_aa]
         elif include_cysteine:
-            # 包含半胱氨酸
             possible_aas = [aa for aa in AMINO_ACIDS if aa != original_aa]
         else:
-            # 不包含半胱氨酸
             possible_aas = [aa for aa in AMINO_ACIDS_NO_CYS if aa != original_aa]
             
         if not possible_aas: 
@@ -779,7 +643,6 @@ def parse_confidence_metrics(
 
     root_path = Path(results_path)
 
-    # 读取亲和力数据（若存在）
     affinity_path = root_path / "affinity_data.json"
     if affinity_path.exists():
         try:
@@ -916,7 +779,7 @@ def parse_confidence_metrics(
             model_candidates = list(output_root.glob("**/*model.cif"))
             model_cif_path = _prefer_aggregate_file(model_candidates)
 
-        # 解析 summary_confidences.json
+        # summary_confidences.json
         if summary_file and summary_file.exists():
             try:
                 with summary_file.open('r') as f:
@@ -966,7 +829,7 @@ def parse_confidence_metrics(
             except Exception as exc:
                 logger.warning(f"Failed to parse AF3 summary confidences from {summary_file}: {exc}")
 
-        # 解析 confidences.json
+        # confidences.json
         if confidences_file and confidences_file.exists():
             try:
                 with confidences_file.open('r') as f:
@@ -989,7 +852,7 @@ def parse_confidence_metrics(
             except Exception as exc:
                 logger.warning(f"Failed to parse AF3 confidences from {confidences_file}: {exc}")
 
-        # 解析 CIF 获取 binder pLDDT
+        # CIF: binder pLDDT
         if model_cif_path and model_cif_path.exists():
             binder_plddts = _extract_plddts_from_cif(model_cif_path, binder_chain_id)
             if binder_plddts:
@@ -1072,7 +935,7 @@ def parse_confidence_metrics(
 
         return metrics
 
-    # --- Boltz 默认结果解析 ---
+    # Boltz 结果解析
     try:
         json_path = next(
             (
@@ -1171,23 +1034,19 @@ class AdvancedMutationEngine:
         if score < 0.5:
             return
             
-        # 学习位置偏好
         for i, aa in enumerate(sequence):
             self.position_preferences[i][aa] += score
-        
-        # 学习motif模式
+
         for length in range(2, min(6, len(sequence) + 1)):
             for i in range(len(sequence) - length + 1):
                 motif = sequence[i:i+length]
                 self.motif_patterns[motif] += score
         
-        # 更新能量景观
         energy = -(score)  # 转换为能量值
         self.energy_landscape[sequence] = energy
     
     def select_mutation_strategy(self) -> str:
         """根据成功率选择突变策略"""
-        # 调整权重
         total_success = sum(self.strategy_success_rates.values())
         if total_success > 0:
             adjusted_weights = {}
@@ -1197,7 +1056,6 @@ class AdvancedMutationEngine:
         else:
             adjusted_weights = self.strategy_weights
         
-        # 随机选择
         total_weight = sum(adjusted_weights.values())
         r = random.uniform(0, total_weight)
         cumulative = 0
@@ -1215,14 +1073,12 @@ class AdvancedMutationEngine:
         if num_mutations is None:
             num_mutations = max(1, len(sequence) // 8)
         
-        # 获取包含半胱氨酸的设置
         include_cysteine = design_params.get('include_cysteine', True) if design_params else True
         amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
         sequence_mask = design_params.get('sequence_mask') if design_params else None
         
         new_sequence = list(sequence)
         
-        # 确定可突变的位置
         available_positions = list(range(len(sequence)))
         if sequence_mask:
             mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
@@ -1230,8 +1086,7 @@ class AdvancedMutationEngine:
         
         if not available_positions:
             return sequence
-        
-        # 选择突变位置
+
         if plddt_scores and len(plddt_scores) == len(sequence):
             available_weights = [(100 - plddt_scores[i]) ** 2 for i in available_positions]
             total_weight = sum(available_weights)
@@ -1253,7 +1108,6 @@ class AdvancedMutationEngine:
         
         for pos in positions:
             original_aa = sequence[pos]
-            # 只考虑允许的氨基酸类型
             candidates = [(aa, score) for aa, score in BLOSUM62.get(original_aa, {}).items()
                          if aa != original_aa and score > 0 and aa in amino_acid_set]
             
@@ -1288,14 +1142,12 @@ class AdvancedMutationEngine:
         if num_mutations is None:
             num_mutations = max(2, len(sequence) // 4)
         
-        # 获取包含半胱氨酸的设置
         include_cysteine = design_params.get('include_cysteine', True) if design_params else True
         amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
         sequence_mask = design_params.get('sequence_mask') if design_params else None
         
         new_sequence = list(sequence)
         
-        # 确定可突变的位置
         available_positions = list(range(len(sequence)))
         if sequence_mask:
             mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
@@ -1318,7 +1170,6 @@ class AdvancedMutationEngine:
         new_sequence = list(sequence)
         sequence_mask = design_params.get('sequence_mask') if design_params else None
         
-        # 确定可突变的位置
         available_positions = list(range(len(sequence)))
         if sequence_mask:
             mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
@@ -1326,8 +1177,7 @@ class AdvancedMutationEngine:
         
         if not available_positions:
             return sequence
-        
-        # 选择有益motif
+
         all_motifs = {**self.beneficial_motifs, **dict(self.motif_patterns)}
         beneficial_motifs = [motif for motif, score in all_motifs.items() if score >= 0.3]
         
@@ -1369,7 +1219,6 @@ class AdvancedMutationEngine:
         num_mutations = max(1, len(sequence) // 6)
         sequence_mask = design_params.get('sequence_mask') if design_params else None
         
-        # 确定可突变的位置
         available_positions = list(range(len(sequence)))
         if sequence_mask:
             mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
@@ -1418,14 +1267,12 @@ class AdvancedMutationEngine:
         if not elite_sequences:
             return self.aggressive_mutation(sequence, design_params=design_params)
         
-        # 获取包含半胱氨酸的设置
         include_cysteine = design_params.get('include_cysteine', True) if design_params else True
         amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
         sequence_mask = design_params.get('sequence_mask') if design_params else None
         
         new_sequence = list(sequence)
         
-        # 确定可突变的位置
         available_positions = list(range(len(sequence)))
         if sequence_mask:
             mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
@@ -1433,8 +1280,7 @@ class AdvancedMutationEngine:
         
         if not available_positions:
             return sequence
-        
-        # 计算相似性
+
         similarities = []
         for elite_seq in elite_sequences:
             if len(elite_seq) == len(sequence):
@@ -1597,40 +1443,29 @@ def calculate_sequence_similarity(seq1: str, seq2: str) -> float:
 def extract_sequence_features(sequence: str) -> Dict[str, float]:
     """提取序列的生化特征"""
     features = {}
-    
-    # 氨基酸组成
+
     aa_counts = Counter(sequence)
     total_length = len(sequence)
-    
-    # 疏水性氨基酸比例
+
     hydrophobic = set('AILMFPWYV')
     features['hydrophobic_ratio'] = sum(aa_counts[aa] for aa in hydrophobic if aa in aa_counts) / total_length
-    
-    # 极性氨基酸比例
+
     polar = set('NQST')
     features['polar_ratio'] = sum(aa_counts[aa] for aa in polar if aa in aa_counts) / total_length
-    
-    # 带电氨基酸比例
+
     charged = set('DEKRHC')
     features['charged_ratio'] = sum(aa_counts[aa] for aa in charged if aa in aa_counts) / total_length
-    
-    # 芳香性氨基酸比例
+
     aromatic = set('FWY')
     features['aromatic_ratio'] = sum(aa_counts[aa] for aa in aromatic if aa in aa_counts) / total_length
-    
-    # 小氨基酸比例
+
     small = set('AGS')
     features['small_ratio'] = sum(aa_counts[aa] for aa in small if aa in aa_counts) / total_length
-    
-    # Pro含量（结构柔性）
+
     features['pro_ratio'] = aa_counts.get('P', 0) / total_length
-    
-    # Gly含量（结构柔性）
     features['gly_ratio'] = aa_counts.get('G', 0) / total_length
-    
-    # Cys含量（二硫键潜力）
     features['cys_ratio'] = aa_counts.get('C', 0) / total_length
-    
+
     return features
 
 
@@ -1638,8 +1473,7 @@ def analyze_population_diversity(sequences: List[str]) -> Dict[str, float]:
     """分析群体多样性"""
     if len(sequences) < 2:
         return {'avg_pairwise_similarity': 0.0, 'position_entropy': 0.0}
-    
-    # 平均成对相似性
+
     similarities = []
     for i in range(len(sequences)):
         for j in range(i + 1, len(sequences)):
@@ -1647,8 +1481,7 @@ def analyze_population_diversity(sequences: List[str]) -> Dict[str, float]:
             similarities.append(sim)
     
     avg_similarity = sum(similarities) / len(similarities) if similarities else 0.0
-    
-    # 位置熵
+
     position_entropies = []
     seq_length = len(sequences[0]) if sequences else 0
     
@@ -1669,267 +1502,3 @@ def analyze_population_diversity(sequences: List[str]) -> Dict[str, float]:
         'num_unique_sequences': len(set(sequences)),
         'diversity_index': 1.0 - avg_similarity  # 多样性指数
     }
-
-
-# === 糖肽修饰相关辅助函数 ===
-
-def get_glycopeptide_ccd_code(glycan_code: str, amino_acid: str) -> str:
-    """生成糖肽的CCD代码"""
-    return f"{glycan_code}_{amino_acid}"
-
-
-def validate_glycosylation_compatibility(amino_acid: str, glycan_code: str) -> bool:
-    """验证氨基酸与糖基的兼容性"""
-    if glycan_code not in MONOSACCHARIDES:
-        return False
-    
-    glycan_info = MONOSACCHARIDES[glycan_code]
-    allowed_types = glycan_info.get('type', [])
-    
-    # 检查氨基酸是否支持任何允许的糖基化类型
-    for linkage_type in allowed_types:
-        if linkage_type in GLYCOSYLATION_SITES:
-            if amino_acid in GLYCOSYLATION_SITES[linkage_type]:
-                return True
-    
-    return False
-
-
-def get_optimal_linkage_type(amino_acid: str, glycan_code: str) -> str:
-    """获取氨基酸和糖基的最佳连接类型"""
-    if not validate_glycosylation_compatibility(amino_acid, glycan_code):
-        raise ValueError(f"Incompatible combination: {amino_acid} with {glycan_code}")
-    
-    glycan_info = MONOSACCHARIDES[glycan_code]
-    allowed_types = glycan_info.get('type', [])
-    
-    # 优先级：N-linked > O-linked > C-linked
-    priority = ['N-linked', 'O-linked', 'C-linked']
-    
-    for linkage_type in priority:
-        if linkage_type in allowed_types and linkage_type in GLYCOSYLATION_SITES:
-            if amino_acid in GLYCOSYLATION_SITES[linkage_type]:
-                return linkage_type
-    
-    # 如果没有找到优先的类型，返回第一个可用的
-    for linkage_type in allowed_types:
-        if linkage_type in GLYCOSYLATION_SITES:
-            if amino_acid in GLYCOSYLATION_SITES[linkage_type]:
-                return linkage_type
-    
-    raise ValueError(f"No compatible linkage type found for {amino_acid} and {glycan_code}")
-
-
-def calculate_glycopeptide_properties(glycan_code: str) -> Dict[str, float]:
-    """计算糖肽的理化性质"""
-    if glycan_code not in MONOSACCHARIDES:
-        return {}
-    
-    glycan_info = MONOSACCHARIDES[glycan_code]
-    
-    properties = {
-        'molecular_weight': glycan_info.get('molecular_weight', 0.0),
-        'hydrophilic_contribution': 0.8,  # 糖基通常是亲水的
-        'flexibility_increase': 0.6,      # 糖基增加分子柔性
-        'surface_exposure': 0.9,          # 糖基通常暴露在表面
-    }
-    
-    # 根据糖基类型调整性质
-    if 'NAN' in glycan_code or 'SIA' in glycan_code:
-        properties['charge'] = -1.0  # 唾液酸带负电荷
-    else:
-        properties['charge'] = 0.0
-    
-    if 'FUC' in glycan_code:
-        properties['steric_hindrance'] = 0.7  # 岩藻糖空间位阻较大
-    else:
-        properties['steric_hindrance'] = 0.3
-    
-    return properties
-
-
-def suggest_glycosylation_sites(sequence: str, target_properties: Dict = None) -> List[Dict]:
-    """建议蛋白质序列的糖基化位点"""
-    suggestions = []
-    
-    # 默认目标属性
-    if target_properties is None:
-        target_properties = {
-            'increase_solubility': True,
-            'increase_stability': True,
-            'avoid_active_sites': True,
-        }
-    
-    for i, aa in enumerate(sequence):
-        position = i + 1
-        
-        # 检查该氨基酸是否可以糖基化
-        compatible_glycans = []
-        for glycan_code, glycan_info in MONOSACCHARIDES.items():
-            if validate_glycosylation_compatibility(aa, glycan_code):
-                compatible_glycans.append({
-                    'glycan_code': glycan_code,
-                    'glycan_name': glycan_info.get('name', ''),
-                    'linkage_type': get_optimal_linkage_type(aa, glycan_code),
-                    'properties': calculate_glycopeptide_properties(glycan_code)
-                })
-        
-        if compatible_glycans:
-            # 根据目标属性排序
-            if target_properties.get('increase_solubility', False):
-                compatible_glycans.sort(
-                    key=lambda x: x['properties'].get('hydrophilic_contribution', 0),
-                    reverse=True
-                )
-            
-            suggestions.append({
-                'position': position,
-                'amino_acid': aa,
-                'compatible_glycans': compatible_glycans
-            })
-    
-    return suggestions
-
-
-def generate_glycosylation_patterns(
-    sequence: str, 
-    max_sites: int = 3,
-    pattern_type: str = 'balanced'
-) -> List[List[Dict]]:
-    """
-    生成糖基化模式
-    
-    Args:
-        sequence: 蛋白质序列
-        max_sites: 最大糖基化位点数
-        pattern_type: 模式类型 ('balanced', 'high_density', 'terminal_focused')
-    
-    Returns:
-        糖基化模式列表，每个模式是位点配置的列表
-    """
-    from itertools import combinations
-    
-    # 获取所有可能的糖基化位点
-    potential_sites = suggest_glycosylation_sites(sequence)
-    
-    if not potential_sites:
-        return []
-    
-    patterns = []
-    
-    # 根据模式类型调整策略
-    if pattern_type == 'balanced':
-        # 均匀分布的糖基化位点
-        step = max(1, len(potential_sites) // max_sites)
-        selected_sites = potential_sites[::step][:max_sites]
-        
-        for site in selected_sites:
-            # 为每个位点选择最佳糖基
-            best_glycan = site['compatible_glycans'][0] if site['compatible_glycans'] else None
-            if best_glycan:
-                patterns.append([{
-                    'position': site['position'],
-                    'amino_acid': site['amino_acid'],
-                    'glycan': best_glycan['glycan_code']
-                }])
-    
-    elif pattern_type == 'high_density':
-        # 高密度糖基化
-        for num_sites in range(1, min(max_sites + 1, len(potential_sites) + 1)):
-            for site_combination in combinations(potential_sites[:max_sites*2], num_sites):
-                pattern = []
-                for site in site_combination:
-                    best_glycan = site['compatible_glycans'][0] if site['compatible_glycans'] else None
-                    if best_glycan:
-                        pattern.append({
-                            'position': site['position'],
-                            'amino_acid': site['amino_acid'],
-                            'glycan': best_glycan['glycan_code']
-                        })
-                if pattern:
-                    patterns.append(pattern)
-    
-    elif pattern_type == 'terminal_focused':
-        # 关注N端和C端的糖基化
-        n_terminal_sites = [s for s in potential_sites if s['position'] <= len(sequence) // 3]
-        c_terminal_sites = [s for s in potential_sites if s['position'] >= 2 * len(sequence) // 3]
-        
-        for sites_group in [n_terminal_sites, c_terminal_sites]:
-            for site in sites_group[:max_sites//2 + 1]:
-                best_glycan = site['compatible_glycans'][0] if site['compatible_glycans'] else None
-                if best_glycan:
-                    patterns.append([{
-                        'position': site['position'],
-                        'amino_acid': site['amino_acid'],
-                        'glycan': best_glycan['glycan_code']
-                    }])
-    
-    # 限制返回的模式数量
-    return patterns[:20]  # 最多返回20种模式
-
-
-def create_modification_based_yaml(
-    sequence: str,
-    glycosylation_pattern: List[Dict],
-    chain_id: str = 'A',
-    msa_type: str = 'empty'
-) -> str:
-    """
-    创建基于modifications的Boltz YAML配置
-    
-    Args:
-        sequence: 蛋白质序列
-        glycosylation_pattern: 糖基化模式
-        chain_id: 链ID
-        msa_type: MSA类型
-    
-    Returns:
-        YAML配置字符串
-    """
-    import yaml
-    
-    # 构建modifications列表
-    modifications = []
-    for site in glycosylation_pattern:
-        position = site['position']
-        glycan = site['glycan']
-        amino_acid = site.get('amino_acid', sequence[position-1] if position <= len(sequence) else 'N')
-        
-        ccd_code = get_glycopeptide_ccd_code(glycan, amino_acid)
-        modifications.append({
-            'position': position,
-            'ccd': ccd_code
-        })
-    
-    # 构建YAML配置
-    config = {
-        'version': 1,
-        'sequences': [{
-            'protein': {
-                'id': [chain_id],
-                'sequence': sequence,
-                'msa': msa_type,
-                'modifications': modifications
-            }
-        }]
-    }
-    
-    return yaml.dump(config, default_flow_style=False, sort_keys=False)
-
-
-def compare_glycosylation_strategies(sequence: str) -> Dict[str, List[Dict]]:
-    """比较不同的糖基化策略"""
-    strategies = {}
-    
-    # 生成不同类型的糖基化模式
-    pattern_types = ['balanced', 'high_density', 'terminal_focused']
-    
-    for pattern_type in pattern_types:
-        patterns = generate_glycosylation_patterns(
-            sequence, 
-            max_sites=3, 
-            pattern_type=pattern_type
-        )
-        strategies[pattern_type] = patterns
-    
-    return strategies

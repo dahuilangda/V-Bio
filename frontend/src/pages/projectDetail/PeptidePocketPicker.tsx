@@ -36,18 +36,16 @@ export interface PeptideTargetPocketContext {
 }
 
 // Sequence-only target: the pocket is defined by naming amino acids on the
-// target sequence, constraint-style. A dropdown adds positions (labelled
-// "25 · GLU" like the constraint residue selects); chips remove them; the rail
-// below keeps the spatial overview and stays clickable.
+// target sequence, constraint-style (dropdown adds, chips remove, rail clickable).
 function PeptidePocketSequencePicker({
   sequence,
   selectedPositions,
-  disabled,
+  isDisabled,
   onToggle
 }: {
   sequence: string;
   selectedPositions: number[];
-  disabled: boolean;
+  isDisabled: boolean;
   onToggle: (position: number) => void;
 }) {
   const letters = String(sequence || '').replace(/\s+/g, '').toUpperCase().split('');
@@ -61,7 +59,7 @@ function PeptidePocketSequencePicker({
       <div className="peptide-pocket-sequence-add">
         <select
           value=""
-          disabled={disabled}
+          disabled={isDisabled}
           aria-label="Add pocket residue"
           title="Add a target-sequence amino acid to the pocket"
           onChange={(event) => {
@@ -88,7 +86,7 @@ function PeptidePocketSequencePicker({
               type="button"
               role="listitem"
               className="peptide-pocket-chip"
-              disabled={disabled}
+              disabled={isDisabled}
               onClick={() => onToggle(position)}
               title={`Remove pocket residue ${position}`}
             >
@@ -111,7 +109,7 @@ function PeptidePocketSequencePicker({
               role="listitem"
               className={`peptide-mask-dot ${selected ? 'fixed' : ''}`}
               onClick={() => onToggle(position)}
-              disabled={disabled}
+              disabled={isDisabled}
               aria-pressed={selected}
               title={selected ? `Remove pocket residue ${position} (${letter})` : `Add pocket residue ${position} (${letter})`}
             >
@@ -125,17 +123,12 @@ function PeptidePocketSequencePicker({
   );
 }
 
-// Peptide-design binding-pocket picker, mounted inside the target component's
-// editor block (the component Binding's Target refers to). With an uploaded
-// structure it mirrors the docking module: the component's inline MolStar
-// viewer shows the box wireframe, clicking residues picks the pocket, and the
-// Box panel adjusts center/size — all remembered with the draft/task. A
-// sequence-only target instead names amino acids on the sequence
-// (constraint-style); the engines fold the target (Protenix / Boltz2 /
-// AlphaFold3) and the pocket constraint is applied to those positions, so the
-// box is built around the user's residues after folding.
+// Peptide-design binding-pocket picker inside the target component's editor
+// block. With an uploaded structure it mirrors the docking module (box
+// wireframe, residue picks, Box panel). A sequence-only target names positions
+// on the sequence instead; engines fold the target and apply the pocket there.
 export function PeptidePocketPicker({
-  canEdit,
+  isEditable,
   targetComponentId,
   targetTemplate,
   targetChainId,
@@ -147,7 +140,7 @@ export function PeptidePocketPicker({
   onPocketFieldChange,
   onDockPocketChange
 }: {
-  canEdit: boolean;
+  isEditable: boolean;
   targetComponentId: string | null;
   targetTemplate: {
     fileName: string;
@@ -172,11 +165,9 @@ export function PeptidePocketPicker({
   const [open, setOpen] = useState(false);
   const lastTargetSignatureRef = useRef('');
 
-  // Identity of what the pocket is defined against (see
-  // peptidePocketTargetSignature). A real change invalidates picks/box/fields
-  // defined against the old coordinates — except the same component gaining
-  // its uploaded structure, which is how restored tasks hydrate their
-  // templates and must not wipe the persisted pocket.
+  // pocket identity (see peptidePocketTargetSignature); a real change
+  // invalidates picks/box/fields — except a component gaining its structure,
+  // which is how restored tasks hydrate templates
   const targetSignature = peptidePocketTargetSignature({
     componentId: targetComponentId,
     hasStructure,
@@ -199,7 +190,7 @@ export function PeptidePocketPicker({
 
 
   const handleResiduePick = (pick: MolstarResiduePick) => {
-    if (!canEdit || !hasStructure) return;
+    if (!isEditable || !hasStructure) return;
     const exists = picks.some((p) => p.chainId === pick.chainId && p.residue === pick.residue);
     const next = exists
       ? picks.filter((p) => !(p.chainId === pick.chainId && p.residue === pick.residue))
@@ -210,9 +201,8 @@ export function PeptidePocketPicker({
       onPocketFieldChange('peptidePocketResidues', null);
       return;
     }
-    // Picks carry the template's author numbering; the token chain prefix is
-    // the target's YAML chain, which the backend resolves through the
-    // template alignment.
+    // picks carry the template's author numbering; the token chain prefix is
+    // the YAML chain, resolved through the template alignment
     onPocketFieldChange('peptidePocketResidues', formatPocketResiduePicks(targetChainId, next));
     onPocketFieldChange('peptidePocketCenter', null);
   };
@@ -240,8 +230,7 @@ export function PeptidePocketPicker({
     if (picks.length > 0) {
       return picks.map((p) => ({ chainId: p.chainId, residue: p.residue }));
     }
-    // Restored task: surface persisted pocket tokens on the template chain so
-    // the selection is visible before the first re-pick.
+    // restored task: show persisted tokens on the template chain before the first re-pick
     const templateChain = String(targetTemplate?.chainId || '').trim();
     if (!templateChain) return undefined;
     const contacts = parsePocketResidueTokens(pocketResidues).chainContacts;
@@ -288,7 +277,7 @@ export function PeptidePocketPicker({
               type="button"
               className={`btn pocket-box-btn ${drawerOpen ? 'active' : ''}`}
               onClick={() => setDrawerOpen((v) => !v)}
-              disabled={!canEdit}
+              disabled={!isEditable}
               title="Show the box controls (center/size sliders, ligand presets)"
             >
               <Box size={12} />
@@ -298,7 +287,7 @@ export function PeptidePocketPicker({
               type="button"
               className="btn btn-ghost btn-compact"
               onClick={handleClearPocket}
-              disabled={!canEdit}
+              disabled={!isEditable}
               title="Remove the pocket — design over the whole target surface"
             >
               <RotateCcw size={11} />
@@ -326,8 +315,8 @@ export function PeptidePocketPicker({
                 pickedResidues={picks}
                 onBoxWireframeChange={setBoxWireframe}
                 onCollapse={() => setDrawerOpen(false)}
-                canEdit={canEdit}
-                submitting={false}
+                isEditable={isEditable}
+                isSubmitting={false}
               />
             ) : null}
           </div>
@@ -337,7 +326,7 @@ export function PeptidePocketPicker({
           <PeptidePocketSequencePicker
             sequence={targetSequence}
             selectedPositions={plainPositions}
-            disabled={!canEdit}
+            isDisabled={!isEditable}
             onToggle={toggleSequencePosition}
           />
         </div>
@@ -353,7 +342,7 @@ export function PeptidePocketPicker({
             aria-label="Pocket center coordinates"
             title="Pocket center 'x,y,z' in the uploaded structure's frame; selects residues within the radius below"
             onChange={(e) => onPocketFieldChange('peptidePocketCenter', e.target.value)}
-            disabled={!canEdit || !hasStructure}
+            disabled={!isEditable || !hasStructure}
           />
           <input
             type="text"
@@ -366,7 +355,7 @@ export function PeptidePocketPicker({
                 : 'Target sequence positions acting as the pocket (1-based)'
             }
             onChange={(e) => onPocketFieldChange('peptidePocketResidues', e.target.value)}
-            disabled={!canEdit}
+            disabled={!isEditable}
           />
           <input
             type="number"
@@ -381,7 +370,7 @@ export function PeptidePocketPicker({
                 onPocketFieldChange('peptidePocketBox', Math.max(4, Math.min(40, Math.round(next))));
               }
             }}
-            disabled={!canEdit}
+            disabled={!isEditable}
           />
         </div>
       </details>

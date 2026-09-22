@@ -16,9 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 
-from peplm.models.gpt2 import GPT2Prior
-from peplm.models.train import pretrain_gpt2
-from peplm.props.descriptors import compute_props, dev_tag_for
+from peplm.props.descriptors import compute_props
 from peplm.residues import NCAA_TOKENS, placement_of
 from peplm.vocab import DEFAULT_VOCAB, parse_tokens
 
@@ -202,9 +200,6 @@ def main():
     ap.add_argument("--lr", type=float, default=6e-4)
     ap.add_argument("--ncaa_aug", type=float, default=0.10,
                     help="fraction of corpus lines augmented with NCAAs")
-    ap.add_argument("--arch", choices=["gpt2", "modern"], default="modern",
-                    help="modern = Llama-style RoPE/SwiGLU/RMSNorm + aux "
-                         "property heads + modality augmentation")
     ap.add_argument("--skip_eval", action="store_true")
     args = ap.parse_args()
 
@@ -213,32 +208,21 @@ def main():
     print(f"[tier1] {len(train)} train (incl. NCAA aug) / {len(val)} val lines")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    if args.arch == "modern":
-        from peplm.models.llama_prior import ModernPrior
-        from peplm.models.train_modern import modality_augment, pretrain_modern
+    from peplm.models.llama_prior import ModernPrior
+    from peplm.models.train_modern import modality_augment, pretrain_modern
 
-        train = modality_augment(train, random.Random(11))
-        model = ModernPrior(DEFAULT_VOCAB, d_model=args.d_model,
-                            n_layers=args.n_layers, n_heads=8, max_len=96)
-        print(f"[tier1-modern] params: "
-              f"{sum(p.numel() for p in model.parameters())/1e6:.1f}M")
-        # hidden-states retention for the aux head costs memory: quarter the
-        # batch, keep the effective batch via grad accumulation
-        eff_bs = 128
-        info = pretrain_modern(model, train, val, DEFAULT_VOCAB,
-                               epochs=args.epochs, batch_size=eff_bs,
-                               grad_accum=3,
-                               lr=args.lr, device=args.device,
-                               save_best=str(out / "prior.pt"), log=print)
-    else:
-        model = GPT2Prior(DEFAULT_VOCAB, d_model=args.d_model,
-                          n_layers=args.n_layers, n_heads=8, max_len=96)
-        print(f"[tier1] params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
-        info = pretrain_gpt2(model, train, val, DEFAULT_VOCAB,
-                             epochs=args.epochs, batch_size=args.batch_size,
-                             lr=args.lr, device=args.device,
-                             save_best=str(out / "prior.pt"),
-                             log=print)
+    train = modality_augment(train, random.Random(11))
+    model = ModernPrior(DEFAULT_VOCAB, d_model=args.d_model,
+                        n_layers=args.n_layers, n_heads=max(1, args.d_model // 64), max_len=96)
+    print(f"[tier1] params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
+    # hidden-states retention for the aux head costs memory: quarter the
+    # batch, keep the effective batch via grad accumulation
+    eff_bs = 128
+    info = pretrain_modern(model, train, val, DEFAULT_VOCAB,
+                           epochs=args.epochs, batch_size=eff_bs,
+                           grad_accum=3,
+                           lr=args.lr, device=args.device,
+                           save_best=str(out / "prior.pt"), log=print)
     print("[tier1] done:", info)
     if not args.skip_eval:
         model.eval().to(args.device)

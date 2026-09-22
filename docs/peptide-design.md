@@ -29,7 +29,7 @@ L 肽设计跳过镜像，其余机制共用。历史路线（先 de novo 预测
   构象放置）；产物 frame 用受体-受体刚体变换恢复（同一受体的 CA 对应
   是精确变换，非拟合残差）。
 - **双环化学**：构象自带闭环 linker；staged 先做 CCD 键长弛豫，扩散中
-  键走 TFG 软约束（x0）+ 每步硬锚带 [1.75, 2.05]（扩散形变发生在 x_t）。
+  键走 TFG x0 软约束 + 精修后 `_dpeptide_linker_bond_report` 硬门（键长超标即拒）。
 - **原子对齐按链内序数**（不按晶体编号），源结构缺失的原子用 CCD 参考
   几何重建；未知原子不 pin。
 - **手性守卫**每步重建翻转/拉伸的 CB（设计空间蛋白残基为 L）。
@@ -39,8 +39,8 @@ L 肽设计跳过镜像，其余机制共用。历史路线（先 de novo 预测
 ## MSA
 
 受体 MSA 由 colabfold server（MMseqs2 API）提供，缓存于
-`/data/boltz_msa_cache`；设计肽不查 MSA（无同源序列，查询即噪声）。
-当前 server 部署只搜 UniRef30（无宏基因组库）；同一复合物用含 MGYP
+`/data/boltz_msa_cache`；设计肽查 MSA（env/uniref 分层，超时 1800s 硬失败）。
+当前 server 部署按 tier 搜索：env=UniRef30+宏基因组，uniref=仅 UniRef30（缓存键带 tier 后缀）；同一复合物用含 MGYP
 宏基因组的全库 MSA 打分时 ipTM 高约 0.25（0.70 vs 0.95，paired 块无
 影响）——绝对置信度刻度受 MSA 库内容影响，候选间相对排序不受影响。
 

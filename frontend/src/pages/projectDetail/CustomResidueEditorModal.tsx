@@ -1,16 +1,15 @@
 /**
- * Custom residue editor modal — extracted from WorkflowRuntimeSettingsSection.
- * Controlled: all draft state lives in the parent during incremental migration.
- * Contains: JSME molecular editor, 2D preview with backbone-atom highlighting,
- * backbone slot assignment, amidation toggle, validation status.
+ * Custom residue editor modal (controlled; draft state lives in the parent):
+ * JSME editor, 2D preview with backbone-atom highlighting, slot assignment,
+ * amidation toggle, validation status.
  */
 import { JSMEEditor } from '../../components/project/JSMEEditor';
+import { CUSTOM_RESIDUE_SCAFFOLD_SMILES } from './peptideCustomResidues';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
 import { firstBackboneSlotError, generateCustomResidueCode } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 
 const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
-const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@@H](C)C(=O)O';
 
 const CUSTOM_BACKBONE_SLOT_LABELS: Record<string, string> = { n: 'N', ca: 'CA', c: 'C', o: 'O', oxt: 'OXT' };
 const slotLabel = (slot: string) => CUSTOM_BACKBONE_SLOT_LABELS[slot] ?? slot.toUpperCase();
@@ -19,39 +18,35 @@ import type { CustomResidueBackbone } from '../../types/models';
 import { Field } from '../../components/common/Field';
 
 interface Props {
-  open: boolean;
+  isOpen: boolean;
   userId: string;
   editingCcd: string;
-  disabled: boolean;
+  isDisabled: boolean;
   draftSmiles: string;
   draftName: string;
   draftBaseResidue: string;
   draftBackbone: Partial<CustomResidueBackbone>;
-  draftAmidated: boolean;
-  draftValid: boolean;
+  isDraftAmidated: boolean;
+  isDraftValid: boolean;
   autoStatus: 'idle' | 'failed';
   slotErrors: Record<string, string>;
-  activeSlot: string;
   armedSlot: string | null;
   assignedIndices: number[];
   backboneAtomLabels: string[] | null;
   onAtomClick: (atomIndex: number) => void;
   onResetBackbone: () => void;
-  activeSlotValue: string | null;
   highlightColors: Record<number, [number, number, number]> | null;
   onSmilesChange: (v: string) => void;
   onNameChange: (v: string) => void;
   onBaseResidueChange: (v: string) => void;
   onAmidatedChange: (v: boolean) => void;
-  onActiveSlotChange: (v: string | ((prev: string) => string)) => void;
   onArmSlot: (v: string | null | ((prev: string | null) => string | null)) => void;
-  onAssignAtom: (atomIdx: number) => void;
   onSave: () => void;
   onClose: () => void;
 }
 
 export function CustomResidueEditorModal(p: Props) {
-  if (!p.open) return null;
+  if (!p.isOpen) return null;
   return (
                   <div className="peptide-custom-editor">
                 <div className="peptide-custom-editor-head">
@@ -71,7 +66,7 @@ export function CustomResidueEditorModal(p: Props) {
                   <Field label="Name">
                     <input
                       value={p.draftName}
-                      disabled={p.disabled}
+                      disabled={p.isDisabled}
                       onChange={(event) => p.onNameChange(event.target.value)}
                       placeholder="Custom residue"
                     />
@@ -79,7 +74,7 @@ export function CustomResidueEditorModal(p: Props) {
                   <Field label="Base residue">
                     <select
                       value={p.draftBaseResidue}
-                      disabled={p.disabled}
+                      disabled={p.isDisabled}
                       onChange={(event) => p.onBaseResidueChange(event.target.value)}
                     >
                       {'ARNDCQEGHILKMFPSTWYV'.split('').map((aa) => (
@@ -138,7 +133,7 @@ export function CustomResidueEditorModal(p: Props) {
                       >
                         Auto
                       </button>
-                      {!p.draftValid ? (
+                      {!p.isDraftValid ? (
                         <span className="peptide-custom-invalid">Backbone N-CA-C(=O) is required.</span>
                       ) : null}
                       {p.autoStatus === 'failed' ? (
@@ -153,15 +148,15 @@ export function CustomResidueEditorModal(p: Props) {
                   <span>Custom Residue SMILES</span>
                   <input
                     value={p.draftSmiles}
-                    disabled={p.disabled}
+                    disabled={p.isDisabled}
                     onChange={(event) => p.onSmilesChange(event.target.value)}
                   />
                 </label>
                 <label className="switch-field peptide-custom-amidation">
                   <input
                     type="checkbox"
-                    checked={p.draftAmidated}
-                    disabled={p.disabled}
+                    checked={p.isDraftAmidated}
+                    disabled={p.isDisabled}
                     onChange={async (event) => {
                       const nextAmidated = event.target.checked;
                       const currentSmiles = String(p.draftSmiles || '').trim() || CUSTOM_RESIDUE_SCAFFOLD_SMILES;
@@ -179,7 +174,7 @@ export function CustomResidueEditorModal(p: Props) {
                   <button
                     type="button"
                     className="btn btn-primary btn-compact"
-                    disabled={p.disabled || !p.draftSmiles.trim() || !p.draftValid || Boolean(firstBackboneSlotError(p.slotErrors))}
+                    disabled={p.isDisabled || !p.draftSmiles.trim() || !p.isDraftValid || Boolean(firstBackboneSlotError(p.slotErrors))}
                     onClick={p.onSave}
                   >
                     Save residue

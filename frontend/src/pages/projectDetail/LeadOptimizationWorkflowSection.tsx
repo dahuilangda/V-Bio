@@ -4,7 +4,7 @@ import type { LeadOptPersistedUploads } from '../../components/project/leadopt/h
 import type { AffinityDockPocket, PredictionOptions } from '../../types/models';
 
 export interface LeadOptimizationWorkflowSectionProps {
-  visible: boolean;
+  isVisible: boolean;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   canEdit: boolean;
   submitting: boolean;
@@ -39,7 +39,7 @@ export interface LeadOptimizationWorkflowSectionProps {
 }
 
 export function LeadOptimizationWorkflowSection({
-  visible,
+  isVisible,
   workspaceTab,
   canEdit,
   submitting,
@@ -60,7 +60,7 @@ export function LeadOptimizationWorkflowSection({
   onHaloTaskFailed,
   onNavigateToResults
 }: LeadOptimizationWorkflowSectionProps) {
-  if (!visible) return null;
+  if (!isVisible) return null;
   const viewMode = workspaceTab === 'results' ? 'design' : 'reference';
   return (
     <LeadOptimizationWorkspace

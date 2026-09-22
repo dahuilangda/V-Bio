@@ -12,8 +12,7 @@ import random
 from rdkit import Chem, RDLogger
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
-from halo.generate.safe_tasks import (FragmentClassifier, canonicalize_digits,
-                                     reorder, roundtrip_ok)
+from halo.generate.safe_tasks import FragmentClassifier, canonicalize_digits
 from halo.generate.radius_tasks import fragment_distances, order_near_far
 from halo.score.properties import is_pains, passes_window, compute_descriptors, DEFAULT_WINDOW
 
@@ -107,9 +106,8 @@ def unified_edit(model, vocab, smiles: str, safe_str: str, device, n: int,
             kept = core_frags + env_kept
         else:
             kept = env_kept
-        # canonicalize the prompt sequence: kept leads the final sequence in
-        # training, so appearance-order numbering of the prompt matches the
-        # training distribution exactly
+        # canonicalize the prompt: kept leads the final training sequence, so
+        # appearance-order digit numbering matches the training distribution
         prompt = canonicalize_digits(".".join(kept))
         kept = prompt.split(".")
         use_fsm = hasattr(vocab, "pattern_id") or type(vocab).__name__ == "DigitBPEVocab"
@@ -192,13 +190,10 @@ def attachment_profiles(safe_span: str) -> dict[str, dict]:
 
 def attachment_compatibility(parent_smiles: str, env_span: str, gen_span: str) -> float:
     """Score how faithfully the generated part attaches to the environment,
-    using the PARENT molecule's original attachment bonds as the reference.
-
-    For every label the environment offers, the parent connected a specific
-    (env atom, core atom) pair; the replacement core should form bonds of
-    the same chemical character: aromaticity of the new host must match the
-    original core-side host, and heteroatom attachment points (usually key
-    polar contacts) score higher when preserved. Score in [0,1]."""
+    using the PARENT molecule's original attachment bonds as the reference:
+    aromaticity of the new host must match the original core-side host, and
+    preserved heteroatom attachment points (usually key polar contacts)
+    score higher. Score in [0,1]."""
     try:
         from halo.generate.safe_tasks import safe_encode_canonical
 

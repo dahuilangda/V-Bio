@@ -16,8 +16,8 @@ import type { AffinityDockPocket, AffinityScoringMode } from '../../types/models
 import { PocketBoxControls } from './PocketBoxControls';
 import { pocketTargetChanged, type PocketTargetSignature } from '../../utils/pocketBox';
 import { useTabsKeyboard } from '../ui/useTabsKeyboard';
+import type { MetricTone } from '../../pages/projectDetail/projectMetrics';
 
-export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
 
 function normalizeChainToken(value: string | null | undefined): string {
@@ -33,18 +33,19 @@ export interface AffinitySignalCard {
 }
 
 interface AffinityBasicsWorkspaceProps {
-  canEdit: boolean;
-  submitting: boolean;
+  isEditable: boolean;
+  isSubmitting: boolean;
   backend: string;
   mode: AffinityScoringMode;
   dockPocket: AffinityDockPocket | null;
+  isDockBlind: boolean;
   seed: number | null;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
   ligandEditorInput: string;
-  confidenceOnly: boolean;
-  confidenceOnlyLocked: boolean;
+  isConfidenceOnly: boolean;
+  isConfidenceOnlyLocked: boolean;
   previewTargetStructureText: string;
   previewTargetStructureFormat: 'cif' | 'pdb';
   previewLigandStructureText: string;
@@ -59,6 +60,7 @@ interface AffinityBasicsWorkspaceProps {
   onBackendChange: (backend: string) => void;
   onModeChange: (mode: AffinityScoringMode) => void;
   onDockPocketChange: (pocket: AffinityDockPocket | null) => void;
+  onDockBlindChange: (blind: boolean) => void;
   onSeedChange: (seed: number | null) => void;
   onLigandSmilesChange: (smiles: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
@@ -66,18 +68,19 @@ interface AffinityBasicsWorkspaceProps {
 }
 
 export function AffinityBasicsWorkspace({
-  canEdit,
-  submitting,
+  isEditable,
+  isSubmitting,
   backend,
   mode,
   dockPocket,
+  isDockBlind,
   seed,
   targetFileName,
   ligandFileName,
   ligandSmiles,
   ligandEditorInput,
-  confidenceOnly,
-  confidenceOnlyLocked,
+  isConfidenceOnly,
+  isConfidenceOnlyLocked,
   previewTargetStructureText,
   previewTargetStructureFormat,
   previewLigandStructureText,
@@ -92,6 +95,7 @@ export function AffinityBasicsWorkspace({
   onBackendChange,
   onModeChange,
   onDockPocketChange,
+  onDockBlindChange,
   onSeedChange,
   onLigandSmilesChange,
   onResizerPointerDown,
@@ -112,10 +116,7 @@ export function AffinityBasicsWorkspace({
   }, [isDockMode]);
 
   useEffect(() => {
-    // A new target structure invalidates any pocket defined against the old one — the box
-    // coordinates would dock against the wrong protein (the submitted box must be
-    // remembered; see
-    // pocketTargetChanged for why the preview-loading step must not count as a change).
+    // A new target structure invalidates any pocket defined against the old one.
     const next = { name: targetFileName.trim(), length: previewTargetStructureText.length };
     const previous = lastTargetSignatureRef.current;
     lastTargetSignatureRef.current = next;
@@ -154,7 +155,7 @@ export function AffinityBasicsWorkspace({
               type="file"
               className="file-input-unified"
               accept=".pdb,.ent,.cif,.mmcif"
-              disabled={!canEdit || submitting}
+              disabled={!isEditable || isSubmitting}
               onClick={(event) => {
                 (event.currentTarget as HTMLInputElement).value = '';
               }}
@@ -173,7 +174,7 @@ export function AffinityBasicsWorkspace({
                 type="file"
                 className="file-input-unified"
                 accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
-                disabled={!canEdit || submitting}
+                disabled={!isEditable || isSubmitting}
                 onClick={(event) => {
                   (event.currentTarget as HTMLInputElement).value = '';
                 }}
@@ -195,7 +196,7 @@ export function AffinityBasicsWorkspace({
             <span className="affinity-field-title">Mode</span>
             <select
               value={mode}
-              disabled={!canEdit || submitting}
+              disabled={!isEditable || isSubmitting}
               onChange={(event) => onModeChange(event.target.value as AffinityScoringMode)}
             >
               <option value="score">Score</option>
@@ -207,17 +208,47 @@ export function AffinityBasicsWorkspace({
           </label>
 
           {isDockMode ? (
-            <div className="field affinity-inline-field">
-              <span className="affinity-field-title">Box</span>
-              <button
-                type="button"
-                className={`btn pocket-box-btn ${pocketDrawerOpen ? 'active' : ''}`}
-                onClick={() => setPocketDrawerOpen(v => !v)}
-                disabled={!canEdit || submitting}
+            <>
+              <div className="field affinity-inline-field">
+                <span className="affinity-field-title">Box</span>
+                <button
+                  type="button"
+                  className={`btn pocket-box-btn ${pocketDrawerOpen ? 'active' : ''}`}
+                  onClick={() => setPocketDrawerOpen(v => !v)}
+                  disabled={!isEditable || isSubmitting || isDockBlind}
+                  title={isDockBlind ? 'Blind docking ignores the pocket box' : 'Show the pocket box controls'}
+                >
+                  {pocketDrawerOpen ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              <label
+                className="switch-field affinity-inline-toggle"
+                title={
+                  backend === 'protenix'
+                    ? 'Blind docking: no pocket conditioning — the ligand searches the whole surface.'
+                    : 'Blind docking requires the Protenix backend (Boltz requires a pocket).'
+                }
               >
-                {pocketDrawerOpen ? 'Hide' : 'Show'}
-              </button>
-            </div>
+                <input
+                  type="checkbox"
+                  checked={isDockBlind}
+                  disabled={!isEditable || isSubmitting || backend !== 'protenix'}
+                  onChange={(event) => {
+                    const nextBlind = event.target.checked;
+                    if (nextBlind) {
+                      // Blind = no pocket anywhere: drop the stale box and its wireframe.
+                      setBoxWireframe('');
+                      onDockPocketChange(null);
+                    }
+                    onDockBlindChange(nextBlind);
+                  }}
+                />
+                <span className="affinity-field-title">
+                  <Eye size={13} />
+                  Blind
+                </span>
+              </label>
+            </>
           ) : null}
 
           {/* Backend force-enables use_msa_server for this workflow. */}
@@ -226,8 +257,8 @@ export function AffinityBasicsWorkspace({
             <label className="switch-field affinity-inline-toggle">
               <input
                 type="checkbox"
-                checked={confidenceOnly}
-                disabled={!canEdit || submitting || confidenceOnlyLocked}
+                checked={isConfidenceOnly}
+                disabled={!isEditable || isSubmitting || isConfidenceOnlyLocked}
                 onChange={(event) => onConfidenceOnlyChange(event.target.checked)}
               />
               <span className="affinity-field-title">
@@ -249,7 +280,7 @@ export function AffinityBasicsWorkspace({
               overlayStructureText={isDockMode && boxWireframe ? boxWireframe : previewLigandStructureText}
               overlayFormat={isDockMode && boxWireframe ? 'pdb' : previewLigandStructureFormat}
               ligandFocusChainId={previewLigandChainId}
-              autoFocusLigand={!isDockMode}
+              isLigandAutoFocusEnabled={!isDockMode}
               colorMode="default"
               onResiduePick={handleResiduePick}
               pickMode="click"
@@ -275,7 +306,7 @@ export function AffinityBasicsWorkspace({
         <aside className="info-panel">
           {isDockMode ? (
             <>
-              {pocketDrawerOpen ? (
+              {pocketDrawerOpen && !isDockBlind ? (
                 <PocketBoxControls
                   pocket={dockPocket}
                   onPocketChange={onDockPocketChange}
@@ -284,8 +315,8 @@ export function AffinityBasicsWorkspace({
                   pickedResidues={pickedResidues}
                   onBoxWireframeChange={setBoxWireframe}
                   onCollapse={() => setPocketDrawerOpen(false)}
-                  canEdit={canEdit}
-                  submitting={submitting}
+                  isEditable={isEditable}
+                  isSubmitting={isSubmitting}
                 />
               ) : null}
             </>
@@ -311,7 +342,7 @@ export function AffinityBasicsWorkspace({
             <span className="affinity-field-title">Backend</span>
             <select
               value={backend}
-              disabled={!canEdit || submitting}
+              disabled={!isEditable || isSubmitting}
               onChange={(event) => onBackendChange(event.target.value)}
             >
               <option value="boltz">Boltz2Dock</option>
@@ -330,7 +361,7 @@ export function AffinityBasicsWorkspace({
                 const nextSeed = value === '' ? null : Math.max(0, Math.floor(Number(value) || 0));
                 onSeedChange(nextSeed);
               }}
-              disabled={!canEdit || submitting}
+              disabled={!isEditable || isSubmitting}
               placeholder="Default: 42"
             />
           </label>
@@ -405,9 +436,9 @@ export function AffinityResultsWorkspace({
   const interactionsReport = useMemo(() => parseInteractionsFromAffinity(snapshotAffinity), [snapshotAffinity]);
   const [selectedInteraction, setSelectedInteraction] = useState<LigandInteraction | null>(null);
   const [interactionAtomHighlights, setInteractionAtomHighlights] = useState<MolstarAtomHighlight[]>([]);
-  // The workspace instance is reused across task results: a selection made against task A's
-  // report must not keep highlighting residues/atoms on task B's structure. Render-time
-  // adjustment (no effect pass): https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  // The workspace instance is reused across task results; a selection from one
+  // report must not highlight onto another's structure. Render-time adjustment,
+  // not an effect.
   const [prevInteractionsReport, setPrevInteractionsReport] = useState(interactionsReport);
   if (interactionsReport !== prevInteractionsReport) {
     setPrevInteractionsReport(interactionsReport);
@@ -507,8 +538,8 @@ export function AffinityResultsWorkspace({
               highlightResidues={interactionResidues}
               highlightAtoms={highlightedLigandAtoms}
               activeAtom={activeLigandAtom}
-              suppressAutoFocus={false}
-              showSequence={false}
+              isAutoFocusSuppressed={false}
+              isSequenceVisible={false}
             />
           ) : (
             <div className="ligand-preview-empty">Upload target file in Basics.</div>

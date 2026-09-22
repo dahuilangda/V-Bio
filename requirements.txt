@@ -5,11 +5,8 @@ gunicorn
 requests
 pyyaml
 biopython
-py3dmol
 numpy
 psutil>=5.9.0
-python-dotenv
-psycopg[binary]
 psycopg2-binary
 gemmi
 rdkit
@@ -23,3 +20,5 @@ tokenizers
 safe-mol
 datamol
 pandas
+fair-esm>=2.0.0  # target-aware conditioning (ESM-1b encoder)
+scipy>=1.10  # spatial cKDTree in D-peptide staging

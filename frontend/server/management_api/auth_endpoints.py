@@ -1,11 +1,4 @@
-"""Server-side auth surface (F2): registration, profile, user admin, share search, API tokens.
-
-Previously the SPA performed these DIRECTLY against PostgREST as the anonymous role —
-client-side password hashing, client-chosen `is_admin`, plaintext tokens in a world-readable
-column. These endpoints move every sensitive operation behind the management session (or a
-public register with server-side hashing + server-side super-admin determination), so the
-database policies can drop anonymous access to app_users/api_tokens entirely.
-"""
+"""Server-side auth endpoints: registration, profile, user admin, share search, API tokens."""
 from __future__ import annotations
 
 import hashlib
@@ -14,8 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import jsonify, request
 
-# Imported lazily inside functions: vbio_management_api imports this module at
-# route-registration time, so a module-level import would be circular.
+# Imported lazily: a module-level import would be circular (vbio_management_api imports this module).
 
 
 def _server_helpers():
@@ -25,6 +17,18 @@ def _server_helpers():
 
 # Fields a non-admin client may ever see on a user row.
 SAFE_USER_FIELDS = ("id", "username", "name", "email", "avatar_url", "is_admin", "deleted_at", "created_at", "last_login_at")
+
+
+def _reject_stale_session(user: Dict[str, Any], claims: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Drop sessions issued before the account's password last changed."""
+    epoch = user.get("sessions_valid_after")
+    issued = claims.get("iat") or claims.get("login_at") or 0
+    try:
+        if epoch is not None and float(issued) < float(epoch):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return user
 
 
 def _session_user(postgrest) -> Optional[Dict[str, Any]]:
@@ -41,7 +45,11 @@ def _session_user(postgrest) -> Optional[Dict[str, Any]]:
     if user_id:
         rows = postgrest.request("GET", "app_users", query={"id": f"eq.{user_id}", "limit": "1"})
         if rows:
-            return rows[0]
+            return _reject_stale_session(rows[0], claims)
+    if username:
+        rows = postgrest.request("GET", "app_users", query={"username": f"eq.{username}", "limit": "1"})
+        if rows:
+            return _reject_stale_session(rows[0], claims)
     if username:
         rows = postgrest.request("GET", "app_users", query={"username": f"eq.{username}", "limit": "1"})
         if rows:
@@ -57,14 +65,17 @@ def _unauthorized() -> Tuple[Any, int]:
     return jsonify({"error": "Management session required."}), 401
 
 
-# ── Public: registration ──────────────────────────────────────────────────────────────────
+# Public: registration
 
 def handle_register(gateway) -> Tuple[Any, int]:
     payload = request.get_json(silent=True) or {}
-    username = str(payload.get("username") or "").strip()
+    username = str(payload.get("username") or "").strip().lower()
     password = str(payload.get("password") or "")
     name = str(payload.get("name") or username).strip() or username
+    import re as _re
     email = str(payload.get("email") or "").strip().lower() or None
+    if email and not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"error": "Invalid email address."}), 400
 
     if not username or len(username) < 2:
         return jsonify({"error": "Username must be at least 2 characters."}), 400
@@ -72,13 +83,12 @@ def handle_register(gateway) -> Tuple[Any, int]:
         return jsonify({"error": "Password must be at least 8 characters."}), 400
 
     postgrest = gateway.auth_service.postgrest
-    # Uniqueness (same checks the SPA did, now server-side).
     if postgrest.request("GET", "app_users", query={"username": f"eq.{username}", "select": "id", "limit": "1"}):
         return jsonify({"error": "Username already exists."}), 409
     if email and postgrest.request("GET", "app_users", query={"email": f"eq.{email}", "select": "id", "limit": "1"}):
         return jsonify({"error": "Email already registered."}), 409
 
-    # SERVER-side: strong hash + admin only via the env super-admin lists.
+    # Hash server-side; admin only via the env super-admin lists.
     password_hash = _server_helpers()._hash_password_scrypt(password)
     is_admin = _server_helpers()._is_super_admin(username, email)
     created = postgrest.request(
@@ -93,7 +103,7 @@ def handle_register(gateway) -> Tuple[Any, int]:
     return jsonify({"user": _safe(created[0])}), 201
 
 
-# ── Session-scoped: profile ───────────────────────────────────────────────────────────────
+# Session-scoped: profile
 
 def handle_me(gateway) -> Tuple[Any, int]:
     user = _session_user(gateway.auth_service.postgrest)
@@ -112,6 +122,23 @@ def handle_update_profile(gateway) -> Tuple[Any, int]:
         value = payload.get(field)
         if isinstance(value, str):
             patch[field] = value.strip()
+    email = str(payload.get("email") or "").strip().lower()
+    if email and email != str(user.get("email") or "").strip().lower():
+        # Rotating the recovery email demands the current password.
+        if not _server_helpers()._verify_password(
+            str(payload.get("current_password") or ""), user.get("username") or "", user.get("password_hash") or ""):
+            return jsonify({"error": "Current password is required to change the email."}), 403
+    if email:
+        import re as _re
+        if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            return jsonify({"error": "Invalid email address."}), 400
+        existing = gateway.auth_service.postgrest.request(
+            "GET", "app_users",
+            query={"email": f"eq.{email}", "select": "id", "limit": "1"},
+        )
+        if existing and existing[0].get("id") != user.get("id"):
+            return jsonify({"error": "This email is already used by another account."}), 409
+        patch["email"] = email
     new_password = str(payload.get("password") or "")
     current_password = str(payload.get("current_password") or "")
     if new_password:
@@ -122,10 +149,15 @@ def handle_update_profile(gateway) -> Tuple[Any, int]:
         patch["password_hash"] = _server_helpers()._hash_password_scrypt(new_password)
     if not patch:
         return jsonify({"error": "Nothing to update."}), 400
-    updated = gateway.auth_service.postgrest.request(
-        "PATCH", "app_users", payload=patch, query={"id": f"eq.{user['id']}", "select": "*"},
-        headers={"Prefer": "return=representation"},
-    )
+    try:
+        updated = gateway.auth_service.postgrest.request(
+            "PATCH", "app_users", payload=patch, query={"id": f"eq.{user['id']}", "select": "*"},
+            headers={"Prefer": "return=representation"},
+        )
+    except Exception as exc:
+        if "23505" in str(exc) or "duplicate key" in str(exc).lower():
+            return jsonify({"error": "This email is already used by another account."}), 409
+        raise
     return jsonify({"user": _safe(updated[0]) if updated else _safe(user)}), 200
 
 
@@ -169,7 +201,7 @@ def handle_users_search(gateway) -> Tuple[Any, int]:
     return jsonify({"users": rows or []}), 200
 
 
-# ── Platform-admin: user management ───────────────────────────────────────────────────────
+# Platform-admin: user management
 
 def handle_admin_list_users(gateway) -> Tuple[Any, int]:
     forbidden = _server_helpers()._require_platform_admin()
@@ -186,11 +218,15 @@ def handle_admin_create_user(gateway) -> Tuple[Any, int]:
     if forbidden:
         return forbidden
     payload = request.get_json(silent=True) or {}
-    username = str(payload.get("username") or "").strip()
+    username = str(payload.get("username") or "").strip().lower()
     password = str(payload.get("password") or "")
     if not username or len(password) < 8:
         return jsonify({"error": "Username and a password of at least 8 characters are required."}), 400
-    email = str(payload.get("email") or "").strip().lower() or None
+    raw_email = str(payload.get("email") or "").strip().lower() or None
+    import re as _re3
+    if raw_email and not _re3.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", raw_email):
+        return jsonify({"error": "Invalid email address."}), 400
+    email = raw_email
     postgrest = gateway.auth_service.postgrest
     if postgrest.request("GET", "app_users", query={"username": f"eq.{username}", "select": "id", "limit": "1"}):
         return jsonify({"error": "Username already exists."}), 409
@@ -243,7 +279,7 @@ def handle_admin_update_user(gateway, user_id: str) -> Tuple[Any, int]:
     return jsonify({"user": _safe(updated[0])}), 200
 
 
-# ── Session-scoped: API tokens ────────────────────────────────────────────────────────────
+# Session-scoped: API tokens
 
 _TOKEN_FIELDS = "id,user_id,name,project_id,allow_submit,allow_delete,allow_cancel,is_active,revoked_at,expires_at,created_at,last_used_at"
 
@@ -267,9 +303,7 @@ def handle_create_token(gateway) -> Tuple[Any, int]:
     project_id = str(payload.get("project_id") or "").strip()
     if not project_id:
         return jsonify({"error": "project_id is required."}), 400
-    # The project must exist (same check the gateway does on submit). ensure_project_exists
-    # raises PermissionError when missing and returns None on success — the old truthiness
-    # check read success as failure, so token creation ALWAYS returned 404.
+    # ensure_project_exists raises PermissionError when the project is missing.
     try:
         gateway.auth_service.ensure_project_exists(project_id)
     except PermissionError:
@@ -295,8 +329,7 @@ def handle_create_token(gateway) -> Tuple[Any, int]:
     )
     if not created:
         return jsonify({"error": "Failed to create the token."}), 500
-    # The plaintext crosses the wire exactly ONCE, in this response; the row stores only
-    # the hash (token_plain is never written).
+    # The plaintext is returned exactly once; the row stores only the hash.
     return jsonify({"token": created[0], "token_plain": token_plain}), 201
 
 

@@ -1,12 +1,8 @@
 /**
  * The open-state panel shell of the copilot: floating/draggable panel frame,
  * header, error banner, history sidebar, settings panel, messages list and
- * plan-action card. Pure presentation — zero hooks/effects; every value
- * arrives via seven named prop groups (panel/header/history/settings/
- * messages/turn/plan) re-destructured to the historical local names so the
- * JSX stayed byte-identical. The composer element (with its keyboard map)
- * is built by the modal and passed as `children`, keeping the keymap's
- * ~26 composer-scope identifiers out of this interface.
+ * plan-action card. Pure presentation; every value arrives via named prop
+ * groups. The composer element is built by the modal and passed as `children`.
  */
 import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
 import { LoaderCircle } from 'lucide-react';
@@ -24,15 +20,15 @@ import './CopilotPanelShell.css';
 
 export interface CopilotPanelShellPanelProps {
   panelRef: RefObject<HTMLDivElement | null>;
-  suppressedByOverlay: boolean;
+  isSuppressedByOverlay: boolean;
   isMobileViewport: boolean;
   visualViewportHeight: number | null;
   visualViewportTop: number;
   position: { x: number; y: number } | null;
   panelSize: { width: number; height: number } | null;
-  startDrag: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  moveDrag: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  endDrag: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onDragStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onDragMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onDragEnd: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }
 
 export interface CopilotPanelShellHeaderProps {
@@ -40,53 +36,53 @@ export interface CopilotPanelShellHeaderProps {
   subtitle: string;
   authSession: Session | null;
   onClose: () => void;
-  openSettings: () => void;
+  onOpenSettings: () => void;
 }
 
 export interface CopilotPanelShellHistoryProps {
-  historyOpen: boolean;
+  isHistoryOpen: boolean;
   setHistoryOpen: Dispatch<SetStateAction<boolean>>;
   chatSessions: CopilotSessionSummary[];
   activeSessionId: string;
-  selectSession: (sessionId: string) => void;
-  deleteSession: (sessionId: string) => Promise<void>;
-  startNewChat: () => void;
+  onSelectSession: (sessionId: string) => void;
+  deleteSessionAction: (sessionId: string) => Promise<void>;
+  onStartNewChat: () => void;
 }
 
 export interface CopilotPanelShellSettingsProps {
-  settingsOpen: boolean;
+  isSettingsOpen: boolean;
   setSettingsOpen: Dispatch<SetStateAction<boolean>>;
   settingsForm: SettingsFormValues;
   setSettingsForm: Dispatch<SetStateAction<SettingsFormValues>>;
   settingsError: string;
   settingsHasKey: boolean;
   settingsMaskedKey: string;
-  settingsSaved: boolean;
-  settingsSaving: boolean;
+  isSettingsSaved: boolean;
+  isSettingsSaving: boolean;
   settingsTestResult: CopilotTestResult | null;
-  settingsTesting: boolean;
-  handleSaveSettings: () => Promise<void>;
-  handleTestSettings: () => Promise<void>;
+  isSettingsTesting: boolean;
+  saveSettingsAction: () => Promise<void>;
+  testSettingsAction: () => Promise<void>;
 }
 
 export interface CopilotPanelShellMessagesProps {
   scrollRef: RefObject<HTMLDivElement | null>;
-  handleMessagesScroll: () => void;
-  loading: boolean;
+  onMessagesScroll: () => void;
+  isLoading: boolean;
   sessionMessages: ProjectCopilotMessage[];
   visibleMessageCount: number;
   setVisibleMessageCount: Dispatch<SetStateAction<number>>;
   MESSAGE_WINDOW: number;
   visibleSessionMessages: ProjectCopilotMessage[];
-  answerQuestion: (answer: string) => void;
-  loadMessageTrace: (messageId: string) => void;
+  onAnswerQuestion: (answer: string) => void;
+  onLoadTrace: (messageId: string) => void;
   streamStartedAt: string;
   steeredTurnTexts: string[];
   liveTrace: CopilotTraceStep[];
 }
 
 export interface CopilotPanelShellTurnProps {
-  sending: boolean;
+  isSending: boolean;
   applyingActionKey: string | null;
   bulkAction: 'apply' | 'cancel' | null;
 }
@@ -94,7 +90,7 @@ export interface CopilotPanelShellTurnProps {
 export interface CopilotPanelShellPlanProps {
   pendingActions: CopilotPlanAction[];
   applyAction: (action: CopilotPlanAction) => Promise<boolean>;
-  cancelPendingActions: () => Promise<void>;
+  cancelAction: () => Promise<void>;
 }
 
 interface CopilotPanelShellProps {
@@ -122,86 +118,83 @@ export function CopilotPanelShell({
 }: CopilotPanelShellProps) {
   const {
     panelRef,
-    suppressedByOverlay,
+    isSuppressedByOverlay,
     isMobileViewport,
     visualViewportHeight,
     visualViewportTop,
     position,
     panelSize,
-    startDrag,
-    moveDrag,
-    endDrag
+    onDragStart,
+    onDragMove,
+    onDragEnd
   } = panel;
   const {
     title,
     subtitle,
     authSession,
     onClose,
-    openSettings
+    onOpenSettings
   } = header;
   const {
-    historyOpen,
+    isHistoryOpen,
     setHistoryOpen,
     chatSessions,
     activeSessionId,
-    selectSession,
-    deleteSession,
-    startNewChat
+    onSelectSession,
+    deleteSessionAction,
+    onStartNewChat
   } = history;
   const {
-    settingsOpen,
+    isSettingsOpen,
     setSettingsOpen,
     settingsForm,
     setSettingsForm,
     settingsError,
     settingsHasKey,
     settingsMaskedKey,
-    settingsSaved,
-    settingsSaving,
+    isSettingsSaved,
+    isSettingsSaving,
     settingsTestResult,
-    settingsTesting,
-    handleSaveSettings,
-    handleTestSettings
+    isSettingsTesting,
+    saveSettingsAction,
+    testSettingsAction
   } = settings;
   const {
     scrollRef,
-    handleMessagesScroll,
-    loading,
+    onMessagesScroll,
+    isLoading,
     sessionMessages,
     visibleMessageCount,
     setVisibleMessageCount,
     MESSAGE_WINDOW,
     visibleSessionMessages,
-    answerQuestion,
-    loadMessageTrace,
+    onAnswerQuestion,
+    onLoadTrace,
     streamStartedAt,
     steeredTurnTexts,
     liveTrace
   } = messages;
   const {
-    sending,
+    isSending,
     applyingActionKey,
     bulkAction
   } = turn;
   const {
     pendingActions,
     applyAction,
-    cancelPendingActions
+    cancelAction
   } = plan;
 
   return (
     <div
       ref={panelRef as RefObject<HTMLDivElement>}
-      className={`copilot-floating-panel${suppressedByOverlay ? ' copilot-suppressed' : ''}`}
+      className={`copilot-floating-panel${isSuppressedByOverlay ? ' copilot-suppressed' : ''}`}
       style={
-        suppressedByOverlay
+        isSuppressedByOverlay
           ? { right: 24, bottom: 24 }
           : isMobileViewport
-            ? // On mobile the panel is pinned full-screen by CSS. When the soft keyboard is open,
-              // visualViewport reports the visible region above it — bind the panel to that region
-              // (height + max-height + top) so the composer sits right above the keyboard instead of
-              // being covered. When the keyboard is closed visualViewportHeight == layout height and
-              // these reduce to the CSS full-screen rules (top:0, height:100dvh).
+            ? // Bind to visualViewport while the soft keyboard is open so the composer
+              // sits above it; when closed these reduce to the CSS full-screen rules.
               visualViewportHeight != null
                 ? {
                     top: TOP_CHROME_PX + Math.max(0, visualViewportTop),
@@ -216,55 +209,55 @@ export function CopilotPanelShell({
       }
       role="dialog"
       aria-modal="false"
-      aria-hidden={suppressedByOverlay ? 'true' : undefined}
+      aria-hidden={isSuppressedByOverlay ? 'true' : undefined}
       aria-label={title}
     >
-      <div className={`copilot-modal copilot-chat-window${historyOpen ? ' history-open' : ''}`}>
+      <div className={`copilot-modal copilot-chat-window${isHistoryOpen ? ' history-open' : ''}`}>
         <CopilotHeader
           title={title}
           subtitle={subtitle}
           isAdmin={Boolean(authSession?.isAdmin)}
-          historyOpen={historyOpen}
+          isHistoryOpen={isHistoryOpen}
           onToggleHistory={() => setHistoryOpen((prev) => !prev)}
-          onNewChat={startNewChat}
-          onOpenSettings={openSettings}
+          onNewChat={onStartNewChat}
+          onOpenSettings={onOpenSettings}
           onClose={onClose}
-          onDragStart={startDrag}
-          onDragMove={moveDrag}
-          onDragEnd={endDrag}
+          onDragStart={onDragStart}
+          onDragMove={onDragMove}
+          onDragEnd={onDragEnd}
         />
 
         {error ? <div className="alert error copilot-error">{error}</div> : null}
 
-        {historyOpen ? (
+        {isHistoryOpen ? (
           <CopilotHistorySidebar
             sessions={chatSessions}
             activeSessionId={activeSessionId}
-            onSelect={selectSession}
-            onDelete={deleteSession}
-            onNewChat={startNewChat}
+            onSelect={onSelectSession}
+            deleteAction={deleteSessionAction}
+            onNewChat={onStartNewChat}
           />
         ) : null}
 
-        {settingsOpen && (
+        {isSettingsOpen && (
           <CopilotSettingsPanel
             settingsForm={settingsForm}
             settingsError={settingsError}
             settingsHasKey={settingsHasKey}
             settingsMaskedKey={settingsMaskedKey}
-            settingsSaved={settingsSaved}
-            settingsSaving={settingsSaving}
+            isSettingsSaved={isSettingsSaved}
+            isSettingsSaving={isSettingsSaving}
             settingsTestResult={settingsTestResult}
-            settingsTesting={settingsTesting}
+            isSettingsTesting={isSettingsTesting}
             onFormChange={setSettingsForm}
-            onSave={handleSaveSettings}
-            onTest={handleTestSettings}
+            saveAction={saveSettingsAction}
+            testAction={testSettingsAction}
             onClose={() => setSettingsOpen(false)}
           />
         )}
 
-        <div className="copilot-messages" ref={scrollRef as RefObject<HTMLDivElement>} onScroll={handleMessagesScroll}>
-          {loading ? (
+        <div className="copilot-messages" ref={scrollRef as RefObject<HTMLDivElement>} onScroll={onMessagesScroll}>
+          {isLoading ? (
             <div className="copilot-empty">
               <LoaderCircle size={16} className="spin" />
               Loading messages
@@ -286,15 +279,15 @@ export function CopilotPanelShell({
                 <CopilotMessageItem
                   key={message.id}
                   message={message}
-                  disabled={sending || Boolean(applyingActionKey || bulkAction)}
-                  onAnswerQuestion={answerQuestion}
-                  onLoadTrace={loadMessageTrace}
+                  isDisabled={isSending || Boolean(applyingActionKey || bulkAction)}
+                  onAnswerQuestion={onAnswerQuestion}
+                  onLoadTrace={onLoadTrace}
                 />
               ))}
             </>
           )}
           <CopilotStreamingBubble
-            sending={sending}
+            isSending={isSending}
             streamStartedAt={streamStartedAt}
             steeredTurnTexts={steeredTurnTexts}
             liveTrace={liveTrace}
@@ -305,10 +298,10 @@ export function CopilotPanelShell({
           <CopilotPlanActionCard
             action={pendingActions[0]}
             isApplying={applyingActionKey === planActionKey(pendingActions[0])}
-            blocked={sending || bulkAction !== null}
+            isBlocked={isSending || bulkAction !== null}
             bulkAction={bulkAction as 'apply' | 'cancel' | null}
-            onApply={applyAction}
-            onCancel={cancelPendingActions}
+            applyAction={applyAction}
+            cancelAction={cancelAction}
           />
         ) : null}
 

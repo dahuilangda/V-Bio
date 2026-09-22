@@ -29,19 +29,13 @@ CA 手性体积严格反号（D-α 螺旋 φ≈+57/ψ≈+47；L-α 为 −57/−
 | `mirror.py` | 镜像/翻转、手性体积报告 | 双镜像=恒等；原生/镜像手性体积严格反号 |
 | `pipeline.py` | `flip_product`：精修后镜像空间复合物 → 显示空间产物 | 3LNJ 夹具逐原子还原 |
 
-> 历史：dihedral/placement/docking/manifest/scoring 及路线编排已随生产
-> D 路线迁移至 `backend/runtime/run_single_prediction.py` +
-> protenix2dock peptide 模式后删除，详见 `docs/peptide-design.md`。
+## 3. 生产路线
 
-## 3. 生产路线（历史记录，已被取代）
-
-> 原"路线 A/B"（MSA 端到端 + 位姿镜像搬运 / de novo 单链构象 + 随机取向
-> 放置）已被 backend/runtime 的统一 D 路线取代：上传结构 → x→−x 镜像
-> D-target → 孤立构象口袋放置 → 固定 D-target inpainting → 翻转。
-> 见 `docs/peptide-design.md`。
-
-诚实边界：路线 B 产出为"正确口袋内的高置信替代模式"（~12 Å 注册滑移，
-接触正确沟槽壁）；要晶体级注册走路线 A 或引入实验信息。
+> 统一 D 路线（`backend/runtime/run_single_prediction.py` 编排）：上传
+> 结构 → x→−x 镜像成 D-target → PeptideLM 提案 → 逐候选孤立构象 →
+> 盲 inpainting / 口袋引导扩散（protenix2dock peptide 模式，含 CA 手性
+> 引导）→ composite → 精英循环 → 最优翻转+终验。详见
+> `docs/peptide-design.md`。
 
 ## 4. V-Bio 集成
 
@@ -49,9 +43,9 @@ CA 手性体积严格反号（D-α 螺旋 φ≈+57/ψ≈+47；L-α 为 −57/−
   语义；映射到 boltz2/protenix 全功能预测器补齐缺失结构）。
 - **手性**：`peptide_design_options.peptideChirality = 'l' | 'd'`（D 需对接引擎）。
 - **D 路线**（`run_single_prediction` 编排）：上传结构（或先单链预测）→
-  x→−x 镜像成 D-target → PeptideLM 提案 → 逐候选孤立构象 → 口袋表面
-  放置（`_dpeptide_stage_conformer_in_pocket`）→ 固定 D-target inpainting
-  → composite → 精英循环 → 最优翻转+终验 → 与现有 result.zip 契约一致的产物
+  x→−x 镜像成 D-target → PeptideLM 提案 → 逐候选孤立构象 → 盲
+  inpainting / 口袋引导扩散（protenix2dock peptide 模式）→ composite
+  → 精英循环 → 最优翻转+终验 → 与现有 result.zip 契约一致的产物
   （`structures/rank_NN.cif`、`structures/product_Ltarget_Dpeptide.pdb`、
   `results_summary.json` 含手性验证报告）。
 - **口袋指定**（可选）：`peptidePocketCenter "x,y,z"` 或

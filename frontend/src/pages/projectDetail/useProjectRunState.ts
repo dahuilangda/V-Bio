@@ -23,6 +23,8 @@ interface UseProjectRunStateInput {
   affinityPreviewError: string;
   affinityDockMode: boolean;
   affinityDockPocketPresent: boolean;
+  affinityDockBlind: boolean;
+  hasUnsavedChanges: boolean;
   affinityTargetChainCount: number;
   affinityLigandChainId: string;
   affinityLigandSmiles: string;
@@ -67,6 +69,8 @@ export function useProjectRunState(input: UseProjectRunStateInput): UseProjectRu
     affinityPreviewError: input.affinityPreviewError,
     affinityDockMode: input.affinityDockMode,
     affinityDockPocketPresent: input.affinityDockPocketPresent,
+    affinityDockBlind: input.affinityDockBlind,
+    hasUnsavedChanges: input.hasUnsavedChanges,
     affinityTargetChainCount: input.affinityTargetChainCount,
     affinityLigandChainId: input.affinityLigandChainId,
     affinityLigandSmiles: input.affinityLigandSmiles,

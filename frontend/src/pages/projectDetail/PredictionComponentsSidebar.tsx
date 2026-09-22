@@ -33,7 +33,7 @@ export interface WorkspaceOption {
 }
 
 export interface PredictionComponentsSidebarProps {
-  visible: boolean;
+  isVisible: boolean;
   canEdit: boolean;
   components: InputComponent[];
   hasIncompleteComponents: boolean;
@@ -73,7 +73,7 @@ export interface PredictionComponentsSidebarProps {
 }
 
 export function PredictionComponentsSidebar({
-  visible,
+  isVisible,
   canEdit,
   components,
   hasIncompleteComponents,
@@ -110,7 +110,7 @@ export function PredictionComponentsSidebar({
   showAffinityComputeToggle = true,
   peptidePocket = null
 }: PredictionComponentsSidebarProps) {
-  if (!visible) return null;
+  if (!isVisible) return null;
 
   return (
     <aside className="component-sidebar">

@@ -10,6 +10,7 @@ import { normalizePredictionBackend } from './projectDraftUtils';
 import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
+import { CUSTOM_RESIDUE_SCAFFOLD_SMILES } from './peptideCustomResidues';
 import { PeptideCysSpectrum } from '../../components/project/PeptideCysSpectrum';
 import { Field } from '../../components/common/Field';
 import {
@@ -30,7 +31,6 @@ const BICYCLIC_LINKERS: Array<{ type: BicyclicLinkerType; name: string; smiles: 
   { type: 'BS3', name: 'Bi(III) center', smiles: '[Bi+3]' }
 ];
 
-const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@H](C(=O)O)c1ccccc1';
 
 type ResiduePlacementRule = 'any' | 'n_term' | 'c_term' | 'terminal';
 
@@ -53,6 +53,12 @@ function normalizeCustomResidueCode(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
 }
 
+const PEPTIDE_EFFORT_PRESETS = [
+  { id: 'quick', label: 'Quick screen', iterations: 6, populationSize: 8, eliteSize: 3 },
+  { id: 'balanced', label: 'Balanced', iterations: 12, populationSize: 16, eliteSize: 5 },
+  { id: 'thorough', label: 'Thorough', iterations: 24, populationSize: 32, eliteSize: 8 }
+] as const;
+
 const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number], string> = {
   n: 'N',
@@ -65,21 +71,20 @@ const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number]
 
 
 export interface WorkflowRuntimeSettingsSectionProps {
-  visible: boolean;
-  displayMode?: 'full' | 'peptide_mode_only';
-  canEdit: boolean;
+  isVisible: boolean;
+  isEditable: boolean;
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
   isAffinityWorkflow: boolean;
   backend: string;
   seed: number | null;
-  lowVram: boolean;
+  isLowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   peptideChirality: 'l' | 'd';
   peptideBinderLength: number;
   peptideLengthMin: number;
   peptideLengthMax: number;
-  peptideUseInitialSequence: boolean;
+  isPeptideUseInitialSequence: boolean;
   peptideInitialSequence: string;
   peptideStructureUpload: {
     fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
@@ -92,7 +97,7 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptidePopulationSize: number;
   peptideEliteSize: number;
   peptideResiduePool: PeptideResiduePoolSelection[];
-  peptideResiduePoolAvailable?: boolean;
+  hasPeptideResiduePool?: boolean;
   peptideNonNaturalMin: number;
   peptideNonNaturalMax: number;
   peptideCustomResidueLibrary: CustomCcdMoleculeInput[];
@@ -104,14 +109,14 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptideBicyclicRatio1: number;
   peptideBicyclicRatio2: number;
   peptideBicyclicRatio3: number;
-  peptideBicyclicFixTerminalCys: boolean;
-  peptideBicyclicIncludeExtraCys: boolean;
+  isPeptideBicyclicFixTerminalCys: boolean;
+  isPeptideBicyclicIncludeExtraCys: boolean;
   peptideBicyclicCys1Pos: number;
   peptideBicyclicCys2Pos: number;
   peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
   onSeedChange: (seed: number | null) => void;
-  onLowVramChange: (lowVram: boolean) => void;
+  onLowVramChange: (isLowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
   onPeptideLengthRange: (min: number, max: number) => void;
@@ -135,21 +140,20 @@ export interface WorkflowRuntimeSettingsSectionProps {
 }
 
 export function WorkflowRuntimeSettingsSection({
-  visible,
-  displayMode = 'full',
-  canEdit,
+  isVisible,
+  isEditable,
   isPredictionWorkflow,
   isPeptideDesignWorkflow,
   isAffinityWorkflow,
   backend,
   seed,
-  lowVram,
+  isLowVram,
   peptideDesignMode,
   peptideChirality,
   peptideBinderLength,
   peptideLengthMin,
   peptideLengthMax,
-  peptideUseInitialSequence,
+  isPeptideUseInitialSequence,
   peptideInitialSequence,
   peptideStructureUpload,
   onPeptideStructureUploadChange,
@@ -158,7 +162,7 @@ export function WorkflowRuntimeSettingsSection({
   peptidePopulationSize,
   peptideEliteSize,
   peptideResiduePool,
-  peptideResiduePoolAvailable = true,
+  hasPeptideResiduePool = true,
   peptideNonNaturalMin,
   peptideNonNaturalMax,
   peptideCustomResidueLibrary,
@@ -170,8 +174,8 @@ export function WorkflowRuntimeSettingsSection({
   peptideBicyclicRatio1,
   peptideBicyclicRatio2,
   peptideBicyclicRatio3,
-  peptideBicyclicFixTerminalCys,
-  peptideBicyclicIncludeExtraCys,
+  isPeptideBicyclicFixTerminalCys,
+  isPeptideBicyclicIncludeExtraCys,
   peptideBicyclicCys1Pos,
   peptideBicyclicCys2Pos,
   peptideBicyclicCys3Pos,
@@ -202,35 +206,30 @@ export function WorkflowRuntimeSettingsSection({
   const { session } = useAuth();
   const currentUserId = session?.userId ?? null;
   const [activeCysSlot, setActiveCysSlot] = useState<CysSlot>('cys1');
+  const [structureUploadError, setStructureUploadError] = useState<string | null>(null);
   const [customEditorOpen, setCustomEditorOpen] = useState(false);
   const [customEditingCcd, setCustomEditingCcd] = useState('');
   const [customDraftName, setCustomDraftName] = useState('Custom residue');
   const [customDraftBaseResidue, setCustomDraftBaseResidue] = useState('A');
   const [customDraftSmiles, setCustomDraftSmiles] = useState(CUSTOM_RESIDUE_SCAFFOLD_SMILES);
   const [customDraftValid, setCustomDraftValid] = useState(false);
-  // Manual backbone atom slots (0-based heavy-atom indices). Auto-prefilled from RDKit when the
-  // SMILES validates; the user corrects by clicking atoms in the 2D. Saved on the residue as its
-  // `backbone` and used by the backend as-is.
+  // manual backbone atom slots (0-based indices); auto-prefilled from RDKit,
+  // corrected by clicking atoms in the 2D, saved on the residue as `backbone`
   const [customDraftBackbone, setCustomDraftBackbone] = useState<Partial<CustomResidueBackbone>>({});
   const [customDraftAmidated, setCustomDraftAmidated] = useState(false);
-  // 'failed' surfaces why an explicit Auto run found no backbone (e.g. a C-terminal amide without
-  // the amidation flag): the manual picks are kept and the reason is shown instead of a silent wipe.
+  // 'failed': Auto found no backbone; keep the manual picks and show the reason
   const [customDraftAutoStatus, setCustomDraftAutoStatus] = useState<'idle' | 'failed'>('idle');
-  // Per-slot errors for the manual backbone override (empty = valid). Mirrors the protein editor
-  // in ComponentInputEditor; blocks Save and surfaces inline. Never silently passes a wrong set.
+  // per-slot errors for the manual override (empty = valid); blocks Save
   const [customDraftSlotErrors, setCustomDraftSlotErrors] = useState<BackboneSlotErrors>({});
   const [armedBackboneSlot, setArmedBackboneSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
   const skipBackboneAutoDetectRef = useRef(false);
   const prevCustomDraftAmidatedRef = useRef(customDraftAmidated);
-  // True once the user has clicked any atom. While set, SMILES edits validate the picks against
-  // the new structure instead of auto-detecting over them. Cleared by Auto and on opening a residue.
+  // true once the user clicked any atom: SMILES edits then validate the picks
+  // instead of auto-detecting over them; cleared by Auto and on open
   const manualOverrideBackboneRef = useRef(false);
-  const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
-  // Peptide design only offers the docking engines (+ AlphaFold3): migrate a
-  // legacy default ('boltz') so the select never shows an unmatched value —
-  // otherwise the browser displays "Boltz2Dock" while the state stays 'boltz'
-  // and the D-peptide option stays disabled despite appearances.
+  // peptide design only offers the docking engines (+ AF3); migrate a legacy
+  // 'boltz' so the select never shows an unmatched value
   const peptideBackendAllowed =
     normalizedBackend === 'boltz2dock' || normalizedBackend === 'protenix2dock' || normalizedBackend === 'alphafold3';
   useEffect(() => {
@@ -238,8 +237,7 @@ export function WorkflowRuntimeSettingsSection({
       onBackendChange('protenix2dock');
     }
   }, [isPeptideDesignWorkflow, peptideBackendAllowed, onBackendChange]);
-  // Local mirror so a click is reflected instantly even when an upstream
-  // normalizer round-trips the draft; external value changes win.
+  // local mirror for instant clicks; external value changes win
   const [backendMirror, setBackendMirror] = useState<string>(normalizedBackend);
   const [residuePoolOpen, setResiduePoolOpen] = useState(false);
   useEffect(() => {
@@ -251,10 +249,9 @@ export function WorkflowRuntimeSettingsSection({
     setBackendMirror(value);
     onBackendChange(value);
   };
-  const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
+  const canEditRuntimeIdentity = isEditable || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
   const isBicyclicMode = isPeptideDesignWorkflow && peptideDesignMode === 'bicyclic';
-  // Constrained rings are Protenix-only (hard TFG bond enforcement); migrate
-  // a stale non-protenix selection so the form never submits an invalid pair.
+  // constrained rings are Protenix-only; migrate stale selections before submit
   useEffect(() => {
     if (
       isPeptideDesignWorkflow &&
@@ -265,14 +262,10 @@ export function WorkflowRuntimeSettingsSection({
       onBackendChange('protenix2dock');
     }
   }, [isPeptideDesignWorkflow, peptideDesignMode, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
-  // Rail reference length: the length range's max when set, else the legacy
-  // single binder length. Manual Cys choices are made against this reference.
+  // rail reference length: range max when set, else the legacy binder length
   const cysReferenceLength = Math.max(8, peptideLengthMax || peptideBinderLength || 20);
-  // Single source of truth for UI previews (mask rail / initial-sequence
-  // placeholder): the length RANGE the backend will actually design within —
-  // locked range uses that exact length, open range uses its max (longest
-  // candidate), and only a fully unset range falls back to the legacy fixed
-  // binder length. Prevents the "range 8-12 but preview says 20" confusion.
+  // preview length = the range the backend designs in: locked uses that exact
+  // length, open uses its max, fully unset falls back to the fixed binder length
   const lengthLocked = peptideLengthMin === peptideLengthMax;
   const effectiveDesignLength = lengthLocked
     ? peptideLengthMin
@@ -285,7 +278,7 @@ export function WorkflowRuntimeSettingsSection({
       absolute: {
         cys1: peptideBicyclicCys1Pos,
         cys2: peptideBicyclicCys2Pos,
-        cys3: peptideBicyclicFixTerminalCys ? cysReferenceLength : peptideBicyclicCys3Pos
+        cys3: isPeptideBicyclicFixTerminalCys ? cysReferenceLength : peptideBicyclicCys3Pos
       }
     }),
     [
@@ -297,13 +290,13 @@ export function WorkflowRuntimeSettingsSection({
       peptideBicyclicCys1Pos,
       peptideBicyclicCys2Pos,
       peptideBicyclicCys3Pos,
-      peptideBicyclicFixTerminalCys,
+      isPeptideBicyclicFixTerminalCys,
       cysReferenceLength
     ]
   );
   const resolvedCysAnchors = useMemo(
-    () => resolveAnchorsAtLength(peptideBicyclicCysLayout, cysLayoutParams, cysReferenceLength, peptideBicyclicFixTerminalCys),
-    [peptideBicyclicCysLayout, cysLayoutParams, cysReferenceLength, peptideBicyclicFixTerminalCys]
+    () => resolveAnchorsAtLength(peptideBicyclicCysLayout, cysLayoutParams, cysReferenceLength, isPeptideBicyclicFixTerminalCys),
+    [peptideBicyclicCysLayout, cysLayoutParams, cysReferenceLength, isPeptideBicyclicFixTerminalCys]
   );
   const cysLayoutError = useMemo(
     () => (isBicyclicMode ? validateCysLayout({
@@ -311,9 +304,9 @@ export function WorkflowRuntimeSettingsSection({
       layout: cysLayoutParams,
       lengthMin: peptideLengthMin,
       lengthMax: peptideLengthMax,
-      fixTerminalCys: peptideBicyclicFixTerminalCys
+      fixTerminalCys: isPeptideBicyclicFixTerminalCys
     }) : null),
-    [isBicyclicMode, peptideBicyclicCysLayout, cysLayoutParams, peptideLengthMin, peptideLengthMax, peptideBicyclicFixTerminalCys]
+    [isBicyclicMode, peptideBicyclicCysLayout, cysLayoutParams, peptideLengthMin, peptideLengthMax, isPeptideBicyclicFixTerminalCys]
   );
   const cysLayoutNotice = useMemo(
     () => (isBicyclicMode && !cysLayoutError ? cysLayoutRangeNotice({
@@ -321,28 +314,28 @@ export function WorkflowRuntimeSettingsSection({
       layout: cysLayoutParams,
       lengthMin: peptideLengthMin,
       lengthMax: peptideLengthMax,
-      fixTerminalCys: peptideBicyclicFixTerminalCys
+      fixTerminalCys: isPeptideBicyclicFixTerminalCys
     }) : null),
-    [isBicyclicMode, cysLayoutError, peptideBicyclicCysLayout, cysLayoutParams, peptideLengthMin, peptideLengthMax, peptideBicyclicFixTerminalCys]
+    [isBicyclicMode, cysLayoutError, peptideBicyclicCysLayout, cysLayoutParams, peptideLengthMin, peptideLengthMax, isPeptideBicyclicFixTerminalCys]
   );
   const cysSlotValueMap = useMemo(
     () => ({
       cys1: resolvedCysAnchors?.[0] ?? peptideBicyclicCys1Pos,
       cys2: resolvedCysAnchors?.[1] ?? peptideBicyclicCys2Pos,
       cys3: resolvedCysAnchors?.[2]
-        ?? (peptideBicyclicFixTerminalCys ? cysReferenceLength : peptideBicyclicCys3Pos)
+        ?? (isPeptideBicyclicFixTerminalCys ? cysReferenceLength : peptideBicyclicCys3Pos)
     }),
-    [resolvedCysAnchors, peptideBicyclicCys1Pos, peptideBicyclicCys2Pos, peptideBicyclicCys3Pos, peptideBicyclicFixTerminalCys, cysReferenceLength]
+    [resolvedCysAnchors, peptideBicyclicCys1Pos, peptideBicyclicCys2Pos, peptideBicyclicCys3Pos, isPeptideBicyclicFixTerminalCys, cysReferenceLength]
   );
   const cysSlotMaxMap = useMemo(
     () => ({
       cys1: Math.max(1, cysReferenceLength - 2),
-      cys2: peptideBicyclicFixTerminalCys
+      cys2: isPeptideBicyclicFixTerminalCys
         ? Math.max(1, cysReferenceLength - 2)
         : Math.max(1, cysReferenceLength - 1),
       cys3: cysReferenceLength
     }),
-    [cysReferenceLength, peptideBicyclicFixTerminalCys]
+    [cysReferenceLength, isPeptideBicyclicFixTerminalCys]
   );
   const positions = useMemo(
     () => Array.from({ length: Math.max(1, cysReferenceLength) }, (_, idx) => idx + 1),
@@ -350,8 +343,8 @@ export function WorkflowRuntimeSettingsSection({
   );
   const spectrumResolver = useMemo(
     () => (length: number) => resolveAnchorsAtLength(
-      peptideBicyclicCysLayout, cysLayoutParams, length, peptideBicyclicFixTerminalCys),
-    [peptideBicyclicCysLayout, cysLayoutParams, peptideBicyclicFixTerminalCys]
+      peptideBicyclicCysLayout, cysLayoutParams, length, isPeptideBicyclicFixTerminalCys),
+    [peptideBicyclicCysLayout, cysLayoutParams, isPeptideBicyclicFixTerminalCys]
   );
   const rangeIsOpen = peptideLengthMin !== peptideLengthMax;
   const normalizedInitialSequence = useMemo(
@@ -377,7 +370,7 @@ export function WorkflowRuntimeSettingsSection({
     let cancelled = false;
     const amidatedChanged = prevCustomDraftAmidatedRef.current !== customDraftAmidated;
     prevCustomDraftAmidatedRef.current = customDraftAmidated;
-    // Debounce so drawing in JSME (many SMILES changes in a row) doesn't flicker the picks.
+    // debounce JSME drawing so rapid SMILES changes don't flicker the picks
     const timer = window.setTimeout(() => {
       const validate = async () => {
         const smiles = customDraftSmiles.trim();
@@ -391,16 +384,14 @@ export function WorkflowRuntimeSettingsSection({
           if (cancelled) return;
           const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
           setCustomDraftValid(valid);
-          // Amidation toggle re-canonicalizes the SMILES and flips the terminal element; re-detect
-          // keeping the user's N/CA/C/O picks.
+          // amidation flips the terminal element; re-detect keeping the user's picks
           if (amidatedChanged) {
             skipBackboneAutoDetectRef.current = false;
             const anchors = manualOverrideBackboneRef.current ? customDraftBackbone : {};
             setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, anchors, customDraftAmidated) ?? {});
             setCustomDraftAutoStatus('idle');
           } else if (manualOverrideBackboneRef.current) {
-            // The user picked atoms: validate them against the edited structure; never auto-detect
-            // over them. Keep picks still on the right element, drop those whose atom shifted.
+            // user picked atoms: validate them, never auto-detect over them
             const kept = validateBackboneSlots(rdkit, smiles, customDraftBackbone, customDraftAmidated);
             if (CUSTOM_BACKBONE_SLOTS.some((slot) => kept[slot] !== customDraftBackbone[slot])) {
               setCustomDraftBackbone(kept);
@@ -408,7 +399,7 @@ export function WorkflowRuntimeSettingsSection({
           } else if (skipBackboneAutoDetectRef.current) {
             skipBackboneAutoDetectRef.current = false;
           } else if (valid) {
-            // Fresh auto-detection as a starting suggestion (user hasn't intervened).
+            // fresh auto-detection as a starting suggestion
             setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, {}, customDraftAmidated) ?? {});
             setCustomDraftAutoStatus('idle');
           } else {
@@ -431,9 +422,8 @@ export function WorkflowRuntimeSettingsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customDraftSmiles, customDraftAmidated]);
 
-  // Recompute backbone slot errors whenever picks/structure/amidation change. A complete-but-wrong
-  // override is reported and blocks Save; an incomplete set yields no error (backend auto-detects).
-  // Never silently passes a wrong assignment.
+  // recompute slot errors on change; complete-but-wrong blocks Save,
+  // incomplete is fine (backend auto-detects)
   useEffect(() => {
     let cancelled = false;
     const recompute = async () => {
@@ -448,7 +438,7 @@ export function WorkflowRuntimeSettingsSection({
         const errors = validateCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone as CustomResidueBackbone, customDraftAmidated);
         if (!cancelled) setCustomDraftSlotErrors(errors);
       } catch {
-        // RDKit not warmed yet; leave the previous verdict rather than silently passing.
+        // RDKit not warmed yet; keep the previous verdict
       }
     };
     const timer = window.setTimeout(() => { void recompute(); }, 150);
@@ -486,9 +476,7 @@ export function WorkflowRuntimeSettingsSection({
     setArmedBackboneSlot(null);
   };
 
-  // Arm a slot, then click an atom in the 2D to assign it. Clicking the atom already in the
-  // armed slot clears it; an atom already used by another slot is moved. After assigning, the
-  // next unfilled slot is armed automatically (or null once all five are set).
+  // arm a slot, then click an atom to assign; the next unfilled slot arms automatically
   const handleBackboneAtomClick = (atomIndex: number) => {
     if (!armedBackboneSlot) return;
     manualOverrideBackboneRef.current = true;
@@ -510,21 +498,19 @@ export function WorkflowRuntimeSettingsSection({
   const resetBackboneToAuto = async () => {
     manualOverrideBackboneRef.current = false;
     const rdkit = await loadRDKitModule();
-    // Re-detect with the current picks as anchors: atoms the user already set stay; only the
-    // empty slots are filled.
+    // re-detect with the current picks as anchors; only empty slots are filled
     const detected = detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone, customDraftAmidated);
     if (detected) {
       setCustomDraftBackbone(detected);
       setCustomDraftAutoStatus('idle');
     } else {
-      // Keep the manual picks and explain, rather than silently wiping them.
+      // keep the manual picks and explain, rather than wiping them
       setCustomDraftAutoStatus('failed');
     }
     setArmedBackboneSlot(null);
   };
 
-  // Derived display values for the 2D: highlight the assigned backbone atoms and label them
-  // with their slot letter so the user sees exactly which atom is N/CA/C/O/OXT.
+  // derived 2D display: highlight assigned atoms with their slot letters
   const assignedBackboneIndices = CUSTOM_BACKBONE_SLOTS
     .map((slot) => customDraftBackbone[slot])
     .filter((idx): idx is number => idx !== undefined);
@@ -564,9 +550,8 @@ export function WorkflowRuntimeSettingsSection({
     return buildCustomResidueCatalog([...poolSources, ...peptideCustomResidueLibrary]);
   }, [peptideResiduePool, peptideCustomResidueLibrary]);
 
-  // A custom pool entry carries its own CCD SMILES (read straight off the catalog entry,
-  // which is the single merged source) so the definition persists with the selection in
-  // the config and reaches the backends as a CCD.
+  // custom pool entries carry their own CCD SMILES so the definition
+  // persists with the selection and reaches the backends as a CCD
   const poolEntryFromCatalog = (
     entry: ResidueCatalogEntry,
     kind: PeptideResiduePoolSelection['kind']
@@ -585,10 +570,8 @@ export function WorkflowRuntimeSettingsSection({
     return { code: entry.ccd, kind };
   };
 
-  // Persist the drawn SMILES onto the selection itself: if a custom pool entry lacks a
-  // SMILES but the residue library (where it was drawn) has one, write it into the pool
-  // entry once. After this the pool entry is self-contained and survives reload; the
-  // submit path reads only the pool entry (no runtime fallback).
+  // backfill a drawn SMILES from the library onto pool entries lacking one,
+  // so the submit path only ever reads the pool entry
   const onPeptideResiduePoolChangeRef = useRef(onPeptideResiduePoolChange);
   onPeptideResiduePoolChangeRef.current = onPeptideResiduePoolChange;
   useEffect(() => {
@@ -627,11 +610,11 @@ export function WorkflowRuntimeSettingsSection({
     if (Array.isArray(peptideResiduePool)) {
       peptideResiduePool.forEach((item) => selected.add(`${item.kind}:${item.code}`));
     }
-    if (peptideResiduePoolAvailable && selected.size === 0) {
+    if (hasPeptideResiduePool && selected.size === 0) {
       NATURAL_AMINO_ACID_RESIDUES.forEach((item) => selected.add(`natural:${item.ccd}`));
     }
     return selected;
-  }, [peptideResiduePool, peptideResiduePoolAvailable]);
+  }, [peptideResiduePool, hasPeptideResiduePool]);
   const selectedNonNaturalCount = useMemo(
     () =>
       residueCatalogSections
@@ -644,7 +627,7 @@ export function WorkflowRuntimeSettingsSection({
     () => NATURAL_AMINO_ACID_RESIDUES.filter((entry) => selectedResidueKeySet.has(`natural:${entry.ccd}`)).length,
     [selectedResidueKeySet]
   );
-  const residuePoolControlsDisabled = !canEdit;
+  const residuePoolControlsDisabled = !isEditable;
   const protectedResiduePositions = useMemo(() => {
     const protectedSet = new Set<number>();
     maskChars.forEach((maskChar, idx) => {
@@ -666,8 +649,8 @@ export function WorkflowRuntimeSettingsSection({
         const rule = residuePlacementRule(entry);
         let candidatePositions = positions;
         if (rule === 'n_term') candidatePositions = positions.filter((position) => position === 1);
-        if (rule === 'c_term') candidatePositions = positions.filter((position) => position === peptideBinderLength);
-        if (rule === 'terminal') candidatePositions = positions.filter((position) => position === 1 || position === peptideBinderLength);
+        if (rule === 'c_term') candidatePositions = positions.filter((position) => position === effectiveDesignLength);
+        if (rule === 'terminal') candidatePositions = positions.filter((position) => position === 1 || position === effectiveDesignLength);
         if (isBicyclicMode && section.kind === 'natural' && entry.ccd === 'CYS') {
           status.set(key, {
             selectable: false,
@@ -683,7 +666,7 @@ export function WorkflowRuntimeSettingsSection({
         if (allowedPositions.length === 0) {
           reason = `${placement}; no editable position is available with the current mask and design mode.`;
           if (rule === 'n_term' && protectedResiduePositions.has(1)) reason = `${placement}; position 1 is fixed by the sequence mask.`;
-          if (rule === 'c_term' && protectedResiduePositions.has(peptideBinderLength)) reason = `${placement}; the C-terminal position is fixed by the sequence mask.`;
+          if (rule === 'c_term' && protectedResiduePositions.has(effectiveDesignLength)) reason = `${placement}; the C-terminal position is fixed by the sequence mask.`;
           if (rule === 'terminal') reason = `${placement}; both terminal positions are fixed or protected.`;
         }
         status.set(key, {
@@ -695,8 +678,8 @@ export function WorkflowRuntimeSettingsSection({
       });
     });
     return status;
-  }, [residueCatalogSections, positions, peptideBinderLength, protectedResiduePositions, isBicyclicMode]);
-  const clampNonNaturalLimit = (value: number) => Math.max(0, Math.min(peptideBinderLength, Math.floor(Number(value) || 0)));
+  }, [residueCatalogSections, positions, effectiveDesignLength, protectedResiduePositions, isBicyclicMode]);
+  const clampNonNaturalLimit = (value: number) => Math.max(0, Math.min(effectiveDesignLength, Math.floor(Number(value) || 0)));
   const toggleResiduePoolEntry = (entry: ResidueCatalogEntry) => {
     if (residuePoolControlsDisabled) return;
     const kind = normalizePoolEntryKind(entry);
@@ -739,14 +722,12 @@ export function WorkflowRuntimeSettingsSection({
     if (residuePoolControlsDisabled || !customDraftValid || firstBackboneSlotError(customDraftSlotErrors)) return;
     const smiles = customDraftSmiles.trim();
     if (!smiles) return;
-    // Existing residues keep their frozen code; new residues get a system-generated code
-    // (deterministic per user + SMILES). Users never author the CCD code.
+    // existing residues keep their code; new ones get a deterministic generated code
     const ccd = customEditingCcd || normalizeCustomResidueCode(generateCustomResidueCode(currentUserId, smiles));
     if (!ccd) return;
     const baseResidue = customDraftBaseResidue.trim().toUpperCase().slice(0, 1) || undefined;
     const label = customDraftName.trim() || 'Custom residue';
-    // The backbone is saved only when all 5 slots are set; otherwise it is omitted and the
-    // backend auto-detects.
+    // save the backbone only when all 5 slots are set; else backend auto-detects
     const backbone: CustomResidueBackbone | undefined = CUSTOM_BACKBONE_SLOTS.every(
       (slot) => customDraftBackbone[slot] !== undefined
     )
@@ -763,8 +744,7 @@ export function WorkflowRuntimeSettingsSection({
     onCustomResidueLibraryChange(nextLibrary);
     const selectedKeys = new Set(selectedResidueKeySet);
     selectedKeys.add(`custom:${ccd}`);
-    // The freshly drawn residue is the source of truth for its own SMILES; every other
-    // custom residue keeps the SMILES already on its catalog entry.
+    // the fresh residue is the source of truth for its own SMILES
     const freshEntry: PeptideResiduePoolSelection = { code: ccd, kind: 'custom', smiles, baseResidue, label, backbone, cTerminalAmidated: customDraftAmidated || undefined };
     const ordered = residueCatalogSections
       .flatMap((section) =>
@@ -790,7 +770,7 @@ export function WorkflowRuntimeSettingsSection({
   };
 
   const assignCysPosition = (slot: CysSlot, position: number) => {
-    if (!canEdit || cysPositionAuto) return;
+    if (!isEditable || cysPositionAuto) return;
     if (slot === 'cys1') {
       onPeptideBicyclicCys1PosChange(position);
       return;
@@ -799,12 +779,12 @@ export function WorkflowRuntimeSettingsSection({
       onPeptideBicyclicCys2PosChange(position);
       return;
     }
-    if (peptideBicyclicFixTerminalCys) return;
+    if (isPeptideBicyclicFixTerminalCys) return;
     onPeptideBicyclicCys3PosChange(position);
   };
 
   const toggleMaskPosition = (position: number) => {
-    if (!canEdit) return;
+    if (!isEditable) return;
     const index = position - 1;
     if (index < 0 || index >= maskChars.length) return;
     const sequenceChar = normalizedInitialSequence[index] || '';
@@ -814,13 +794,16 @@ export function WorkflowRuntimeSettingsSection({
     onPeptideSequenceMaskChange(nextMask.join(''));
   };
 
-  if (!visible) return null;
+  if (!isVisible) return null;
 
   return (
     <section className="panel subtle component-runtime-settings">
       <div className="component-runtime-settings-row">
-        {showFullFields && (
-          <Field label={<>Backend <span className="required-mark">*</span></>}>
+
+          <Field
+            label={<>Backend <span className="required-mark">*</span></>}
+            hint="Structure prediction engine. Protenix2Dock supports every peptide design mode, including cyclic/bicyclic covalent-bond constraints."
+          >
             <select
               required
               value={displayedBackend}
@@ -857,10 +840,13 @@ export function WorkflowRuntimeSettingsSection({
               ))}
             </select>
           </Field>
-        )}
 
-        {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && (
-                      <Field label="Seed (optional)">
+
+        {(isPredictionWorkflow || isPeptideDesignWorkflow) && (
+                      <Field
+            label="Seed (optional)"
+            hint="Reproducibility seed. Protenix and Boltz2Dock default to 42; AlphaFold3 draws a random seed when unset."
+          >
             <input
             type="number"
             min={0}
@@ -871,16 +857,16 @@ export function WorkflowRuntimeSettingsSection({
               onSeedChange(nextSeed);
             }}
             disabled={!canEditRuntimeIdentity}
-            placeholder="Default: 42"
+            placeholder="42 (Protenix default)"
             />
             </Field>
         )}
 
-        {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && normalizedBackend !== 'nesso' && (
+        {(isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && normalizedBackend !== 'nesso' && (
           <label className="switch-field runtime-device-toggle">
             <input
               type="checkbox"
-              checked={lowVram}
+              checked={isLowVram}
               onChange={(e) => onLowVramChange(e.target.checked)}
               disabled={!canEditRuntimeIdentity}
             />
@@ -899,28 +885,31 @@ export function WorkflowRuntimeSettingsSection({
                   onChange={(e) =>
                     onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'linear')
                   }
-                  disabled={!canEdit}
+                  disabled={!isEditable}
                   >
                   <option value="linear">Linear</option>
                   <option value="cyclic" disabled={normalizedBackend === 'alphafold3'}>
-                    Cyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
+                    Cyclic{normalizedBackend === 'alphafold3' ? ' (Protenix2Dock only)' : ''}
                   </option>
                   <option value="bicyclic" disabled={normalizedBackend === 'alphafold3'}>
-                    Bicyclic{normalizedBackend === 'alphafold3' ? ' (Boltz2Dock/Protenix2Dock only)' : ''}
+                    Bicyclic{normalizedBackend === 'alphafold3' ? ' (Protenix2Dock only)' : ''}
                   </option>
                   </select>
                   </Field>
-                                  <Field label="Peptide Chirality">
+                                  <Field
+                  label="Peptide Chirality"
+                  hint="D-peptides run the mirror workflow: the target is mirrored, design happens in D-space, results are flipped back. Available on Boltz2Dock/Protenix2Dock."
+                >
                   <select
                   value={peptideChirality}
                   onChange={(e) =>
                     onPeptideChiralityChange((e.target.value as 'l' | 'd') || 'l')
                   }
-                  disabled={!canEdit}
+                  disabled={!isEditable}
                   >
                   <option value="l">L-peptide (standard)</option>
                   <option value="d" disabled={normalizedBackend !== 'boltz2dock' && normalizedBackend !== 'protenix2dock'}>
-                    D-peptide{displayedBackend !== 'boltz2dock' && displayedBackend !== 'protenix2dock' ? '' : ''}
+                    D-peptide
                   </option>
                   </select>
                   </Field>
@@ -930,19 +919,30 @@ export function WorkflowRuntimeSettingsSection({
                   <input
                     type="file"
                     accept=".pdb,.cif,.mmcif"
-                    disabled={!canEdit || peptideChirality !== 'd'}
+                    disabled={!isEditable || peptideChirality !== 'd'}
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       e.target.value = '';
                       if (!file) return;
                       const format = file.name.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
-                      file.text().then((content) => {
-                        onPeptideStructureUploadChange({
-                          fileName: file.name, format, content, chainId: '',
-                        });
-                      });
+                      setStructureUploadError(null);
+                      file.text().then(
+                        (content) => {
+                          onPeptideStructureUploadChange({
+                            fileName: file.name, format, content, chainId: '',
+                          });
+                        },
+                        (err) => {
+                          setStructureUploadError(
+                            `Failed to read ${file.name}: ${err instanceof Error ? err.message : 'unknown error'}`
+                          );
+                        }
+                      );
                     }}
                   />
+                  {structureUploadError ? (
+                    <p className="muted small">{structureUploadError}</p>
+                  ) : null}
                   {peptideStructureUpload ? (
                     <div className="peptide-structure-upload-meta">
                       <span title={peptideStructureUpload.fileName}>
@@ -951,7 +951,7 @@ export function WorkflowRuntimeSettingsSection({
                       <button
                         type="button"
                         className="ghost small"
-                        disabled={!canEdit}
+                        disabled={!isEditable}
                         onClick={() => onPeptideStructureUploadChange(null)}
                       >
                         Remove
@@ -963,13 +963,12 @@ export function WorkflowRuntimeSettingsSection({
                   <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
                     <input
                       type="checkbox"
-                      checked={peptideUseInitialSequence}
+                      checked={isPeptideUseInitialSequence}
                       onChange={(e) => onPeptideUseInitialSequenceChange(e.target.checked)}
-                      disabled={!canEdit}
+                      disabled={!isEditable}
                     />
                     <span>Seed from reference</span>
-                    {/* Click guard: a plain span inside a label would toggle the
-                        checkbox when clicked; the tip itself is hover/focus-only. */}
+                    {/* a plain span inside the label would toggle the checkbox */}
                     <span className="peptide-seed-info" onClick={(e) => e.preventDefault()}>
                       <InfoTip text="Use the reference sequence as the starting point for generation 1." align="start" />
                     </span>
@@ -978,6 +977,7 @@ export function WorkflowRuntimeSettingsSection({
                 <label className="field peptide-length-range">
                   <span>
                     Peptide Length
+                    <InfoTip text="Design length window. Set min = max for a fixed length; an open range lets each generation adapt candidate lengths within it." align="start" />
                     {lengthLocked ? ' (fixed)' : ' (min–max)'}
                     {!lengthLocked && peptideLengthMin !== undefined ? (
                       <span className="muted" style={{ marginLeft: 6, fontSize: '0.9em' }}>
@@ -991,7 +991,7 @@ export function WorkflowRuntimeSettingsSection({
                       max={peptideLengthMax}
                       value={peptideLengthMin}
                       onCommit={(v) => onPeptideLengthRange(v, peptideLengthMax)}
-                      disabled={!canEdit}
+                      disabled={!isEditable}
                     />
                     <span className="peptide-length-range-dash">–</span>
                     <CommitNumberInput
@@ -999,7 +999,7 @@ export function WorkflowRuntimeSettingsSection({
                       max={80}
                       value={peptideLengthMax}
                       onCommit={(v) => onPeptideLengthRange(peptideLengthMin, v)}
-                      disabled={!canEdit}
+                      disabled={!isEditable}
                     />
                   </div>
                 </label>
@@ -1030,7 +1030,7 @@ export function WorkflowRuntimeSettingsSection({
                         <span>At least</span>
                         <CommitNumberInput
                           min={0}
-                          max={peptideBinderLength}
+                          max={effectiveDesignLength}
                           value={peptideNonNaturalMin}
                           onCommit={(value) => {
                             const nextMin = clampNonNaturalLimit(value);
@@ -1043,7 +1043,7 @@ export function WorkflowRuntimeSettingsSection({
                         <span>At most</span>
                         <CommitNumberInput
                           min={peptideNonNaturalMin}
-                          max={peptideBinderLength}
+                          max={effectiveDesignLength}
                           value={peptideNonNaturalMax}
                           onCommit={(value) => {
                             const nextMax = clampNonNaturalLimit(value);
@@ -1054,7 +1054,7 @@ export function WorkflowRuntimeSettingsSection({
                       </label>
                     </div>
                   </div>
-                  {!peptideResiduePoolAvailable ? (
+                  {!hasPeptideResiduePool ? (
                     <div className="muted small peptide-runtime-backend-hint">
                       Edits apply to the next submission.
                     </div>
@@ -1176,63 +1176,96 @@ export function WorkflowRuntimeSettingsSection({
                   )}
                 </div>
                 <CustomResidueEditorModal
-                  open={customEditorOpen}
+                  isOpen={customEditorOpen}
                   userId={currentUserId ?? 'anon'}
                   editingCcd={customEditingCcd}
-                  disabled={residuePoolControlsDisabled}
+                  isDisabled={residuePoolControlsDisabled}
                   draftSmiles={customDraftSmiles}
                   draftName={customDraftName}
                   draftBaseResidue={customDraftBaseResidue}
                   draftBackbone={customDraftBackbone}
-                  draftAmidated={customDraftAmidated}
-                  draftValid={customDraftValid}
+                  isDraftAmidated={customDraftAmidated}
+                  isDraftValid={customDraftValid}
                   autoStatus={customDraftAutoStatus}
                   slotErrors={customDraftSlotErrors}
-                  activeSlot={activeCysSlot}
                   armedSlot={armedBackboneSlot}
                   assignedIndices={assignedBackboneIndices}
                   backboneAtomLabels={backboneAtomLabels}
                   onAtomClick={handleBackboneAtomClick}
                   onResetBackbone={resetBackboneToAuto}
-                  activeSlotValue={activeCysSlot}
                   highlightColors={backboneHighlightColorOverride}
                   onSmilesChange={setCustomDraftSmiles}
                   onNameChange={setCustomDraftName}
                   onBaseResidueChange={setCustomDraftBaseResidue}
                   onAmidatedChange={setCustomDraftAmidated}
-                  onActiveSlotChange={(v) => setActiveCysSlot(v as typeof activeCysSlot)}
                   onArmSlot={(v) => setArmedBackboneSlot(v as typeof armedBackboneSlot)}
-                  onAssignAtom={handleBackboneAtomClick}
                   onSave={saveCustomResidueDraft}
                   onClose={closeCustomResidueEditor}
                 />
-                                  <Field label="Iterations">
+                <div className="peptide-preset-row" role="group" aria-label="Sampling effort presets">
+                  {PEPTIDE_EFFORT_PRESETS.map((preset) => {
+                    const isActive =
+                      peptideIterations === preset.iterations
+                      && peptidePopulationSize === preset.populationSize
+                      && peptideEliteSize === preset.eliteSize;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        className={`peptide-preset-chip${isActive ? ' active' : ''}`}
+                        disabled={!isEditable}
+                        title={`${preset.iterations} generations × ${preset.populationSize} candidates (elite ${preset.eliteSize}) ≈ ${preset.iterations * preset.populationSize} predictions`}
+                        onClick={() => {
+                          onPeptideIterationsChange(preset.iterations);
+                          onPeptidePopulationSizeChange(preset.populationSize);
+                          onPeptideEliteSizeChange(preset.eliteSize);
+                        }}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                                  <Field
+                  label="Iterations"
+                  hint="Evolution generations. Each generation evaluates one population of candidates and breeds the next from the elites."
+                >
                   <CommitNumberInput
                   min={2}
                   max={100}
                   value={peptideIterations}
                   onCommit={onPeptideIterationsChange}
-                  disabled={!canEdit}
+                  isDisabled={!isEditable}
                   />
                   </Field>
-                                  <Field label="Population Size">
+                                  <Field
+                  label="Population Size"
+                  hint="Candidates evaluated per generation. Larger populations explore more sequence space per generation."
+                >
                   <CommitNumberInput
                   min={2}
                   max={100}
                   value={peptidePopulationSize}
                   onCommit={onPeptidePopulationSizeChange}
-                  disabled={!canEdit}
+                  isDisabled={!isEditable}
                   />
                   </Field>
-                                  <Field label="Elite Size">
+                                  <Field
+                  label="Elite Size"
+                  hint="Top candidates carried into the next generation's breeding pool."
+                >
                   <CommitNumberInput
                   min={1}
                   max={Math.max(1, peptidePopulationSize - 1)}
                   value={peptideEliteSize}
                   onCommit={onPeptideEliteSizeChange}
-                  disabled={!canEdit}
+                  isDisabled={!isEditable}
                   />
                   </Field>
+                <p className="muted small">
+                  ≈ {peptideIterations * peptidePopulationSize} candidate predictions total
+                  (generations × population).
+                </p>
                 <label className="field peptide-mask-field">
                   <span>Fixed positions</span>
                   <input
@@ -1240,7 +1273,7 @@ export function WorkflowRuntimeSettingsSection({
                     type="text"
                     value={normalizedInitialSequence}
                     onChange={(e) => onPeptideInitialSequenceChange(e.target.value)}
-                    disabled={!canEdit}
+                    disabled={!isEditable}
                     placeholder={lengthLocked ? `Reference sequence, length ${effectiveDesignLength}` : `Reference sequence, up to ${effectiveDesignLength} aa (design range ${peptideLengthMin}–${peptideLengthMax})`}
                     spellCheck={false}
                   />
@@ -1257,7 +1290,7 @@ export function WorkflowRuntimeSettingsSection({
                           role="listitem"
                           className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''}`}
                           onClick={() => toggleMaskPosition(position)}
-                          disabled={!canEdit || !canFixPosition}
+                          disabled={!isEditable || !canFixPosition}
                           title={
                             fixed
                               ? `Position ${position} fixed at ${residue}`
@@ -1274,9 +1307,9 @@ export function WorkflowRuntimeSettingsSection({
                   </div>
                 </label>
               </div>
-              {normalizedInitialSequence.length !== peptideBinderLength && (
+              {normalizedInitialSequence.length !== effectiveDesignLength && (
                 <p className="muted small">
-                  Reference sequence length is {normalizedInitialSequence.length}. Expected {peptideBinderLength} to fix every desired position.
+                  Reference sequence length is {normalizedInitialSequence.length}. Expected {effectiveDesignLength} to fix every desired position.
                 </p>
               )}
             </section>
@@ -1300,7 +1333,7 @@ export function WorkflowRuntimeSettingsSection({
                           type="button"
                           className={`peptide-linker-card ${peptideBicyclicLinkerCcd === linker.type ? 'active' : ''}`}
                           onClick={() => onPeptideBicyclicLinkerCcdChange(linker.type)}
-                          disabled={!canEdit}
+                          disabled={!isEditable}
                           aria-pressed={peptideBicyclicLinkerCcd === linker.type}
                           aria-label={`Select ${linker.type} linker`}
                           title={`${linker.type} · ${linker.smiles}`}
@@ -1338,7 +1371,7 @@ export function WorkflowRuntimeSettingsSection({
                               type="button"
                               className={`peptide-cys-mode-btn ${peptideBicyclicCysLayout === mode.key ? 'active' : ''}`}
                               onClick={() => onPeptideBicyclicCysLayoutChange(mode.key)}
-                              disabled={!canEdit}
+                              disabled={!isEditable}
                               aria-pressed={peptideBicyclicCysLayout === mode.key}
                               title={mode.title}
                             >
@@ -1352,18 +1385,18 @@ export function WorkflowRuntimeSettingsSection({
                       <label className="switch-field peptide-runtime-switch">
                         <input
                           type="checkbox"
-                          checked={peptideBicyclicFixTerminalCys}
+                          checked={isPeptideBicyclicFixTerminalCys}
                           onChange={(e) => onPeptideBicyclicFixTerminalCysChange(e.target.checked)}
-                          disabled={!canEdit || cysPositionAuto || peptideBicyclicCysLayout === 'ring'}
+                          disabled={!isEditable || cysPositionAuto || peptideBicyclicCysLayout === 'ring'}
                         />
                         <span>Fix Terminal Cys</span>
                       </label>
                       <label className="switch-field peptide-runtime-switch">
                         <input
                           type="checkbox"
-                          checked={peptideBicyclicIncludeExtraCys}
+                          checked={isPeptideBicyclicIncludeExtraCys}
                           onChange={(e) => onPeptideBicyclicIncludeExtraCysChange(e.target.checked)}
-                          disabled={!canEdit}
+                          disabled={!isEditable}
                         />
                         <span>Allow Extra Cys</span>
                       </label>
@@ -1378,7 +1411,7 @@ export function WorkflowRuntimeSettingsSection({
                             max={40}
                             value={peptideBicyclicRing1}
                             onCommit={(v) => onPeptideBicyclicRingChange(v, peptideBicyclicRing2)}
-                            disabled={!canEdit}
+                            disabled={!isEditable}
                           />
                         </label>
                         <label className="field peptide-cys-param">
@@ -1388,7 +1421,7 @@ export function WorkflowRuntimeSettingsSection({
                             max={40}
                             value={peptideBicyclicRing2}
                             onCommit={(v) => onPeptideBicyclicRingChange(peptideBicyclicRing1, v)}
-                            disabled={!canEdit}
+                            disabled={!isEditable}
                           />
                         </label>
                       </div>
@@ -1399,7 +1432,7 @@ export function WorkflowRuntimeSettingsSection({
                         {([
                           { key: 1, label: 'Cys 1', value: peptideBicyclicRatio1, pct3: undefined },
                           { key: 2, label: 'Cys 2', value: peptideBicyclicRatio2, pct3: undefined },
-                          ...(peptideBicyclicFixTerminalCys
+                          ...(isPeptideBicyclicFixTerminalCys
                             ? []
                             : [{ key: 3, label: 'Cys 3', value: peptideBicyclicRatio3, pct3: peptideBicyclicRatio3 }])
                         ]).map((slider) => (
@@ -1417,7 +1450,7 @@ export function WorkflowRuntimeSettingsSection({
                                   else if (slider.key === 2) onPeptideBicyclicRatioChange(peptideBicyclicRatio1, v, slider.pct3);
                                   else onPeptideBicyclicRatioChange(peptideBicyclicRatio1, peptideBicyclicRatio2, v);
                                 }}
-                                disabled={!canEdit}
+                                disabled={!isEditable}
                               />
                               <strong>{slider.value}%</strong>
                             </div>
@@ -1426,10 +1459,7 @@ export function WorkflowRuntimeSettingsSection({
                       </div>
                     )}
 
-                    {/* The spectrum is a across-the-length-range overview: with a single
-                        candidate length (min === max) it degenerates to one column that
-                        duplicates the position preview below — render it only when the
-                        range actually spans multiple lengths. */}
+                    {/* the spectrum only adds information across a multi-length range */}
                     {!cysPositionAuto && peptideLengthMin !== peptideLengthMax && (
                       <PeptideCysSpectrum
                         lengthMin={Math.min(peptideLengthMin, peptideLengthMax)}
@@ -1453,7 +1483,7 @@ export function WorkflowRuntimeSettingsSection({
                             { key: 'cys3' as CysSlot, label: 'Cys 3' }
                           ]).map((slot) => {
                             const disabled = peptideBicyclicCysLayout === 'absolute'
-                              && slot.key === 'cys3' && peptideBicyclicFixTerminalCys;
+                              && slot.key === 'cys3' && isPeptideBicyclicFixTerminalCys;
                             const assigned = cysSlotValueMap[slot.key];
                             return (
                               <button
@@ -1480,9 +1510,9 @@ export function WorkflowRuntimeSettingsSection({
                             if (cysSlotValueMap.cys3 === position) marks.push('cys3');
                             const markClass = marks.length > 0 ? marks[0] : '';
                             const disabledByRange = position > cysSlotMaxMap[activeCysSlot];
-                            const disabledByFixedCys3 = activeCysSlot === 'cys3' && peptideBicyclicFixTerminalCys;
+                            const disabledByFixedCys3 = activeCysSlot === 'cys3' && isPeptideBicyclicFixTerminalCys;
                             const previewOnly = peptideBicyclicCysLayout !== 'absolute';
-                            const disabled = !canEdit || cysPositionAuto || previewOnly || disabledByRange || disabledByFixedCys3;
+                            const disabled = !isEditable || cysPositionAuto || previewOnly || disabledByRange || disabledByFixedCys3;
                             return (
                               <button
                                 key={`peptide-position-${position}`}
@@ -1510,7 +1540,7 @@ export function WorkflowRuntimeSettingsSection({
                             type="button"
                             className="btn btn-ghost btn-compact peptide-cys-pin-length"
                             onClick={() => onPeptideLengthRange(cysReferenceLength, cysReferenceLength)}
-                            disabled={!canEdit}
+                            disabled={!isEditable}
                           >
                             Pin length to {cysReferenceLength} aa
                           </button>
@@ -1533,7 +1563,7 @@ export function WorkflowRuntimeSettingsSection({
                         Cys positions scale with each candidate length; ring sizes flex between candidates.
                       </p>
                     )}
-                    {!cysPositionAuto && peptideBicyclicFixTerminalCys && peptideBicyclicCysLayout !== 'ring' && (
+                    {!cysPositionAuto && isPeptideBicyclicFixTerminalCys && peptideBicyclicCysLayout !== 'ring' && (
                       <p className="muted small">Cys 3 is anchored to terminal residue.</p>
                     )}
                   </div>

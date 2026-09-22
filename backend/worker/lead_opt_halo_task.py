@@ -1,12 +1,8 @@
-"""HALO generative lead-optimization task (V-Bio task system integration).
+"""HALO generative lead-optimization task: runs the closed-loop engine in
+capabilities/halo (de novo / fragment replacement / scaffold hopping) with
+the native prediction oracle.
 
-Runs the closed-loop engine in capabilities/halo (de novo / fragment
-replacement / scaffold hopping) with the native prediction oracle: candidates
-are scored by the platform's own structure-prediction engines — protenix2dock
-(default), boltz2dock, or alphafold3 — with the Boltz2Score affinity
-post-process.
-
-Route: POST /api/lead_optimization/halo_optimize (backend/routes/lead_opt_halo.py).
+Route: POST /api/lead_optimization/halo_optimize.
 Queue: cap.lead_opt.* (CPU worker; the oracle submits GPU predictions itself).
 """
 
@@ -49,7 +45,6 @@ def lead_optimization_halo_task(self, optimization_args: dict):
         run_dir = Path(task_temp_dir) / "run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stage uploaded protein / reference structures into the run directory.
         staged: dict[str, str] = {}
         for key, default_name in (("protein", "target.pdb"), ("reference_sdf", "reference.sdf")):
             upload = optimization_args.get(f"{key}_upload")
@@ -112,14 +107,11 @@ def lead_optimization_halo_task(self, optimization_args: dict):
         tracker.update_status("running", "Running HALO closed loop.")
         summary = run_halo_optimization(payload, run_dir, progress_cb=report, log=logger.info)
 
-        # Results land in RESULTS_BASE_DIR (same GC coverage as every other
-        # task's root zip); model weights (.pt) stay out — the loop artifacts
-        # (candidates, oracle scores, config, checkpoints of state) are the
-        # deliverable, 200 MB+ of prior weights are not.
-        # Structured artifact for the SPA result parser (confidence.lead_opt_halo).
-        # Named halo_results.json so the peptide design_results scanner can never
-        # sweep it up; carries an engine marker for future disambiguation.
-        # MUST be written before the result zip is sealed — it rides inside it.
+        # Zip keeps loop artifacts only (candidates, oracle scores, config);
+        # model weights (.pt, 200 MB+) stay out.
+        # halo_results.json: SPA result artifact (confidence.lead_opt_halo); the
+        # name keeps the peptide design_results scanner from sweeping it up.
+        # Must be written before the zip is sealed — it rides inside it.
         try:
             import pandas as pd
 
@@ -195,9 +187,9 @@ def lead_optimization_halo_task(self, optimization_args: dict):
     except Exception as exc:
         logger.exception("HALO lead-optimization task %s failed", task_id)
         tracker.update_status("failed", f"HALO optimization failed: {exc}")
-        from celery.exceptions import Ignore
-
-        raise Ignore()
+        # Re-raise so Celery records FAILURE; an Ignore() here would leave
+        # tasks polling as "waiting in queue" forever.
+        raise
     finally:
         if task_temp_dir and os.path.exists(task_temp_dir):
             shutil.rmtree(task_temp_dir, ignore_errors=True)

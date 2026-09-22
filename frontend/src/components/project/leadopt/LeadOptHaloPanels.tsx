@@ -13,35 +13,35 @@ const HALO_BACKEND_FALLBACK: Array<{ value: LeadOptHaloBackend; label: string }>
 ];
 
 interface LeadOptHaloParamsPanelProps {
-  canEdit: boolean;
-  running: boolean;
+  isEditable: boolean;
+  isRunning: boolean;
   backend: LeadOptHaloBackend;
   rounds: number;
   budgetPerRound: number;
   pocketLabel: string;
-  canRun: boolean;
+  isRunAllowed: boolean;
   runDisabledReason: string;
   onBackendChange: (value: LeadOptHaloBackend) => void;
   onRoundsChange: (value: number) => void;
   onBudgetChange: (value: number) => void;
-  onRun: () => void;
+  runAction: () => void;
 }
 
 export function LeadOptHaloParamsPanel({
-  canEdit,
-  running,
+  isEditable,
+  isRunning,
   backend,
   rounds,
   budgetPerRound,
   pocketLabel,
-  canRun,
+  isRunAllowed,
   runDisabledReason,
   onBackendChange,
   onRoundsChange,
   onBudgetChange,
-  onRun
+  runAction
 }: LeadOptHaloParamsPanelProps) {
-  const disabled = !canEdit || running || !canRun;
+  const disabled = !isEditable || isRunning || !isRunAllowed;
   const [backendOptions, setBackendOptions] = useState(HALO_BACKEND_FALLBACK);
   useEffect(() => {
     let cancelled = false;
@@ -99,11 +99,11 @@ export function LeadOptHaloParamsPanel({
           className="btn btn-primary btn-compact"
           disabled={disabled}
           title={runDisabledReason || 'Run the iterative optimization'}
-          onClick={onRun}
+          onClick={runAction}
         >
-          {running ? 'Optimizing…' : 'Run Optimization'}
+          {isRunning ? 'Optimizing…' : 'Run Optimization'}
         </button>
-        {canRun || !runDisabledReason ? null : (
+        {isRunAllowed || !runDisabledReason ? null : (
           <span className="lead-opt-error">{runDisabledReason}</span>
         )}
       </div>

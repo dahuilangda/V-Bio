@@ -1,16 +1,9 @@
-"""Interchain PAE extraction + cross-fold self-consistency (no RMSD).
-
-Upgrade-1 core: instead of comparing coordinates (complex RMSD needs a
-superposition that flexible targets break), compare the two predictions'
-interchain PAE submatrices (target x binder) — alignment-free and
-interpretable:
+"""Interchain PAE extraction + cross-fold self-consistency, without
+coordinates: run the SAME candidate through two independent predictors
+(boltz <-> protenix) and compare their interchain PAE submatrices —
+alignment-free, and it breaks the single-model self-confirmation loop:
 
   self_consistency = corr(P_A, P_B)  x  1/(1 + exp((|min_ipae_A - min_ipae_B| - 2)/1))
-
-Both folds run the SAME candidate through two independent predictors
-(boltz <-> protenix via the consistency guard); high correlation + small
-min-ipae delta means the second predictor saw the same interface — the
-single-model self-confirmation loop is broken without coordinates.
 """
 
 from __future__ import annotations
@@ -29,12 +22,12 @@ class InterchainPAE:
     n_binder: int
 
     def sub(self, max_len: int = 512):
-        """Cap matrix size for the correlation (cheap; tail residues do not
-        change interface statistics)."""
+        """Cap matrix size for the correlation; tail residues do not
+        change interface statistics."""
         return self.matrix[:max_len, :max_len]
 
 
-# ------------------------------------------------------------------ boltz
+# boltz
 def extract_boltz_pae(record_dir: Path, n_binder: int,
                       mi: int | None = None) -> InterchainPAE | None:
     """From a boltz prediction record (pae npz + token layout: target first,
@@ -61,10 +54,14 @@ def extract_boltz_pae(record_dir: Path, n_binder: int,
         return InterchainPAE(matrix=m, min_ipae=float(m.min()),
                              mean_ipae=float(m.mean()), n_binder=n_binder)
     except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            'PAE extraction failed; consistency gate loses this candidate',
+            exc_info=True)
         return None
 
 
-# ---------------------------------------------------------------- protenix
+# protenix
 def extract_protenix_pae(pred_root: Path, binder_residues: int,
                          samples: bool = False) -> InterchainPAE | None:
     """From a protenix predictions dir (full-data json token arrays)."""
@@ -117,10 +114,14 @@ def extract_protenix_pae(pred_root: Path, binder_residues: int,
                              mean_ipae=float(sub.mean()),
                              n_binder=len(bi))
     except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            'PAE extraction failed; consistency gate loses this candidate',
+            exc_info=True)
         return None
 
 
-# ------------------------------------------------------------- consistency
+# consistency
 def consistency_score(a: InterchainPAE, b: InterchainPAE) -> dict:
     """corr of the two submatrices (interpolated to a common shape for the
     adaptive-length case) + min-ipae delta penalty."""

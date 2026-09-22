@@ -2,8 +2,7 @@
  * The token registry modal of the API access page: create-token form
  * (name/project/expiry/permission chips + plain-text reveal) and the paged
  * token table with select/revoke/delete actions. Pure presentation — all
- * state and handlers stay in ApiAccessPage; props use the historical closure
- * names so the JSX stayed verbatim.
+ * state and handlers stay in ApiAccessPage.
  */
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
 import { Check, ChevronLeft, ChevronRight, Copy, LoaderCircle, Plus, Search, ShieldCheck, ShieldOff, Trash2, X } from 'lucide-react';
@@ -15,27 +14,27 @@ import './ApiTokenRegistryModal.css';
 interface ApiTokenRegistryModalProps {
   registryScopeProject: Project | null;
   tokenRegistryDialogProps: ModalDialogProps;
-  closeTokenRegistry: () => void;
-  createApiToken: (e: FormEvent<HTMLFormElement>) => Promise<void>;
-  tokenCreating: boolean;
+  onClose: () => void;
+  createTokenAction: (e: FormEvent<HTMLFormElement>) => Promise<void>;
+  isTokenCreating: boolean;
   newTokenName: string;
   setNewTokenName: Dispatch<SetStateAction<string>>;
   newTokenExpiresDays: string;
   setNewTokenExpiresDays: Dispatch<SetStateAction<string>>;
   newTokenPlainText: string;
   setNewTokenPlainText: Dispatch<SetStateAction<string>>;
-  allowSubmit: boolean;
+  isSubmitAllowed: boolean;
   setAllowSubmit: Dispatch<SetStateAction<boolean>>;
-  allowDelete: boolean;
+  isDeleteAllowed: boolean;
   setAllowDelete: Dispatch<SetStateAction<boolean>>;
-  allowCancel: boolean;
+  isCancelAllowed: boolean;
   setAllowCancel: Dispatch<SetStateAction<boolean>>;
   projects: Project[];
-  projectLoading: boolean;
+  isProjectLoading: boolean;
   selectedProjectId: string;
   setSelectedProjectId: Dispatch<SetStateAction<string>>;
-  showRegistryProjectColumn: boolean;
-  tokenLoading: boolean;
+  isRegistryProjectColumnVisible: boolean;
+  isTokenLoading: boolean;
   tokenQuery: string;
   setTokenQuery: Dispatch<SetStateAction<string>>;
   tokenPage: number;
@@ -46,36 +45,36 @@ interface ApiTokenRegistryModalProps {
   setSelectedTokenId: Dispatch<SetStateAction<string>>;
   tokenRevokingId: string | null;
   tokenDeletingId: string | null;
-  revokeToken: (tokenId: string) => Promise<void>;
-  removeToken: (tokenId: string) => Promise<void>;
+  revokeTokenAction: (tokenId: string) => Promise<void>;
+  removeTokenAction: (tokenId: string) => Promise<void>;
   copiedActionId: string | null;
-  copyText: (text: string, okMessage: string, historyLabel?: string, copyId?: string) => Promise<void>;
+  copyTextAction: (text: string, okMessage: string, historyLabel?: string, copyId?: string) => Promise<void>;
 }
 
 export function ApiTokenRegistryModal({
   registryScopeProject,
   tokenRegistryDialogProps,
-  closeTokenRegistry,
-  createApiToken,
-  tokenCreating,
+  onClose,
+  createTokenAction,
+  isTokenCreating,
   newTokenName,
   setNewTokenName,
   newTokenExpiresDays,
   setNewTokenExpiresDays,
   newTokenPlainText,
   setNewTokenPlainText,
-  allowSubmit,
+  isSubmitAllowed,
   setAllowSubmit,
-  allowDelete,
+  isDeleteAllowed,
   setAllowDelete,
-  allowCancel,
+  isCancelAllowed,
   setAllowCancel,
   projects,
-  projectLoading,
+  isProjectLoading,
   selectedProjectId,
   setSelectedProjectId,
-  showRegistryProjectColumn,
-  tokenLoading,
+  isRegistryProjectColumnVisible,
+  isTokenLoading,
   tokenQuery,
   setTokenQuery,
   tokenPage,
@@ -86,13 +85,13 @@ export function ApiTokenRegistryModal({
   setSelectedTokenId,
   tokenRevokingId,
   tokenDeletingId,
-  revokeToken,
-  removeToken,
+  revokeTokenAction,
+  removeTokenAction,
   copiedActionId,
-  copyText
+  copyTextAction
 }: ApiTokenRegistryModalProps) {
   return (
-    <div className="modal-mask" onClick={closeTokenRegistry}>
+    <div className="modal-mask" onClick={onClose}>
       <div
         className="modal modal-wide api-token-modal"
         onClick={(e) => e.stopPropagation()}
@@ -105,7 +104,7 @@ export function ApiTokenRegistryModal({
             className="icon-btn"
             type="button"
             aria-label="Close token registry"
-            onClick={closeTokenRegistry}
+            onClick={onClose}
           >
             <X size={16} />
           </button>
@@ -113,7 +112,7 @@ export function ApiTokenRegistryModal({
 
         <div className="api-token-modal-body">
           <section className="api-token-modal-create">
-            <form className="api-token-create" onSubmit={createApiToken}>
+            <form className="api-token-create" onSubmit={createTokenAction}>
               <label className="field api-token-name-field">
                 <span>Name</span>
                 <input value={newTokenName} onChange={(e) => setNewTokenName(e.target.value)} placeholder="token-xxxxxxxx" required />
@@ -125,7 +124,7 @@ export function ApiTokenRegistryModal({
                   <select
                     value={selectedProjectId}
                     onChange={(e) => setSelectedProjectId(e.target.value)}
-                    disabled={projectLoading || projects.length === 0}
+                    disabled={isProjectLoading || projects.length === 0}
                   >
                     {projects.length === 0 ? (
                       <option value="">No project</option>
@@ -152,25 +151,25 @@ export function ApiTokenRegistryModal({
                 <div className="api-permission-grid">
                   <button
                     type="button"
-                    className={`api-permission-chip ${allowSubmit ? 'active' : ''}`}
+                    className={`api-permission-chip ${isSubmitAllowed ? 'active' : ''}`}
                     onClick={() => setAllowSubmit((prev) => !prev)}
-                    aria-pressed={allowSubmit}
+                    aria-pressed={isSubmitAllowed}
                   >
                     Submit
                   </button>
                   <button
                     type="button"
-                    className={`api-permission-chip ${allowDelete ? 'active' : ''}`}
+                    className={`api-permission-chip ${isDeleteAllowed ? 'active' : ''}`}
                     onClick={() => setAllowDelete((prev) => !prev)}
-                    aria-pressed={allowDelete}
+                    aria-pressed={isDeleteAllowed}
                   >
                     Delete
                   </button>
                   <button
                     type="button"
-                    className={`api-permission-chip ${allowCancel ? 'active' : ''}`}
+                    className={`api-permission-chip ${isCancelAllowed ? 'active' : ''}`}
                     onClick={() => setAllowCancel((prev) => !prev)}
-                    aria-pressed={allowCancel}
+                    aria-pressed={isCancelAllowed}
                   >
                     Cancel
                   </button>
@@ -178,8 +177,8 @@ export function ApiTokenRegistryModal({
               </div>
 
               <div className="row end api-token-create-action">
-                <button className="btn btn-primary" type="submit" disabled={tokenCreating || !selectedProjectId}>
-                  <Plus size={14} /> {tokenCreating ? 'Creating...' : 'Create Token'}
+                <button className="btn btn-primary" type="submit" disabled={isTokenCreating || !selectedProjectId}>
+                  <Plus size={14} /> {isTokenCreating ? 'Creating...' : 'Create Token'}
                 </button>
               </div>
             </form>
@@ -193,7 +192,7 @@ export function ApiTokenRegistryModal({
                   <button
                     className={`btn btn-secondary ${copiedActionId === 'copy-new-token' ? 'is-copied' : ''}`}
                     type="button"
-                    onClick={() => { void copyText(newTokenPlainText, 'Token copied.', undefined, 'copy-new-token'); }}
+                    onClick={() => { void copyTextAction(newTokenPlainText, 'Token copied.', undefined, 'copy-new-token'); }}
                   >
                     <Copy size={14} /> Copy
                   </button>
@@ -228,20 +227,20 @@ export function ApiTokenRegistryModal({
                 <thead>
                   <tr>
                     <th>Name</th>
-                    {showRegistryProjectColumn && <th>Project</th>}
+                    {isRegistryProjectColumnVisible && <th>Project</th>}
                     <th>Permissions</th>
                     <th>Status</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {tokenLoading ? (
+                  {isTokenLoading ? (
                     <tr>
-                      <td colSpan={showRegistryProjectColumn ? 5 : 4} className="muted">Loading...</td>
+                      <td colSpan={isRegistryProjectColumnVisible ? 5 : 4} className="muted">Loading...</td>
                     </tr>
                   ) : pagedTokens.length === 0 ? (
                     <tr>
-                      <td colSpan={showRegistryProjectColumn ? 5 : 4} className="muted">No tokens.</td>
+                      <td colSpan={isRegistryProjectColumnVisible ? 5 : 4} className="muted">No tokens.</td>
                     </tr>
                   ) : (
                     pagedTokens.map((token) => {
@@ -249,7 +248,7 @@ export function ApiTokenRegistryModal({
                       return (
                         <tr key={token.id} className={selectedTokenId === token.id ? 'row-selected' : ''}>
                           <td>{token.name}<br /><code>{token.token_prefix}...{token.token_last4}</code></td>
-                          {showRegistryProjectColumn && <td>{projectName}</td>}
+                          {isRegistryProjectColumnVisible && <td>{projectName}</td>}
                           <td>
                             <div className="api-token-perm-badges">
                               <span className={`api-token-perm-badge ${token.allow_submit ? 'on' : 'off'}`}>S</span>
@@ -281,7 +280,7 @@ export function ApiTokenRegistryModal({
                                 disabled={!token.is_active || tokenRevokingId === token.id}
                                 aria-busy={tokenRevokingId === token.id}
                                 onClick={() => {
-                                  void revokeToken(token.id);
+                                  void revokeTokenAction(token.id);
                                 }}
                               >
                                 {tokenRevokingId === token.id ? <LoaderCircle size={14} className="spin" /> : <ShieldOff size={14} />}
@@ -294,7 +293,7 @@ export function ApiTokenRegistryModal({
                                 disabled={tokenDeletingId === token.id}
                                 aria-busy={tokenDeletingId === token.id}
                                 onClick={() => {
-                                  void removeToken(token.id);
+                                  void removeTokenAction(token.id);
                                 }}
                               >
                                 {tokenDeletingId === token.id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}

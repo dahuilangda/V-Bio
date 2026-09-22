@@ -74,8 +74,7 @@ function detectStructureFormat(fileName: string): 'pdb' | 'cif' {
   return fileName.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
 }
 
-// Docking-style resizable split: 3D reference on the left, fragments + run
-// parameters on the right (mmpdb-era layout).
+// Resizable split: 3D reference on the left, fragments + run parameters on the right.
 const LEFT_PANEL_MIN = 360;
 const RIGHT_PANEL_MIN = 300;
 const RESIZER_WIDTH = 10;
@@ -83,10 +82,9 @@ const LEFT_PANEL_KEY_STEP = 24;
 const LEFT_PANEL_DEFAULT = 720;
 
 /**
- * HALO lead-optimization workspace (mmpdb retrieval flow retired):
- * Build tab — docking-style reference viewer (uploads + pocket box on the
- * target, remembered; clear = blind) on the left, fragment selection
- * (2D RDKit click-select, auto-split) + iteration params on the right.
+ * HALO lead-optimization workspace.
+ * Build tab — reference viewer (uploads + pocket box, remembered; clear = blind)
+ * on the left, fragment selection + iteration params on the right.
  * Design tab — per-round progress + ranked candidates from the RL loop.
  */
 export function LeadOptimizationWorkspace({
@@ -181,11 +179,13 @@ export function LeadOptimizationWorkspace({
     ? selectedAtomIndices.join(',')
     : '');
 
-  // Mode is inferred from what the user selected, not chosen: a reference
-  // ligand / selected fragments means fragment replacement; without any
-  // reference the run generates de novo inside the pocket box.
+  // An explicit persisted leadOptMode (e.g. a restored scaffold_hop draft) wins;
+  // otherwise infer: reference ligand/fragments → fragment mode, none → de novo.
   const hasReference = Boolean(referenceSmiles || keepFragment);
-  const mode: LeadOptHaloMode = hasReference ? 'fragment' : 'denovo';
+  const inferredMode: LeadOptHaloMode = hasReference ? 'fragment' : 'denovo';
+  const persistedMode = options.leadOptMode;
+  const mode: LeadOptHaloMode =
+    persistedMode === 'scaffold_hop' ? 'scaffold_hop' : inferredMode;
 
   const runDisabledReason = useMemo(() => {
     if (!targetUpload) return 'Upload a target structure first.';
@@ -368,10 +368,10 @@ export function LeadOptimizationWorkspace({
       {error ? <div className="alert error">{error}</div> : null}
       <div ref={layoutRef} className="lead-opt-layout lead-opt-layout--resizable" style={layoutStyle}>
         <LeadOptReferencePanel
-          canEdit={canEdit}
-          loading={reference.busy}
-          submitting={submitting}
-          referenceReady={reference.referenceReady}
+          isEditable={canEdit}
+          isLoading={reference.busy}
+          isSubmitting={submitting}
+          isReferenceReady={reference.referenceReady}
           previewStructureText={reference.previewStructureText}
           previewStructureFormat={reference.previewStructureFormat}
           previewOverlayStructureText={reference.previewOverlayStructureText}
@@ -388,8 +388,8 @@ export function LeadOptimizationWorkspace({
                 pickedResidues={[]}
                 onBoxWireframeChange={pocket.applyBoxWireframe}
                 onCollapse={pocket.toggleDrawer}
-                canEdit={canEdit}
-                submitting={false}
+                isEditable={canEdit}
+                isSubmitting={false}
               />
             ) : null
           }
@@ -398,8 +398,8 @@ export function LeadOptimizationWorkspace({
           highlightedPocketResidues={reference.highlightedPocketResidues}
           activeMolstarAtom={reference.activeMolstarAtom}
           onResiduePick={reference.handleMolstarResiduePick}
-          onTargetFileChange={reference.handleTargetFileChange}
-          onLigandFileChange={reference.handleLigandFileChange}
+          targetFileChangeAction={reference.handleTargetFileChange}
+          ligandFileChangeAction={reference.handleLigandFileChange}
         />
 
         <div
@@ -423,18 +423,18 @@ export function LeadOptimizationWorkspace({
             onClearFragmentSelection={reference.clearFragmentSelection}
           />
           <LeadOptHaloParamsPanel
-            canEdit={canEdit}
-            running={halo.running}
+            isEditable={canEdit}
+            isRunning={halo.running}
             backend={backend}
             rounds={options.leadOptRounds ?? 6}
             budgetPerRound={options.leadOptBudgetPerRound ?? 48}
             pocketLabel={pocketLabel}
-            canRun={!runDisabledReason}
+            isRunAllowed={!runDisabledReason}
             runDisabledReason={runDisabledReason}
             onBackendChange={(value) => onOptionChange('leadOptBackend', value)}
             onRoundsChange={(value) => onOptionChange('leadOptRounds', value)}
             onBudgetChange={(value) => onOptionChange('leadOptBudgetPerRound', value)}
-            onRun={runOptimization}
+            runAction={runOptimization}
           />
         </div>
       </div>

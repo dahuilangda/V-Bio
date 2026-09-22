@@ -3,9 +3,9 @@ import { AffinityBasicsWorkspace } from '../../components/project/AffinityWorksp
 import type { AffinityDockPocket, AffinityScoringMode } from '../../types/models';
 
 export interface AffinityWorkflowSectionProps {
-  visible: boolean;
-  canEdit: boolean;
-  submitting: boolean;
+  isVisible: boolean;
+  isEditable: boolean;
+  isSubmitting: boolean;
   backend: string;
   mode: AffinityScoringMode;
   dockPocket: AffinityDockPocket | null;
@@ -14,8 +14,8 @@ export interface AffinityWorkflowSectionProps {
   ligandFileName: string;
   ligandSmiles: string;
   ligandEditorInput: string;
-  confidenceOnly: boolean;
-  confidenceOnlyLocked: boolean;
+  isConfidenceOnly: boolean;
+  isConfidenceOnlyLocked: boolean;
   previewTargetStructureText: string;
   previewTargetStructureFormat: 'cif' | 'pdb';
   previewLigandStructureText: string;
@@ -30,6 +30,8 @@ export interface AffinityWorkflowSectionProps {
   onBackendChange: (backend: string) => void;
   onModeChange: (mode: AffinityScoringMode) => void;
   onDockPocketChange: (pocket: AffinityDockPocket | null) => void;
+  isDockBlind: boolean;
+  onDockBlindChange: (blind: boolean) => void;
   onSeedChange: (seed: number | null) => void;
   onLigandSmilesChange: (value: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
@@ -37,9 +39,9 @@ export interface AffinityWorkflowSectionProps {
 }
 
 export function AffinityWorkflowSection({
-  visible,
-  canEdit,
-  submitting,
+  isVisible,
+  isEditable,
+  isSubmitting,
   backend,
   mode,
   dockPocket,
@@ -48,8 +50,8 @@ export function AffinityWorkflowSection({
   ligandFileName,
   ligandSmiles,
   ligandEditorInput,
-  confidenceOnly,
-  confidenceOnlyLocked,
+  isConfidenceOnly,
+  isConfidenceOnlyLocked,
   previewTargetStructureText,
   previewTargetStructureFormat,
   previewLigandStructureText,
@@ -64,27 +66,31 @@ export function AffinityWorkflowSection({
   onBackendChange,
   onModeChange,
   onDockPocketChange,
+  isDockBlind,
+  onDockBlindChange,
   onSeedChange,
   onLigandSmilesChange,
   onResizerPointerDown,
   onResizerKeyDown
 }: AffinityWorkflowSectionProps) {
-  if (!visible) return null;
+  if (!isVisible) return null;
 
   return (
     <AffinityBasicsWorkspace
-      canEdit={canEdit}
-      submitting={submitting}
+      isEditable={isEditable}
+      isSubmitting={isSubmitting}
       backend={backend}
       mode={mode}
       dockPocket={dockPocket}
+      isDockBlind={isDockBlind}
+      onDockBlindChange={onDockBlindChange}
       seed={seed}
       targetFileName={targetFileName}
       ligandFileName={ligandFileName}
       ligandSmiles={ligandSmiles}
       ligandEditorInput={ligandEditorInput}
-      confidenceOnly={confidenceOnly}
-      confidenceOnlyLocked={confidenceOnlyLocked}
+      isConfidenceOnly={isConfidenceOnly}
+      isConfidenceOnlyLocked={isConfidenceOnlyLocked}
       previewTargetStructureText={previewTargetStructureText}
       previewTargetStructureFormat={previewTargetStructureFormat}
       previewLigandStructureText={previewLigandStructureText}

@@ -1,12 +1,9 @@
-"""Protenix oracle: V-Bio production docker invocation, PeptideLM interface.
-
-Reuses the production adapter (backend.runtime.protenix_adapter.parse_yaml_for_
-protenix) so the input contract (modifications / cyclic / bond constraints /
-CCD ligands) is identical to the platform's Protenix path, then one docker
-container per candidate (parallel across GPUs). Output parsing mirrors the
-production postprocessor: best sample by ranking_score from
-{stem}_summary_confidence_sample_*.json plus atom-level data.
-"""
+"""Protenix oracle: V-Bio production docker invocation, PeptideLM
+interface. Reuses the production adapter (backend.runtime.protenix_adapter)
+so the input contract matches the platform's Protenix path, then one
+docker container per candidate (parallel across GPUs). Output parsing
+mirrors the production postprocessor: best sample by ranking_score from
+{stem}_summary_confidence_sample_*.json plus atom-level data."""
 
 from __future__ import annotations
 
@@ -21,7 +18,8 @@ from pathlib import Path
 from peplm.candidate import Candidate
 from peplm.oracle.peptide_boltz import build_complex_yaml
 
-IMAGE = "vbio-protenix-v2-runtime:2.0.0"  # production docker image
+import os
+IMAGE = os.environ.get("P2D_IMAGE", "vbio-protenix-v2-runtime:2.0.0")
 MODEL_DIR = "/data/protenix/model"
 MODEL_NAME = "protenix-v2"
 SOURCE_DIR = "/data/V-Bio/vendor/protenix-source"
@@ -106,8 +104,7 @@ def _parse_output(out_dir: Path, binder_residues: int,
                     out["binder_plddt"] = b_plddt
                     out["binder_avg_plddt"] = float(np.mean(b_plddt))
             # geometry-based ipSAE (same formulation as the boltz path:
-            # CA distances <= 10 A interfaced with PAE < 12); falls back
-            # to PAE-only when the structure is unavailable
+            # CA <= 10 A interfaced with PAE < 12); PAE-only fallback
             if binder_asym is not None and binder_asym != target_asym:
                 pae_m = np.asarray(pae, dtype=float)
                 ti = np.asarray(groups[target_asym])
@@ -125,8 +122,8 @@ def _parse_output(out_dir: Path, binder_residues: int,
                     for c, xyz in ca:
                         sized.setdefault(c, []).append(xyz)
                     by_size = {len(xs): xs for xs in sized.values()}
-                    # Only protein chains align (the linker ligand's
-                    # tokens carry no CA block); target + binder required.
+                    # only protein chains align (the linker ligand carries
+                    # no CA block); target + binder required
                     matched = [(g, by_size[len(groups[g])])
                                for g in groups
                                if len(groups[g]) in by_size]

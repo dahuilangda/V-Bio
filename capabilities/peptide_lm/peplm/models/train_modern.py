@@ -1,32 +1,44 @@
-"""Training loop for the modern (Llama-style) prior.
-
-Differences vs the GPT-2 loop:
-  * auxiliary property regression loss (sol/syn/liab) on mean-pooled states
-    — multi-task shaping of the representation
-  * modality augmentation at load time: a share of plain lines is re-labelled
-    <cyc> (head-to-tail) or <bicy> (3-Cys layout) so one prior serves
-    linear / cyclic / bicyclic design through the structure token
-"""
+"""Training loop for the modern (Llama-style) prior: auxiliary property
+regression loss (sol/syn/liab) on mean-pooled states, plus modality
+augmentation at load time (a share of plain lines re-labelled <cyc> or
+<bicy>) so one prior serves all three design modalities."""
 
 from __future__ import annotations
 
 import math
 import os
 import random
+import warnings
 
 import torch
 import torch.nn.functional as F
 
-from peplm.models.gpt2 import encode_line
 from peplm.models.llama_prior import ModernPrior
 from peplm.props.descriptors import compute_props
 from peplm.vocab import Vocab, parse_tokens
 
 
+def encode_line(vocab, text: str) -> list[int]:
+    """Canonical training encoding.
+
+    Line grammar: ``tag+ L-bucket <lin>|<cyc> BODY`` where BODY is either
+    a plain residue string (NCAA brackets allowed) or an FIM body
+    ``<pre> P <suf> S <mid> M``. Wrapped with <bos>/<eos> so the model
+    learns termination."""
+    from peplm.vocab import parse_tokens
+
+    parts = text.split()
+    if not parts:
+        return []
+    toks: list[str] = [p for p in parts[:-1] if p in vocab.stoi]
+    toks.extend(parse_tokens(parts[-1]))
+    return [vocab.bos] + vocab.encode_tokens(toks) + [vocab.eos]
+
+
 def modality_augment(train: list[str], rng: random.Random,
                      p_cyc: float = 0.08, p_bicy: float = 0.08) -> list[str]:
     """Re-label structure tokens so the prior learns all three modalities.
-    FIM lines are only re-labelled cyclic (their span layout cannot be
+    FIM lines are only re-labelled cyclic (span layout cannot be
     re-anchored post-hoc); bicyclic lines get the first_last Cys layout."""
     from peplm.oracle.peptide_boltz import enforce_bicyclic_cys
 
@@ -88,19 +100,17 @@ def pretrain_modern(
 ) -> dict:
     max_len = max_len or model.max_len
     model.to(device)
-    # Crash-resumable training state: full (model, optimizer, scheduler
-    # step, epoch, RNG) snapshot every `ckpt_every` optimizer steps plus
-    # end-of-epoch. A 12M-row x 2-epoch run must never restart from zero
-    # on a preemption; --resume restores bit-compatible continuation
-    # (shuffle RNG + optimizer moments + cosine step counter).
+    # crash-resumable state: full (model, optimizer, scheduler step,
+    # epoch, RNG) snapshot every `ckpt_every` steps plus end-of-epoch, so
+    # a long run never restarts from zero on a preemption
     resume_state = None
     if isinstance(ckpt_path, str) and os.path.exists(ckpt_path):
         resume_state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model.load_state_dict(resume_state["model"])
         log(f"[tier1-modern] resume from {ckpt_path} "
             f"(epoch {resume_state['epoch']}, step {resume_state['step']})")
-    # hidden-states retention for the aux head roughly doubles activation
-    # memory; gradient checkpointing trades ~30% compute for a large cut
+    # aux-head hidden-state retention roughly doubles activation memory;
+    # gradient checkpointing trades ~30% compute for a large cut
     model.gpt.gradient_checkpointing_enable()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01,
                             betas=(0.9, 0.95))
@@ -263,15 +273,23 @@ def load_modern_prior(path: str, device: str = "cpu") -> tuple[ModernPrior, Voca
                         n_heads=cfg.get("n_heads", 8),
                         max_len=cfg.get("max_len", 128))
     missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
-    # Pre-track checkpoints predate the additive SS track; its zero init
-    # makes loading one an exact identity. Anything else missing or any
-    # unexpected key is a real corruption and must stay loud.
+    # pre-track checkpoints predate the additive SS track; its zero init
+    # makes loading one an exact identity. Anything else missing or
+    # unexpected is real corruption and must stay loud.
     tolerated = {"ss_track.weight"}
     if set(missing) - tolerated or unexpected:
         raise RuntimeError(
             f"checkpoint {path} incompatible: "
             f"missing={sorted(set(missing) - tolerated)} "
             f"unexpected={sorted(unexpected)}")
+    if "ss_track.weight" in missing and any(
+            t in vocab.stoi for t in ("<h>", "<e>", "<l>", "<s>")):
+        warnings.warn(
+            f"{path}: SS-prefix checkpoint (SS tokens in vocab, no "
+            "ss_track). The SS-prefix mechanism is not supported by the "
+            "proposer — use a checkpoint trained with the additive "
+            "ss_track to keep SS conditioning.",
+            DeprecationWarning, stacklevel=2)
     model.to(device)
     model.eval()
     return model, vocab

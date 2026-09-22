@@ -12,30 +12,30 @@ export interface ProjectWorkspaceContentProps {
   workspaceTab: WorkspaceTab;
   componentStepLabel: string;
   projectResultsSectionProps: ProjectResultsSectionProps;
-  onSaveDraft: (event: FormEvent<HTMLFormElement>) => void;
-  canEdit: boolean;
+  saveDraftAction: (event: FormEvent<HTMLFormElement>) => void;
+  isEditable: boolean;
   taskName: string;
   taskSummary: string;
   onTaskNameChange: (value: string) => void;
   onTaskSummaryChange: (value: string) => void;
-  affinitySectionProps: Omit<AffinityWorkflowSectionProps, 'visible'>;
-  leadOptimizationSectionProps: Omit<LeadOptimizationWorkflowSectionProps, 'visible'>;
+  affinitySectionProps: Omit<AffinityWorkflowSectionProps, 'isVisible'>;
+  leadOptimizationSectionProps: Omit<LeadOptimizationWorkflowSectionProps, 'isVisible'>;
   isPredictionWorkflow: boolean;
   isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
-  predictionSectionProps: Omit<PredictionWorkflowSectionProps, 'visible'>;
-  virtualScreeningSectionProps: Omit<VirtualScreeningWorkflowSectionProps, 'visible'>;
+  predictionSectionProps: Omit<PredictionWorkflowSectionProps, 'isVisible'>;
+  virtualScreeningSectionProps: Omit<VirtualScreeningWorkflowSectionProps, 'isVisible'>;
   workflowDescription: string;
-  runtimeSettingsProps: Omit<WorkflowRuntimeSettingsSectionProps, 'visible'>;
+  runtimeSettingsProps: Omit<WorkflowRuntimeSettingsSectionProps, 'isVisible'>;
 }
 
 export function ProjectWorkspaceContent({
   workspaceTab,
   componentStepLabel,
   projectResultsSectionProps,
-  onSaveDraft,
-  canEdit,
+  saveDraftAction,
+  isEditable,
   taskName,
   taskSummary,
   onTaskNameChange,
@@ -70,7 +70,7 @@ export function ProjectWorkspaceContent({
     return (
       <div className="workspace-content workspace-content--lead-opt">
         <LeadOptimizationWorkflowSection
-          visible
+          isVisible
           {...leadOptimizationSectionProps}
         />
       </div>
@@ -90,12 +90,12 @@ export function ProjectWorkspaceContent({
       {showNativeResults && <ProjectResultsSection {...projectResultsSectionProps} />}
 
       {showFlatWorkspace && (
-        <form className="form-grid" onSubmit={onSaveDraft}>
-          {showFlatPredictionWorkspace && <PredictionWorkflowSection visible {...predictionSectionProps} />}
-          {showFlatVirtualScreeningWorkspace && <VirtualScreeningWorkflowSection visible {...virtualScreeningSectionProps} />}
-          {showFlatAffinityWorkspace && <AffinityWorkflowSection visible {...affinitySectionProps} />}
+        <form className="form-grid" onSubmit={saveDraftAction}>
+          {showFlatPredictionWorkspace && <PredictionWorkflowSection isVisible {...predictionSectionProps} />}
+          {showFlatVirtualScreeningWorkspace && <VirtualScreeningWorkflowSection isVisible {...virtualScreeningSectionProps} />}
+          {showFlatAffinityWorkspace && <AffinityWorkflowSection isVisible {...affinitySectionProps} />}
           {showFlatPredictionWorkspace && showRuntimeSettingsInComponents ? (
-            <WorkflowRuntimeSettingsSection visible {...runtimeSettingsProps} />
+            <WorkflowRuntimeSettingsSection isVisible {...runtimeSettingsProps} />
           ) : null}
         </form>
       )}
@@ -104,10 +104,10 @@ export function ProjectWorkspaceContent({
         <section className="panel inputs-panel">
           {showWorkspaceTitle ? <h2>{workspaceTitle}</h2> : null}
 
-          <form className="form-grid" onSubmit={onSaveDraft}>
+          <form className="form-grid" onSubmit={saveDraftAction}>
             {workspaceTab === 'basics' && (
               <ProjectBasicsMetadataForm
-                canEdit={canEdit}
+                isEditable={isEditable}
                 taskName={taskName}
                 taskSummary={taskSummary}
                 onTaskNameChange={onTaskNameChange}
@@ -115,17 +115,17 @@ export function ProjectWorkspaceContent({
               />
             )}
 
-            {showAffinitySection ? <AffinityWorkflowSection visible {...affinitySectionProps} /> : null}
+            {showAffinitySection ? <AffinityWorkflowSection isVisible {...affinitySectionProps} /> : null}
 
             {showPredictionSection ? (
-              <PredictionWorkflowSection visible {...predictionSectionProps} />
+              <PredictionWorkflowSection isVisible {...predictionSectionProps} />
             ) : isVirtualScreeningWorkflow && workspaceTab === 'components' ? (
-              <VirtualScreeningWorkflowSection visible {...virtualScreeningSectionProps} />
+              <VirtualScreeningWorkflowSection isVisible {...virtualScreeningSectionProps} />
             ) : isAffinityWorkflow || isLeadOptimizationWorkflow ? null : (
               <div className="workflow-note">{workflowDescription}</div>
             )}
 
-            {showRuntimeSettingsInComponents ? <WorkflowRuntimeSettingsSection visible {...runtimeSettingsProps} /> : null}
+            {showRuntimeSettingsInComponents ? <WorkflowRuntimeSettingsSection isVisible {...runtimeSettingsProps} /> : null}
           </form>
         </section>
       )}

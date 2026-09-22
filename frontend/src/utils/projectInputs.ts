@@ -1,3 +1,7 @@
+export function isValidNotifyEmail(value: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
+}
+
 function isPeptideStructureUpload(value: unknown): value is {
   fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
 } {
@@ -324,10 +328,12 @@ function normalizeAffinityDockPocket(value: unknown): AffinityDockPocket | null 
   if (nums.some((v) => !Number.isFinite(v))) return null;
   if (nums.slice(3).some((v) => v <= 0)) return null;
   const method = String(obj.method || 'manual');
+  const residues = String(obj.residues || '').trim().slice(0, 2000);
   return {
     centerX: nums[0], centerY: nums[1], centerZ: nums[2],
     sizeX: nums[3], sizeY: nums[4], sizeZ: nums[5],
-    method: (['residues', 'manual', 'ligand'].includes(method) ? method : 'manual') as 'residues' | 'manual' | 'ligand'
+    method: (['residues', 'manual', 'ligand'].includes(method) ? method : 'manual') as 'residues' | 'manual' | 'ligand',
+    ...(method === 'residues' && residues ? { residues } : {})
   };
 }
 
@@ -554,6 +560,11 @@ function normalizeOptions(value: unknown): PredictionOptions {
   );
   const affinityMode = normalizeAffinityMode(raw.affinityMode ?? rawObj.affinity_mode ?? rawObj.mode);
   const affinityDockPocket = normalizeAffinityDockPocket(raw.affinityDockPocket ?? rawObj.affinity_dock_pocket);
+  const affinityDockBlind = normalizeBooleanOption(
+    raw.affinityDockBlind ?? rawObj.affinity_dock_blind, false
+  );
+  const notifyEmailRaw = String(raw.notifyEmail ?? rawObj.notify_email ?? '').trim();
+  const notifyEmail = isValidNotifyEmail(notifyEmailRaw) ? notifyEmailRaw : '';
   const peptideDockPocket = normalizeAffinityDockPocket(raw.peptideDockPocket ?? rawObj.peptide_dock_pocket);
   const leadOptDockPocket = normalizeAffinityDockPocket(raw.leadOptDockPocket ?? rawObj.lead_opt_dock_pocket);
   const leadOptMode = raw.leadOptMode === 'denovo' || raw.leadOptMode === 'scaffold_hop' ? raw.leadOptMode : 'fragment';
@@ -704,12 +715,16 @@ function normalizeOptions(value: unknown): PredictionOptions {
       virtualScreeningPredictions,
       affinityMode,
       affinityDockPocket,
+      affinityDockBlind,
+      notifyEmail,
       peptideDesignMode,
       peptideChirality,
       peptideStructureUpload: isPeptideStructureUpload(raw.peptideStructureUpload)
         ? raw.peptideStructureUpload
         : null,
       peptideBinderLength,
+      peptideLengthMin,
+      peptideLengthMax,
       peptideUseInitialSequence,
       peptideInitialSequence,
       peptideSequenceMask,
@@ -750,12 +765,16 @@ function normalizeOptions(value: unknown): PredictionOptions {
     virtualScreeningPredictions,
     affinityMode,
     affinityDockPocket,
+    affinityDockBlind,
+    notifyEmail,
     peptideDesignMode,
     peptideChirality,
     peptideStructureUpload: isPeptideStructureUpload(raw.peptideStructureUpload)
       ? raw.peptideStructureUpload
       : null,
     peptideBinderLength,
+    peptideLengthMin,
+    peptideLengthMax,
     peptideUseInitialSequence,
     peptideInitialSequence,
     peptideSequenceMask,

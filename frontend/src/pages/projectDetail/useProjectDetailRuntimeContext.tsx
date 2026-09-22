@@ -139,10 +139,8 @@ function buildRuntimePollingSignature(rows: Array<{
   properties?: unknown;
   confidence?: unknown;
 }>): string {
-  // Identity + runtime state (+ lead-opt stage/counters) only. updated_at is
-  // deliberately excluded: every runtime state overlay used to bump it, which changed
-  // the signature, restarted both polling effects and fired an immediate extra tick —
-  // a self-amplifying request loop. Progress text changes must never re-arm a poller.
+  // identity + runtime state only; updated_at excluded so progress-text
+  // changes never re-arm the poller
   return rows
     .filter((row) => {
       const hasRuntimeTaskState = isRuntimeTaskState(row.task_state) && String(row.task_id || '').trim();
@@ -494,8 +492,8 @@ function mergeTaskRuntimeFields<
   const nextTaskId = String(next.task_id || '').trim();
   const prevTaskId = String(prev.task_id || '').trim();
   if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return mergePayloadFields(next, prev);
-  // Lead-opt scoring can start after an MMP query row is already marked SUCCESS.
-  // Allow QUEUED/RUNNING updates to replace stale SUCCESS for the same task row.
+  // lead-opt scoring can start after the row is already SUCCESS; let QUEUED/RUNNING
+  // replace the stale terminal state
   if (hasLeadOptPredictionRuntime(next as unknown as any)) {
     const nextTaskState = String(next.task_state || '').trim().toUpperCase();
     const prevTaskState = String(prev.task_state || '').trim().toUpperCase();
@@ -762,10 +760,8 @@ export function useProjectDetailRuntimeContext() {
     }
   }, [location.search, projectId]);
 
-  // Sync the URL tab param with the active workspace tab. IMPORTANT: draft is NOT in the deps —
-  // including it caused a navigate(replace) on every keystroke/edit, creating a cascade with
-  // syncWorkspaceTaskRow and loadProject that made the page visibly jump after submit. The tab
-  // only needs to sync when workspaceTab changes, not when the draft changes.
+  // Sync the URL tab param with the active workspace tab. draft is NOT in the deps —
+  // the tab only needs to sync when workspaceTab changes, not on every draft edit.
   useEffect(() => {
     if (!projectId || !project) return;
     const query = new URLSearchParams(location.search);
@@ -776,9 +772,8 @@ export function useProjectDetailRuntimeContext() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTab, projectId, project, navigate]);
 
-  // Only set source_task_row_id when requestNewTask transitions to true AND we have a fallback.
-  // projectTasks and location.search are NOT in deps — they caused a navigate cascade after submit
-  // (submit → syncWorkspaceTaskRow → location.search change → this effect fires → another navigate).
+  // projectTasks/location.search are NOT in deps — they caused a navigate cascade
+  // after submit (submit → syncWorkspaceTaskRow → search change → this effect → navigate).
   useEffect(() => {
     if (!projectId || !project) return;
     if (!requestNewTask) return;
@@ -963,9 +958,7 @@ export function useProjectDetailRuntimeContext() {
 
     let cancelled = false;
 
-    // Adaptive poll cadence (see adaptivePollScheduler): fast while fetched rows keep
-    // changing, ~2× slower after three identical fetches, doubled while hidden, immediate
-    // catch-up when the tab becomes visible again.
+    // adaptive cadence (see adaptivePollScheduler)
     let lastFetchedRowsSignature = '';
     let pauseChainOnce = false;
 
@@ -1147,8 +1140,7 @@ export function useProjectDetailRuntimeContext() {
           }
         }
 
-        // A cancelled/teardown poll must not land its (stale-closure) writes — it could
-        // paint the previous active task's state over the newly-focused one.
+        // a cancelled poll must not land its stale-closure writes
         if (cancelled) return { changed: false, shouldContinue: false };
 
         setProjectTasks((prev) => {
@@ -1207,9 +1199,7 @@ export function useProjectDetailRuntimeContext() {
         console.error('refreshTaskRows polling failed; keeping local state.', err);
         hadError = true;
       }
-      // Cadence signal: "changed" compares this fetch against the previous fetch (not the
-      // React state — the effect closure would be stale mid-run). A failing poll changes
-      // nothing and drifts toward the idle cadence instead of hammering.
+      // "changed" compares fetches, not React state (the effect closure is stale mid-run)
       const fetchedSignature = buildTaskRuntimeSignature(rowsForUiSnapshot);
       const changed = !hadError && fetchedSignature !== lastFetchedRowsSignature;
       lastFetchedRowsSignature = fetchedSignature;
@@ -1277,11 +1267,9 @@ export function useProjectDetailRuntimeContext() {
     workflowKey
   ]);
 
-  // Peptide design: rehydrate the full task snapshot when switching tasks.
-  // The residue pool, non-natural limits, partial masks, mode-specific cyclic settings,
-  // and related runtime options are stored per task under properties.__vbio_input_options_v1.
-  // List rows can be intentionally lightweight, so fetch the selected task detail once
-  // through the existing cache when the option snapshot is absent.
+  // Peptide design: rehydrate the task snapshot on task switch; per-task runtime
+  // options live under properties.__vbio_input_options_v1. List rows are
+  // lightweight, so fetch the detail through the cache on a snapshot miss.
   const peptideTaskSwitchRef = useRef<string>('');
   useEffect(() => {
     if (!isPeptideDesignWorkflow) return;
@@ -1303,10 +1291,8 @@ export function useProjectDetailRuntimeContext() {
       if (!hasStoredTaskInputOptions(taskRow)) return;
       const taskOptions = readTaskInputOptions(taskRow);
       if (Object.keys(taskOptions).length === 0) return;
-      // Content-level marker: the snapshot must be applied when the focused task or its
-      // stored options actually change — NOT when updated_at moves. Runtime overlays and
-      // status refreshes used to bump updated_at every poll, rebuilding the whole
-      // inputConfig (and clobbering in-progress edits) on every tick while a task ran.
+      // apply on a real task/options change, not on updated_at (polls bump it
+      // and would rebuild the inputConfig mid-edit)
       const marker = `${focusedRowId}|${JSON.stringify(taskOptions)}`;
       if (peptideTaskSwitchRef.current === marker) return;
       peptideTaskSwitchRef.current = marker;
@@ -1330,9 +1316,8 @@ export function useProjectDetailRuntimeContext() {
         });
       }
 
-      // Pocket picks reference the uploaded target structure; when no
-      // structure content is available they are dropped (plain sequence
-      // picks stay).
+      // pocket picks reference the uploaded target structure; without its
+      // content they are dropped (plain sequence picks stay)
       const hasTargetTemplate = Object.values(proteinTemplates).some(
         (template) => String(template?.content || '').trim().length > 0
       );
@@ -1402,13 +1387,9 @@ export function useProjectDetailRuntimeContext() {
     normalizeConfigForBackend
   ]);
 
-  // In-place task draft re-hydration for the component-editor workflows (prediction / affinity /
-  // virtual_screening). These workflows edit their draft through the component editor, so when the
-  // selected task changes (task_row_id in the URL, e.g. browser back/forward) the draft must be
-  // re-aligned to the newly-selected task's snapshot — WITHOUT a full workspace refetch (which is
-  // the page-reload feel the loadContextSearchKey fix eliminated). Peptide/lead-opt have their own
-  // dedicated effects above; this covers the remaining component-editor workflows. The marker ref
-  // dedupes so it only fires on a real task change, not on every projectTasks refresh.
+  // Re-align the draft to the selected task's snapshot in place (no workspace
+  // refetch) for the component-editor workflows; peptide/lead-opt have their
+  // own effects above. The marker ref dedupes against projectTasks refreshes.
   const componentTaskSwitchRef = useRef<string>('');
   useEffect(() => {
     if (!isPredictionWorkflow && !isAffinityWorkflow && !isVirtualScreeningWorkflow) return;
@@ -2033,7 +2014,9 @@ export function useProjectDetailRuntimeContext() {
     setLigandSmiles: setAffinityLigandSmiles,
     onAffinityModeChange,
     affinityDockPocket,
-    onAffinityDockPocketChange
+    onAffinityDockPocketChange,
+    affinityDockBlind,
+    onAffinityDockBlindChange
   } = useProjectAffinityWorkspace({
     isAffinityWorkflow,
     workspaceTab,
@@ -2180,14 +2163,12 @@ export function useProjectDetailRuntimeContext() {
     [location.search, navigate, projectId, workspaceTab]
   );
 
-  // Track the latest draft via a ref so submitTask always reads the current value, not a stale
-  // closure. The applyPatch function in the workspace view updates draft via setDraft (async React
-  // state update), but submitTask may execute before the re-render commits the new value. Reading
-  // from a ref that's always kept in sync avoids the race condition.
+  // latest draft via ref: submitTask may run before setDraft's re-render commits
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
   const { submitAffinityTask, submitPredictionTask } = createWorkflowSubmitters({
+    sessionEmail: session?.email ?? null,
     project,
     draftRef,
     isPeptideDesignWorkflow,
@@ -2252,8 +2233,9 @@ export function useProjectDetailRuntimeContext() {
     validateComponents
   });
 
-  const submitTask = async () => {
+  const submitTask = async (notifyEmailOverride?: string) => {
     await submitTaskByWorkflow({
+      notifyEmailOverride,
       project,
       draft: draftRef.current,
       submitInFlightRef,
@@ -2414,12 +2396,14 @@ export function useProjectDetailRuntimeContext() {
     affinityCurrentUploads,
     affinityMode,
     affinityDockPocket,
+    affinityDockBlind,
     onAffinityTargetFileChange,
     onAffinityLigandFileChange,
     onAffinityConfidenceOnlyChange,
     setAffinityLigandSmiles,
     onAffinityModeChange,
     onAffinityDockPocketChange,
+    onAffinityDockBlindChange,
     metadataOnlyDraftDirty,
     hasUnsavedChanges,
     patch,

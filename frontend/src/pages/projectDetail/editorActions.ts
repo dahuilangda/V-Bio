@@ -34,7 +34,7 @@ function patchDraftOptions<TDraft extends DraftLike>(
           ...d,
           inputConfig: {
             ...d.inputConfig,
-            options: patch(((d.inputConfig as any).options || {}) as NonNullable<DraftLike['inputConfig']['options']>)
+            options: patch(d.inputConfig.options ?? { seed: null })
           }
         }
       : d
@@ -42,9 +42,8 @@ function patchDraftOptions<TDraft extends DraftLike>(
 }
 
 function clampInteger(value: number, minValue: number, maxValue: number, fallback: number): number {
-  // `Number(value) || fallback` would treat a legitimate 0 as missing (dragging the
-  // Cys 1 ratio slider to 0% snapped back to the 15% default). The fallback is for
-  // non-numeric input only.
+  // `Number(value) || fallback` would treat a legitimate 0 as missing;
+  // the fallback is for non-numeric input only
   const numeric = Number(value);
   const floored = Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
   return Math.max(minValue, Math.min(maxValue, floored));
@@ -362,7 +361,7 @@ export function handleRuntimeBackendChangeAction<TDraft extends DraftLike>(param
   setDraft((d) =>
     d
       ? (() => {
-          const options = ((d.inputConfig as any).options || {}) as NonNullable<DraftLike['inputConfig']['options']>;
+          const options = d.inputConfig.options ?? { seed: null };
           const shouldApplyPeptideBackendRules = isPeptideDesignWorkflow && hasPeptideDesignOptions(options);
           const nextBackend = shouldApplyPeptideBackendRules
             ? normalizePeptideBackendValue(backend)
@@ -383,13 +382,18 @@ export function handleRuntimeBackendChangeAction<TDraft extends DraftLike>(param
             : options;
           // AlphaFold3 is GPU-only — never carry low-VRAM into it.
           const deviceOptions = nextBackend === 'alphafold3' ? { lowVram: false } : {};
+          // blind dock is protenix2dock-only; drop the stale flag when switching back
+          const dockOptions =
+            !isPeptideDesignWorkflow && options.affinityDockBlind && !['protenix', 'protenix2dock', 'p2d'].includes(nextBackend)
+              ? { affinityDockBlind: false }
+              : {};
           return {
             ...d,
             backend: nextBackend,
             inputConfig: {
               ...d.inputConfig,
               constraints: filterConstraintsByBackend(d.inputConfig.constraints, nextBackend),
-              options: { ...nextOptions, ...deviceOptions },
+              options: { ...nextOptions, ...deviceOptions, ...dockOptions },
             },
           };
         })()
@@ -473,11 +477,11 @@ export function handleRuntimePeptideStructureUploadChangeAction<TDraft extends D
   const { upload, setDraft } = params;
   setDraft((d) => {
     if (!d) return d;
-    const options = ((d.inputConfig as any).options || {}) as Record<string, unknown>;
+    const options = d.inputConfig.options ?? { seed: null };
     const nextOptions = { ...options, peptideStructureUpload: upload };
     return {
       ...d,
-      inputConfig: { ...(d.inputConfig as any), options: nextOptions },
+      inputConfig: { ...d.inputConfig, options: nextOptions },
     };
   });
 }
@@ -489,11 +493,11 @@ export function handleRuntimePeptideChiralityChangeAction<TDraft extends DraftLi
   const { peptideChirality, setDraft } = params;
   setDraft((d) => {
     if (!d) return d;
-    const options = ((d.inputConfig as any).options || {}) as Record<string, unknown>;
+    const options = d.inputConfig.options ?? { seed: null };
     const nextOptions = { ...options, peptideChirality };
     return {
       ...d,
-      inputConfig: { ...(d.inputConfig as any), options: nextOptions },
+      inputConfig: { ...d.inputConfig, options: nextOptions },
     };
   });
 }
@@ -505,7 +509,7 @@ export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftL
   const { peptideDesignMode, setDraft } = params;
   setDraft((d) => {
     if (!d) return d;
-    const options = ((d.inputConfig as any).options || {}) as NonNullable<DraftLike['inputConfig']['options']>;
+    const options = d.inputConfig.options ?? { seed: null };
     const minLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
     const fallbackLength = peptideDesignMode === 'bicyclic' ? 15 : 20;
     // adaptive mode keeps the length free across mode switches
@@ -566,8 +570,7 @@ export function handleRuntimePeptideLengthRangeAction<TDraft extends DraftLike>(
       peptideLengthMin: min,
       peptideLengthMax: max
     };
-    // min == max behaves as a fixed length; keep the legacy single value in
-    // sync so existing consumers (snapshots, previews) keep working
+    // min == max is a fixed length; keep the legacy single value in sync
     if (min === max) {
       next.peptideBinderLength = min;
       delete next.peptideLengthMin;
@@ -849,12 +852,8 @@ function readBicyclicLayoutParams(options: NonNullable<DraftLike['inputConfig'][
   };
 }
 
-/**
- * Switch the Cys anchor layout. The active layout's anchors are re-expressed
- * in the target mode at the current reference length so switching modes never
- * silently discards what the user dialed in. Ring topology requires the
- * terminal Cys (the block is anchored to the C-terminus).
- */
+/** Switch the Cys layout; anchors are re-expressed in the target mode so a
+ * switch never discards user input. Ring topology requires the terminal Cys. */
 export function handleRuntimePeptideBicyclicCysLayoutChangeAction<TDraft extends DraftLike>(params: {
   peptideBicyclicCysLayout: CysLayoutMode;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
@@ -959,11 +958,7 @@ export function handleOpenTaskHistoryAction(params: {
   setRunRedirectTaskId: Dispatch<SetStateAction<string | null>>;
   navigate: (to: string) => void;
 }): void {
-  // SPA navigation only — no window.location.assign fallback. A full page load on every
-  // task-list switch is the exact reload the user sees; react-router owns the route, and if the
-  // target path is already current we do nothing. There is deliberately no "soft-check then
-  // hard-reload" timer: a failed client navigation is a routing bug to fix, not a reason to
-  // silently downgrade the whole app to a full load.
+  // SPA navigation only; if the target path is already current, do nothing
   const { event, taskHistoryPath, setRunRedirectTaskId, navigate } = params;
   event.preventDefault();
   setRunRedirectTaskId(null);

@@ -77,6 +77,26 @@ export function useProjectAffinityWorkspace({
     [setDraft]
   );
 
+  const onAffinityDockBlindChange = useCallback(
+    (blind: boolean) => {
+      setDraft((prev: any) => {
+        if (!prev) return prev;
+        if (Boolean(prev.inputConfig?.options?.affinityDockBlind) === blind) return prev;
+        return {
+          ...prev,
+          inputConfig: {
+            ...prev.inputConfig,
+            options: {
+              ...(prev.inputConfig?.options || {}),
+              affinityDockBlind: blind
+            }
+          }
+        };
+      });
+    },
+    [setDraft]
+  );
+
   const applyAffinityChainsToDraft = useCallback(
     (targetChainId: string, ligandChainId: string, forceEnable = false) => {
       setDraft((prev: any) => applyAffinityChainsToDraftState(prev, targetChainId, ligandChainId, forceEnable));
@@ -137,9 +157,8 @@ export function useProjectAffinityWorkspace({
   useEffect(() => {
     if (!isAffinityWorkflow || workspaceTab !== 'components') return;
     if (affinityWorkflow.uploadsHydrating) return;
-    // A freshly applied/selected file whose content is still being read
-    // (persistedTargetUpload not yet populated) must not be remembered as
-    // "no upload" — that would DELETE the previously saved snapshot.
+    // a file whose content is still being read must not be remembered as
+    // "no upload" — that would delete the previously saved snapshot
     if (affinityWorkflow.targetFile && !affinityWorkflow.persistedUploads.target) return;
     if (affinityWorkflow.ligandFile && !affinityWorkflow.persistedUploads.ligand) return;
     const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(affinityUploadScopeTaskRowId);
@@ -162,6 +181,8 @@ export function useProjectAffinityWorkspace({
     onAffinityModeChange,
     affinityDockPocket: (draft?.inputConfig?.options?.affinityDockPocket ?? null) as AffinityDockPocket | null,
     onAffinityDockPocketChange,
+    affinityDockBlind: Boolean(draft?.inputConfig?.options?.affinityDockBlind),
+    onAffinityDockBlindChange,
     onAffinityUseMsaChange
   };
 }

@@ -4,17 +4,19 @@ import { submitPredictionTaskFromDraft } from './predictionSubmission';
 
 export interface WorkflowSubmitterContext {
   [key: string]: any;
-  /** A ref to the latest draft so the submit closures always read the current value, not a stale
-   * closure capture. This fixes the race where applyPatch (setDraft, async) is immediately followed
-   * by submit — without the ref, the submit closures captured the pre-patch draft. */
+  /** Latest draft via ref so submit closures never read a stale capture
+   *  after a setDraft immediately followed by submit. */
   draftRef: MutableRefObject<unknown>;
+  /** Logged-in user's email (notification default). */
+  sessionEmail?: string | null;
 }
 
 export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
-  const submitAffinityTask = async () => {
+  const submitAffinityTask = async (notifyEmailOverride?: string) => {
     const draft = c.draftRef.current as Record<string, unknown> | null;
     if (!c.project || !draft) return;
     await submitAffinityTaskFromDraft({
+      notifyEmailFallback: notifyEmailOverride || c.sessionEmail || undefined,
       project: c.project,
       draft: draft as any,
       affinityTargetFile: c.affinityTargetFile,
@@ -69,10 +71,11 @@ export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
     });
   };
 
-  const submitPredictionTask = async () => {
+  const submitPredictionTask = async (notifyEmailOverride?: string) => {
     const draft = c.draftRef.current as Record<string, unknown> | null;
     if (!c.project || !draft) return;
     await submitPredictionTaskFromDraft({
+      notifyEmailFallback: notifyEmailOverride || c.sessionEmail || undefined,
       project: c.project,
       draft: draft as any,
       isPeptideDesignWorkflow: Boolean(c.isPeptideDesignWorkflow),

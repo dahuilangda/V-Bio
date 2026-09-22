@@ -22,28 +22,39 @@ export function findProgressPercent(data: unknown): number | null {
   if (typeof data !== 'object' || data === null) return null;
   const obj = data as Record<string, unknown>;
 
-  const directCandidates = ['progress', 'percent', 'percentage', 'pct', 'ratio'];
+  const directCandidates = ['progress', 'progress_percent', 'percent', 'percentage', 'pct', 'ratio'];
   for (const key of directCandidates) {
     const value = obj[key];
     if (typeof value === 'number' && Number.isFinite(value)) {
-      const normalized = value <= 1 ? value * 100 : value;
+      // "percent"-named keys are always 0-100; bare progress/ratio may be 0-1
+      // fractions, which only the <= 1 heuristic can distinguish.
+      const scaleAmbiguous = key === 'progress' || key === 'ratio';
+      const normalized = scaleAmbiguous && value <= 1 ? value * 100 : value;
       if (normalized >= 0 && normalized <= 100) {
         return normalized;
       }
     }
   }
 
-  const nestedCandidates = ['tracker', 'meta', 'details', 'info'];
+  // the worker publishes progress as a nested object; recurse into it too
+  const nestedCandidates = ['tracker', 'meta', 'details', 'info', 'progress'];
   for (const key of nestedCandidates) {
     const nested = obj[key];
     const nestedPercent = findProgressPercent(nested);
     if (nestedPercent !== null) return nestedPercent;
   }
 
-  const current = obj.current;
-  const total = obj.total;
-  if (typeof current === 'number' && typeof total === 'number' && total > 0) {
-    return Math.min(100, Math.max(0, (current / total) * 100));
+  const ratioCandidates: Array<[string, string]> = [
+    ['current', 'total'],
+    ['current_generation', 'total_generations'],
+    ['completed_tasks', 'total_tasks']
+  ];
+  for (const [currentKey, totalKey] of ratioCandidates) {
+    const current = obj[currentKey];
+    const total = obj[totalKey];
+    if (typeof current === 'number' && typeof total === 'number' && total > 0) {
+      return Math.min(100, Math.max(0, (current / total) * 100));
+    }
   }
 
   return null;
@@ -328,12 +339,9 @@ export function readLigandIpsaeMaxMetric(confidence: Record<string, unknown> | n
 }
 
 /**
- * Unified `interface_metric` channel: prediction engines that report a single
- * interface score (e.g. the D-peptide design loop's refined ipSAE) write
- * interface_metric + interface_metric_label/source instead of the legacy
- * ligand_ipsae_max / ipsae_dom pair. Only counts as IPSAE when the declared
- * label/source says so — the same task-confidence contract the task list
- * resolver already implements (taskDataConfidence.readInterfaceIpsaeMetric).
+ * interface_metric channel: engines reporting a single interface score write
+ * interface_metric + label/source instead of the legacy ipsae pair. Only
+ * counts as IPSAE when the declared label/source says so.
  */
 export function readInterfaceMetricIpsaeChannel(confidence: Record<string, unknown> | null): number | null {
   if (!confidence) return null;

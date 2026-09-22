@@ -66,11 +66,8 @@ def _merge_prediction_properties_into_yaml(
     if not merged:
         property_entries.insert(0, entry)
 
-    # Boltz-2 的 schema 仅当 properties 中存在「首个 key 为 'affinity' 的独立 property」
-    # (binder 指向配体链) 时才触发亲和力预测；与 ligand/binder 同级的 affinity 布尔值，
-    # 因首个 key 不是 'affinity' 会被 boltz2 忽略，导致亲和力不计算、前端 affinity 面板无值。
-    # AF3/Protenix 的 extract_affinity_config_from_yaml 与 _yaml_has_ligand_annotation
-    # 同样以该 dict 写法为准，故将其作为 affinity 的唯一真相来源。
+    # boltz2 只在存在「首个 key 为 'affinity' 的独立 property」时才计算亲和力；
+    # 同级 affinity 布尔值会被忽略。AF3/Protenix 的解析同样以该写法为准。
     if bool(properties.get('affinity')):
         ligand_chain = str(entry.get('ligand') or entry.get('binder') or '').strip()
         has_affinity_property = any(
@@ -119,9 +116,8 @@ def _yaml_has_ligand_annotation(yaml_content: str) -> bool:
 def _validate_yaml_ligands(yaml_content: str) -> Optional[str]:
     """Reject ligand SMILES that cannot be processed.
 
-    Bare ions are translated to CCD before validation; remaining failures are
-    unparseable SMILES or bondless multi-atom sets (disconnected salts), which
-    are input errors.
+    Bare ions are translated to CCD before validation; remaining failures
+    (unparseable SMILES, disconnected salts) are input errors.
     """
     data = None
     try:
@@ -215,10 +211,54 @@ def register_prediction_routes(
     select_queue_for_capability: Callable[[str, str], Dict[str, Any]],
     capability_from_prediction_backend: Callable[[str], str],
 ) -> None:
+    def _check_tenant_quota(tenant_id: str) -> Optional[tuple]:
+        """Per-tenant daily submission quota backed by Redis.
+
+        Returns (response, status_code) on rejection or None (= allowed).
+        Fails open on Redis errors; application bugs propagate.
+        """
+        import redis as redis_module
+        from datetime import date
+
+        from gpu_manager import get_redis_client
+
+        today = date.today().strftime("%Y%m%d")
+        max_daily = int(getattr(config_module, "TENANT_MAX_DAILY", 50))
+        if max_daily <= 0:
+            # Explicitly disabled; never touches Redis in this mode.
+            return None
+
+        try:
+            client = get_redis_client()
+            daily_key = f"vbio:quota:daily:{tenant_id}:{today}"
+            daily = int(client.get(daily_key) or 0)
+
+            if daily >= max_daily:
+                return jsonify({
+                    "error": (
+                        f"Daily quota exhausted ({daily}/{max_daily}). "
+                        "Quota resets at midnight."
+                    )
+                }), 429
+
+            client.incr(daily_key)
+            client.expire(daily_key, 86400)
+        except redis_module.RedisError:
+            logger.warning(
+                "Tenant quota check failed (Redis unreachable); "
+                "failing open", exc_info=True)
+        return None
+
     @app.route('/predict', methods=['POST'])
     @require_api_token
     def handle_predict():
         logger.info('Received prediction request.')
+
+        # Tenant identity = hashed API token (keeps secrets out of Redis keys)
+        import hashlib as _hashlib
+        raw_token = request.headers.get("X-API-Token", "")
+        tenant_id = _hashlib.sha256(raw_token.encode()).hexdigest()[:16] if raw_token else "anonymous"
+
 
         if 'yaml_file' not in request.files:
             logger.error("Missing 'yaml_file' in prediction request. Client IP: %s", request.remote_addr)
@@ -272,8 +312,8 @@ def register_prediction_routes(
             )
         else:
             use_msa_server = parse_bool(use_msa_server_raw, False)
-        msa_mode = str(request.form.get('msa_mode') or 'uniref').strip()
-        if msa_mode not in ('uniref', 'env', 'none'):
+        msa_mode = str(request.form.get('msa_mode') or 'auto').strip()
+        if msa_mode not in ('auto', 'uniref', 'env', 'none'):
             msa_mode = 'uniref'
         if msa_mode == 'none':
             use_msa_server = False
@@ -287,8 +327,7 @@ def register_prediction_routes(
         backend = str(request.form.get('backend', '')).strip().lower()
         requested_workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
         if not backend:
-            # Module defaults follow engine strength per workflow: prediction
-            # runs on Protenix, peptide design on Protenix2Dock.
+            # Defaults per workflow: prediction -> Protenix, peptide design -> Protenix2Dock.
             backend = 'protenix2dock' if requested_workflow in {'peptide_design'} else 'protenix'
         if backend in {'nesso1', 'nesso-1'}:
             backend = 'nesso'
@@ -296,14 +335,9 @@ def register_prediction_routes(
             requested_workflow = 'peptide_design'
         elif requested_workflow in {'virtual screening', 'virtual-screening', 'screening', 'vs'}:
             requested_workflow = 'virtual_screening'
-        # Structure-based peptide docking engines (D-peptide capable). They
-        # map onto the corresponding full predictors at the engine level but
-        # carry docking semantics (target structure required; predicted first
-        # via the full engine when the user did not upload one).
-        # lead_optimization: the HALO oracle scores small-molecule candidates
-        # with the docking engines; at the engine level these run as plain
-        # complex predictions (run_single_prediction maps them onto the full
-        # predictors), so only the workflow gating differs.
+        # Docking engines (D-peptide capable) map onto the full predictors at
+        # the engine level (target predicted first when not uploaded); they
+        # differ only in workflow gating.
         if backend in {'boltz2dock', 'boltz-2-dock'}:
             if requested_workflow not in {'peptide_design', 'lead_optimization'}:
                 return jsonify({'error': "Backend 'boltz2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
@@ -348,8 +382,7 @@ def register_prediction_routes(
                 logger.error("Failed to read compounds_file: %s. Client IP: %s", exc, request.remote_addr)
                 return jsonify({'error': "Failed to read compounds_file. Ensure it's a valid UTF-8 text file."}), 400
             try:
-                # Library files replace inline compounds at the API boundary; SMILES
-                # validation and canonicalization stay inside the normalizer below.
+                # Library files replace inline compounds here; validation stays in the normalizer.
                 yaml_content = merge_screening_compounds_file_into_yaml(yaml_content, compounds_text)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
@@ -362,8 +395,7 @@ def register_prediction_routes(
         low_vram = parse_bool(request.form.get('low_vram'), False)
         if backend == 'nesso':
             try:
-                # Validate every compound at the API boundary while preserving the
-                # original YAML for canonical preparation inside the worker.
+                # Validate every compound at the API boundary; canonical prep stays in the worker.
                 normalize_nesso_screening_input_yaml(yaml_content)
             except ValueError as exc:
                 return jsonify({'error': str(exc), 'backend': backend, 'workflow': 'virtual_screening'}), 400
@@ -413,8 +445,16 @@ def register_prediction_routes(
                     parsed = json.loads(peptide_opts_raw)
                     if isinstance(parsed, dict):
                         peptide_design_options = parsed
-                except json.JSONDecodeError:
-                    logger.warning('Invalid peptide_design_options JSON provided; ignoring design options.')
+                    else:
+                        return jsonify({
+                            'error': 'peptide_design_options must be a JSON object.',
+                        }), 400
+                except json.JSONDecodeError as exc:
+                    # A silently-ignored options blob would run the GPU job on
+                    # defaults the user never chose.
+                    return jsonify({
+                        'error': f'Invalid peptide_design_options JSON: {exc}',
+                    }), 400
             design_mode_raw = (
                 peptide_design_options.get('peptideDesignMode')
                 or peptide_design_options.get('peptide_design_mode')
@@ -445,10 +485,8 @@ def register_prediction_routes(
             return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
         parent_queue_selection = None
         if workflow == 'peptide_design':
-            # Parent peptide task is orchestration-only for BOTH chiralities:
-            # all heavy steps (structure/conformer prediction, mirror-space
-            # scoring) are dispatched as sub-steps, so the orchestrator stays
-            # on the CPU queue where PeptideLM lives.
+            # Parent task is orchestration-only: heavy steps run as sub-tasks,
+            # so it stays on the CPU queue with PeptideLM.
             parent_queue_selection = select_queue_for_capability('peptide_design', 'default')
             if not bool(parent_queue_selection.get('online', False)):
                 return jsonify({
@@ -467,15 +505,20 @@ def register_prediction_routes(
             request.remote_addr,
         )
 
+        notify_email = str(request.form.get('notify_email') or '').strip()
+        if notify_email:
+            from backend.services.mailer import is_valid_notify_email
+            if not is_valid_notify_email(notify_email):
+                return jsonify({'error': "notify_email must be a valid email address."}), 400
         seed_value = parse_int(request.form.get('seed'), None)
-        if seed_value is None and backend in {'protenix', 'nesso', 'protenix2dock'}:
+        if seed_value is None and backend in {'protenix', 'nesso', 'protenix2dock', 'boltz2dock'}:
             seed_value = 42
             logger.info('seed parameter missing for backend=%s; defaulting to %s for client %s.', backend, seed_value, request.remote_addr)
 
         custom_ccd_molecules = _parse_custom_ccd_molecules(request.form.get('custom_ccd_molecules'))
 
-        # Dry-run the exact production CCD builders so malformed custom chemistry fails
-        # here (HTTP 400 naming the component) instead of inside a GPU task later.
+        # Dry-run the production CCD builders so bad chemistry fails as 400
+        # here instead of inside a GPU task.
         if custom_ccd_molecules:
             from backend.runtime.custom_ccd_builder import _build_custom_ccd_bundle
             from backend.runtime.ccd_contract import validate_ccd_additions
@@ -536,10 +579,9 @@ def register_prediction_routes(
                 'backend': backend,
             }), 400
 
-        # Initial peptide structure for mode-anchored design (peptide_design):
-        # uploaded in the same coordinate frame as the target structure; both
-        # uploads together switch the D-route from generic pocket placement to
-        # reference-pose anchoring.
+        # Initial peptide structure for mode-anchored design; uploaded in the
+        # target's coordinate frame, it switches the D-route to reference-pose
+        # anchoring.
         peptide_structure_input = None
         if workflow == 'peptide_design':
             uploaded_pep = request.files.get('peptide_structure_file')
@@ -563,6 +605,7 @@ def register_prediction_routes(
                     'content_base64': base64.b64encode(uploaded_pep.read()).decode('utf-8'),
                 }
 
+        project_id_form = str(request.form.get('project_id') or '').strip()
         predict_args = {
             'yaml_content': yaml_content,
             'use_msa_server': use_msa_server,
@@ -573,6 +616,10 @@ def register_prediction_routes(
             'workflow': workflow,
             'low_vram': low_vram,
         }
+        if notify_email:
+            predict_args['notify_email'] = notify_email
+        if project_id_form:
+            predict_args['project_id'] = project_id_form
         if workflow == 'peptide_design':
             predict_args['peptide_design_options'] = peptide_design_options
             peptide_target_chain = str(request.form.get('peptide_design_target_chain', '')).strip()
@@ -586,6 +633,11 @@ def register_prediction_routes(
             predict_args['template_inputs'] = template_inputs
         if custom_ccd_molecules:
             predict_args['custom_ccd_molecules'] = custom_ccd_molecules
+
+        # Consume quota only after validation; 400-rejected submits must not burn units.
+        quota_response = _check_tenant_quota(tenant_id)
+        if quota_response:
+            return quota_response
 
         try:
             task = predict_task.apply_async(args=[predict_args], queue=target_queue)

@@ -1,9 +1,6 @@
-"""Shared docker command skeleton for GPU task containers.
-
-Common parts of every task-container invocation: naming/labels, nvidia
-runtime, shm sizing, GPU pinning, repo mount, and env basics. Engine-specific
-builders (image, extra mounts, entry) compose on top.
-"""
+"""Shared docker command skeleton for GPU task containers: naming/labels,
+nvidia runtime, shm sizing, GPU pinning, repo mount, env basics. Engine
+builders compose on top."""
 
 from __future__ import annotations
 
@@ -24,10 +21,8 @@ def build_task_docker_skeleton(
     base_dir: Optional[str] = None,
     shm_size: str = "16g",
 ) -> tuple[list[str], str]:
-    """Return (partial command, container_name) with common flags applied.
-
-    The caller appends engine-specific volumes/env, the image, and the argv.
-    """
+    """Return (partial command, container_name) with common flags applied;
+    the caller appends image, engine volumes/env, and argv."""
     container_name = _tasks._make_task_container_name(task_id, runtime_label)
     raw_extra = shlex.split(str(getattr(config, "PROTENIX_DOCKER_EXTRA_ARGS", "") or ""))
     extra_args = _tasks._sanitize_docker_extra_args(raw_extra)
@@ -55,6 +50,10 @@ def build_task_docker_skeleton(
 
 def protenix_runtime_mounts(command: list[str]) -> list[str]:
     """Append the standard protenix runtime mounts/env (model, caches, shm)."""
+    if not config.PROTENIX_MODEL_DIR:
+        raise ValueError(
+            "PROTENIX_MODEL_DIR is not configured; refusing to build a "
+            "container with a literal 'None:/workspace/model:ro' volume")
     command.extend([
         "--volume", f"{config.PROTENIX_MODEL_DIR}:/workspace/model:ro",
         "--volume", f"{config.PROTENIX_COMMON_CACHE_DIR}:/cache/common:ro",
@@ -64,9 +63,8 @@ def protenix_runtime_mounts(command: list[str]) -> list[str]:
         "--env", "PYTHONPATH=/workspace/vbio/vendor/protenix-source",
         "--env", "PROTENIX_ROOT_DIR=/cache",
     ])
-    # Writable whole-module cache: Protenix model construction takes ~80 s per
-    # task (random init immediately overwritten by the checkpoint); the
-    # pickled module (protenix/model/module_cache) loads in seconds.
+    # Writable whole-module cache: model construction takes ~80 s per task;
+    # the pickled module loads in seconds.
     module_cache_dir = str(getattr(config, "PROTENIX_MODULE_CACHE_DIR", "") or "").strip()
     if module_cache_dir:
         container_dir = "/cache/module_cache"

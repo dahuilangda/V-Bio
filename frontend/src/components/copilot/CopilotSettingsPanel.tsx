@@ -1,6 +1,5 @@
 /**
- * Copilot settings panel (controlled) — extracted from ProjectCopilotModal.
- * Parent keeps the 9 settings states during incremental migration.
+ * Copilot settings panel (controlled). The parent owns the settings state.
  */
 import { LoaderCircle, Settings, X } from 'lucide-react';
 import type { CopilotTestResult } from '../../api/copilotApi';
@@ -11,13 +10,13 @@ interface CopilotSettingsPanelProps {
   settingsError: string;
   settingsHasKey: boolean;
   settingsMaskedKey: string;
-  settingsSaved: boolean;
-  settingsSaving: boolean;
+  isSettingsSaved: boolean;
+  isSettingsSaving: boolean;
   settingsTestResult: CopilotTestResult | null;
-  settingsTesting: boolean;
+  isSettingsTesting: boolean;
   onFormChange: (v: SettingsFormValues | ((prev: SettingsFormValues) => SettingsFormValues)) => void;
-  onSave: () => void;
-  onTest: () => void;
+  saveAction: () => void;
+  testAction: () => void;
   onClose: () => void;
 }
 
@@ -78,7 +77,7 @@ export function CopilotSettingsPanel(p: CopilotSettingsPanelProps) {
                   />
                 </label>
                 {p.settingsError ? <div className="copilot-settings-error">{p.settingsError}</div> : null}
-                {p.settingsSaved ? <div className="copilot-settings-success">Settings saved — applied live.</div> : null}
+                {p.isSettingsSaved ? <div className="copilot-settings-success">Settings saved — applied live.</div> : null}
                 {p.settingsTestResult ? (
                   <div className="copilot-settings-test-results">
                     <div className={`copilot-settings-test-item ${testState(p.settingsTestResult.proxy)}`}>
@@ -96,19 +95,19 @@ export function CopilotSettingsPanel(p: CopilotSettingsPanelProps) {
                 <button
                   type="button"
                   className="copilot-settings-btn secondary"
-                  onClick={() => void p.onTest()}
-                  disabled={p.settingsTesting || p.settingsSaving}
+                  onClick={() => void p.testAction()}
+                  disabled={p.isSettingsTesting || p.isSettingsSaving}
                 >
-                  {p.settingsTesting ? <LoaderCircle size={14} className="spin" /> : null}
+                  {p.isSettingsTesting ? <LoaderCircle size={14} className="spin" /> : null}
                   Test Connection
                 </button>
                 <button
                   type="button"
                   className="copilot-settings-btn primary"
-                  onClick={() => void p.onSave()}
-                  disabled={p.settingsSaving || p.settingsTesting}
+                  onClick={() => void p.saveAction()}
+                  disabled={p.isSettingsSaving || p.isSettingsTesting}
                 >
-                  {p.settingsSaving ? <LoaderCircle size={14} className="spin" /> : null}
+                  {p.isSettingsSaving ? <LoaderCircle size={14} className="spin" /> : null}
                   Save Settings
                 </button>
               </div>

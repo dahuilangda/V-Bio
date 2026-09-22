@@ -7,7 +7,6 @@ we generate is directly consumable by the existing Boltz YAML pipeline
 (modifications + custom_ccd_molecules).
 
 Glyco-residue presets (MANS..XYLS) are intentionally excluded here: they need
-on-the-fly CCD cache building (glycopeptide_generator) and are a separate
 design mode, not part of the therapeutic-peptide NCAA pool.
 """
 
@@ -15,8 +14,16 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-# --- natural amino acids -------------------------------------------------
+# natural amino acids
 NATURAL_AA = "ACDEFGHIKLMNPQRSTVWY"
+
+# CCD three-letter names, positionally aligned with NATURAL_AA. This is the
+# single mapping used for structure staging (gemmi/PDB) across the project.
+AA3_OF = dict(zip(
+    NATURAL_AA,
+    ("ALA CYS ASP GLU PHE GLY HIS ILE LYS LEU MET ASN PRO GLN ARG SER THR "
+     "VAL TRP TYR").split()))
+ONE_OF = {v: k for k, v in AA3_OF.items()}
 
 # Kyte-Doolittle hydropathy (positive = hydrophobic); NCAA values assigned by
 # side-chain analogy (documented per entry).
@@ -55,7 +62,15 @@ PKA = {
 PKA_N_TERM = 9.6
 PKA_C_TERM = 2.3
 
-# --- NCAA presets (V-Bio production table, glyco entries excluded) --------
+# NCAA presets (V-Bio production table, glyco entries excluded)
+# NOTE on CCD code collisions with the PDB Chemical Component Dictionary:
+#   CIT → real CCD CIT is citric acid; citrulline is CIR
+#   HCY → real CCD HCY is a steroid; homocysteine is HCS
+#   MLY → real CCD MLY is N,N-dimethyl-Lys; our SMILES is mono-methyl (MLZ)
+#   BALA → no CCD entry; beta-alanine is BAL
+# Production always sends custom CCD blocks (which override the cache), so
+# the collisions are masked in the closed loop; bare-CCD resolution paths
+# (uploads, third-party oracles) would get the wrong chemistry.
 # placement: any | n_term | c_term | terminal
 NCAA_PRESETS: dict[str, dict] = {
     "AIB":  {"smiles": "NC(C)(C)C(=O)O", "base": "A", "label": "alpha-aminoisobutyric acid"},
@@ -89,7 +104,7 @@ NCAA_TOKENS = [f"[{ccd}]" for ccd in NCAA_PRESETS]
 NCAA_TOKEN_TO_CCD = {f"[{ccd}]": ccd for ccd in NCAA_PRESETS}
 NCAA_CCD_TO_TOKEN = {ccd: f"[{ccd}]" for ccd in NCAA_PRESETS}
 
-# --- user-supplied residues (runtime registration) ------------------------
+# user-supplied residues (runtime registration)
 # Arbitrary non-natural residues beyond the presets: users register entries
 # {ccd, smiles, base, placement} and every component (vocab extension,
 # placement masks, oracle CCD cache, mutation channel) consults this table.

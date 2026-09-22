@@ -177,17 +177,17 @@ function groupRowsByProject(rows: ShareRow[], sortBy: SharesSortBy): ShareProjec
 
 function ShareAccessPills(props: {
   value: ShareAccessLevel;
-  disabled?: boolean;
+  isDisabled?: boolean;
   onChange?: (value: ShareAccessLevel) => void;
 }) {
-  const { value, disabled = false, onChange } = props;
+  const { value, isDisabled = false, onChange } = props;
   return (
     <div className="share-mini-toggle" role="radiogroup" aria-label="Share access level">
       <button
         type="button"
         className={`share-mini-toggle-btn ${value === 'viewer' ? 'is-active' : ''}`}
         aria-pressed={value === 'viewer'}
-        disabled={disabled}
+        disabled={isDisabled}
         title="Viewer"
         onClick={() => onChange?.('viewer')}
       >
@@ -197,7 +197,7 @@ function ShareAccessPills(props: {
         type="button"
         className={`share-mini-toggle-btn ${value === 'editor' ? 'is-active' : ''}`}
         aria-pressed={value === 'editor'}
-        disabled={disabled}
+        disabled={isDisabled}
         title="Editor"
         onClick={() => onChange?.('editor')}
       >
@@ -211,9 +211,9 @@ function ShareRowCard(props: {
   row: ShareRow;
   savingRowId: string | null;
   onChangeAccess: (row: ShareRow, nextAccessLevel: ShareAccessLevel) => void;
-  onRevoke: (row: ShareRow) => void;
+  revokeAction: (row: ShareRow) => void;
 }) {
-  const { row, savingRowId, onChangeAccess, onRevoke } = props;
+  const { row, savingRowId, onChangeAccess, revokeAction } = props;
   const isSaving = savingRowId === row.id;
   const title = row.kind === 'task' ? row.taskName : row.projectName;
   const summary = row.kind === 'task' ? row.taskSummary : row.projectSummary;
@@ -240,7 +240,7 @@ function ShareRowCard(props: {
           {canManage ? (
             <ShareAccessPills
               value={row.accessLevel}
-              disabled={isSaving}
+              isDisabled={isSaving}
               onChange={(nextAccessLevel) => {
                 if (nextAccessLevel === row.accessLevel) return;
                 onChangeAccess(row, nextAccessLevel);
@@ -259,7 +259,7 @@ function ShareRowCard(props: {
               <button
                 type="button"
                 className="task-row-action-btn danger"
-                onClick={() => onRevoke(row)}
+                onClick={() => revokeAction(row)}
                 disabled={isSaving}
                 title="Revoke share"
                 aria-label="Revoke share"
@@ -283,13 +283,13 @@ function ShareRowCard(props: {
 
 function ProjectShareCard(props: {
   group: ShareProjectGroup;
-  collapsed: boolean;
+  isCollapsed: boolean;
   onToggle: (projectId: string) => void;
   savingRowId: string | null;
   onChangeAccess: (row: ShareRow, nextAccessLevel: ShareAccessLevel) => void;
-  onRevoke: (row: ShareRow) => void;
+  revokeAction: (row: ShareRow) => void;
 }) {
-  const { group, collapsed, onToggle, savingRowId, onChangeAccess, onRevoke } = props;
+  const { group, isCollapsed, onToggle, savingRowId, onChangeAccess, revokeAction } = props;
   return (
     <article className="project-card shares-project-card">
       <div className="project-card-main shares-project-card-head">
@@ -306,10 +306,10 @@ function ProjectShareCard(props: {
           {group.taskCount > 0 ? <span className="badge badge-muted">{group.taskCount} tasks</span> : null}
           <button
             type="button"
-            className={`shares-project-toggle ${collapsed ? 'is-collapsed' : ''}`}
+            className={`shares-project-toggle ${isCollapsed ? 'is-collapsed' : ''}`}
             onClick={() => onToggle(group.projectId)}
-            aria-expanded={!collapsed}
-            title={collapsed ? 'Expand project shares' : 'Collapse project shares'}
+            aria-expanded={!isCollapsed}
+            title={isCollapsed ? 'Expand project shares' : 'Collapse project shares'}
           >
             <span className="share-count-pill">{group.rows.length}</span>
             <ChevronDown size={15} />
@@ -321,7 +321,7 @@ function ProjectShareCard(props: {
         <span className="muted small">Latest share {formatDateTime(group.latestGrantedAt)}</span>
       </div>
 
-      {!collapsed ? (
+      {!isCollapsed ? (
         <div className="shares-project-items">
           {group.rows.map((row) => (
             <ShareRowCard
@@ -329,7 +329,7 @@ function ProjectShareCard(props: {
               row={row}
               savingRowId={savingRowId}
               onChangeAccess={onChangeAccess}
-              onRevoke={onRevoke}
+              revokeAction={revokeAction}
             />
           ))}
         </div>
@@ -492,8 +492,8 @@ export function SharesPage() {
     return groupedProjects.slice(start, start + pageSize);
   }, [currentPage, groupedProjects, pageSize]);
 
-  // Render-time adjustment (not effects): reset to page 1 when any filter
-  // changes, and clamp the page when the filtered total shrinks below it.
+  // Render-time adjustment (not effects): reset to page 1 on filter change,
+  // clamp when the filtered total shrinks.
   // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   const filtersSignature = `${search}\u001f${directionFilter}\u001f${kindFilter}\u001f${accessFilter}\u001f${sortBy}\u001f${pageSize}`;
   const [prevFiltersSignature, setPrevFiltersSignature] = useState(filtersSignature);
@@ -661,11 +661,11 @@ export function SharesPage() {
                 <ProjectShareCard
                   key={group.projectId}
                   group={group}
-                  collapsed={Boolean(collapsedProjects[group.projectId])}
+                  isCollapsed={Boolean(collapsedProjects[group.projectId])}
                   onToggle={handleToggleProject}
                   savingRowId={savingRowId}
                   onChangeAccess={handleChangeAccess}
-                  onRevoke={handleRevoke}
+                  revokeAction={handleRevoke}
                 />
               ))}
             </div>
