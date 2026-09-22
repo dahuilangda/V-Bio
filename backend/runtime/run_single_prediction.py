@@ -6900,7 +6900,7 @@ def _relax_staged_bicyclic_strain(
         (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
         key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
     )
-    pep = polymer[1] if len(polymer) > 1 else None
+    pep = polymer[-1] if len(polymer) > 1 else None
     linker_res = None
     for chain in st[0]:
         if linker_res is None and any(r.name == linker_code for r in chain):
@@ -7452,12 +7452,17 @@ def _dpeptide_stage_conformer_in_pocket(
     # Skipped when pose_matters=False (blind route: peptide rows are
     # re-noised; only the receptor + sequences feed the engine).
     if pose_matters:
+        _poly_chk = sorted(
+            (c for c in check[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+            key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+        _pep_chk = _poly_chk[0]
         rec_atoms_chk = np.array([
             [a.pos.x, a.pos.y, a.pos.z]
-            for r in check[0]["A"] for a in r if a.element.name != "H"])
+            for _rc in _poly_chk[1:] for r in _rc
+            for a in r if a.element.name != "H"])
         pep_atoms_chk = np.array([
             [a.pos.x, a.pos.y, a.pos.z]
-            for r in check[0]["B"] for a in r if a.element.name != "H"])
+            for r in _pep_chk for a in r if a.element.name != "H"])
         from scipy.spatial import cKDTree as _CKD
         _tree = _CKD(rec_atoms_chk)
         _nbr = _tree.query(pep_atoms_chk, k=1)[0]
@@ -8687,15 +8692,20 @@ def _assert_product_chirality(
             f"D-peptide product gate failed: expected >=2 protein chains, got "
             f"{[c.name for c in st[0]]}"
         )
-    receptor_chain, peptide_chain = protein_chains[0], protein_chains[1]
+    # peptide = SHORTEST chain (multi-chain receptors put receptor copies at
+    # every length tier; chains[1] was a second receptor copy on trimers)
+    receptor_chains = protein_chains[:-1]
+    peptide_chain = protein_chains[-1]
 
-    rec_report = chirality_report(st, receptor_chain.name)
+    rec_report = []
+    for _rec in receptor_chains:
+        rec_report.extend(chirality_report(st, _rec.name))
     pep_report = chirality_report(st, peptide_chain.name)
     from peplm.dpeptide import chirality_violations
     # Product frame contract: receptor ALL-L, peptide ALL-D — per residue.
     # The mean-volume check silently passed 11L/9D mixtures (the mean stays on
     # the expected side); a mixed-chirality product is a failed product.
-    rec_bad = chirality_violations(st, receptor_chain.name, "L")
+    rec_bad = chirality_violations(st, receptor_chains[0].name, "L")
     pep_bad = chirality_violations(st, peptide_chain.name, "D")
     if rec_report.n_scored <= 0 or pep_report.n_scored <= 0:
         raise RuntimeError(
@@ -8755,7 +8765,7 @@ def _assert_product_chirality(
                 )
 
     return {
-        "receptor_chain": receptor_chain.name,
+        "receptor_chain": receptor_chains[0].name,
         "peptide_chain": peptide_chain.name,
         "receptor_mean_ca_volume": float(rec_report.mean_volume),
         "peptide_mean_ca_volume": float(pep_report.mean_volume),
@@ -9924,11 +9934,18 @@ def run_peptide_design_backend(
                     pair_iptm = float(refined_ipsae)
                     pair_iptm_formula = "d_space_refined_ipsae"
                     chain_plddt = d_space_metrics.get("chain_mean_plddt")
+                    # peptide chain = LAST entity letter (receptors are
+                    # written first, the peptide appended last; hard "B"
+                    # read a receptor copy's plddt on multi-chain targets)
+                    _pep_key = (sorted(chain_plddt)[-1]
+                                if isinstance(chain_plddt, dict) and chain_plddt
+                                else None)
                     if (not isinstance(chain_plddt, dict)
-                            or not isinstance(chain_plddt.get("B"), (int, float))
-                            or float(chain_plddt["B"]) <= 0):
+                            or _pep_key is None
+                            or not isinstance(chain_plddt.get(_pep_key), (int, float))
+                            or float(chain_plddt[_pep_key]) <= 0):
                         raise RuntimeError("精修结果缺少肽链 pLDDT 读数,拒绝以空值评分")
-                    chain_b = float(chain_plddt["B"])
+                    chain_b = float(chain_plddt[_pep_key])
                     binder_avg_plddt = chain_b * 100.0 if chain_b <= 1.0 else chain_b
                     resc = _dpeptide_composite_from_refined(
                         refined_ipsae=pair_iptm,
