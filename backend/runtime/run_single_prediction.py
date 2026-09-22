@@ -8052,8 +8052,11 @@ def _backbone_intact(cif: Path, min_ca_ca: float = 2.80) -> bool:
     import gemmi
     st = gemmi.read_structure(str(cif))
     st.setup_entities()
-    prev = None
     for chain in st[0]:
+        # virtual bonds are WITHIN a chain: reset per chain, else the last
+        # CA of chain A gets compared with the first CA of chain B (multi-
+        # chain receptors put unrelated CAs within 2.8 A at their interface)
+        prev = None
         for res in chain:
             ca = res.find_atom("CA", "*")
             if ca is None:
