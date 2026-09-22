@@ -398,6 +398,53 @@ def add_interface_metrics(summary: dict, output_dir: Path, ligand_chain="B",
     summary["best_by_interface"] = best
 
 
+def _center_complex_on_receptor(
+    complex_path: Path, work_dir: Path,
+    peptide_letters: list[str], linker_letters: list[str],
+) -> Path:
+    """Translate the whole complex so the RECEPTOR centroid sits at origin.
+
+    The trunk/denoiser were trained on origin-centred complexes: an upload
+    in its crystal frame (RANKL trimer, centroid ~87 A off origin) is out
+    of distribution and the sampler never attaches the free chain --
+    measured 2026-09-22, every trimer refine crystallised the peptide
+    195-265 A away (interface 208+ A) while origin-centred receptors bound
+    normally. The output is therefore delivered in the centred frame
+    (translation is biologically meaningless; superposition downstream is
+    frame-independent).
+    """
+    import gemmi
+    st = gemmi.read_structure(str(complex_path))
+    st.setup_entities()
+    st.remove_hydrogens()
+    rec_pts = []
+    for ch in st[0]:
+        if ch.name in peptide_letters or ch.name in linker_letters:
+            continue
+        for r in ch:
+            if r.het_flag == "H":
+                continue
+            for a in r:
+                rec_pts.append((a.pos.x, a.pos.y, a.pos.z))
+    if not rec_pts:
+        return complex_path
+    c = np.asarray(rec_pts, dtype=np.float64).mean(axis=0)
+    if float(np.linalg.norm(c)) < 1.0:
+        return complex_path  # already centred
+    st_full = gemmi.read_structure(str(complex_path))
+    st_full.setup_entities()
+    for model in st_full:
+        for ch in model:
+            for r in ch:
+                for a in r:
+                    a.pos = gemmi.Position(a.pos.x - c[0], a.pos.y - c[1], a.pos.z - c[2])
+    centered = work_dir / f"{complex_path.stem}_centered{complex_path.suffix}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    st_full.write_pdb(str(centered))
+    log.info("complex centred on receptor centroid (offset %.1f A applied; "
+             "output ships in the centred frame)", float(np.linalg.norm(c)))
+    return centered
+
 def _run_peptide_engine(
     args, work_dir: Path, output_dir: Path
 ) -> tuple[Path, dict[str, Any]]:
@@ -413,6 +460,10 @@ def _run_peptide_engine(
     complex_path = Path(args.input).expanduser().resolve()
     if not complex_path.is_file():
         raise SystemExit(f"--input complex file not found: {complex_path}")
+    complex_path = _center_complex_on_receptor(
+        complex_path, work_dir,
+        peptide_letters=[s for s in (args.peptide_chain or "").split(",") if s.strip()],
+        linker_letters=[s for s in (args.linker_chain or "").split(",") if s.strip()])
 
     peptide_letters = [s.strip() for s in (args.peptide_chain or "").split(",") if s.strip()]
     linker_letters = [s.strip() for s in (args.linker_chain or "").split(",") if s.strip()]
