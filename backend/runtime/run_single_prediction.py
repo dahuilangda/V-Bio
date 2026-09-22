@@ -8573,7 +8573,11 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
     )
     if len(polymer) < 2:
         return {"chain": None, "n_c_distance": None, "all_bonded": False}
-    pep = polymer[1]
+    # the peptide is the SHORTEST polymer chain (multi-chain receptors put
+    # receptor copies at every length tier; the old polymer[1] pick measured
+    # a second receptor copy's termini -- a constant ~15.8 A on the RANKL
+    # trimer, phantom-"opening" every ring, 2026-09-22)
+    pep = polymer[-1]
     residues = [r for r in pep if r.het_flag != "H"]
     if len(residues) < 4:
         return {"chain": pep.name, "n_c_distance": None, "all_bonded": False}
