@@ -7671,8 +7671,16 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
     if len(protein_chains) < 2:
         raise RuntimeError(
             f"精修产物缺少两条聚合链: {[c.name for c in st[0]]}")
-    receptor, peptide = protein_chains[0], protein_chains[1]
-    rec_bad = chirality_violations(st, receptor.name, "D")
+    # The peptide is the SHORTEST polymer chain, every other chain is a
+    # receptor copy to check. The old chains[0]/chains[1] pick assumed a
+    # single receptor: on a multi-chain receptor (RANKL trimer A/B/C + D)
+    # chains[1] was a second RECEPTOR copy and every candidate died at the
+    # gate with 144/144 phantom violations (measured 2026-09-22).
+    peptide = protein_chains[-1]
+    receptor_chains = protein_chains[:-1]
+    rec_bad = []
+    for _rec in receptor_chains:
+        rec_bad.extend(chirality_violations(st, _rec.name, "D"))
     pep_bad = chirality_violations(st, peptide.name, "L")
     # Receptor flips = real sampler failure (the receptor is PINNED — any
     # inversion means the inpainting contract broke). Hard reject.
