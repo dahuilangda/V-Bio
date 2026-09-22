@@ -1,7 +1,7 @@
 import type { InputComponent, ProjectTask, ProteinModification } from '../../types/models';
 import type { WorkflowKey } from '../../utils/workflows';
+export type { MetricTone } from '../../pages/projectDetail/projectMetrics';
 
-export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 
 /** Phases of the async server-side Excel export, in order. */
 export type ExportProgressPhase = 'collecting' | 'submitting' | 'exporting' | 'downloading';

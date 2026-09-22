@@ -1,13 +1,13 @@
 import { Field } from '../components/common/Field';
 /**
- * Affinity workflow config block — extracted from ApiAccessPage CommandPanel.
- * 17 controlled pairs; self-contained per audit (only reads workflow gate flags).
+ * Affinity workflow config block: 17 controlled pairs; reads only the
+ * workflow gate flags.
  */
 interface AffinityConfigBlockProps {
   isAffinityWorkflow: boolean;
   isDockBuilderMode: boolean;
   normalizeMode: (v: string) => string;
-  builderAffinityConfidenceOnly: boolean;
+  isBuilderAffinityConfidenceOnly: boolean;
   builderAffinityMode: string;  // AffinityScoringMode union at parent
   builderAffinitySeed: number | null;
   builderTargetPath: string;
@@ -53,7 +53,7 @@ export function AffinityConfigBlock(p: AffinityConfigBlockProps) {
       <label className="checkbox-inline">
         <input
           type="checkbox"
-          checked={p.builderAffinityConfidenceOnly}
+          checked={p.isBuilderAffinityConfidenceOnly}
           onChange={(e) => p.onAffinityConfidenceOnlyChange(e.target.checked)}
         />
         <span>Confidence Only</span>
@@ -185,7 +185,7 @@ export function AffinityConfigBlock(p: AffinityConfigBlockProps) {
         <input value={p.builderLigandPath} onChange={(e) => p.onLigandPathChange(e.target.value)} placeholder="./ligand.sdf" />
       </Field>
     )}
-    {!p.builderAffinityConfidenceOnly && !p.isDockBuilderMode && (
+    {!p.isBuilderAffinityConfidenceOnly && !p.isDockBuilderMode && (
       <>
         <Field label="Target chain">
           <input

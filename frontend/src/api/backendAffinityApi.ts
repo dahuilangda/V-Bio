@@ -1,5 +1,6 @@
 import type { AffinityPreviewPayload, AffinitySubmitInput } from '../types/models';
 import { API_HEADERS, requestBackend } from './backendClient';
+import { isValidNotifyEmail } from '../utils/projectInputs';
 
 const AFFINITY_PREVIEW_TIMEOUT_MS = 90000;
 
@@ -111,19 +112,25 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
     if (!dockSmiles) {
       throw new Error('Dock mode requires a ligand SMILES.');
     }
-    const pocket = input.dockPocket || null;
-    if (!pocket) {
-      throw new Error('Dock mode requires a pocket box (pick residues, set a center, or upload a reference ligand).');
+    const pocket = input.dockBlind ? null : input.dockPocket || null;
+    // Blind dock is protenix-only; boltz2score requires a pocket and rejects blind submits.
+    if (!pocket && !input.dockBlind) {
+      throw new Error('Dock mode requires a pocket (pick residues in the 3D view or set a box center) — or enable Blind docking on the Protenix backend.');
     }
     form.append('protein_file', targetFile);
     form.append('ligand_smiles', dockSmiles);
     form.append('ligand_filename', 'ligand_from_smiles.sdf');
-    form.append('center_x', String(pocket.centerX));
-    form.append('center_y', String(pocket.centerY));
-    form.append('center_z', String(pocket.centerZ));
-    form.append('size_x', String(pocket.sizeX));
-    form.append('size_y', String(pocket.sizeY));
-    form.append('size_z', String(pocket.sizeZ));
+    if (pocket?.method === 'residues' && pocket.residues) {
+      // Explicit residue picks beat a derived box on the backend.
+      form.append('pocket_residues', pocket.residues);
+    } else if (pocket) {
+      form.append('center_x', String(pocket.centerX));
+      form.append('center_y', String(pocket.centerY));
+      form.append('center_z', String(pocket.centerZ));
+      form.append('size_x', String(pocket.sizeX));
+      form.append('size_y', String(pocket.sizeY));
+      form.append('size_z', String(pocket.sizeZ));
+    }
   } else if (useSeparateBoltzInputs && targetFile && ligandFile) {
     form.append('protein_file', targetFile);
     form.append('ligand_file', ligandFile);
@@ -132,6 +139,9 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
       'input_file',
       new File([structureText], input.inputStructureName || 'affinity_input.cif', { type: 'chemical/x-cif' })
     );
+  }
+  if (input.notifyEmail && isValidNotifyEmail(input.notifyEmail)) {
+    form.append('notify_email', input.notifyEmail);
   }
   const targetChainIds = Array.isArray(input.targetChainIds)
     ? input.targetChainIds.map((item) => String(item || '').trim()).filter(Boolean)
@@ -154,8 +164,7 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   const enableAffinity = input.enableAffinity;
   const computeIpsae = input.computeIpsae !== false;
   form.append('mode', affinityMode);
-  // backend routes /api/boltz2score to the boltz2score (default) or the
-  // protenix2dock engine (backend=protenix) — same five-mode semantics.
+  // backend=protenix routes this endpoint to the protenix2dock engine.
   const normalizedBackend = String(input.backend || '').trim().toLowerCase();
   form.append('backend', normalizedBackend === 'protenix' || normalizedBackend === 'protenix2dock' || normalizedBackend === 'p2d' ? 'protenix' : 'boltz');
   if (computeIpsae) {

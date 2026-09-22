@@ -7,6 +7,8 @@ import { AdminRoute, ProtectedRoute, SuperAdminRoute } from './components/layout
 import { ScrollToTop } from './components/router/ScrollToTop';
 import { RouteSkeleton } from './components/ui/RouteSkeleton';
 import { LoginPage } from './pages/LoginPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { JwtCallbackPage } from './pages/JwtCallbackPage';
 import { RegisterPage } from './pages/RegisterPage';
 
@@ -43,6 +45,8 @@ export default function App() {
       <CommandPalette />
       <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/auth/jwt" element={<JwtCallbackPage />} />
       <Route path="/register" element={<RegisterPage />} />
 

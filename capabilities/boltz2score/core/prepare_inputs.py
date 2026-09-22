@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 import tempfile
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -46,18 +46,15 @@ MSA_ALLOWED_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 
 def _sequence_cache_path(sequence: str, cache_dir: Path) -> Path:
-    """Shared cache key — the prediction runtime and protenix2dock read and
-    write the same ``msa_<md5>`` entries."""
+    """Cache key shared with the prediction runtime and protenix2dock
+    (same ``msa_<md5>`` entries)."""
     digest = hashlib.md5(sequence.encode("utf-8")).hexdigest()
     return cache_dir / f"msa_{digest}.a3m"
 
 
 def _cached_msa_matches_query(path: Path, sequence: str) -> bool:
-    """First aligned row (inserts stripped) must match the query length.
-
-    Guards against truncated or wrong-sequence cache entries; a mismatch is
-    treated as a cache miss so the MSA is regenerated, never trusted.
-    """
+    """First aligned row (inserts stripped) must match the query length; a
+    mismatch is treated as a cache miss so the MSA is regenerated, never trusted."""
     try:
         with open(path, "r", encoding="utf-8") as handle:
             for line in handle:
@@ -251,9 +248,8 @@ def _attach_msa_to_record(
 def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     """Return True if CCD atom names can map to residue atom names.
 
-    Boltz2 maps ligand coordinates by atom *name*. If names do not match,
-    coordinates will be dropped (atoms marked not present), which degrades
-    confidence on small molecules. We therefore require name-level agreement
+    Boltz2 maps ligand coordinates by atom *name*; mismatches drop coordinates
+    and degrade small-molecule confidence, so require name-level agreement
     (with light normalization) rather than element-only matching.
     """
     if ccd_mol is None:
@@ -288,7 +284,6 @@ def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     import re
 
     def _norm(name: str) -> str:
-        # Normalize common PDB/CCD naming differences without losing identity.
         norm = re.sub(r"[^A-Za-z0-9]", "", name.strip().upper())
         norm = norm.lstrip("0123456789")
         return norm
@@ -298,7 +293,6 @@ def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     res_norm_counter = Counter(_norm(n) for n in res_names)
     ccd_norm_counter = Counter(_norm(n) for n in ccd_names)
 
-    # Try exact atom name matching first
     exact_match = True
     for name, count in res_counter.items():
         if ccd_counter.get(name, 0) < count:
@@ -308,7 +302,6 @@ def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     if exact_match:
         return True
 
-    # Try normalized name matching (handles simple formatting differences).
     norm_match = True
     for name, count in res_norm_counter.items():
         if ccd_norm_counter.get(name, 0) < count:
@@ -422,7 +415,6 @@ def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
     mol.SetProp("name", residue.name)
     mol.SetProp("id", residue.name)
 
-    # Try to infer bonds from coordinates; fall back to no bonds on failure.
     mol = _assign_bond_orders(mol)
     _finalize_custom_mol(mol)
 
@@ -455,17 +447,15 @@ def _build_custom_ligand_mol_from_smiles(
 ) -> Chem.Mol | None:
     """Build ligand topology from SMILES while preserving residue heavy-atom coordinates.
 
-    Residue coordinates can include explicit hydrogens (e.g. from SDF/MOL2 uploads),
-    while SMILES templates are matched on heavy atoms. Matching on all atoms causes
-    frequent failures and silently falls back to weaker topology inference.
+    Residues may carry explicit hydrogens (SDF/MOL2 uploads) while SMILES
+    templates match heavy atoms; matching on all atoms fails often and silently
+    falls back to weaker topology inference.
     """
     template = Chem.MolFromSmiles((smiles or "").strip())
     if template is None:
         return None
     template = Chem.RemoveHs(template)
 
-    # Build coordinate candidate from heavy atoms only, so template matching remains
-    # stable for ligands with explicit hydrogens in uploaded structures.
     rw_mol = Chem.RWMol()
     atom_names = []
     kept_positions: list[tuple[float, float, float]] = []
@@ -1003,12 +993,6 @@ def _iter_struct_files(input_dir: Path, recursive: bool) -> List[Path]:
     return sorted(files)
 
 
-def _load_ccd(ccd_path: Path) -> dict:
-    if not ccd_path.exists():
-        raise FileNotFoundError(f"CCD file not found: {ccd_path}")
-    with ccd_path.open("rb") as f:
-        return pickle.load(f)
-
 
 def _parse_structure(path: Path, mols: dict, mol_dir: Path):
     suffix = path.suffix.lower()
@@ -1179,8 +1163,8 @@ def prepare_inputs(
 
     # Ensure RDKit pickle properties are available
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
-    # Authoritative source for CCD molecules is cache/mols/*.pkl.
-    # Avoids dependence on ccd.pkl serialization variants.
+    # Authoritative source for CCD molecules is cache/mols/*.pkl (not ccd.pkl,
+    # whose serialization varies).
     mols = {}
 
     struct_files = _iter_struct_files(input_dir, recursive)
@@ -1232,7 +1216,6 @@ def prepare_inputs(
                 max_msa_seqs=max_msa_seqs,
                 msa_cache_dir=msa_cache_dir,
             )
-            # Dump structure and record
             parsed.data.dump(struct_dir / f"{target_id}.npz")
             if record.templates:
                 parsed.data.dump(template_dir / f"{target_id}_self.npz")

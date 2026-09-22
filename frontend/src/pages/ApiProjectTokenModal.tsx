@@ -1,8 +1,8 @@
 /**
  * The per-project token panel of the API access page: lists a project's
  * tokens with use/revoke/delete actions and a jump into the token registry.
- * Pure presentation — all state and handlers stay in ApiAccessPage; the
- * wrapper there guarantees this renders only while a project is selected.
+ * Pure presentation — all state and handlers stay in ApiAccessPage; rendered
+ * only while a project is selected.
  */
 import type { Dispatch, SetStateAction } from 'react';
 import { KeyRound, LoaderCircle, ShieldOff, Trash2, X } from 'lucide-react';
@@ -20,9 +20,9 @@ interface ApiProjectTokenModalProps {
   setSelectedTokenId: Dispatch<SetStateAction<string>>;
   tokenRevokingId: string | null;
   tokenDeletingId: string | null;
-  revokeToken: (tokenId: string) => Promise<void>;
-  removeToken: (tokenId: string) => Promise<void>;
-  openTokenRegistryForProject: (projectId: string) => void;
+  revokeTokenAction: (tokenId: string) => Promise<void>;
+  removeTokenAction: (tokenId: string) => Promise<void>;
+  onOpenTokenRegistry: (projectId: string) => void;
 }
 
 export function ApiProjectTokenModal({
@@ -35,9 +35,9 @@ export function ApiProjectTokenModal({
   setSelectedTokenId,
   tokenRevokingId,
   tokenDeletingId,
-  revokeToken,
-  removeToken,
-  openTokenRegistryForProject
+  revokeTokenAction,
+  removeTokenAction,
+  onOpenTokenRegistry
 }: ApiProjectTokenModalProps) {
   return (
     <div className="modal-mask" onClick={() => setProjectTokenPanelProjectId(null)}>
@@ -95,7 +95,7 @@ export function ApiProjectTokenModal({
                         aria-label="Revoke token"
                         disabled={tokenRevokingId === token.id}
                         aria-busy={tokenRevokingId === token.id}
-                        onClick={() => { void revokeToken(token.id); }}
+                        onClick={() => { void revokeTokenAction(token.id); }}
                       >
                         {tokenRevokingId === token.id ? <LoaderCircle size={13} className="spin" /> : <ShieldOff size={13} />}
                       </button>
@@ -107,7 +107,7 @@ export function ApiProjectTokenModal({
                       aria-label="Delete token"
                       disabled={tokenDeletingId === token.id}
                       aria-busy={tokenDeletingId === token.id}
-                      onClick={() => { void removeToken(token.id); }}
+                      onClick={() => { void removeTokenAction(token.id); }}
                     >
                       {tokenDeletingId === token.id ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={13} />}
                     </button>
@@ -123,7 +123,7 @@ export function ApiProjectTokenModal({
               onClick={() => {
                 if (!projectTokenPanelProjectId) return;
                 setProjectTokenPanelProjectId(null);
-                openTokenRegistryForProject(projectTokenPanelProjectId);
+                onOpenTokenRegistry(projectTokenPanelProjectId);
               }}
             >
               <KeyRound size={13} />

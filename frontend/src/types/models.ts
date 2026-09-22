@@ -17,11 +17,11 @@ export interface AffinityDockPocket {
   sizeY: number;
   sizeZ: number;
   method: 'residues' | 'manual' | 'ligand';
+  /** Author-numbered residue picks ("A:152,A:153"); the dock sampler conditions on them. */
+  residues?: string;
 }
 
-// Manual backbone atom assignment for a custom non-natural residue, as 0-based RDKit
-// heavy-atom indices — the same index space as the 2D depiction and the backend CCD builder.
-// When present it overrides automatic backbone detection end-to-end (single source of truth).
+// Manual backbone atoms as 0-based RDKit heavy-atom indices; overrides auto detection when present.
 export interface CustomResidueBackbone {
   n: number;
   ca: number;
@@ -33,16 +33,12 @@ export interface CustomResidueBackbone {
 export interface PeptideResiduePoolSelection {
   code: string;
   kind: PeptideResiduePoolKind;
-  // Custom residues carry their own CCD source (SMILES + parent AA) so the definition
-  // travels with the selection in the persisted config and reaches AF3/Protenix/Boltz
-  // as a CCD regardless of the ephemeral in-memory residue library.
+  // Custom residues carry their CCD source so the definition survives in the persisted config.
   smiles?: string;
   baseResidue?: string;
   label?: string;
   backbone?: CustomResidueBackbone;
-  // When true the residue's C-terminus is -CONH2 (amide) instead of -COOH (carboxyl). The 5th
-  // backbone slot then points at the amide nitrogen (NXT, non-leaving); the residue may only
-  // occupy the C-terminal position of a linear chain.
+  // Amide C-terminus; the 5th backbone slot is the NXT nitrogen. C-terminal position only.
   cTerminalAmidated?: boolean;
 }
 
@@ -131,8 +127,7 @@ export interface PredictionProperties {
 export type VirtualScreeningStructureBackend = 'boltz' | 'protenix' | 'alphafold3';
 export type VirtualScreeningStructureState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
 
-// Small, durable metadata for a structure job launched from a virtual-screening hit.
-// The structure itself stays in the runtime result archive and is loaded only when opened.
+// Durable metadata for a virtual-screening structure job; the structure loads lazily.
 export interface VirtualScreeningPredictionRecord {
   taskId: string;
   backend: VirtualScreeningStructureBackend;
@@ -161,6 +156,10 @@ export interface PredictionOptions {
   virtualScreeningPredictions?: Record<string, VirtualScreeningPredictionRecord>;
   affinityMode?: AffinityScoringMode;
   affinityDockPocket?: AffinityDockPocket | null;
+  /** Dock mode: blind whole-surface search (no pocket conditioning). */
+  affinityDockBlind?: boolean;
+  /** Optional completion-notification email for long-running submissions. */
+  notifyEmail?: string | null;
   peptideDesignMode?: PeptideDesignMode;
   peptideChirality?: 'l' | 'd';
   peptideBinderLength?: number;
@@ -173,7 +172,6 @@ export interface PredictionOptions {
   peptidePopulationSize?: number;
   peptideEliteSize?: number;
   peptideResiduePool?: PeptideResiduePoolSelection[];
-  peptideCustomResidueDefinitions?: CustomCcdMoleculeInput[];
   peptideNonNaturalMin?: number;
   peptideNonNaturalMax?: number;
   peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
@@ -425,9 +423,8 @@ export interface ProjectCopilotState {
 export type CopilotOperationEffect = 'create' | 'update' | 'delete' | 'execute' | 'navigate';
 
 /**
- * A structured question the planner asks the user to resolve an ambiguity before planning (e.g.
- * which task type or modeling backend). The frontend renders these as clickable choice chips when
- * kind=choice, a yes/no pair when kind=confirm, or a highlighted prompt when kind=freeform.
+ * Planner question that resolves an ambiguity (task type, backend, ...) before planning;
+ * rendered as choice chips (choice), a yes/no pair (confirm), or a prompt (freeform).
  */
 export type CopilotQuestionKind = 'choice' | 'confirm' | 'freeform';
 
@@ -447,10 +444,8 @@ export interface CopilotPlannerQuestion {
 }
 
 /**
- * One observable step in the planner loop (model call → harness audit → read-skill
- * observation → terminal). Returned by the Copilot turn endpoint as a `trace[]` so the
- * UI can show how the planner reasoned, general and domain-agnostic (event names + compact
- * detail, never payload bodies). Mirrors the agent-trace pattern (OTel GenAI / agent SDKs).
+ * One observable step in the planner loop, returned as `trace[]` so the UI can show how
+ * the planner reasoned (event names + compact detail, never payload bodies).
  */
 export interface CopilotTraceStep {
   round: number;
@@ -521,6 +516,7 @@ export interface PredictionSubmitInput {
   backend: string;
   useMsa: boolean;
   msaMode?: 'none' | 'uniref' | 'env';
+  notifyEmail?: string;
   templateUploads?: PredictionTemplateUpload[];
   customCcdMolecules?: CustomCcdMoleculeInput[];
   lowVram?: boolean;
@@ -573,6 +569,10 @@ export interface AffinitySubmitInput {
   msaMode?: 'none' | 'uniref' | 'env';
   useTemplate?: boolean;
   dockPocket?: AffinityDockPocket | null;
+  /** Dock mode without any pocket — protenix2dock whole-surface blind search. */
+  dockBlind?: boolean;
+  /** Optional completion-notification email. */
+  notifyEmail?: string;
 }
 
 export interface TaskStatusResponse {

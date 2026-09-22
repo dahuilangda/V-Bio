@@ -1,8 +1,6 @@
 /**
- * Number input that only commits on blur/Enter — draft typing doesn't
- * trigger parent state updates (avoids re-render storms in large forms).
- * Extracted from WorkflowRuntimeSettingsSection for reuse (audit: was
- * file-private while 10+ files hand-rolled raw number inputs).
+ * Number input that commits on blur/Enter so draft typing
+ * doesn't re-render the parent on every keystroke.
  */
 import { useEffect, useState, type ChangeEvent, type FocusEvent } from 'react';
 
@@ -18,11 +16,11 @@ interface CommitNumberInputProps {
   min: number;
   max: number;
   step?: number;
-  disabled?: boolean;
+  isDisabled?: boolean;
   onCommit: (value: number) => void;
 }
 
-export function CommitNumberInput({ value, min, max, step, disabled, onCommit }: CommitNumberInputProps) {
+export function CommitNumberInput({ value, min, max, step, isDisabled, onCommit, ...rest }: CommitNumberInputProps & React.InputHTMLAttributes<HTMLInputElement>) {
   const [draftValue, setDraftValue] = useState(String(value));
 
   useEffect(() => {
@@ -37,7 +35,8 @@ export function CommitNumberInput({ value, min, max, step, disabled, onCommit }:
 
   return (
     <input
-      type="number"
+          {...rest}
+    type="number"
       min={min}
       max={max}
       step={step}
@@ -49,7 +48,7 @@ export function CommitNumberInput({ value, min, max, step, disabled, onCommit }:
         commit(event.currentTarget.value);
         event.currentTarget.blur();
       }}
-      disabled={disabled}
+      disabled={isDisabled}
     />
   );
 }

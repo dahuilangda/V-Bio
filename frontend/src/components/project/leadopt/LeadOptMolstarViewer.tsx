@@ -20,10 +20,10 @@ interface LeadOptMolstarViewerProps {
   activeAtom?: MolstarAtomHighlight | null;
   interactionGranularity?: 'residue' | 'element';
   lockView?: boolean;
-  suppressAutoFocus?: boolean;
-  showSequence?: boolean;
+  isAutoFocusSuppressed?: boolean;
+  isSequenceVisible?: boolean;
   ligandFocusChainId?: string;
-  suppressResidueSelection?: boolean;
+  isResidueSelectionSuppressed?: boolean;
   styleVariant?: 'default' | 'results';
 }
 

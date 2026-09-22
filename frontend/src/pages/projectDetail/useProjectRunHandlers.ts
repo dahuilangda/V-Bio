@@ -26,6 +26,7 @@ interface UseProjectRunHandlersOptions {
 
 interface UseProjectRunHandlersResult {
   handleRunAction: () => void;
+  handleConfirmedRunAction: (notifyEmailOverride?: string) => void;
   handleRunCurrentDraft: () => void;
   handleRestoreSavedDraft: () => void;
   handleResetFromHeader: () => void;
@@ -48,7 +49,20 @@ export function useProjectRunHandlers({
   navigate,
 }: UseProjectRunHandlersOptions): UseProjectRunHandlersResult {
   const handleRunAction = () => {
+    // unsaved edits: let the user choose which version to run before
+    // consuming compute (the "(has unsaved changes)" hint advertises this menu)
+    if (hasUnsavedChanges && !runDisabled && !submitting && !saving && !loading) {
+      setRunMenuOpen(true);
+      return;
+    }
     handleRunActionControl({ runDisabled, submitTask });
+  };
+
+  // the confirm dialog IS the run confirmation: submit the current draft
+  // directly — handleRunAction would open the unsaved-changes menu under the
+  // modal and lock the dialog
+  const handleConfirmedRunAction = (notifyEmailOverride?: string) => {
+    handleRunActionControl({ runDisabled, submitTask, notifyEmailOverride });
   };
 
   const handleRunCurrentDraft = () => {
@@ -90,6 +104,7 @@ export function useProjectRunHandlers({
 
   return {
     handleRunAction,
+    handleConfirmedRunAction,
     handleRunCurrentDraft,
     handleRestoreSavedDraft,
     handleResetFromHeader,

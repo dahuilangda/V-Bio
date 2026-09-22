@@ -11,14 +11,12 @@ import type {
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
 import type { LeadOptPersistedUploads } from '../../components/project/leadopt/hooks/useLeadOptReferenceFragment';
-import {
-  buildAffinityWorkflowSectionProps,
-  buildLeadOptimizationWorkflowSectionProps,
-  buildPredictionWorkflowSectionProps,
-  buildProjectResultsSectionProps,
-  buildVirtualScreeningWorkflowSectionProps,
-  buildWorkflowRuntimeSettingsSectionProps
-} from './workflowSectionProps';
+import { buildProjectResultsSectionProps } from './workflowSectionProps';
+import type { AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
+import type { LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWorkflowSection';
+import type { PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
+import type { VirtualScreeningLibraryChange, VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
+import type { WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
 import { handleLeadOptimizationLigandSmilesChangeAction } from './editorActions';
 import { withLeadOptimizationLigandSmiles } from '../../utils/leadOptimization';
 import type { LeadOptHaloSnapshot } from '../../components/project/LeadOptimizationWorkspace';
@@ -90,6 +88,8 @@ interface UseProjectWorkflowSectionPropsInput {
   onAffinityConfidenceOnlyChange: (checked: boolean) => void;
   onAffinityModeChange: (mode: AffinityScoringMode) => void;
   onAffinityDockPocketChange: (pocket: import('../../types/models').AffinityDockPocket | null) => void;
+  affinityDockBlind: boolean;
+  onAffinityDockBlindChange: (blind: boolean) => void;
   setAffinityLigandSmiles: (value: string) => void;
   leadOptProteinSequence: string;
   leadOptLigandSmiles: string;
@@ -142,8 +142,8 @@ interface UseProjectWorkflowSectionPropsInput {
   activeComponentId: string | null;
   setActiveComponentId: Dispatch<SetStateAction<string | null>>;
   onProteinTemplateResiduePick: (pick: MolstarResiduePick) => void;
-  predictionConstraintsWorkspaceProps: ReturnType<typeof buildPredictionWorkflowSectionProps>['constraintsWorkspaceProps'];
-  predictionComponentsSidebarProps: ReturnType<typeof buildPredictionWorkflowSectionProps>['componentsSidebarProps'];
+  predictionConstraintsWorkspaceProps: Omit<PredictionWorkflowSectionProps, 'isVisible'>['constraintsWorkspaceProps'];
+  predictionComponentsSidebarProps: Omit<PredictionWorkflowSectionProps, 'isVisible'>['componentsSidebarProps'];
   backend: string;
   seed: number | null;
   lowVram: boolean;
@@ -225,23 +225,19 @@ interface UseProjectWorkflowSectionPropsInput {
 
 interface UseProjectWorkflowSectionPropsResult {
   projectResultsSectionProps: ReturnType<typeof buildProjectResultsSectionProps>;
-  affinityWorkflowSectionProps: ReturnType<typeof buildAffinityWorkflowSectionProps>;
-  leadOptimizationWorkflowSectionProps: ReturnType<typeof buildLeadOptimizationWorkflowSectionProps>;
-  predictionWorkflowSectionProps: ReturnType<typeof buildPredictionWorkflowSectionProps>;
-  virtualScreeningWorkflowSectionProps: ReturnType<typeof buildVirtualScreeningWorkflowSectionProps>;
-  workflowRuntimeSettingsSectionProps: ReturnType<typeof buildWorkflowRuntimeSettingsSectionProps>;
+  affinityWorkflowSectionProps: Omit<AffinityWorkflowSectionProps, 'isVisible'>;
+  leadOptimizationWorkflowSectionProps: Omit<LeadOptimizationWorkflowSectionProps, 'isVisible'>;
+  predictionWorkflowSectionProps: Omit<PredictionWorkflowSectionProps, 'isVisible'>;
+  virtualScreeningWorkflowSectionProps: Omit<VirtualScreeningWorkflowSectionProps, 'isVisible'>;
+  workflowRuntimeSettingsSectionProps: Omit<WorkflowRuntimeSettingsSectionProps, 'isVisible'>;
 }
 
 const EMPTY_PROJECT_RESULTS_SECTION_PROPS = {} as ReturnType<typeof buildProjectResultsSectionProps>;
-const EMPTY_AFFINITY_WORKFLOW_SECTION_PROPS = {} as ReturnType<typeof buildAffinityWorkflowSectionProps>;
-const EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS = {} as ReturnType<
-  typeof buildLeadOptimizationWorkflowSectionProps
->;
-const EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS = {} as ReturnType<typeof buildPredictionWorkflowSectionProps>;
-const EMPTY_VIRTUAL_SCREENING_WORKFLOW_SECTION_PROPS = {} as ReturnType<
-  typeof buildVirtualScreeningWorkflowSectionProps
->;
-const EMPTY_WORKFLOW_RUNTIME_SETTINGS_SECTION_PROPS = {} as ReturnType<typeof buildWorkflowRuntimeSettingsSectionProps>;
+const EMPTY_AFFINITY_WORKFLOW_SECTION_PROPS = {} as Omit<AffinityWorkflowSectionProps, 'isVisible'>;
+const EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS = {} as Omit<LeadOptimizationWorkflowSectionProps, 'isVisible'>;
+const EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS = {} as Omit<PredictionWorkflowSectionProps, 'isVisible'>;
+const EMPTY_VIRTUAL_SCREENING_WORKFLOW_SECTION_PROPS = {} as Omit<VirtualScreeningWorkflowSectionProps, 'isVisible'>;
+const EMPTY_WORKFLOW_RUNTIME_SETTINGS_SECTION_PROPS = {} as Omit<WorkflowRuntimeSettingsSectionProps, 'isVisible'>;
 
 export function useProjectWorkflowSectionProps({
   isPredictionWorkflow,
@@ -307,6 +303,8 @@ export function useProjectWorkflowSectionProps({
   onAffinityConfidenceOnlyChange,
   onAffinityModeChange,
   onAffinityDockPocketChange,
+  affinityDockBlind,
+  onAffinityDockBlindChange,
   setAffinityLigandSmiles,
   leadOptProteinSequence,
   leadOptLigandSmiles,
@@ -481,19 +479,19 @@ export function useProjectWorkflowSectionProps({
         peptideFallbackIptm: snapshotSelectedPairIptm,
         statusInfo,
         progressPercent,
-        canPredictStructures: canEdit,
+        isStructurePredictionAllowed: canEdit,
         virtualScreeningComponents: components,
         predictionRecords: virtualScreeningPredictionRecords,
         onPredictionRecordsChange: canEdit
           ? onVirtualScreeningPredictionRecordsChange
           : undefined,
-        onPeptideRequestStructure
+        requestStructureAction: onPeptideRequestStructure
       })
     : EMPTY_PROJECT_RESULTS_SECTION_PROPS;
   const affinityWorkflowSectionProps = shouldBuildAffinityWorkflowSection
-    ? buildAffinityWorkflowSectionProps({
-        canEdit,
-        submitting,
+    ? {
+        isEditable: canEdit,
+        isSubmitting: submitting,
         backend,
         targetFileName: affinityTargetFileName,
         ligandFileName: affinityLigandFileName,
@@ -501,9 +499,10 @@ export function useProjectWorkflowSectionProps({
         ligandEditorInput: affinityEffectiveLigandSmiles,
         mode: affinityMode,
         dockPocket: affinityDockPocket,
+        isDockBlind: affinityDockBlind,
         seed: seed ?? null,
-        confidenceOnly: affinityConfidenceOnlyUiValue,
-        confidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
+        isConfidenceOnly: affinityConfidenceOnlyUiValue,
+        isConfidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
         previewTargetStructureText: affinityPreviewStructureText,
         previewTargetStructureFormat: affinityPreviewStructureFormat,
         previewLigandStructureText: affinityPreviewLigandOverlayText,
@@ -518,14 +517,15 @@ export function useProjectWorkflowSectionProps({
         onBackendChange,
         onModeChange: onAffinityModeChange,
         onDockPocketChange: onAffinityDockPocketChange,
+        onDockBlindChange: onAffinityDockBlindChange,
         onSeedChange,
         onLigandSmilesChange: setAffinityLigandSmiles,
         onResizerPointerDown: onResultsResizerPointerDown,
         onResizerKeyDown: onResultsResizerKeyDown
-      })
+      }
     : EMPTY_AFFINITY_WORKFLOW_SECTION_PROPS;
   const leadOptimizationWorkflowSectionProps = shouldBuildLeadOptimizationWorkflowSection
-    ? buildLeadOptimizationWorkflowSectionProps({
+    ? {
         workspaceTab,
         canEdit,
         submitting,
@@ -545,10 +545,10 @@ export function useProjectWorkflowSectionProps({
         options: leadOptOptions,
         onOptionChange: onLeadOptOptionChange,
         onDockPocketChange: onLeadOptDockPocketChange
-      })
+      }
     : EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS;
   const predictionWorkflowSectionProps = shouldBuildPredictionWorkflowSection
-    ? buildPredictionWorkflowSectionProps({
+    ? {
         workspaceTab,
         canEdit,
         componentsWorkspaceRef,
@@ -559,8 +559,8 @@ export function useProjectWorkflowSectionProps({
         components,
         onComponentsChange,
         proteinTemplates,
-        allowProteinMsa: !isNessoBackend,
-        allowProteinTemplates: !isNessoBackend,
+        isProteinMsaAllowed: !isNessoBackend,
+        isProteinTemplatesAllowed: !isNessoBackend,
         customResidueLibrary,
         onCustomResidueLibraryChange,
         onProteinTemplateChange,
@@ -587,10 +587,10 @@ export function useProjectWorkflowSectionProps({
             : null,
         constraintsWorkspaceProps: predictionConstraintsWorkspaceProps,
         componentsSidebarProps: predictionComponentsSidebarProps
-      })
+      }
     : EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS;
   const virtualScreeningWorkflowSectionProps = shouldBuildVirtualScreeningWorkflowSection
-    ? buildVirtualScreeningWorkflowSectionProps({
+    ? {
         canEdit,
         componentsWorkspaceRef,
         isComponentsResizing,
@@ -604,7 +604,7 @@ export function useProjectWorkflowSectionProps({
         screeningInput: virtualScreeningInput,
         screeningInputMode: virtualScreeningInputMode,
         screeningInputFileName: virtualScreeningInputFileName,
-        onScreeningLibraryChange: ({ value, mode, fileName }) => {
+        onScreeningLibraryChange: ({ value, mode, fileName }: VirtualScreeningLibraryChange) => {
           setDraft((previous) => {
             if (!previous) return previous;
             return {
@@ -621,23 +621,23 @@ export function useProjectWorkflowSectionProps({
             };
           });
         }
-      })
+      }
     : EMPTY_VIRTUAL_SCREENING_WORKFLOW_SECTION_PROPS;
   const workflowRuntimeSettingsSectionProps = shouldBuildWorkflowRuntimeSettingsSection
-    ? buildWorkflowRuntimeSettingsSectionProps({
-        canEdit,
+    ? {
+        isEditable: canEdit,
         isPredictionWorkflow,
         isPeptideDesignWorkflow,
         isAffinityWorkflow,
         backend,
         seed: seed ?? null,
-        lowVram,
+        isLowVram: lowVram,
         peptideDesignMode,
         peptideChirality,
         peptideBinderLength,
-    peptideLengthMin,
-    peptideLengthMax,
-        peptideUseInitialSequence,
+        peptideLengthMin,
+        peptideLengthMax,
+        isPeptideUseInitialSequence: peptideUseInitialSequence,
         peptideInitialSequence,
         peptideStructureUpload,
         onPeptideStructureUploadChange,
@@ -646,14 +646,14 @@ export function useProjectWorkflowSectionProps({
         peptidePopulationSize,
         peptideEliteSize,
         peptideResiduePool,
-        peptideResiduePoolAvailable,
+        hasPeptideResiduePool: peptideResiduePoolAvailable,
         peptideNonNaturalMin,
         peptideNonNaturalMax,
         peptideCustomResidueLibrary: customResidueLibrary,
         onCustomResidueLibraryChange,
         peptideBicyclicLinkerCcd,
-        peptideBicyclicFixTerminalCys,
-        peptideBicyclicIncludeExtraCys,
+        isPeptideBicyclicFixTerminalCys: peptideBicyclicFixTerminalCys,
+        isPeptideBicyclicIncludeExtraCys: peptideBicyclicIncludeExtraCys,
         peptideBicyclicCys1Pos,
         peptideBicyclicCysLayout,
         peptideBicyclicRing1,
@@ -675,7 +675,7 @@ export function useProjectWorkflowSectionProps({
         onPeptideIterationsChange,
         onPeptidePopulationSizeChange,
         onPeptideEliteSizeChange,
-              onPeptideResiduePoolChange,
+        onPeptideResiduePoolChange,
         onPeptideNonNaturalRangeChange,
         onPeptideBicyclicLinkerCcdChange,
         onPeptideBicyclicFixTerminalCysChange,
@@ -686,7 +686,7 @@ export function useProjectWorkflowSectionProps({
         onPeptideBicyclicRatioChange,
         onPeptideBicyclicCys2PosChange,
         onPeptideBicyclicCys3PosChange
-      })
+      }
     : EMPTY_WORKFLOW_RUNTIME_SETTINGS_SECTION_PROPS;
 
   return {

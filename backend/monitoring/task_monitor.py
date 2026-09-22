@@ -5,11 +5,10 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import psutil
-from celery.result import AsyncResult
 
 from backend.core import config
 from backend.core.celery_app import celery_app
@@ -26,90 +25,9 @@ class TaskMonitor:
         self.logger = logger
         self.docker_cmd_timeout_seconds = docker_cmd_timeout_seconds
         self.redis_client = get_redis_client()
-        self.max_task_duration = timedelta(hours=3)
-        self.max_stuck_duration = timedelta(minutes=30)
 
-    def get_stuck_tasks(self) -> List[Dict]:
-        stuck_tasks = []
-        gpu_status = get_gpu_status()
-
-        for gpu_id, task_id in gpu_status['in_use'].items():
-            task_info = self._analyze_task(task_id)
-            if task_info and task_info['is_stuck']:
-                task_info['gpu_id'] = gpu_id
-                stuck_tasks.append(task_info)
-
-        return stuck_tasks
-
-    def _analyze_task(self, task_id: str) -> Optional[Dict]:
-        try:
-            result = AsyncResult(task_id, app=celery_app)
-
-            task_start_key = f"task_start:{task_id}"
-            start_time_raw = self.redis_client.get(task_start_key)
-            last_update_key = f"task_update:{task_id}"
-            last_update_raw = self.redis_client.get(last_update_key)
-            # The shared redis pool runs decode_responses=False — raw values are bytes,
-            # and fromisoformat(bytes) raises. Decode explicitly (writers store UTF-8 ISO
-            # timestamps).
-            if isinstance(start_time_raw, bytes):
-                start_time_raw = start_time_raw.decode('utf-8', 'replace')
-            if isinstance(last_update_raw, bytes):
-                last_update_raw = last_update_raw.decode('utf-8', 'replace')
-            start_time_str = start_time_raw
-            last_update_str = last_update_raw
-
-            if start_time_str:
-                start_time = datetime.fromisoformat(start_time_str)
-            else:
-                # No start record (task predates monitoring, or the recorder missed it). Do not
-                # fabricate and persist a fake start — fall back to last_update (or now) so the
-                # duration check stays conservative instead of hiding a stuck task behind a fresh
-                # timestamp.
-                self.logger.warning('Task %s has no task_start record; age unknown.', task_id)
-                start_time = datetime.fromisoformat(last_update_str) if last_update_str else datetime.now()
-
-            last_update = datetime.fromisoformat(last_update_str) if last_update_str else start_time
-
-            now = datetime.now()
-            running_time = now - start_time
-            stuck_time = now - last_update
-
-            is_stuck = False
-            reason = ""
-
-            if running_time > self.max_task_duration:
-                is_stuck = True
-                reason = f"运行时间过长 ({running_time})"
-            elif stuck_time > self.max_stuck_duration and result.state in ['PENDING', 'PROGRESS']:
-                is_stuck = True
-                reason = f"无进展时间过长 ({stuck_time})"
-            elif result.state == 'FAILURE':
-                is_stuck = True
-                reason = '任务已失败但GPU未释放'
-
-            processes = self._find_task_processes(task_id)
-            if not processes and result.state in ['PENDING', 'PROGRESS']:
-                is_stuck = True
-                reason = '任务进程不存在但状态显示运行中'
-
-            return {
-                'task_id': task_id,
-                'state': result.state,
-                'start_time': start_time.isoformat(),
-                'last_update': last_update.isoformat(),
-                'running_time': str(running_time),
-                'stuck_time': str(stuck_time),
-                'is_stuck': is_stuck,
-                'reason': reason,
-                'processes': len(processes),
-                'meta': result.info if hasattr(result, 'info') else {},
-            }
-
-        except Exception as exc:
-            self.logger.error('分析任务 %s 时出错: %s', task_id, exc)
-            return None
-
+    
+    
     def _find_task_processes(self, task_id: str) -> List[Dict]:
         processes = []
         seen_pids = set()
@@ -153,8 +71,8 @@ class TaskMonitor:
                             'cpu_percent': proc.cpu_percent(),
                         })
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    # Registered PID vanished or is restricted — expected during cleanup. A corrupt
-                    # task_process blob (JSONDecodeError/ValueError) propagates to the outer handler.
+                    # PID vanished/restricted is expected; corrupt task_process blobs
+                    # propagate to the outer handler.
                     pass
         except Exception as exc:
             self.logger.error('查找进程时出错: %s', exc)
@@ -206,8 +124,8 @@ class TaskMonitor:
                 'mount_sources': [str(item.get('Source') or '') for item in mounts if isinstance(item, dict)],
             }
         except Exception as exc:
-            # "No such container" is expected (the container is gone). Anything else (Docker daemon
-            # down, malformed inspect output) is operationally relevant — log it.
+            # "No such container" is expected; anything else (daemon down,
+            # malformed output) gets logged.
             if 'No such container' not in str(exc):
                 self.logger.warning('docker inspect failed for %s: %s', container_id, exc)
             return None
@@ -433,8 +351,7 @@ class TaskMonitor:
                     result['errors'].append(str(exc))
 
         try:
-            self.redis_client.delete(f'task_start:{task_id}')
-            self.redis_client.delete(f'task_update:{task_id}')
+
             self.redis_client.delete(f'task_heartbeat:{task_id}')
             self.redis_client.delete(f'task_status:{task_id}')
             self.redis_client.delete(f'task_process:{task_id}')
@@ -459,44 +376,5 @@ class TaskMonitor:
 
         return result
 
-    def kill_stuck_tasks(self, task_ids: Optional[List[str]] = None, force: bool = False) -> Dict:
-        if task_ids is None:
-            stuck_tasks = self.get_stuck_tasks()
-            task_ids = [task['task_id'] for task in stuck_tasks]
-
-        results = {'killed_tasks': [], 'failed_to_kill': [], 'released_gpus': []}
-
-        for task_id in task_ids:
-            try:
-                termination = self.terminate_task_runtime(task_id, force=force)
-                success = bool(termination.get('ok'))
-                if success:
-                    results['killed_tasks'].append(task_id)
-                    for gpu_id in termination.get('released_gpus', []):
-                        if gpu_id not in results['released_gpus']:
-                            results['released_gpus'].append(gpu_id)
-                else:
-                    results['failed_to_kill'].append(task_id)
-                    self.logger.error('终止任务 %s 失败: %s', task_id, termination)
-            except Exception as exc:
-                self.logger.error('清理任务 %s 时出错: %s', task_id, exc)
-                results['failed_to_kill'].append(task_id)
-
-        return results
-
-    def clean_completed_tasks(self) -> Dict:
-        gpu_status = get_gpu_status()
-        results = {'cleaned_gpus': [], 'failed_to_clean': []}
-
-        for gpu_id, task_id in gpu_status['in_use'].items():
-            try:
-                result = AsyncResult(task_id, app=celery_app)
-                if result.state in ['SUCCESS', 'FAILURE', 'REVOKED']:
-                    release_gpu(int(gpu_id), task_id)
-                    results['cleaned_gpus'].append(gpu_id)
-                    self.logger.info('已清理GPU %s (任务 %s, 状态: %s)', gpu_id, task_id, result.state)
-            except Exception as exc:
-                self.logger.error('清理GPU %s 时出错: %s', gpu_id, exc)
-                results['failed_to_clean'].append(gpu_id)
-
-        return results
+    
+    

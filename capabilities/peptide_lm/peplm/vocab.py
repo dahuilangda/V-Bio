@@ -12,6 +12,8 @@ drop straight into the existing Boltz YAML protocol.
 
 from __future__ import annotations
 
+import torch
+
 import re
 
 from peplm.residues import (
@@ -136,3 +138,72 @@ class Vocab:
 
 
 DEFAULT_VOCAB = Vocab()
+
+
+class PlacementMask:
+    """Per-position allowed-token mask factory for residue sequences.
+
+    Track how many residues were already emitted (special tokens like dev tags
+    and <lin>/<cyc> do not count); placement rules then decide which NCAA
+    tokens remain legal at the current position. The NCAA pool is the preset
+    table plus any user-registered residues (peplm.residues.USER_RESIDUES)."""
+
+    def __init__(self, vocab: Vocab, max_len: int,
+                 ncaa_max: int | None = None,
+                 banned_ncaa: list[str] | None = None,
+                 extra_tokens: list[str] | None = None,
+                 pool_tokens: list[str] | None = None):
+        """pool_tokens: the explicit user-specified NCAA pool (strict — only
+        these bracket tokens are legal). None = the full catalog (preset
+        table + user-registered residues), used at training time."""
+        from peplm.residues import USER_RESIDUES, placement_lookup
+
+        self.vocab = vocab
+        self.max_len = max_len
+        self.ncaa_max = ncaa_max
+        banned = set(banned_ncaa or [])
+        if pool_tokens is not None:
+            self.tokens = [t for t in dict.fromkeys(pool_tokens)
+                           if t not in banned]
+        else:
+            self.tokens = [f"[{c}]" for c in NCAA_PRESETS] \
+                + [f"[{c}]" for c in USER_RESIDUES] \
+                + list(extra_tokens or [])
+            self.tokens = [t for t in dict.fromkeys(self.tokens)
+                           if t not in banned]
+        self._placement = placement_lookup
+        self.ncaa_ids = {vocab.stoi[t] for t in self.tokens if t in vocab.stoi}
+        # strict pool: bracket tokens NOT in the user pool are banned outright
+        self.strict_ban: set[int] = set()
+        if pool_tokens is not None:
+            allowed = set(self.tokens)
+            self.strict_ban = {vocab.stoi[t] for t in vocab.itos.values()
+                               if t.startswith("[") and t not in allowed}
+            self.strict_ban -= self.ncaa_ids
+
+    def mask(self, emitted_residues: int, ncaa_used: int, total_len_hint: int,
+             logits: torch.Tensor):
+        """Apply in-place legality mask to a [B, V] logits batch."""
+        stoi = self.vocab.stoi
+        at_n = emitted_residues == 0
+        near_c = total_len_hint and emitted_residues >= total_len_hint - 1
+        ncaa_ok = self.ncaa_max is None or ncaa_used < self.ncaa_max
+        banned_positions: set[int] = set(self.strict_ban)
+        if not ncaa_ok:
+            banned_positions |= self.ncaa_ids
+        else:
+            for t in self.tokens:
+                pl = self._placement(t)
+                tid = stoi.get(t)
+                if tid is None:
+                    continue
+                if pl == "n_term" and not at_n:
+                    banned_positions.add(tid)
+                elif pl == "c_term" and not near_c:
+                    banned_positions.add(tid)
+                elif pl == "terminal" and not (at_n or near_c):
+                    banned_positions.add(tid)
+        if banned_positions:
+            idx = torch.tensor(sorted(banned_positions), dtype=torch.long,
+                               device=logits.device)
+            logits.index_fill_(1, idx, float("-inf"))

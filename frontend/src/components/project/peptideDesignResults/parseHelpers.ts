@@ -1,7 +1,4 @@
-/**
- * Pure parsing/metrics helpers extracted from PeptideDesignResultsWorkspace.
- * Verified zero-JSX / zero-hooks region (agent boundary audit: lines 11-1630).
- */
+/** Pure parsing/metrics helpers; no JSX, no hooks. */
 import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from 'react';
 import { normalizePlddt } from '../../../pages/projectTasks/taskDataConfidence';
 import { asRecord, asRecordArray, asString } from '../../../pages/projectTasks/recordReaders';
@@ -447,9 +444,7 @@ export function readPreferredInterfaceMetricForCandidate(
     if (ipsaeDom !== null) {
       return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
     }
-    // canonical orchestrated objective: interface_metric carries its own
-    // label (the D-route ships `interface_metric: <ipsae>`,
-    // label 'IPSAE', formula d_space_refined_ipsae)
+    // interface_metric carries its own label (IPSAE or IPTM).
     const interfaceMetric = normalizeIptm(firstFiniteMetric(payload, ['interface_metric', 'interfaceMetric']));
     if (interfaceMetric !== null) {
       const label = firstNonEmptyText(payload, ['interface_metric_label', 'interfaceMetricLabel']).toUpperCase();
@@ -1314,10 +1309,7 @@ export function parseCandidateRows(
         preferredTargetChainId,
         preferredLigandChainId
       );
-      // ipSAE is the sensitive interface metric — read it independently so the
-      // card always exposes pLDDT / ipTM / ipSAE side by side. Falls back to
-      // the canonical interface_metric when its label is ipSAE (the D-route
-      // ships `interface_metric: <ipsae>` without the *_dom components).
+      // ipSAE is read independently so the card shows pLDDT / ipTM / ipSAE side by side.
       const ipsaeRaw = firstFiniteMetric(row, ['ligand_ipsae_max', 'ligandIpsaeMax', 'ipsae_dom', 'ipsaeDom']);
       const ipsae = normalizeIptm(
         ipsaeRaw ?? (interfaceMetric.source === 'ipsae' ? interfaceMetric.value : null)
@@ -1370,7 +1362,7 @@ export function parseCandidateRows(
     .filter((row) => Boolean(row.sequence || row.structureName));
 }
 
-export function parseProgressPercent(value: number | null): number | null {
+function parseProgressPercent(value: number | null): number | null {
   if (value === null) return null;
   const normalized = value <= 1 ? value * 100 : value;
   if (!Number.isFinite(normalized)) return null;
@@ -1506,6 +1498,35 @@ export function extractRuntimeContext(params: {
 
 export function shouldUseLivePeptideRows(state: RuntimeState): boolean {
   return state === 'RUNNING' || state === 'QUEUED';
+}
+
+/**
+ * Header-facing staged progress line, e.g. "Generation 3/6 · 45/128 candidates · ~35m left".
+ * Returns null when the payload carries no stage information (non-peptide workflows).
+ */
+export function buildStagedProgressText(statusInfo: Record<string, unknown>): string | null {
+  const runtime = extractRuntimeContext({
+    statusInfo,
+    snapshotConfidence: {},
+    projectTaskState: 'RUNNING',
+    fallbackProgressPercent: Number.NaN
+  });
+  const parts: string[] = [];
+  if (runtime.currentGeneration !== null && runtime.totalGenerations !== null && runtime.totalGenerations > 0) {
+    parts.push(`Generation ${runtime.currentGeneration}/${runtime.totalGenerations}`);
+  }
+  if (runtime.completedTasks !== null && runtime.totalTasks !== null && runtime.totalTasks > 0) {
+    parts.push(`${runtime.completedTasks}/${runtime.totalTasks} candidates`);
+  }
+  if (
+    runtime.estimatedRemainingSeconds !== null &&
+    Number.isFinite(runtime.estimatedRemainingSeconds) &&
+    runtime.estimatedRemainingSeconds > 0
+  ) {
+    const minutes = Math.round(runtime.estimatedRemainingSeconds / 60);
+    parts.push(minutes >= 1 ? `~${minutes}m left` : '<1m left');
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 export function buildRawCandidateRowsSignature(rows: Array<Record<string, unknown>>): string {

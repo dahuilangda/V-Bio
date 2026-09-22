@@ -11,7 +11,7 @@ import numpy as np
 
 from boltz.data import const
 from boltz.data.types import InferenceOptions, Manifest, StructureV2, TemplateInfo
-from utils.ligand_utils import fix_cif_entity_ids, sync_entity_sequences_from_first_subchain
+from utils.ligand_utils import sync_entity_sequences_from_first_subchain
 
 WATER_RESNAMES = {"HOH", "WAT", "H2O"}
 ION_RESNAMES = {
@@ -178,10 +178,8 @@ def _iter_chain_residues(structure: StructureV2, chain: object):
 def _atom_coords_from_atom_block(atom_block: object) -> list[tuple[float, float, float]]:
     """All atom coordinates from an AtomV2 block.
 
-    AtomV2 carries no element field, so no hydrogen filtering is applied —
-    every atom in the block participates in distance computations. Inputs
-    are expected to be heavy-atom structures (the dock/refine ligand SDFs
-    and the prepared receptor used by this pipeline are).
+    AtomV2 carries no element field, so no hydrogen filtering is applied;
+    inputs are expected to be heavy-atom structures.
     """
     coords: list[tuple[float, float, float]] = []
     for atom in atom_block:
@@ -401,11 +399,11 @@ def configure_anchored_refine_constraints(
                 )
             )
 
-    # Boltz2 contact constraints are soft token-contact potentials, not rigid-body
-    # pose restraints. Applying many ligand atom-level contacts lets the model
-    # satisfy them by tearing ligand internal geometry instead of moving the
-    # ligand as a whole. Keep the computed atom anchors for diagnostics, but
-    # only emit pocket-level constraints into inference.
+    # Boltz2 contact constraints are soft token-contact potentials, not
+    # rigid-body restraints: many ligand atom-level contacts get satisfied by
+    # tearing the ligand internal geometry instead of moving the ligand. Keep
+    # the computed atom anchors for diagnostics; emit pocket-level constraints
+    # into inference only.
     pocket_constraints = [(ligand_asym_id, pocket_contacts, float(max_distance), True)]
     contact_constraints = None
     applied_anchor_strategy = "pocket_only"

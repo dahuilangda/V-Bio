@@ -71,8 +71,8 @@ function summarizeProjectTaskStates(rows: Project[]): Record<string, number> {
   }, {});
 }
 
-// Count projects by a string field (task_type / backend). Precomputed so Copilot answers portfolio
-// questions ("how many per type/backend") from the FULL set, not the visible window (capped at 40).
+// Count projects by a string field (task_type / backend), from the FULL set rather
+// than the visible window, so portfolio questions answer correctly.
 function countProjectsByField(rows: Project[], field: 'task_type' | 'backend'): Record<string, number> {
   return rows.reduce<Record<string, number>>((acc, project) => {
     const value = (project[field] || '').trim();
@@ -320,9 +320,8 @@ export function ProjectsPage() {
 
   const applyProjectCopilotAction = async (action: CopilotPlanAction) => {
     if (action.id === 'projects:create') {
-      // Create the project directly from the plan and navigate to its task list. The workflow comes
-      // from the action arguments (what the planner resolved the user wants) and falls back to the
-      // payload workflowKey, then to prediction as a last resort.
+      // create from the plan and navigate to its task list; workflow falls back
+      // from the action arguments to the payload workflowKey, then prediction
       const argWorkflow = String(action.arguments?.workflow || '').trim();
       const payloadWorkflow = String(action.payload?.workflowKey || '').trim();
       const rawWorkflowKey = argWorkflow || payloadWorkflow;
@@ -461,8 +460,8 @@ export function ProjectsPage() {
     }
   };
 
-  // Render-time adjustment (not effects): reset to page 1 when any filter
-  // changes, and clamp the page when the filtered total shrinks below it.
+  // Render-time adjustment (not effects): reset to page 1 on filter change,
+  // clamp when the filtered total shrinks.
   // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   const filtersSignature = `${search}\u001f${typeFilter}\u001f${stateFilter}\u001f${sortBy}\u001f${pageSize}\u001f${backendFilter}\u001f${activityFilter}\u001f${updatedWithinDays}\u001f${minTaskCount}`;
   const [prevFiltersSignature, setPrevFiltersSignature] = useState(filtersSignature);
@@ -496,8 +495,7 @@ export function ProjectsPage() {
   useEffect(() => {
     if (!hasActiveRuntime) return;
     const timer = window.setInterval(() => {
-      // Hidden tabs skip the tick (the visibilitychange handler refreshes on return) —
-      // a backgrounded tab used to keep polling every 2.5s for nothing.
+      // hidden tabs skip the tick; the visibilitychange handler refreshes on return
       if (document.visibilityState === 'hidden') return;
       void load({ silent: true, statusOnly: true, preferBackendStatus: true });
     }, 2500);
@@ -512,10 +510,8 @@ export function ProjectsPage() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  // Announce the new-project dialog to the overlay coordinator while it is open, so the persistent
-  // Copilot panel collapses out of the way instead of overlapping it. This covers the manual "New
-  // Project" button path; the Copilot projects:create action creates inline (no dialog) and does
-  // not open showCreate. No-op when no provider is mounted.
+  // announce the dialog to the overlay coordinator so the Copilot panel collapses
+  // out of the way. No-op when no provider is mounted.
   const registerOverlay = useOverlayHost();
   useEffect(() => {
     if (!showCreate) return;
@@ -528,8 +524,7 @@ export function ProjectsPage() {
     setCreateError(null);
   });
 
-  // Global ⌘K palette handoff: "New project" navigates here with a one-shot sessionStorage
-  // flag (survives the navigation, consumed exactly once by this mount).
+  // ⌘K palette handoff: a one-shot sessionStorage flag opens the create dialog once
   useEffect(() => {
     try {
       if (window.sessionStorage.getItem('vbio:palette:open-create') !== '1') return;
@@ -543,10 +538,7 @@ export function ProjectsPage() {
 
   const openCreateModalRef = useRef<((workflowKey?: WorkflowKey) => void) | null>(null);
   const openCreateModal = (workflowKey?: WorkflowKey) => {
-    // Default to the prediction workflow only when no workflow is implied by the caller. A Copilot
-    // plan that proposes projects:create carries the workflow the user asked for (affinity, virtual
-    // screening, ...) on the action payload, so the new-project dialog opens pre-selected to it
-    // instead of always resetting to prediction.
+    // default to prediction only when the caller implies no workflow
     setWorkflow(workflowKey ?? 'prediction');
     setCreateError(null);
     setShowCreate(true);
@@ -587,9 +579,7 @@ export function ProjectsPage() {
         throw new Error('Project was created but no project ID was returned from PostgREST.');
       }
       setShowCreate(false);
-      // Land on the task list, not the workspace editor — a brand-new project has no tasks yet,
-      // and dropping the user straight into a fresh draft task feels abrupt. The task list's
-      // "New Task" button is the deliberate entry point for creating the first task.
+      // land on the task list; its "New Task" button is the entry point for the first task
       navigate(`/projects/${created.id}/tasks`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create project.');
@@ -1056,8 +1046,7 @@ export function ProjectsPage() {
           </div>
         )}
 
-        {/* Mobile card list — shown only on small screens (CSS toggles visibility). Uses the same
-         * pagedProjects data as the table above, rendered as scannable cards instead of a wide table. */}
+        {/* mobile card list; CSS toggles visibility */}
         {!loading && pagedProjects.length > 0 ? (
           <div className="project-card-list" aria-label="Projects">
             {pagedProjects.map((project) => {
@@ -1245,7 +1234,7 @@ export function ProjectsPage() {
 
       {copilotAvailable && session?.userId ? (
         <ProjectCopilotModal
-          open={copilotOpen}
+          isOpen={copilotOpen}
           title="Copilot"
           subtitle={`${filteredProjects.length} matched / ${projects.length} total`}
           contextType="project_list"
@@ -1279,7 +1268,7 @@ export function ProjectsPage() {
               updated_at: project.updated_at
             }))
           }}
-          onApplyPlanAction={applyProjectCopilotAction}
+          applyPlanAction={applyProjectCopilotAction}
           onOpen={() => setCopilotOpen(true)}
           onClose={() => setCopilotOpen(false)}
         />

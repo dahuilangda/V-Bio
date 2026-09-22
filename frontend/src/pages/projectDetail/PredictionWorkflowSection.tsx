@@ -10,7 +10,7 @@ import { PredictionConstraintsWorkspace, type PredictionConstraintsWorkspaceProp
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 
 export interface PredictionWorkflowSectionProps {
-  visible: boolean;
+  isVisible: boolean;
   workspaceTab: PredictionWorkspaceTab;
   canEdit: boolean;
   componentsWorkspaceRef: RefObject<HTMLDivElement | null>;
@@ -21,22 +21,22 @@ export interface PredictionWorkflowSectionProps {
   components: InputComponent[];
   onComponentsChange: (components: InputComponent[]) => void;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
-  allowProteinMsa: boolean;
-  allowProteinTemplates: boolean;
+  isProteinMsaAllowed: boolean;
+  isProteinTemplatesAllowed: boolean;
   customResidueLibrary: CustomCcdMoleculeInput[];
   onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange: (componentId: string, upload: ProteinTemplateUpload | null) => void;
   activeComponentId: string | null;
   onActiveComponentIdChange: (id: string | null) => void;
   onProteinTemplateResiduePick: (pick: MolstarResiduePick) => void;
-  constraintsWorkspaceProps: Omit<PredictionConstraintsWorkspaceProps, 'visible'>;
-  componentsSidebarProps: Omit<PredictionComponentsSidebarProps, 'visible'>;
+  constraintsWorkspaceProps: Omit<PredictionConstraintsWorkspaceProps, 'isVisible'>;
+  componentsSidebarProps: Omit<PredictionComponentsSidebarProps, 'isVisible'>;
   /** Peptide design only: pocket state for the Binding target component. */
   peptideTargetPocket?: PeptideTargetPocketContext | null;
 }
 
 export function PredictionWorkflowSection({
-  visible,
+  isVisible,
   workspaceTab,
   canEdit,
   componentsWorkspaceRef,
@@ -47,8 +47,8 @@ export function PredictionWorkflowSection({
   components,
   onComponentsChange,
   proteinTemplates,
-  allowProteinMsa,
-  allowProteinTemplates,
+  isProteinMsaAllowed,
+  isProteinTemplatesAllowed,
   customResidueLibrary,
   onCustomResidueLibraryChange,
   onProteinTemplateChange,
@@ -59,7 +59,7 @@ export function PredictionWorkflowSection({
   componentsSidebarProps,
   peptideTargetPocket = null
 }: PredictionWorkflowSectionProps) {
-  if (!visible || workspaceTab === 'basics' || workspaceTab === 'results') return null;
+  if (!isVisible || workspaceTab === 'basics' || workspaceTab === 'results') return null;
 
   return (
     <div
@@ -75,21 +75,21 @@ export function PredictionWorkflowSection({
             components={components}
             onChange={onComponentsChange}
             proteinTemplates={proteinTemplates}
-            allowProteinMsa={allowProteinMsa}
-            allowProteinTemplates={allowProteinTemplates}
+            isProteinMsaAllowed={isProteinMsaAllowed}
+            isProteinTemplatesAllowed={isProteinTemplatesAllowed}
             customResidueLibrary={customResidueLibrary}
             onCustomResidueLibraryChange={onCustomResidueLibraryChange}
             onProteinTemplateChange={onProteinTemplateChange}
             selectedComponentId={activeComponentId}
             onSelectedComponentIdChange={(id) => onActiveComponentIdChange(id)}
-            showQuickAdd={false}
-            compact
+            isQuickAddVisible={false}
+            isCompact
             targetPocketComponentId={peptideTargetPocket ? peptideTargetPocket.componentId : null}
             renderTargetPocketPanel={
               peptideTargetPocket
                 ? ({ upload }) => (
                     <PeptidePocketPicker
-                      canEdit={canEdit}
+                      isEditable={canEdit}
                       targetComponentId={peptideTargetPocket.componentId}
                       targetTemplate={
                         upload
@@ -119,17 +119,17 @@ export function PredictionWorkflowSection({
                   structureText={upload.content}
                   format={upload.format}
                   colorMode="default"
-                  showSequence={false}
+                  isSequenceVisible={false}
                   pickMode="alt-left"
                   onResiduePick={(pick: MolstarResiduePick) => onProteinTemplateResiduePick(pick)}
                 />
               </section>
             )}
-            disabled={!canEdit}
+            isDisabled={!canEdit}
           />
         )}
 
-        {workspaceTab === 'constraints' ? <PredictionConstraintsWorkspace visible {...constraintsWorkspaceProps} /> : null}
+        {workspaceTab === 'constraints' ? <PredictionConstraintsWorkspace isVisible {...constraintsWorkspaceProps} /> : null}
       </div>
 
       {workspaceTab === 'components' && (
@@ -144,7 +144,7 @@ export function PredictionWorkflowSection({
         />
       )}
 
-      {workspaceTab === 'components' ? <PredictionComponentsSidebar visible {...componentsSidebarProps} /> : null}
+      {workspaceTab === 'components' ? <PredictionComponentsSidebar isVisible {...componentsSidebarProps} /> : null}
     </div>
   );
 }

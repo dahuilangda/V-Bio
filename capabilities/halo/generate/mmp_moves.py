@@ -16,7 +16,7 @@ from rdkit import Chem
 from rdkit.Chem import BRICS
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit import DataStructs
-from rdkit.Chem.Scaffolds import MurckoScaffold
+
 
 from halo.score.properties import is_pains, passes_window, compute_descriptors, DEFAULT_WINDOW
 
@@ -71,8 +71,7 @@ def grow(smiles: str, rng: random.Random, window: dict | None = None,
     """Attach a random small group at a random attachable H position.
 
     With `target_atoms` (canonical-SMILES atom indices, e.g. the low-pLDDT
-    atoms from Boltz2Score), growth is directed to those atoms first -
-    structure-guided editing without any external rule database.
+    atoms from Boltz2Score), growth is directed to those atoms first.
     """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:

@@ -1,6 +1,6 @@
 /**
  * Plan-action confirmation card — one progressive-reveal step at a time.
- * Extracted from ProjectCopilotModal (zero local state, pure display).
+ * Pure display, zero local state.
  */
 import type { CopilotPlanAction } from '../../types/models';
 import { Check, LoaderCircle, X } from 'lucide-react';
@@ -9,10 +9,10 @@ import { planActionKey, formatActionSummary } from './copilotPlanHelpers';
 interface CopilotPlanActionCardProps {
   action: CopilotPlanAction;
   isApplying: boolean;
-  blocked: boolean;
+  isBlocked: boolean;
   bulkAction: 'apply' | 'cancel' | null;
-  onApply: (action: CopilotPlanAction) => void;
-  onCancel: () => void;
+  applyAction: (action: CopilotPlanAction) => void;
+  cancelAction: () => void;
 }
 
 export function CopilotPlanActionCard(p: CopilotPlanActionCardProps) {
@@ -22,9 +22,7 @@ export function CopilotPlanActionCard(p: CopilotPlanActionCardProps) {
   return (
 
             <div className="copilot-action-stack" aria-label="Pending confirmation step">
-              {/* Deterministic honesty guard: whatever the assistant message above says, the
-                  pending step has NOT executed. This line is the UI's own statement of fact —
-                  it neutralizes a model that narrates proposed operations as completed. */}
+              {/* The pending step has NOT executed, whatever the message above says. */}
               <div className="copilot-plan-pending-hint">
                 Not run yet — it takes effect only after you click Apply; the returned receipt is the actual result.
               </div>
@@ -51,7 +49,7 @@ export function CopilotPlanActionCard(p: CopilotPlanActionCardProps) {
                     <button
                       className="copilot-plan-action-cancel"
                       type="button"
-                      onClick={() => void p.onCancel()}
+                      onClick={() => void p.cancelAction()}
                       disabled={Boolean(p.isApplying || p.bulkAction)}
                       title="Cancel"
                     >
@@ -61,8 +59,8 @@ export function CopilotPlanActionCard(p: CopilotPlanActionCardProps) {
                     <button
                       className="copilot-plan-action-apply"
                       type="button"
-                      onClick={() => void p.onApply(p.action)}
-                      disabled={p.blocked}
+                      onClick={() => void p.applyAction(p.action)}
+                      disabled={p.isBlocked}
                       title="Apply this step"
                     >
                       {p.isApplying ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}

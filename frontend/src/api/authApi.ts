@@ -105,9 +105,6 @@ function validateRegistration(input: AuthRegisterInput): void {
 
 export async function register(input: AuthRegisterInput): Promise<Session> {
   validateRegistration(input);
-
-  // Server-side registration (F2): the hash is scrypt on the server and `is_admin` is
-  // determined from the SERVER's super-admin env — the browser no longer writes app_users.
   const res = await requestManagement('/vbio-api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -162,4 +159,26 @@ export async function completeJwtLogin(token: string): Promise<Session> {
   };
   saveSession(session);
   return session;
+}
+
+export async function forgotPassword(identifier: string): Promise<void> {
+  // Anti-enumeration: the backend answers identically whether or not the account exists.
+  const res = await requestManagement('/vbio-api/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ identifier })
+  });
+  if (!res.ok) {
+    throw new Error('Request failed. Please try again.');
+  }
+}
+
+export async function resetPassword(token: string, password: string): Promise<void> {
+  const res = await requestManagement('/vbio-api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, password })
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body.error || 'Reset failed. Please request a new link.');
+  }
 }

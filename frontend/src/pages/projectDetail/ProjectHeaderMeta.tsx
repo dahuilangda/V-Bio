@@ -7,14 +7,14 @@ export interface ProjectHeaderMetaProps {
   workflowShortTitle: string;
   isActiveRuntime: boolean;
   progressPercent: number;
+  /** Stage-level progress from the worker payload ("Generation 3/6 · 45/128 candidates"); null when unavailable. */
+  stagedProgressText: string | null;
   submittedAt: string | null;
   totalRuntimeSeconds: number | null;
 }
 
 function ElapsedSecondsChip({ submittedAt, taskState }: { submittedAt: string; taskState: string }) {
-  // Self-held 1s tick. The historical implementation ticked a top-level nowTs state that
-  // re-rendered the ENTIRE workspace tree every second while a task ran; this chip was its
-  // only consumer, so the clock lives here now and nothing above re-renders.
+  // self-held 1s tick: only this chip re-renders while a task runs, not the workspace
   const active = taskState === 'QUEUED' || taskState === 'RUNNING';
   const [nowTs, setNowTs] = useState(Date.now());
   useEffect(() => {
@@ -41,6 +41,7 @@ export function ProjectHeaderMeta({
   workflowShortTitle,
   isActiveRuntime,
   progressPercent,
+  stagedProgressText,
   submittedAt,
   totalRuntimeSeconds
 }: ProjectHeaderMetaProps) {
@@ -59,6 +60,9 @@ export function ProjectHeaderMeta({
             >
               {Math.round(progressPercent)}%
             </span>
+            {displayTaskState === 'RUNNING' && stagedProgressText !== null && (
+              <span className="meta-chip meta-chip-live meta-chip-live-running">{stagedProgressText}</span>
+            )}
             {submittedAt !== null && <ElapsedSecondsChip submittedAt={submittedAt} taskState={displayTaskState} />}
           </>
         ) : (

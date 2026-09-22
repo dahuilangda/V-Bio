@@ -1,10 +1,9 @@
 """Oracle validation: Boltz2Score score-mode vs experimental activity per target.
 
-Protocol matches the repository's mode benchmark: score mode on the crystal
-poses (confidence + affinity + ipSAE), then Spearman/Pearson correlation of
-affinity_pic50 (and affinity_pic50_mw, ipSAE) with experimental pIC50.
-Targets already covered by the repo (cdk8, cmet, ...) are read from their
-mode_benchmark_compare outputs; cdk2 is scored fresh here.
+Score mode on the crystal poses (confidence + affinity + ipSAE), then
+Spearman/Pearson correlation of affinity_pic50 (and affinity_pic50_mw, ipSAE)
+with experimental pIC50. Targets covered by the repo's mode benchmarks reuse
+their mode_benchmark_compare outputs; cdk2 is scored fresh.
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 

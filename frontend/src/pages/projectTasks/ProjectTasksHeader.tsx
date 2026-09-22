@@ -37,32 +37,32 @@ function ExportProgressRing({ percent }: { percent: number | null }) {
 interface ProjectTasksHeaderProps {
   projectName: string;
   taskCountText: string;
-  refreshing: boolean;
+  isRefreshing: boolean;
   createTaskHref: string;
   backToCurrentTaskHref: string;
-  canEdit: boolean;
-  exportingExcel: boolean;
+  isEditable: boolean;
+  isExportingExcel: boolean;
   exportProgress?: ExportProgressInfo | null;
   filteredCount: number;
   onDownloadExcel: () => void;
   onOpenApi: () => void;
-  apiAccessDisabled?: boolean;
+  isApiAccessDisabled?: boolean;
   apiAccessDisabledReason?: string;
 }
 
 export function ProjectTasksHeader({
   projectName,
   taskCountText,
-  refreshing,
+  isRefreshing,
   createTaskHref,
   backToCurrentTaskHref,
-  canEdit,
-  exportingExcel,
+  isEditable,
+  isExportingExcel,
   exportProgress = null,
   filteredCount,
   onDownloadExcel,
   onOpenApi,
-  apiAccessDisabled = false,
+  isApiAccessDisabled = false,
   apiAccessDisabledReason = ''
 }: ProjectTasksHeaderProps) {
   const exportPercent =
@@ -93,7 +93,7 @@ export function ProjectTasksHeader({
         <h1>Tasks</h1>
         <p className="muted">
           {projectName} · {taskCountText}
-          {refreshing ? ' · Syncing...' : ''}
+          {isRefreshing ? ' · Syncing...' : ''}
         </p>
       </div>
       <div className="row gap-8 page-header-actions page-header-actions-minimal">
@@ -101,14 +101,14 @@ export function ProjectTasksHeader({
           <Link
             className="task-row-action-btn task-row-action-btn-primary"
             to={createTaskHref}
-            title={canEdit ? 'New task' : 'Shared projects are read-only'}
+            title={isEditable ? 'New task' : 'Shared projects are read-only'}
             aria-label="New task"
             onClick={(event) => {
-              if (canEdit) return;
+              if (isEditable) return;
               event.preventDefault();
             }}
-            aria-disabled={!canEdit}
-            style={!canEdit ? { pointerEvents: 'none', opacity: 0.5 } : undefined}
+            aria-disabled={!isEditable}
+            style={!isEditable ? { pointerEvents: 'none', opacity: 0.5 } : undefined}
           >
             <Plus size={14} />
           </Link>
@@ -120,11 +120,11 @@ export function ProjectTasksHeader({
               type="button"
               className="task-row-action-btn"
               onClick={onDownloadExcel}
-              disabled={!exportingExcel && filteredCount === 0}
-              title={exportingExcel ? 'Cancel export' : 'Export task list'}
-              aria-label={exportingExcel ? 'Cancel export' : 'Export task list'}
+              disabled={!isExportingExcel && filteredCount === 0}
+              title={isExportingExcel ? 'Cancel export' : 'Export task list'}
+              aria-label={isExportingExcel ? 'Cancel export' : 'Export task list'}
             >
-              {exportingExcel ? (
+              {isExportingExcel ? (
                 <>
                   <ExportProgressRing percent={exportPercent} />
                   <X size={14} className="task-export-cancel-icon" aria-hidden="true" />
@@ -133,7 +133,7 @@ export function ProjectTasksHeader({
                 <Download size={14} />
               )}
             </button>
-            {exportingExcel && exportProgress ? (
+            {isExportingExcel && exportProgress ? (
               <div className="task-export-popover" role="status">
                 <div className="task-export-popover-head">
                   <span className="task-export-popover-title">{exportTitle}</span>
@@ -153,8 +153,8 @@ export function ProjectTasksHeader({
             type="button"
             className="task-row-action-btn"
             onClick={onOpenApi}
-            disabled={apiAccessDisabled}
-            title={apiAccessDisabled ? (apiAccessDisabledReason || 'API access unavailable') : 'API access'}
+            disabled={isApiAccessDisabled}
+            title={isApiAccessDisabled ? (apiAccessDisabledReason || 'API access unavailable') : 'API access'}
             aria-label="API access"
           >
             <KeyRound size={14} />

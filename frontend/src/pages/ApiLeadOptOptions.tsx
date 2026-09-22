@@ -1,7 +1,4 @@
-/**
- * Lead Optimization options — extracted from ApiAccessPage CommandPanel.
- * Zero cross-block coupling; 6 controlled value/callback pairs.
- */
+/** Lead Optimization options: 6 controlled value/callback pairs, no cross-block coupling. */
 import { ShieldCheck } from 'lucide-react';
 import { Field } from '../components/common/Field';
 
@@ -11,7 +8,7 @@ interface LeadOptOptionsProps {
   builderLeadOptTargetChain: string;
   builderLeadOptLigandChain: string;
   builderLeadOptObjectiveProfile: string;
-  builderLeadOptEnableAffinity: boolean;
+  isBuilderLeadOptAffinityEnabled: boolean;
   onTargetConfigPathChange: (v: string) => void;
   onInputCompoundChange: (v: string) => void;
   onTargetChainChange: (v: string) => void;
@@ -50,7 +47,7 @@ export function LeadOptOptions(p: LeadOptOptionsProps) {
     <label className="checkbox-inline api-prediction-affinity-toggle">
       <input
         type="checkbox"
-        checked={p.builderLeadOptEnableAffinity}
+        checked={p.isBuilderLeadOptAffinityEnabled}
         onChange={(e) => p.onEnableAffinityChange(e.target.checked)}
       />
       <span>Enable affinity</span>

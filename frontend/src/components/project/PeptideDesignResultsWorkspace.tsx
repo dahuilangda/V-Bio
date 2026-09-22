@@ -159,19 +159,15 @@ export function PeptideDesignResultsWorkspace({
   );
   const cardCandidates = pagedCandidates;
 
-  // Render-time adjustments (not effects — no extra pass, no post-paint flash):
-  // revert the viewer color mode to the task's default when it changes, keep a
-  // valid candidate selection, and clamp the page when the candidate set
-  // shrinks. https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  // Render-time adjustments (not effects): reset the viewer color mode on task
+  // change, keep the selection valid, clamp the page when the list shrinks.
   const [prevInitialViewerColorMode, setPrevInitialViewerColorMode] = useState(initialViewerColorMode);
   if (initialViewerColorMode !== prevInitialViewerColorMode) {
     setPrevInitialViewerColorMode(initialViewerColorMode);
     setViewerColorMode(initialViewerColorMode);
   }
 
-  // Selection invariant (render-time, replaces the effect so mount-time repair
-  // and list-change repair share one path with no extra pass): the selection
-  // must point at an existing candidate, or be empty only when the list is.
+  // The selection must point at an existing candidate, or be empty only when the list is.
   if (!sortedCandidates.length) {
     if (selectedCandidateId !== '') setSelectedCandidateId('');
   } else if (!sortedCandidates.some((item) => item.id === selectedCandidateId)) {
@@ -357,8 +353,8 @@ export function PeptideDesignResultsWorkspace({
               <PeptideCandidateTableRow
                 key={candidate.id}
                 candidate={candidate}
-                selected={candidate.id === selectedCandidateStableId}
-                cardMode={cardMode}
+                isSelected={candidate.id === selectedCandidateStableId}
+                isCardMode={cardMode}
                 scoreMin={scoreRange.min}
                 scoreMax={scoreRange.max}
                 onOpen={openCandidateCard}
@@ -491,10 +487,10 @@ export function PeptideDesignResultsWorkspace({
               <PeptideCandidateCard
                 key={candidate.id}
                 candidate={candidate}
-                selected={candidate.id === selectedCandidateStableId}
+                isSelected={candidate.id === selectedCandidateStableId}
                 scoreMin={scoreRange.min}
                 scoreMax={scoreRange.max}
-                showIpsae={hasAnyIpsae}
+                isIpsaeVisible={hasAnyIpsae}
                 onSelect={selectCandidateCard}
               />
             ))}
@@ -526,8 +522,8 @@ export function PeptideDesignResultsWorkspace({
             leadOptStyleVariant="results"
             ligandFocusChainId={viewerLigandFocusChainId || ''}
             interactionGranularity="element"
-            suppressAutoFocus={false}
-            showSequence={false}
+            isAutoFocusSuppressed={false}
+            isSequenceVisible={false}
           />
         ) : (
           <div className={structureRequestError ? 'alert error' : 'ligand-preview-empty'}>

@@ -1,16 +1,8 @@
-"""Peptide-protein Boltz-2 oracle (multi-GPU, local CLI).
-
-Score a batch of peptide candidates against a target sequence:
-  candidate tokens -> Boltz YAML (base sequence + NCAA modifications + cyclic
-  flag, the production protocol) -> `boltz predict` per GPU chunk -> parse
-  ipTM / pair ipTM / per-residue pLDDT (mmCIF B-factor) -> ipSAE from the
-  PAE npz + structure (metrics.ligand_ipsae, same module the production
-  pipeline uses).
-
-Cost control: one CLI process per GPU chunk amortizes model loading; failed
-chunks are bisected to isolate offending candidates (HALO's bisect pattern —
-a single degenerate peptide can otherwise kill a whole batch).
-"""
+"""Peptide-protein Boltz-2 oracle (multi-GPU, local CLI): candidate
+tokens -> Boltz YAML (base sequence + NCAA modifications + cyclic flag)
+-> `boltz predict` per GPU chunk -> parse ipTM / pair ipTM / pLDDT /
+ipSAE. One CLI process per GPU chunk amortizes model loading; failed
+chunks are bisected to isolate offending candidates."""
 
 from __future__ import annotations
 
@@ -18,7 +10,7 @@ import json
 import os
 import random
 import subprocess
-import sys
+
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,7 +21,10 @@ from peplm.candidate import Candidate
 from peplm.oracle.ccdcache import prepare_run_cache
 from peplm.vocab import to_modifications
 
-BOLTZ_PY = "/data/Boltz2Score/.venv/bin/python"
+# Boltz-2 runs in the platform's own boltz2score runtime (pinned install);
+# no external project paths.
+BOLTZ_PY = str(Path(__file__).resolve().parents[3]
+               / "boltz2score" / ".venv" / "bin" / "python")
 
 # V-Bio production bicyclic protocol (run_single_prediction.py)
 BICYCLIC_LINKER_ATOM_MAP = {
@@ -46,14 +41,10 @@ def enforce_bicyclic_cys(residues: list[str], cys_positions: list[int],
 
     layout="first_last": Cys at position 1, one interior anchor (the first
     user-pinned Cys if any, else cys_positions if valid, else the midpoint),
-    and the terminal position — the user-spec layout for macrocycle stapling
-    at both termini.
-    layout="interior_terminal": production default — two interior anchors +
-    terminal.
-    protected: 0-based positions pinned by the user — never modified; anchor
-    correctness on protected positions is validated by PeptideLoop.__init__
-    (fixed non-Cys at pos 1 / terminal is rejected there), not here.
-    Every other C is replaced (deterministic-repair semantics)."""
+    and the terminal position. layout="interior_terminal": two interior
+    anchors + terminal. protected: 0-based user-pinned positions — never
+    modified (anchor correctness on them is validated by
+    PeptideLoop.__init__, not here). Every other C is replaced."""
     import random as _r
 
     rng = rng or _r.Random(0)
@@ -66,8 +57,8 @@ def enforce_bicyclic_cys(residues: list[str], cys_positions: list[int],
     if layout == "first_last":
         anchors.update({0, terminal})
         interior = None
-        # free-optimization default: prefer the midpoint when the user did
-        # not specify an interior anchor (a user-pinned Cys wins over both)
+        # free-optimization default: prefer the midpoint when the user
+        # gave no interior anchor (a user-pinned Cys wins over both)
         for pos in cys_positions:
             if isinstance(pos, int) and 0 < pos < terminal and pos not in protected:
                 interior = pos
@@ -114,7 +105,7 @@ def build_complex_yaml(target_sequence: str, cand: Candidate,
     """bicyclic: {"cys_positions": [i, j] (0-based interior), "linker_ccd":
     "SEZ", "anchor_positions": [i, j, k] (explicit 0-based anchors; when
     absent the exactly-3 Cys in the sequence are the anchors)} -> peptide +
-    linker ligand chain + 3 SG-bond constraints (the production protocol)."""
+    linker ligand chain + 3 SG-bond constraints."""
     res = cand.residues
     base, mods = to_modifications(res)
     binder: dict = {"id": binder_id, "sequence": base, "msa": "empty"}
@@ -151,7 +142,7 @@ def build_complex_yaml(target_sequence: str, cand: Candidate,
     return yaml.safe_dump(data, sort_keys=False)
 
 
-# ----------------------------------------------------------------- parsing
+# parsing
 def parse_cif_plddts(cif_path: Path, chain_id: str) -> list[float]:
     """CA-atom B-factors of one chain from an mmCIF atom_site loop."""
     lines = cif_path.read_text().splitlines()
@@ -213,8 +204,8 @@ def _parse_record(record_dir: Path, binder_id: str, use_ipsae: bool,
     out["iptm"] = conf.get("iptm")
     out["ptm"] = conf.get("ptm")
     out["complex_plddt"] = conf.get("complex_plddt")
-    # boltz writes pair_chains_iptm keyed by internal numeric chain indices;
-    # our YAML always orders target=0, binder=1
+    # boltz writes pair_chains_iptm keyed by internal numeric chain
+    # indices; our YAML always orders target=0, binder=1
     pair = conf.get("pair_chains_iptm") or {}
     try:
         out["pair_iptm"] = pair["0"]["1"]
@@ -238,14 +229,14 @@ def _parse_record(record_dir: Path, binder_id: str, use_ipsae: bool,
         out["ipsae_dom"] = r.get("ipsae_dom")
         out["ligand_ipsae_max"] = r.get("ligand_ipsae_max")
         out["interface_pairs"] = r.get("interface_pairs")
-        # interchain pAE (Latent-X min_ipae / AlphaProteo): min/mean over all
-        # target x binder PAE entries, in Angstrom (lower = more confident)
+        # interchain pAE: min/mean over all target x binder PAE entries,
+        # in Angstrom (lower = more confident)
         out["min_ipae"] = r.get("min_ipae")
         out["mean_ipae"] = r.get("mean_ipae")
     return out
 
 
-# ------------------------------------------------------------------ oracle
+# oracle
 class PeptideBoltzOracle:
     def __init__(self, target_sequence: str, work_dir, gpus=(0, 1, 2, 3),
                  base_cache: str = "/data/boltz_cache", model: str = "boltz2",
@@ -256,7 +247,7 @@ class PeptideBoltzOracle:
                  extra_molecules: list[dict] | None = None, log=print):
         """extra_molecules: user residue entries ({ccd, smiles, base,
         placement}) — registered into the run-local boltz CCD cache so any
-        user-supplied amino acid scores identically to presets."""
+        user amino acid scores identically to presets."""
         self.target_sequence = str(target_sequence).upper()
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -276,7 +267,6 @@ class PeptideBoltzOracle:
         self.n_calls = 0
         self.wall_s = 0.0
 
-    # ------------------------------------------------------------------
     def score(self, candidates: list[Candidate], tag: str = "b") -> list[Candidate]:
         if not candidates:
             return candidates
@@ -363,11 +353,11 @@ class PeptideBoltzOracle:
                 cand.metrics.update(metrics)
                 cand.metrics["record_dir"] = str(rd)
                 parsed.add(i)
-        # a chunk where nothing parsed counts as a failure -> bisect
+        # nothing parsed counts as a chunk failure -> bisect
         return parsed if parsed else None
 
 
-# ------------------------------------------------------------------ mock
+# mock
 class MockPeptideOracle:
     """CPU stand-in for smoke tests: score tracks an artificial but learnable
     motif objective (hydrophobic-at-2/charged-at-center pattern), so GRPO has
@@ -383,7 +373,7 @@ class MockPeptideOracle:
 
     def score(self, candidates: list[Candidate], tag: str = "b") -> list[Candidate]:
         self.n_calls += len(candidates)
-        from peplm.residues import HYDROPATHY
+
         for cand in candidates:
             res = cand.residues
             iptm = 0.30 + 0.05 * min(len(res), 20) / 20

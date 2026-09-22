@@ -16,7 +16,7 @@ const METRIC_COLUMN_LABELS: Record<TaskMetricColumnKey, string> = {
 
 export interface ProjectTasksTableProps {
   totalRowCount: number;
-  canManageShares: boolean;
+  isShareManagementAllowed: boolean;
   filteredCount: number;
   tableMode: TaskTableMode;
   visibleMetricColumns: TaskMetricColumnKey[];
@@ -33,12 +33,14 @@ export interface ProjectTasksTableProps {
   deletingTaskId: string | null;
   terminatingTaskId: string | null;
   onOpenTask: (task: ProjectTask) => void;
-  onTerminateTask: (task: ProjectTask) => void;
-  onRemoveTask: (task: ProjectTask) => void;
+  cloneTaskAction: (task: ProjectTask) => Promise<void> | void;
+  canCloneTask: boolean;
+  terminateTaskAction: (task: ProjectTask) => void;
+  removeTaskAction: (task: ProjectTask) => void;
   onOpenShareTask: (task: ProjectTask) => void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
-  onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => void;
+  saveTaskNameEditAction: (task: ProjectTask, displayName: string) => void;
   onEditingTaskNameValueChange: (value: string) => void;
   currentPage: number;
   totalPages: number;
@@ -50,7 +52,7 @@ export interface ProjectTasksTableProps {
 
 export function ProjectTasksTable({
   totalRowCount,
-  canManageShares,
+  isShareManagementAllowed,
   filteredCount,
   tableMode,
   visibleMetricColumns,
@@ -66,12 +68,14 @@ export function ProjectTasksTable({
   deletingTaskId,
   terminatingTaskId,
   onOpenTask,
-  onTerminateTask,
-  onRemoveTask,
+  cloneTaskAction,
+  canCloneTask,
+  terminateTaskAction,
+  removeTaskAction,
   onOpenShareTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
-  onSaveTaskNameEdit,
+  saveTaskNameEditAction,
   onEditingTaskNameValueChange,
   currentPage,
   totalPages,
@@ -207,23 +211,24 @@ export function ProjectTasksTable({
                   row={row}
                   mode={tableMode}
                   visibleMetricColumns={visibleMetricColumns}
-                  canManageShares={canManageShares}
+                  isShareManagementAllowed={isShareManagementAllowed}
                   editingTaskNameId={editingTaskNameId}
-                  // Only the row being edited consumes the draft value; passing the
-                  // live value to every row would invalidate each memoized row on
-                  // every keystroke.
+                  // only the edited row consumes the draft value; a live value per row
+                  // would invalidate every memoized row on each keystroke
                   editingTaskNameValue={editingTaskNameId === row.task.id ? editingTaskNameValue : ''}
                   savingTaskNameId={savingTaskNameId}
                   openingTaskId={openingTaskId}
                   deletingTaskId={deletingTaskId}
                   terminatingTaskId={terminatingTaskId}
                   onOpenTask={onOpenTask}
-                  onTerminateTask={onTerminateTask}
-                  onRemoveTask={onRemoveTask}
+                  cloneTaskAction={cloneTaskAction}
+                  canCloneTask={canCloneTask}
+                  terminateTaskAction={terminateTaskAction}
+                  removeTaskAction={removeTaskAction}
                   onOpenShareTask={onOpenShareTask}
                   onBeginTaskNameEdit={onBeginTaskNameEdit}
                   onCancelTaskNameEdit={onCancelTaskNameEdit}
-                  onSaveTaskNameEdit={onSaveTaskNameEdit}
+                  saveTaskNameEditAction={saveTaskNameEditAction}
                   onEditingTaskNameValueChange={onEditingTaskNameValueChange}
                 />
               ))}
@@ -271,7 +276,7 @@ export function ProjectTasksTable({
                     <button
                       type="button"
                       className="btn btn-ghost btn-compact"
-                      onClick={() => void onTerminateTask(task)}
+                      onClick={() => void terminateTaskAction(task)}
                       disabled={Boolean(terminatingTaskId)}
                     >
                       <Square size={13} /> Cancel
@@ -281,7 +286,7 @@ export function ProjectTasksTable({
                     <button
                       type="button"
                       className="btn btn-ghost btn-compact danger"
-                      onClick={() => void onRemoveTask(task)}
+                      onClick={() => void removeTaskAction(task)}
                       disabled={Boolean(deletingTaskId)}
                     >
                       <Trash2 size={14} /> Delete

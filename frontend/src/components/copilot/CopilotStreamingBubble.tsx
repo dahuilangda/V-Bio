@@ -1,20 +1,19 @@
 /**
  * In-flight assistant bubble — meta + empty body + steering inserts + live trace.
- * Same shape as a finished message so completion fills the body without
- * restructuring (no jitter). Extracted from ProjectCopilotModal.
+ * Same shape as a finished message so completion fills the body without jitter.
  */
 import { formatDateTime } from '../../utils/date';
 import { CopilotThinkingCard } from './CopilotMessageCards';
 
 interface CopilotStreamingBubbleProps {
-  sending: boolean;
+  isSending: boolean;
   streamStartedAt: string;
   steeredTurnTexts: string[];
   liveTrace: Parameters<typeof CopilotThinkingCard>[0]['steps'];
 }
 
 export function CopilotStreamingBubble(p: CopilotStreamingBubbleProps) {
-  if (!p.sending) return null;
+  if (!p.isSending) return null;
   return (
     <article className="copilot-message is-assistant">
       <div className="copilot-message-meta">
@@ -32,7 +31,7 @@ export function CopilotStreamingBubble(p: CopilotStreamingBubbleProps) {
           ))}
         </div>
       ) : null}
-      <CopilotThinkingCard steps={p.liveTrace} live />
+      <CopilotThinkingCard steps={p.liveTrace} isLive />
     </article>
   );
 }

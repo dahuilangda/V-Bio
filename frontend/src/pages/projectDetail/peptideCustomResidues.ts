@@ -1,5 +1,8 @@
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, ProjectInputConfig } from '../../types/models';
 
+// Default drawing scaffold: the minimal natural amino-acid backbone (L-alanine).
+export const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@@H](C)C(=O)O';
+
 export interface NormalizedCustomResidueDefinition {
   ccd: string;
   smiles: string;
@@ -28,11 +31,8 @@ export function normalizeCustomResidueBackbone(value: unknown): CustomResidueBac
   return backbone;
 }
 
-// Copy a drawn SMILES onto any selected custom pool entry that is missing one. This is a
-// load-time migration, not a submit-time fallback: once the SMILES is on the pool entry it
-// persists with the config and the submit path still reads the pool entry only. Pre-fix
-// selections stored `{code, kind}`; their SMILES lives in the residue library (drawn by the
-// user) so we backfill from there.
+// Load-time migration: backfill a drawn SMILES from the residue library onto
+// selected pool entries missing one, so the submit path reads only the pool entry.
 export function enrichPeptideResiduePoolFromLibrary(
   options: ProjectInputConfig['options'],
   library: CustomCcdMoleculeInput[]
@@ -57,11 +57,9 @@ export function enrichPeptideResiduePoolFromLibrary(
   return { ...options, peptideResiduePool: nextPool };
 }
 
-// Single source of truth: a selected custom residue's CCD comes ONLY from its own
-// peptideResiduePool entry, which carries the SMILES that was drawn for it and is
-// persisted with the config. No fallback, no secondary store — if a custom selection
-// has no SMILES on its pool entry it yields no definition (and the backend rejects it
-// loudly) rather than silently substituting something else.
+// A selected custom residue's CCD comes only from its own pool entry (which
+// carries the drawn SMILES and persists with the config); a missing SMILES
+// yields no definition rather than a silent substitute.
 export function selectedCustomResidueDefinitions(
   options: ProjectInputConfig['options']
 ): NormalizedCustomResidueDefinition[] {

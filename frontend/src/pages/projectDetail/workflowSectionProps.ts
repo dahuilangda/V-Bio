@@ -2,13 +2,8 @@ import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, RefObject, S
 import type { MolstarResidueHighlight, MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { ProjectResultsSectionProps } from '../../components/project/ProjectResultsSection';
 import type { InputComponent, PredictionConstraint, PredictionConstraintType, PredictionProperties } from '../../types/models';
-import type { AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
-import type { LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWorkflowSection';
 import type { PredictionComponentsSidebarProps } from './PredictionComponentsSidebar';
 import type { PredictionConstraintsWorkspaceProps } from './PredictionConstraintsWorkspace';
-import type { PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
-import type { VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
-import type { WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
 import type { MetricTone } from './projectMetrics';
 
 export interface BuildPredictionConstraintsWorkspaceParams {
@@ -50,7 +45,7 @@ export interface BuildPredictionConstraintsWorkspaceParams {
 
 export function buildPredictionConstraintsWorkspaceProps(
   params: BuildPredictionConstraintsWorkspaceParams
-): Omit<PredictionConstraintsWorkspaceProps, 'visible'> {
+): Omit<PredictionConstraintsWorkspaceProps, 'isVisible'> {
   const {
     constraintsWorkspaceRef,
     isConstraintsResizing,
@@ -179,7 +174,7 @@ export interface BuildPredictionComponentsSidebarParams {
 
 export function buildPredictionComponentsSidebarProps(
   params: BuildPredictionComponentsSidebarParams
-): Omit<PredictionComponentsSidebarProps, 'visible'> {
+): Omit<PredictionComponentsSidebarProps, 'isVisible'> {
   const {
     canEdit,
     components,
@@ -269,32 +264,7 @@ export function buildProjectResultsSectionProps(
   };
 }
 
-export function buildAffinityWorkflowSectionProps(
-  params: Omit<AffinityWorkflowSectionProps, 'visible'>
-): Omit<AffinityWorkflowSectionProps, 'visible'> {
-  return params;
-}
 
-export function buildLeadOptimizationWorkflowSectionProps(
-  params: Omit<LeadOptimizationWorkflowSectionProps, 'visible'>
-): Omit<LeadOptimizationWorkflowSectionProps, 'visible'> {
-  return params;
-}
 
-export function buildPredictionWorkflowSectionProps(
-  params: Omit<PredictionWorkflowSectionProps, 'visible'>
-): Omit<PredictionWorkflowSectionProps, 'visible'> {
-  return params;
-}
 
-export function buildVirtualScreeningWorkflowSectionProps(
-  params: Omit<VirtualScreeningWorkflowSectionProps, 'visible'>
-): Omit<VirtualScreeningWorkflowSectionProps, 'visible'> {
-  return params;
-}
 
-export function buildWorkflowRuntimeSettingsSectionProps(
-  params: Omit<WorkflowRuntimeSettingsSectionProps, 'visible'>
-): Omit<WorkflowRuntimeSettingsSectionProps, 'visible'> {
-  return params;
-}

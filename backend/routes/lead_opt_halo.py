@@ -1,10 +1,5 @@
-"""HALO generative lead-optimization API.
-
-Three optimization modes over one engine: de novo, fragment replacement,
-scaffold hopping. Candidate scoring runs on V-Bio's own prediction engines —
-protenix2dock (default), boltz2dock, alphafold3 — via the native prediction
-oracle.
-"""
+"""HALO generative lead-optimization API: de novo, fragment replacement,
+scaffold hopping, scored by the platform's own prediction engines."""
 from __future__ import annotations
 
 import base64
@@ -18,8 +13,8 @@ MODES = ("denovo", "fragment", "scaffold_hop")
 
 
 def _predict_oracle_meta() -> dict:
-    """Import the halo module lazily: the API process must not depend on
-    import-order side effects for capabilities/ to be on sys.path."""
+    """Import lazily: the API process must not depend on import-order side
+    effects for capabilities/ to be on sys.path."""
     from halo.oracle.predict_oracle import PredictOracle
 
     return {
@@ -176,25 +171,22 @@ def register_lead_opt_halo_routes(
         if isinstance(progress, dict):
             state = str(progress.get('status') or '').upper()
             info = progress if isinstance(progress, dict) else {}
+        async_result = None
         try:
             async_result = celery_app.AsyncResult(normalized)
             celery_state = str(async_result.state or '').upper()
         except Exception:
             celery_state = ''
-        # The worker writes 'failed' to the progress tracker and then raises
-        # Ignore(), so Celery's durable terminal state is IGNORED, not FAILURE.
-        terminal = ('SUCCESS', 'FAILURE', 'REVOKED', 'IGNORED')
+        terminal = ('SUCCESS', 'FAILURE', 'REVOKED')
         if state not in terminal and celery_state in terminal:
             state = celery_state
-        if state == 'IGNORED':
-            state = 'FAILURE'
         payload = {
             'task_id': normalized,
             'state': state,
             'status': state,
             'info': info,
         }
-        if state == 'SUCCESS' and isinstance(async_result.result, dict):
+        if state == 'SUCCESS' and async_result is not None and isinstance(async_result.result, dict):
             payload['result'] = async_result.result
         return jsonify(payload)
 

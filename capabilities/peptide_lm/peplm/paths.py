@@ -2,17 +2,15 @@
 
 Web-app task results already live under backend RESULTS_BASE_DIR
 (<RESULTS_BASE_DIR>/<backend>/<task_id>/, auto-cleaned). The offline CLIs
-(closed loop, benchmarks) used to default into ``capabilities/peptide_lm/runs``
-— inside the repository — which is how gigabytes of run archives ended up
-tracked by git. These helpers point offline run outputs at a unified root
-OUTSIDE the repo instead:
+(closed loop, benchmarks) point run outputs at a unified root OUTSIDE the
+repo instead:
 
     VBIO_RUNS_DIR if set, else /data/vbio_runs when /data exists (the
     deployment layout), else ~/.vbio/runs on a developer machine.
 
 The legacy in-repo runs/ directory (training inputs, cached structures,
-property-head assets) is no longer tracked; those regenerate from the
-training entry points (peplm.data.build_corpus, peplm.score.learned_props).
+property-head assets) is not tracked; those regenerate from the training
+entry points (peplm.data.build_corpus, peplm.score.learned_props).
 """
 from __future__ import annotations
 

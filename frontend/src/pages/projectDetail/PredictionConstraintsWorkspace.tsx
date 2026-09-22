@@ -61,10 +61,8 @@ function residue2DAtomLabels(component: InputComponent | undefined, row: { resid
   if (!component || !row) return [];
   const mods = modificationByPosition(component.modifications);
   const mod = mods.get(row.residue);
-  // JSME custom residues: row.atoms is already in RDKit depiction (atom-index) order
-  // (customResidueAtomNamesFromSmiles), and residue2DSmiles uses the same SMILES, so
-  // row.atoms[i] is exactly the name of the i-th depicted atom — use directly so the
-  // 2D labels, highlight, and onAtomClick all line up with the atom grid.
+  // JSME residues: row.atoms is already in RDKit depiction (atom-index) order,
+  // matching the SMILES used for the 2D — use directly
   if (mod?.inputMethod === 'jsme') return row.atoms;
 
   const ccd = String(mod?.ccd || row.residueName || '').trim().toUpperCase();
@@ -101,11 +99,9 @@ interface PickedResidueLike {
   atomName?: string;
 }
 
-// Left pane: all chains listed as a vertical stack of sections. Each protein/dna/rna chain
-// shows a residue grid; a ligand chain shows an atom-name grid. Clicking any residue/atom
-// button aims the active endpoint at it and picks it. The active endpoint slot's residue
-// (targetResidue) drives the `.active` marker, so the left mirrors the right's Atom 1/Atom 2
-// tab; the right-side 2D (top of the constraint card) is the primary atom picker.
+// Left pane: chains as stacked sections — residue grids for protein/dna/rna, an atom
+// grid for ligands. Clicking aims the active endpoint and picks it; the right-side 2D
+// is the primary atom picker.
 function ConstraintChainPicker({
   components,
   atomOptionsByChain,
@@ -128,8 +124,7 @@ function ConstraintChainPicker({
   const activeComponents = components.filter((item) => cleanSequence(item.sequence));
   const chainInfos = buildChainInfos(activeComponents);
   const highlightKeys = new Set(highlightResidues.map((item) => `${item.chainId}:${item.residue}`));
-  // The active residue marker follows the active endpoint slot (targetResidue), so the left
-  // grid highlights the exact residue of the selected Atom 1/Atom 2 (or token1/token2) tab.
+  // the active marker follows the endpoint slot (targetResidue), not the viewer click
   const activeKey = targetResidue ? `${targetResidue.chainId}:${targetResidue.residue}` : '';
   const pickedKey = pickedResidue ? `${pickedResidue.chainId}:${pickedResidue.residue}` : '';
   const selectedAtomKeys = new Set(
@@ -237,9 +232,7 @@ function ConstraintChainPicker({
   );
 }
 
-// Right pane: show the picked residue's 2D depiction + atom grid, plus bond endpoint
-// chips when a bond constraint is active. pickedResidue drives what is shown, so the 2D
-// follows the user's selection (protein residue or ligand) and never gets stuck.
+// Right pane: 2D depiction + atom grid for the target residue, plus bond endpoint chips.
 function ResidueAtomPicker({
   components,
   atomOptionsByChain,
@@ -265,10 +258,8 @@ function ResidueAtomPicker({
     selectedAtomRefs.map((item) => `${item.chainId}:${item.residue}:${String(item.atomName || '').trim().toUpperCase()}`)
   );
 
-  // The 2D detail view is driven by `targetResidue` — the residue of the constraint's
-  // currently-active endpoint (derived from constraint data + active slot), NOT by
-  // pickedResidue. pickedResidue is only the viewer-click highlight signal. This keeps
-  // the 2D always in sync with the endpoint being edited, with no manual state syncing.
+  // driven by targetResidue (the active endpoint), not pickedResidue (viewer-click
+  // highlight only), so the 2D always tracks the endpoint being edited
   const selectedDetail = (() => {
     const selectedChainId = targetResidue?.chainId;
     if (!selectedChainId) return null;
@@ -282,9 +273,7 @@ function ResidueAtomPicker({
       const row = rows[0] || null;
       if (!row) return null;
       const smiles = component.inputMethod === 'ccd' ? '' : component.sequence || '';
-      // row.atoms ({ELEMENT}{count} in SMILES order) label the depiction directly so the
-      // element stays visible (O2, not a bare index that reads as an implicit carbon) and
-      // the 2D labels match the atom grid below, as in the JSME custom-residue branch.
+      // {ELEMENT}{count} labels keep the element visible and match the atom grid below
       const atomLabels = [...(row.atoms || [])];
       return { chain, component, row, smiles, atomLabels, isLigand: true };
     }
@@ -378,10 +367,7 @@ function ResidueAtomPicker({
   );
 }
 
-// Bond endpoint chips (Atom 1 / Atom 2): the primary entry for choosing which endpoint the
-// next pick fills. Rendered at the top of the active bond constraint card
-// (ConstraintEditor.endpointTargets), above Constraint Type, so both endpoints and the active
-// slot stay visible while editing — pick a chip to aim, then click a residue/atom on the left.
+// Bond endpoint chips (Atom 1 / Atom 2): pick a chip to aim, then click a residue/atom.
 function BondEndpointTargets({
   activeBondEndpoints,
   activeConstraintPickSlot,
@@ -424,7 +410,7 @@ function BondEndpointTargets({
 }
 
 export interface PredictionConstraintsWorkspaceProps {
-  visible: boolean;
+  isVisible: boolean;
   constraintsWorkspaceRef: RefObject<HTMLDivElement | null>;
   isConstraintsResizing: boolean;
   constraintsGridStyle: CSSProperties;
@@ -464,7 +450,7 @@ export interface PredictionConstraintsWorkspaceProps {
 }
 
 export function PredictionConstraintsWorkspace({
-  visible,
+  isVisible,
   constraintsWorkspaceRef,
   isConstraintsResizing,
   constraintsGridStyle,
@@ -501,9 +487,8 @@ export function PredictionConstraintsWorkspace({
   onPropertiesChange,
   disabled
 }: PredictionConstraintsWorkspaceProps) {
-  // RDKit resolves custom-residue atom names from the drawn SMILES (mirroring the
-  // backend CCD builder). loadRDKitModule() is a cached promise already started by
-  // Ligand2DPreview in this view, so no extra network cost.
+  // RDKit resolves custom-residue atom names from the drawn SMILES; the module load is
+  // already cached by Ligand2DPreview in this view
   const [rdkit, setRdkit] = useState<RDKitModule | null>(null);
   useEffect(() => {
     let alive = true;
@@ -535,11 +520,8 @@ export function PredictionConstraintsWorkspace({
     };
   }, [constraints, activeConstraintId]);
 
-  // 2D display source, derived directly from the active constraint's data + active slot
-  // (bond → atom1/atom2, contact → token1/token2, pocket → binder). Always defined once a
-  // constraint is selected — the 2D never falls back to pickedResidue, which is only the
-  // viewer-click highlight signal. This removes the manual pickedResidue syncing that
-  // previously caused the 2D to go blank.
+  // 2D display source from the active constraint + slot (bond → atom1/atom2,
+  // contact → token1/token2, pocket → binder); never falls back to pickedResidue
   const activeEndpointTarget = useMemo<{ chainId: string; residue: number } | null>(() => {
     if (!activeConstraintId) return null;
     const constraint = constraints.find((item) => item.id === activeConstraintId);
@@ -557,15 +539,13 @@ export function PredictionConstraintsWorkspace({
     return { chainId: constraint.binder, residue: 1 };
   }, [constraints, activeConstraintId, activeConstraintPickSlot]);
 
-  // Activating a target chip only switches the active endpoint slot; the 2D panel follows
-  // automatically via activeEndpointTarget, so no pickedResidue sync is needed here.
+  // a chip click only switches the slot; the 2D follows via activeEndpointTarget
   const handleEndpointActivate = (slot: 'first' | 'second') => {
     if (!activeBondEndpoints) return;
     onConstraintPickSlotFocus(activeBondEndpoints.id, slot);
   };
 
-  // Rendered inside the active constraint card: endpoint chips (Atom 1/2) at the top, above
-  // Constraint Type, as the primary endpoint selector; the 2D + atom grid below the fields.
+  // endpoint chips render inside the constraint card; 2D + atom grid below the fields
   const bondEndpointTargets = activeBondEndpoints ? (
     <BondEndpointTargets
       activeBondEndpoints={activeBondEndpoints}
@@ -586,7 +566,7 @@ export function PredictionConstraintsWorkspace({
     />
   );
 
-  if (!visible) return null;
+  if (!isVisible) return null;
 
   return (
     <div
@@ -644,7 +624,7 @@ export function PredictionConstraintsWorkspace({
             highlightResidues={constraintViewerHighlightResidues}
             activeResidue={constraintViewerActiveResidue}
             lockView
-            suppressAutoFocus
+            isAutoFocusSuppressed
             onResiduePick={(pick: MolstarResiduePick) => {
               onApplyPickToSelectedConstraint(pick);
             }}
@@ -692,14 +672,14 @@ export function PredictionConstraintsWorkspace({
           onSelectedConstraintIdChange={onSelectedConstraintIdChange}
           onConstraintClick={onConstraintClick}
           onClearSelection={onClearConstraintSelection}
-          showAffinitySection={false}
+          isAffinitySectionVisible={false}
           allowedConstraintTypes={allowedConstraintTypes}
           onConstraintsChange={onConstraintsChange}
           onPropertiesChange={onPropertiesChange}
           onPickSlotFocus={onConstraintPickSlotFocus}
           endpointTargets={bondEndpointTargets}
           activeResiduePicker={residueAtomPicker}
-          disabled={disabled}
+          isDisabled={disabled}
         />
       </section>
     </div>

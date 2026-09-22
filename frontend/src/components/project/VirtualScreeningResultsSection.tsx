@@ -39,7 +39,7 @@ interface VirtualScreeningResultsSectionProps {
   projectTaskId: string;
   projectTaskState: string;
   progressPercent: number;
-  canPredictStructures: boolean;
+  isStructurePredictionAllowed: boolean;
   components: InputComponent[];
   predictionRecords?: Record<string, VirtualScreeningPredictionRecord>;
   onPredictionRecordsChange?: (records: Record<string, VirtualScreeningPredictionRecord>) => void;
@@ -184,7 +184,7 @@ export function VirtualScreeningResultsSection({
   projectTaskId,
   projectTaskState,
   progressPercent,
-  canPredictStructures,
+  isStructurePredictionAllowed,
   components,
   predictionRecords = {},
   onPredictionRecordsChange
@@ -253,11 +253,8 @@ export function VirtualScreeningResultsSection({
   const clampedPage = Math.min(page, totalPages);
   const pageRows = filteredRows.slice((clampedPage - 1) * PAGE_SIZE, clampedPage * PAGE_SIZE);
 
-  // Render-time state adjustment instead of effects — no extra render pass and
-  // no post-paint wrong-page frame: clamp the page when the filtered set
-  // shrinks, and keep the go-to-page input mirroring the effective page when
-  // it changes from elsewhere (prev/next buttons, filter changes).
-  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  // Render-time adjustment instead of effects: clamp the page when the
+  // filtered set shrinks, and keep the go-to-page input mirroring it.
   const [prevTotalPages, setPrevTotalPages] = useState(totalPages);
   if (totalPages !== prevTotalPages) {
     setPrevTotalPages(totalPages);
@@ -492,8 +489,8 @@ export function VirtualScreeningResultsSection({
                 leadOptStyleVariant="results"
                 ligandFocusChainId={ligandChain}
                 interactionGranularity="element"
-                suppressAutoFocus={false}
-                showSequence={false}
+                isAutoFocusSuppressed={false}
+                isSequenceVisible={false}
               />
               <div className="vs-viewer-color-mode-overlay">
                 <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
@@ -736,10 +733,10 @@ export function VirtualScreeningResultsSection({
                   const state = displayState(record);
                   const pending = state === 'QUEUED' || state === 'RUNNING';
                   const openable = state === 'SUCCESS';
-                  const runDisabled = pending || !canPredictStructures || !targetReady || !row.smiles;
+                  const runDisabled = pending || !isStructurePredictionAllowed || !targetReady || !row.smiles;
                   const actionTitle = pending
                     ? stateLabel(state)
-                    : !canPredictStructures
+                    : !isStructurePredictionAllowed
                       ? 'Read-only project'
                       : !targetReady
                         ? 'Add a target sequence or structure first'

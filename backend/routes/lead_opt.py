@@ -19,18 +19,6 @@ def register_lead_opt_routes(
     attachment_fragment_smiles_from_atom_indices: Callable[[Any, List[int]], str],
     decode_smiles_atom_index_from_name: Callable[[str], Optional[int]],
 ) -> None:
-    @app.route('/api/lead_optimization/submit', methods=['POST'])
-    @require_api_token
-    def submit_lead_optimization():
-        logger.info('Received lead optimization submission request.')
-        return jsonify({
-            'error': (
-                'Legacy /api/lead_optimization/submit pipeline is disabled. '
-                'Use the HALO generative workflow instead: '
-                '/api/lead_optimization/halo_optimize (plus /fragment_preview, /reference_preview).'
-            )
-        }), 410
-
     @app.route('/api/lead_optimization/fragment_preview', methods=['POST'])
     @require_api_token
     def lead_optimization_fragment_preview():
@@ -48,8 +36,8 @@ def register_lead_opt_routes(
         input_mol = Chem.MolFromSmiles(smiles)
         if not input_mol:
             return jsonify({'error': 'Invalid SMILES for fragment preview.'}), 400
-        # Keep the original parsed graph to preserve atom-index consistency with
-        # fragment atom selections and downstream variable_spec atom indices.
+        # Keep the original parsed graph: atom indices must match fragment
+        # selections and downstream variable_spec indices.
         mol = input_mol
         atom_bonds: List[List[int]] = []
         seen_bonds: set[tuple[int, int]] = set()
@@ -509,9 +497,11 @@ def register_lead_opt_routes(
                                 'residues': contacts[:8],
                             })
         except Exception as exc:
-            # Pocket/interaction extraction is supplementary to the structure preview. On failure,
-            # drop any partially-collected rows so the response never presents incomplete pocket
-            # data as complete — return empty and log so the operator can trace the root cause.
+            # Pocket extraction is supplementary — except the activity-contract
+            # RuntimeError above, which must propagate as a loud failure.
+            if isinstance(exc, RuntimeError) and 'atom mapping failed' in str(exc):
+                raise
+            # Drop partial rows so incomplete pocket data is never presented as complete.
             logger.warning('Failed to extract reference interactions: %s', exc)
             pocket_residues = []
             ligand_atom_contacts = []

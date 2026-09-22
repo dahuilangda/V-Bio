@@ -1,14 +1,9 @@
 /**
- * The YAML Builder modal of the API access page: component cards (protein/
- * DNA/RNA/ligand with per-component templates and residue modifications),
- * the constraints & properties editor, and the generated-YAML preview.
- *
- * Same composition contract as the accepted CopilotComposer extraction: all
- * state stays in ApiAccessPage (the builder handlers, normalization memos and
- * the dialog/resizer wiring live there), and the ~34 values this modal reads
- * arrive as five named prop groups — chrome, components, templates,
- * constraints, preview. Group members are re-destructured to their historical
- * local names so the JSX stayed byte-identical.
+ * The YAML Builder modal of the API access page: component cards (with
+ * per-component templates and residue modifications), the constraints &
+ * properties editor, and the generated-YAML preview. All state stays in
+ * ApiAccessPage; the values arrive as five named prop groups (chrome,
+ * components, templates, constraints, preview).
  */
 import type {
   Dispatch,
@@ -60,21 +55,21 @@ export interface ApiYamlBuilderComponentsProps {
   builderYamlComponents: InputComponent[];
   builderYamlCollapsed: Record<string, boolean>;
   builderCustomResidueValidity: Record<string, boolean>;
-  addYamlBuilderComponent: (type: InputComponent['type']) => void;
-  updateYamlBuilderComponent: (
+  onAddComponent: (type: InputComponent['type']) => void;
+  onUpdateComponent: (
     componentId: string,
     updater: (component: InputComponent) => InputComponent
   ) => void;
-  toggleYamlBuilderComponentCollapsed: (componentId: string) => void;
-  removeYamlBuilderComponent: (componentId: string) => void;
-  addYamlBuilderModification: (componentId: string) => void;
-  patchYamlBuilderModification: (
+  onToggleComponentCollapsed: (componentId: string) => void;
+  onRemoveComponent: (componentId: string) => void;
+  onAddModification: (componentId: string) => void;
+  onPatchModification: (
     componentId: string,
     modificationId: string,
     patch: Partial<ProteinModification>
   ) => void;
-  removeYamlBuilderModification: (componentId: string, modificationId: string) => void;
-  validateBuilderCustomSmiles: (modificationId: string, smiles: string) => void;
+  onRemoveModification: (componentId: string, modificationId: string) => void;
+  onValidateCustomSmiles: (modificationId: string, smiles: string) => void;
 }
 
 export interface ApiYamlBuilderTemplatesProps {
@@ -91,7 +86,7 @@ export interface ApiYamlBuilderConstraintsProps {
   setBuilderYamlConstraints: Dispatch<SetStateAction<PredictionConstraint[]>>;
   builderYamlProperties: PredictionProperties;
   setBuilderYamlProperties: Dispatch<SetStateAction<PredictionProperties>>;
-  builderYamlConstraintsOpen: boolean;
+  isBuilderYamlConstraintsOpen: boolean;
   setBuilderYamlConstraintsOpen: Dispatch<SetStateAction<boolean>>;
   normalizedYamlBuilderComponents: InputComponent[];
 }
@@ -100,8 +95,8 @@ export interface ApiYamlBuilderPreviewProps {
   yamlComponentStats: Record<InputComponent['type'], number>;
   yamlBuilderText: string;
   copiedActionId: string | null;
-  copyText: (text: string, okMessage: string, historyLabel?: string, copyId?: string) => Promise<void>;
-  downloadGeneratedYaml: () => void;
+  copyTextAction: (text: string, okMessage: string, historyLabel?: string, copyId?: string) => Promise<void>;
+  onDownloadGeneratedYaml: () => void;
 }
 
 interface ApiYamlBuilderModalProps {
@@ -132,14 +127,14 @@ export function ApiYamlBuilderModal({
     builderYamlComponents,
     builderYamlCollapsed,
     builderCustomResidueValidity,
-    addYamlBuilderComponent,
-    updateYamlBuilderComponent,
-    toggleYamlBuilderComponentCollapsed,
-    removeYamlBuilderComponent,
-    addYamlBuilderModification,
-    patchYamlBuilderModification,
-    removeYamlBuilderModification,
-    validateBuilderCustomSmiles
+    onAddComponent,
+    onUpdateComponent,
+    onToggleComponentCollapsed,
+    onRemoveComponent,
+    onAddModification,
+    onPatchModification,
+    onRemoveModification,
+    onValidateCustomSmiles
   } = components;
   const {
     builderYamlTemplates,
@@ -151,7 +146,7 @@ export function ApiYamlBuilderModal({
     setBuilderYamlConstraints,
     builderYamlProperties,
     setBuilderYamlProperties,
-    builderYamlConstraintsOpen,
+    isBuilderYamlConstraintsOpen,
     setBuilderYamlConstraintsOpen,
     normalizedYamlBuilderComponents
   } = constraints;
@@ -159,8 +154,8 @@ export function ApiYamlBuilderModal({
     yamlComponentStats,
     yamlBuilderText,
     copiedActionId,
-    copyText,
-    downloadGeneratedYaml
+    copyTextAction,
+    onDownloadGeneratedYaml
   } = preview;
 
   return (
@@ -207,14 +202,14 @@ export function ApiYamlBuilderModal({
                     <button
                       className="btn btn-ghost api-yaml-collapse-btn"
                       type="button"
-                      onClick={() => toggleYamlBuilderComponentCollapsed(component.id)}
+                      onClick={() => onToggleComponentCollapsed(component.id)}
                       aria-label="Toggle component details"
                     >
                       <ChevronRight size={13} className={builderYamlCollapsed[component.id] ? '' : 'api-icon-rotated'} />
                       <strong>Component {index + 1}</strong>
                       <span className="muted small">({componentTypeLabel(component.type)}, x{component.numCopies})</span>
                     </button>
-                    <button className="icon-btn danger" type="button" aria-label="Remove component" onClick={() => removeYamlBuilderComponent(component.id)}>
+                    <button className="icon-btn danger" type="button" aria-label="Remove component" onClick={() => onRemoveComponent(component.id)}>
                       <Trash2 size={14} />
                     </button>
                   </header>
@@ -227,7 +222,7 @@ export function ApiYamlBuilderModal({
                             value={component.type}
                             onChange={(e) => {
                               const nextType = e.target.value === 'dna' || e.target.value === 'rna' || e.target.value === 'ligand' ? e.target.value : 'protein';
-                              updateYamlBuilderComponent(component.id, (current) => {
+                              onUpdateComponent(component.id, (current) => {
                                 const next: InputComponent = { ...current, type: nextType };
                                 if (nextType === 'ligand') {
                                   next.inputMethod = current.inputMethod === 'ccd' ? 'ccd' : current.inputMethod === 'jsme' ? 'jsme' : 'smiles';
@@ -263,7 +258,7 @@ export function ApiYamlBuilderModal({
                             value={component.numCopies}
                             onChange={(e) => {
                               const copies = Math.max(1, Math.floor(Number(e.target.value) || 1));
-                              updateYamlBuilderComponent(component.id, (current) => ({ ...current, numCopies: copies }));
+                              onUpdateComponent(component.id, (current) => ({ ...current, numCopies: copies }));
                             }}
                           />
                           </Field>
@@ -275,7 +270,7 @@ export function ApiYamlBuilderModal({
                             <select
                               value={component.inputMethod === 'ccd' ? 'ccd' : component.inputMethod === 'jsme' ? 'jsme' : 'smiles'}
                               onChange={(e) =>
-                                updateYamlBuilderComponent(component.id, (current) => ({
+                                onUpdateComponent(component.id, (current) => ({
                                   ...current,
                                   inputMethod: e.target.value === 'ccd' ? 'ccd' : e.target.value === 'jsme' ? 'jsme' : 'smiles'
                                 }))
@@ -289,7 +284,7 @@ export function ApiYamlBuilderModal({
                           <Field label={component.inputMethod === 'ccd' ? 'CCD Code' : 'SMILES'}>
                             <input
                               value={component.sequence}
-                              onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, sequence: e.target.value }))}
+                              onChange={(e) => onUpdateComponent(component.id, (current) => ({ ...current, sequence: e.target.value }))}
                               placeholder={component.inputMethod === 'ccd' ? 'Example: ATP' : 'Example: CC(=O)NC1=CC=C(C=C1)O'}
                             />
                           </Field>
@@ -301,7 +296,7 @@ export function ApiYamlBuilderModal({
                                   smiles={component.sequence}
                                   height={320}
                                   onSmilesChange={(value) =>
-                                    updateYamlBuilderComponent(component.id, (current) => ({ ...current, sequence: value }))
+                                    onUpdateComponent(component.id, (current) => ({ ...current, sequence: value }))
                                   }
                                 />
                               </div>
@@ -315,7 +310,7 @@ export function ApiYamlBuilderModal({
                           <textarea
                             rows={3}
                             value={component.sequence}
-                            onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, sequence: e.target.value }))}
+                            onChange={(e) => onUpdateComponent(component.id, (current) => ({ ...current, sequence: e.target.value }))}
                             placeholder="Component sequence"
                           />
                           </Field>
@@ -328,7 +323,7 @@ export function ApiYamlBuilderModal({
                               <input
                                 type="checkbox"
                                 checked={component.useMsa !== false}
-                                onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, useMsa: e.target.checked }))}
+                                onChange={(e) => onUpdateComponent(component.id, (current) => ({ ...current, useMsa: e.target.checked }))}
                               />
                               <span>MSA</span>
                             </label>
@@ -336,7 +331,7 @@ export function ApiYamlBuilderModal({
                               <input
                                 type="checkbox"
                                 checked={Boolean(component.cyclic)}
-                                onChange={(e) => updateYamlBuilderComponent(component.id, (current) => ({ ...current, cyclic: e.target.checked }))}
+                                onChange={(e) => onUpdateComponent(component.id, (current) => ({ ...current, cyclic: e.target.checked }))}
                               />
                               <span>Cyclic</span>
                             </label>
@@ -345,7 +340,7 @@ export function ApiYamlBuilderModal({
                           <div className="api-yaml-builder api-yaml-modifications">
                             <div className="api-builder-meta">
                               <span className="badge">Residue Modifications {(component.modifications || []).length}</span>
-                              <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderModification(component.id)}>
+                              <button type="button" className="btn btn-secondary btn-compact" onClick={() => onAddModification(component.id)}>
                                 <Plus size={12} />
                                 Add
                               </button>
@@ -365,7 +360,7 @@ export function ApiYamlBuilderModal({
                                       value={mod.position}
                                       onChange={(e) => {
                                         const position = clampBuilderModPosition(Number(e.target.value), component.sequence);
-                                        patchYamlBuilderModification(component.id, mod.id, {
+                                        onPatchModification(component.id, mod.id, {
                                           position,
                                           terminal: builderTerminalForPosition(position, component.sequence),
                                           baseResidue: builderResidueAt(component.sequence, position) || mod.baseResidue
@@ -379,7 +374,7 @@ export function ApiYamlBuilderModal({
                                       onChange={(e) => {
                                         const nextTerminal = e.target.value as ProteinModificationTerminal;
                                         const position = builderPositionForTerminal(nextTerminal, mod.position, component.sequence);
-                                        patchYamlBuilderModification(component.id, mod.id, {
+                                        onPatchModification(component.id, mod.id, {
                                           terminal: nextTerminal,
                                           position,
                                           baseResidue: builderResidueAt(component.sequence, position) || mod.baseResidue
@@ -401,14 +396,14 @@ export function ApiYamlBuilderModal({
                                           const inputMethod = (e.target.value === 'jsme' ? 'jsme' : 'ccd') as ProteinModificationInputMethod;
                                           const fallback = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.baseResidue === residue) || BUILDER_BUILT_IN_MODIFICATIONS[0];
                                           const smiles = mod.smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD;
-                                          patchYamlBuilderModification(component.id, mod.id, {
+                                          onPatchModification(component.id, mod.id, {
                                             inputMethod,
                                             ccd: inputMethod === 'jsme' ? buildBuilderCustomCcd(component.id, mod.position, smiles) : fallback.ccd,
                                             smiles: inputMethod === 'jsme' ? smiles : undefined,
                                             label: inputMethod === 'jsme' ? 'Custom residue' : fallback.label,
                                             customEditorCollapsed: true
                                           });
-                                          if (inputMethod === 'jsme') validateBuilderCustomSmiles(mod.id, smiles);
+                                          if (inputMethod === 'jsme') onValidateCustomSmiles(mod.id, smiles);
                                         }}
                                       >
                                         <option value="ccd">Built-in CCD</option>
@@ -421,7 +416,7 @@ export function ApiYamlBuilderModal({
                                         value={BUILDER_BUILT_IN_MODIFICATIONS.some((item) => item.ccd === mod.ccd) ? mod.ccd : BUILDER_BUILT_IN_MODIFICATIONS[0].ccd}
                                         onChange={(e) => {
                                           const selected = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.ccd === e.target.value) || BUILDER_BUILT_IN_MODIFICATIONS[0];
-                                          patchYamlBuilderModification(component.id, mod.id, { ccd: selected.ccd, label: selected.label, baseResidue: residue });
+                                          onPatchModification(component.id, mod.id, { ccd: selected.ccd, label: selected.label, baseResidue: residue });
                                         }}
                                       >
                                         {BUILDER_BUILT_IN_MODIFICATIONS.map((item) => (
@@ -437,8 +432,8 @@ export function ApiYamlBuilderModal({
                                           value={mod.smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD}
                                           onChange={(e) => {
                                             const smiles = e.target.value;
-                                            patchYamlBuilderModification(component.id, mod.id, { smiles, ccd: buildBuilderCustomCcd(component.id, mod.position, smiles) });
-                                            validateBuilderCustomSmiles(mod.id, smiles);
+                                            onPatchModification(component.id, mod.id, { smiles, ccd: buildBuilderCustomCcd(component.id, mod.position, smiles) });
+                                            onValidateCustomSmiles(mod.id, smiles);
                                           }}
                                         />
                                       </label>
@@ -447,7 +442,7 @@ export function ApiYamlBuilderModal({
                                       </span>
                                     </>
                                   )}
-                                  <button type="button" className="icon-btn danger" aria-label="Remove residue modification" onClick={() => removeYamlBuilderModification(component.id, mod.id)}>
+                                  <button type="button" className="icon-btn danger" aria-label="Remove residue modification" onClick={() => onRemoveModification(component.id, mod.id)}>
                                     <Trash2 size={13} />
                                   </button>
                                 </div>
@@ -505,16 +500,16 @@ export function ApiYamlBuilderModal({
             <div className="api-yaml-component-toolbar api-yaml-component-toolbar-bottom">
               <span className="muted small">Add component below</span>
               <div className="api-yaml-component-toolbar-actions">
-                <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('protein')}>
+                <button type="button" className="btn btn-secondary btn-compact" onClick={() => onAddComponent('protein')}>
                   <Plus size={13} /> Protein
                 </button>
-                <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('ligand')}>
+                <button type="button" className="btn btn-secondary btn-compact" onClick={() => onAddComponent('ligand')}>
                   <Plus size={13} /> Ligand
                 </button>
-                <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('dna')}>
+                <button type="button" className="btn btn-secondary btn-compact" onClick={() => onAddComponent('dna')}>
                   <Plus size={13} /> DNA
                 </button>
-                <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('rna')}>
+                <button type="button" className="btn btn-secondary btn-compact" onClick={() => onAddComponent('rna')}>
                   <Plus size={13} /> RNA
                 </button>
               </div>
@@ -524,16 +519,16 @@ export function ApiYamlBuilderModal({
                 className="btn btn-ghost api-yaml-collapse-btn api-yaml-constraints-toggle"
                 type="button"
                 onClick={() => setBuilderYamlConstraintsOpen((prev) => !prev)}
-                aria-expanded={builderYamlConstraintsOpen}
+                aria-expanded={isBuilderYamlConstraintsOpen}
                 aria-label="Toggle constraints and properties editor"
               >
-                {builderYamlConstraintsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                {isBuilderYamlConstraintsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                 <strong>Constraints &amp; Properties</strong>
                 <span className="muted small">
                   {builderYamlConstraints.length} constraint{builderYamlConstraints.length === 1 ? '' : 's'}
                 </span>
               </button>
-              {builderYamlConstraintsOpen && (
+              {isBuilderYamlConstraintsOpen && (
                 <div className="api-yaml-constraints-body">
                   <ConstraintEditor
                     components={normalizedYamlBuilderComponents}
@@ -541,7 +536,7 @@ export function ApiYamlBuilderModal({
                     properties={builderYamlProperties}
                     onConstraintsChange={setBuilderYamlConstraints}
                     onPropertiesChange={setBuilderYamlProperties}
-                    showAffinitySection
+                    isAffinitySectionVisible
                   />
                 </div>
               )}
@@ -563,9 +558,9 @@ export function ApiYamlBuilderModal({
               index=""
               title="Generated YAML"
               command={yamlBuilderText}
-              copied={copiedActionId === 'copy-yaml-modal'}
-              onCopy={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Builder', 'copy-yaml-modal'); }}
-              extraAction={{ label: 'Download generated YAML', onClick: downloadGeneratedYaml }}
+              isCopied={copiedActionId === 'copy-yaml-modal'}
+              onCopy={() => { void copyTextAction(yamlBuilderText, 'Generated YAML copied.', 'YAML Builder', 'copy-yaml-modal'); }}
+              extraAction={{ label: 'Download generated YAML', onClick: onDownloadGeneratedYaml }}
             />
           </section>
         </div>

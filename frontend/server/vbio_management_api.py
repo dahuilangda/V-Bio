@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""V-Bio management API gateway.
-
-This service keeps V-Bio API-token/project authorization in the frontend layer,
-then proxies runtime calls to the original V-Bio backend unchanged.
-"""
+"""V-Bio management API gateway: token/project auth here, runtime calls proxied to the backend."""
 
 from __future__ import annotations
 
@@ -13,10 +9,12 @@ import hmac
 import json
 import logging
 import os
+from datetime import datetime, timezone
+import threading
+import secrets
 from pathlib import Path
 import sys
 import time
-import uuid
 from typing import Any, Dict, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -97,8 +95,7 @@ COPILOT_MODEL = (
 COPILOT_ENABLED = os.environ.get("VBIO_COPILOT_ENABLED", "").strip().lower()
 COPILOT_CONFIGURED = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(COPILOT_API_URL)
 def _env_float(name: str, default: float) -> float:
-    """Parse a float env var, falling back (silently) on malformed values — a bad
-    VBIO_COPILOT_TIMEOUT_SECONDS must not take the whole management API down at import."""
+    """Parse a float env var, falling back silently on malformed values."""
     raw = os.environ.get(name, "")
     try:
         return float(raw) if raw.strip() else default
@@ -117,8 +114,7 @@ def _env_int(name: str, default: int) -> int:
 COPILOT_TIMEOUT_SECONDS = _env_float("VBIO_COPILOT_TIMEOUT_SECONDS", 90.0)
 COPILOT_MAX_REQUEST_BYTES = _env_int("VBIO_COPILOT_MAX_REQUEST_BYTES", 524288)
 COPILOT_ENABLE_THINKING = os.environ.get("VBIO_COPILOT_ENABLE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
-# Inline auto-complete model. Optional VBIO_COPILOT_COMPLETE_* overrides let a smaller/faster model
-# serve per-keystroke completions; each falls back to the planner value when unset.
+# Optional VBIO_COPILOT_COMPLETE_* overrides: a smaller model for per-keystroke completions.
 _COPILOT_COMPLETE_API_URL, _COPILOT_COMPLETE_API_KEY, _COPILOT_COMPLETE_MODEL = completion_config_from_env(os.environ.get)
 COPILOT_COMPLETE_API_URL = _COPILOT_COMPLETE_API_URL or COPILOT_API_URL
 COPILOT_COMPLETE_API_KEY = _COPILOT_COMPLETE_API_KEY or COPILOT_API_KEY
@@ -126,9 +122,7 @@ COPILOT_COMPLETE_MODEL = _COPILOT_COMPLETE_MODEL or COPILOT_MODEL
 COPILOT_COMPLETE_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_COMPLETE_TIMEOUT_SECONDS", "8"))
 COPILOT_COMPLETE_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_COMPLETE_MAX_REQUEST_BYTES", "32768"))
 
-# Runtime settings (proxy / LLM overrides) can flip Copilot from unconfigured to configured without
-# a restart.  These mutable holders track the live state (updated when settings are applied) so route
-# handlers see the current value rather than a frozen import-time constant.
+# Live Copilot state: runtime settings can change without a restart.
 _copilot_runtime_state: dict[str, bool] = {"configured": COPILOT_CONFIGURED}
 
 
@@ -137,20 +131,12 @@ def _copilot_is_configured() -> bool:
 
 
 def _copilot_is_completion_enabled() -> bool:
-    # Completion requires the main planner to be configured AND the completer to have a URL+model.
-    # The completer's live state is tracked by update_runtime_overrides, so check its live attrs.
-    # NOTE: copilot_completer is defined later in this module; Python resolves the name at call time.
+    # copilot_completer is defined later in this module; Python resolves the name at call time.
     return _copilot_runtime_state["configured"] and bool(copilot_completer.chat_api_url and copilot_completer.chat_model)
 
 
 def _check_settings_reload() -> None:
-    """Hot-reload settings if the file changed on disk.
-
-    Each gunicorn worker has its own copy of the Copilot singletons.  When one worker
-    saves settings, it updates its own singletons immediately; other workers detect the
-    file change (via mtime) on their next request and re-apply.  This makes "live apply"
-    work correctly in a multi-worker deployment.
-    """
+    """Hot-reload settings if the file changed on disk (per gunicorn worker, via mtime)."""
     new_settings = reload_settings_if_changed()
     if new_settings is not None:
         apply_runtime_overrides(copilot_assistant, copilot_completer, new_settings)
@@ -158,10 +144,7 @@ def _check_settings_reload() -> None:
 
 
 JWT_CLIENTS_FILE = os.environ.get("VBIO_JWT_CLIENTS_FILE", "frontend/.run/jwt_clients.json").strip()
-# Session HMAC secret MUST be explicitly set — never fall back to the runtime API token. The runtime
-# token is bundled into the browser SPA and known to clients; reusing it for session signing would
-# let anyone forge admin management sessions. If unset, the server starts but all session-dependent
-# admin endpoints return a clear configuration error instead of silently using an insecure key.
+# Must be set explicitly — never fall back to the runtime API token (it is public in the SPA).
 SESSION_SECRET = os.environ.get("VBIO_SESSION_SECRET", "").strip()
 if not SESSION_SECRET:
     logger.warning(
@@ -179,9 +162,7 @@ FORM_FIELDS_INTERNAL = {"project_id", "task_name", "task_summary", "operation_mo
 DEFAULT_PROTENIX_PREDICT_SEED = 42
 
 app = Flask(__name__)
-# Streamed-body cap for the COPILOT routes only (request.content_length alone is
-# bypassable with chunked encoding). Scoped via before_request: an app-wide
-# MAX_CONTENT_LENGTH would also cap /predict multipart uploads (MSA files exceed 512 KiB).
+# Body cap scoped to copilot routes only — an app-wide MAX_CONTENT_LENGTH would reject /predict MSA uploads.
 
 
 @app.before_request
@@ -202,11 +183,7 @@ runtime_http = create_pooled_session(
     pool_connections=max(8, RUNTIME_HTTP_POOL_SIZE),
     pool_maxsize=max(8, RUNTIME_HTTP_POOL_SIZE),
 )
-# Disable trust_env so HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment variables are NEVER silently
-# applied to outbound requests.  Proxy routing is controlled explicitly: Copilot external calls
-# (LLM, UniProt, etc.) use per-call ``proxies=self._proxies`` from the settings panel; internal
-# calls (RuntimeProxy → runtime backend, PostgREST → DB) must always be direct.  Without this,
-# a non-localhost runtime IP would be routed through an env-var proxy and break.
+# trust_env off: env-var proxies must not hijack internal calls; external proxying is per-call from settings.
 runtime_http.trust_env = False
 postgrest_http = create_pooled_session(
     pool_connections=max(4, POSTGREST_HTTP_POOL_SIZE),
@@ -267,15 +244,8 @@ copilot_completer = CopilotCompleter(
     logger=logger,
 )
 
-# Apply persisted runtime settings (proxy / LLM overrides) so restarts honor user config saved via
-# the Copilot UI.  Each field is only applied when the saved value is non-empty, preserving env-var
-# defaults for unconfigured fields.
 def _recompute_copilot_configured(settings: Dict[str, Any]) -> None:
-    """Recompute the live 'configured' flag from the current effective config.
-
-    Properly resets to ``False`` when there is no effective API URL, so clearing the
-    URL in the UI disables Copilot instead of leaving the flag stuck ``True``.
-    """
+    """Recompute the live 'configured' flag from the current effective config."""
     effective_url = str(settings.get("api_url") or "").strip() or COPILOT_API_URL
     enabled = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(effective_url)
     _copilot_runtime_state["configured"] = enabled
@@ -413,21 +383,14 @@ def _utc_now_iso() -> str:
 
 
 def _safe_error(exc: Exception, *, default_msg: str = "Internal server error") -> str:
-    """Return a user-safe error message, logging the full exception for debugging.
-
-    Never return raw str(exc) to the client — it can leak internal hostnames, SQL fragments, file
-    paths, and stack-internal class names that help attackers fingerprint the stack. The full
-    exception is logged server-side for debugging; the client gets a generic message.
-    """
+    """Return a user-safe error message; the full exception is logged server-side."""
     logger.debug("Suppressed exception detail for client: %s", exc, exc_info=True)
     return default_msg
 
 
-# ── Password hashing ─────────────────────────────────────────────────────────
-# Uses hashlib.scrypt (Python 3.6+ stdlib, strong memory-hard KDF). The hash format is:
-#   scrypt$<n>$<r>$<p>$<salt_hex>$<hash_hex>
-# Legacy hashes are unsalted SHA-256 of "username::password" — verified for backward compat and
-# transparently upgraded to scrypt on the next successful login by the caller.
+# Password hashing
+# Format: scrypt$<n>$<r>$<p>$<salt_hex>$<hash_hex>. Legacy unsalted SHA-256 of
+# "username::password" is still verified and upgraded to scrypt on the next login.
 
 _SCRYPT_N = 16384  # CPU/memory cost (must be a power of 2)
 _SCRYPT_R = 8      # block size
@@ -446,8 +409,7 @@ def _hash_password_scrypt(password: str, *, salt: bytes | None = None) -> str:
 
 
 def _verify_password(password: str, username: str, stored_hash: str) -> bool:
-    """Verify a password against the stored hash. Supports scrypt (current) and legacy SHA-256.
-    Returns True on match. Uses hmac.compare_digest for timing-safe comparison."""
+    """Verify a password against scrypt or legacy SHA-256 hashes, timing-safe."""
     if not stored_hash:
         return False
     parts = stored_hash.split("$")
@@ -507,11 +469,7 @@ def copilot_config() -> Tuple[Response, int]:
 
 @app.get("/vbio-api/copilot/settings")
 def copilot_get_settings() -> Tuple[Response, int]:
-    """Return the current persisted Copilot settings (API key masked, never raw).
-
-    Requires a platform-admin management session — the response reveals deployment
-    internals (LLM endpoint, model, proxy host) even though the key itself is masked.
-    """
+    """Return persisted Copilot settings (API key masked); admin-only since it reveals deployment internals."""
     forbidden = _require_platform_admin()
     if forbidden:
         return forbidden
@@ -521,12 +479,7 @@ def copilot_get_settings() -> Tuple[Response, int]:
 
 @app.post("/vbio-api/copilot/settings")
 def copilot_save_settings() -> Tuple[Response, int]:
-    """Merge, persist, and live-apply Copilot runtime settings.
-
-    Requires a platform-admin management session.  ``proxy`` / ``api_url`` / ``model``
-    are replaced (empty string clears the override); ``api_key`` is only updated when a
-    non-empty value is supplied (the browser only ever holds a masked key).
-    """
+    """Merge, persist, and live-apply Copilot runtime settings (admin-only; empty string clears an override)."""
     forbidden = _require_platform_admin()
     if forbidden:
         return forbidden
@@ -552,20 +505,13 @@ def copilot_save_settings() -> Tuple[Response, int]:
 
 @app.post("/vbio-api/copilot/settings/test")
 def copilot_test_settings() -> Tuple[Response, int]:
-    """Test proxy (UniProt reachability) and LLM endpoint connectivity.
-
-    Requires a platform-admin management session (the endpoint sends the persisted API
-    key to the configured LLM URL, so it must not be callable by unauthenticated users).
-    Accepts settings inline (from the form) so admins can test before saving.  When
-    ``api_key`` is empty, falls back to the persisted key.
-    """
+    """Test proxy and LLM connectivity with inline settings; admin-only (sends the persisted API key)."""
     forbidden = _require_platform_admin()
     if forbidden:
         return forbidden
     payload = request.get_json(silent=True) or {}
     saved = load_saved_settings()
-    # Proxy: respect the form value as-is (empty = no proxy). Do NOT fall back to saved —
-    # the user may have just cleared the field and needs to see the result without a proxy.
+    # Proxy: form value as-is (empty = no proxy) — no fall back to the saved value.
     try:
         proxy = validate_proxy_url(str(payload.get("proxy") or "").strip())
         api_url = validate_api_url(
@@ -586,7 +532,7 @@ def copilot_test_settings() -> Tuple[Response, int]:
     return jsonify(results), 200
 
 
-# ── F2: server-side auth surface (registration/profile/users/tokens) ─────────────────────
+# Server-side auth surface (registration/profile/users/tokens)
 from management_api.auth_endpoints import (  # noqa: E402
     handle_admin_create_user,
     handle_admin_list_users,
@@ -676,9 +622,7 @@ def complete_local_login() -> Tuple[Response, int]:
             return jsonify({"error": "Invalid credentials"}), 401
         username = str(user.get("username") or "").strip().lower()
         stored_hash = str(user.get("password_hash") or "")
-        # Verify the password using timing-safe comparison. Supports two formats:
-        # - "scrypt$<n>$<r>$<p>$<salt_hex>$<hash_hex>" (current, strong KDF)
-        # - legacy unsalted SHA-256 of "username::password" (auto-upgraded on successful login)
+        # Supports scrypt and legacy unsalted SHA-256 (auto-upgraded on next login).
         if not _verify_password(password, username, stored_hash):
             return jsonify({"error": "Invalid credentials"}), 401
         login_at = _utc_now_iso()
@@ -693,6 +637,120 @@ def complete_local_login() -> Tuple[Response, int]:
         return jsonify({"session": _session_from_user_row(updated[0], provider="local", login_at=login_at)}), 200
     except Exception as exc:
         logger.exception("Local login failed")
+        return jsonify({"error": _safe_error(exc)}), 500
+
+
+# Forgot / reset password
+# Self-service reset: single-use hashed token (30 min TTL) emailed as a deep link.
+# Anti-enumeration: the request endpoint always answers 200 with the same body.
+
+_RESET_TOKEN_TTL_SECONDS = 30 * 60
+_RESET_REQUEST_COOLDOWN_SECONDS = 60
+
+
+def _send_reset_email(to_email: str, username: str, token: str) -> bool:
+    """Send the reset link via the shared SMTP leaf; never raises."""
+    from backend.services.smtp_sender import send_plain_smtp, frontend_base_url
+
+    frontend_base = frontend_base_url()
+    if not frontend_base and os.environ.get("SMTP_HOST"):
+        logger.error("FRONTEND_URL is empty; the reset link will be relative "
+                     "and broken in mail clients")
+    body_lines = [
+        f"Hello {username},",
+        "",
+        "A password reset was requested for your V-Bio account.",
+        "This link is valid for 30 minutes and can be used once:",
+        f"{frontend_base}/reset-password?token={token}",
+        "",
+        "If you did not request this, ignore this email — your password stays unchanged.",
+    ]
+    return send_plain_smtp(to_email, "[V-Bio] Password reset", "\n".join(body_lines))
+
+
+
+@app.post("/vbio-api/auth/forgot-password")
+def request_password_reset() -> Tuple[Response, int]:
+    payload = request.get_json(silent=True) or {}
+    identifier = str(payload.get("identifier") or "").strip()
+    generic = jsonify({"message": "If the account exists, a reset email has been sent."}), 200
+    if not identifier:
+        return generic
+    try:
+        user = _find_user_by_identifier(identifier)
+        if not user or user.get("deleted_at"):
+            return generic
+        email = str(user.get("email") or "").strip()
+        if not email or "@" not in email:
+            # No email on file: loud in logs, identical response to the client (anti-enumeration).
+            logger.error("password reset for %s impossible: no email on file", user.get("username"))
+            return generic
+        now = datetime.now(timezone.utc).timestamp()
+        last = user.get("reset_requested_at")
+        if last is not None and now - float(last) < _RESET_REQUEST_COOLDOWN_SECONDS:
+            # Cooldown: the previous link stays valid (bombing cannot invalidate it).
+            return generic
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        expires_at = now + _RESET_TOKEN_TTL_SECONDS
+        postgrest_client.request(
+            "PATCH",
+            "app_users",
+            query={"id": f"eq.{user['id']}"},
+            payload={
+                "reset_token_hash": token_hash,
+                "reset_token_expires": expires_at,
+                "reset_requested_at": now,
+            },
+        )
+        # Send off-path: SMTP is slow and must not create a timing side channel.
+        threading.Thread(
+            target=_send_reset_email,
+            args=(email, str(user.get("username")), token),
+            daemon=True,
+        ).start()
+        return generic
+    except Exception:
+        logger.exception("password reset request failed")
+        return generic
+
+
+@app.post("/vbio-api/auth/reset-password")
+def perform_password_reset() -> Tuple[Response, int]:
+    payload = request.get_json(silent=True) or {}
+    token = str(payload.get("token") or "").strip()
+    new_password = str(payload.get("password") or "")
+    if not token or len(new_password) < 8:
+        return jsonify({"error": "Reset token and new password (min 8 chars) required."}), 400
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    try:
+        rows = postgrest_client.request(
+            "GET",
+            "app_users",
+            query={"reset_token_hash": f"eq.{token_hash}", "select": "id,username,reset_token_expires,deleted_at"},
+        )
+        row = next((r for r in rows if not r.get("deleted_at")), None)
+        now = datetime.now(timezone.utc).timestamp()
+        if not row or not row.get("reset_token_expires") or float(row["reset_token_expires"]) < now:
+            return jsonify({"error": "Reset link invalid or expired; request a new one."}), 400
+        username = str(row.get("username") or "").strip().lower()
+        postgrest_client.request(
+            "PATCH",
+            "app_users",
+            # Conditional on the token still matching: closes the two-parallel-resets TOCTOU.
+            query={"id": f"eq.{row['id']}", "reset_token_hash": f"eq.{token_hash}"},
+            payload={
+                "password_hash": _hash_password_scrypt(new_password),
+                "reset_token_hash": None,
+                "reset_token_expires": None,
+                # sessions issued before this moment are rejected from now on
+                "sessions_valid_after": datetime.now(timezone.utc).timestamp(),
+            },
+        )
+        logger.info("password reset completed for user %s", username)
+        return jsonify({"message": "Password updated. You can now sign in."}), 200
+    except Exception as exc:
+        logger.exception("password reset failed")
         return jsonify({"error": _safe_error(exc)}), 500
 
 
@@ -961,10 +1019,7 @@ def copilot_turn() -> Tuple[Response, int]:
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
-        # No silent downgrade here: a planner that fails to converge returns state="failed" as a
-        # NORMAL result (the loop's honest terminal state), so by the time an exception reaches
-        # this handler it is a genuine server/transport fault — surface it as a 502 and log it.
-        # Never fabricate a state="complete" answer for a failed plan.
+        # Non-convergence is already a normal state="failed" result; an exception here is a genuine fault.
         logger.exception("Copilot turn failed")
         return jsonify({"error": _safe_error(exc)}), 502
 
@@ -983,19 +1038,13 @@ def copilot_stream() -> Response:
     username = str(payload.get("username") or "").strip()
     content = str(payload.get("content") or "").strip()
 
-    # The client-generated turn key rides the stream so mid-turn interjections (steering)
-    # can address exactly this in-flight turn. Registered EAGERLY here — a Flask response
-    # stream's body runs lazily (first consumer read), so in-generator registration would
-    # miss steers arriving before the first frame; the generator's finally still unregisters.
+    # Registered eagerly: the stream body runs lazily, so in-generator registration would miss early steers.
     turn_key = str(payload.get("turn_key") or "").strip()
     if turn_key:
         register_steering(turn_key)
         register_steering(turn_key + "::followup")
 
     def plan(on_step, abort, get_steering=None, get_follow_ups=None):
-        # No silent downgrade: non-convergence is already a normal state="failed" result from
-        # plan_turn; any exception here is a genuine fault that copilot_event_stream surfaces as
-        # an honest event:error frame (never a fabricated state="complete" result).
         return copilot_assistant.plan_turn(
             context_type=context_type,
             context_payload=context_payload,
@@ -1040,13 +1089,7 @@ def copilot_steer() -> Tuple[Response, int]:
 
 @app.post("/vbio-api/copilot/stop")
 def copilot_stop() -> Tuple[Response, int]:
-    """Explicitly stop an in-flight streaming turn (pi destructive-interrupt alignment).
-
-    Steering is cooperative; this is the independent destructive channel. The in-flight
-    round's current model call still runs to completion (requests cannot be cancelled
-    mid-flight), but every later check point — round top, execution waves — sees the abort
-    and the turn ends honestly instead of burning its remaining budget.
-    """
+    """Stop an in-flight streaming turn; later checkpoints see the abort (the current model call still finishes)."""
     if not _copilot_is_configured():
         return jsonify({"error": "Copilot is not configured."}), 404
     payload = request.get_json(silent=True) or {}
@@ -1063,8 +1106,7 @@ def copilot_stop() -> Tuple[Response, int]:
 
 @app.post("/vbio-api/copilot/complete")
 def copilot_complete() -> Tuple[Response, int]:
-    # Inline auto-complete is best-effort assistance: it never blocks the composer or surfaces an
-    # error to the user. When disabled or on any failure it returns an empty suggestion.
+    # Best-effort: never blocks the composer; failures return an empty suggestion.
     _check_settings_reload()
     if not _copilot_is_completion_enabled():
         return jsonify({"suggestion": "", "completions": []}), 200
@@ -1080,8 +1122,7 @@ def copilot_complete() -> Tuple[Response, int]:
             user_id=str(payload.get("user_id") or "").strip(),
             username=str(payload.get("username") or "").strip(),
         )
-        # Backward compatible: ``suggestion`` stays the top-ranked suffix (legacy single-ghost
-        # consumers), ``completions`` carries the full ranked top-10 for the picker.
+        # ``suggestion`` = top-ranked suffix (legacy consumers); ``completions`` = ranked top-10.
         return jsonify({"suggestion": suggestion[0] if suggestion else "", "completions": suggestion}), 200
     except Exception as exc:  # never 5xx — autocomplete must degrade silently to "no suggestion"
         logger.debug("Copilot completion failed: %s", str(exc)[:300])
@@ -1145,15 +1186,12 @@ def get_results_screening(task_id: str) -> Tuple[Response, int]:
 
 @app.get("/vbio-api/tasks/<task_id>/ccd")
 def get_task_ccd(task_id: str) -> Tuple[Response, int]:
-    # Auth: verify the caller has access to this task's project, same as every other task read
-    # endpoint. Without this, any anonymous user who guesses a task_id can download another
-    # tenant's CCD artifacts.
+    # Same project auth as other task reads — otherwise a guessed task_id leaks CCD artifacts.
     try:
         project_id = gateway._read_project_id_from_query()
         token_plain = (request.headers.get("X-API-Token") or "").strip()
         token = gateway._authorize_project_read(project_id, token_plain)
-        # Platform token without a project_id skips the scoped lookup (same as task reads);
-        # project tokens always carry one and must match a visible task row.
+        # Platform tokens skip the scoped lookup; project tokens must match a visible task row.
         if project_id:
             task_row = gateway.task_store.find_project_task(task_id, project_id)
             if not task_row:
@@ -1176,7 +1214,7 @@ register_lead_opt_routes(
 )
 
 
-# ── F1 hardening: gateway coverage for every path the SPA used to call directly ──────────
+# Gateway coverage for SPA runtime paths
 from management_api.gateway_runtime_index import handle_tasks_runtime_index  # noqa: E402
 
 

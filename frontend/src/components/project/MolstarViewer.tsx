@@ -21,13 +21,13 @@ interface MolstarViewerProps {
   activeAtom?: MolstarAtomHighlight | null;
   interactionGranularity?: 'residue' | 'element';
   lockView?: boolean;
-  suppressAutoFocus?: boolean;
-  showSequence?: boolean;
+  isAutoFocusSuppressed?: boolean;
+  isSequenceVisible?: boolean;
   scenePreset?: 'default' | 'lead_opt';
   leadOptStyleVariant?: 'default' | 'results';
   ligandFocusChainId?: string;
-  autoFocusLigand?: boolean;
-  suppressResidueSelection?: boolean;
+  isLigandAutoFocusEnabled?: boolean;
+  isResidueSelectionSuppressed?: boolean;
   emptyMessage?: string;
 }
 
@@ -48,13 +48,13 @@ export const MolstarViewer = memo(function MolstarViewer({
   activeAtom,
   interactionGranularity = 'residue',
   lockView = false,
-  suppressAutoFocus = false,
-  showSequence = true,
+  isAutoFocusSuppressed = false,
+  isSequenceVisible = true,
   scenePreset = 'default',
   leadOptStyleVariant = 'default',
   ligandFocusChainId = '',
-  autoFocusLigand,
-  suppressResidueSelection = false,
+  isLigandAutoFocusEnabled,
+  isResidueSelectionSuppressed = false,
   emptyMessage = 'No structure loaded yet. Run prediction and refresh status after completion.'
 }: MolstarViewerProps) {
   const hadExternalHighlightsRef = useRef(false);
@@ -66,13 +66,13 @@ export const MolstarViewer = memo(function MolstarViewer({
     setError,
     suppressPickEventsRef
   } = useMolstarBootstrap({
-    showSequence,
+    showSequence: isSequenceVisible,
     interactionGranularity,
     onResiduePick,
     pickMode
   });
 
-  const shouldAutoFocusLigand = autoFocusLigand ?? scenePreset === 'lead_opt';
+  const shouldAutoFocusLigand = isLigandAutoFocusEnabled ?? scenePreset === 'lead_opt';
 
   const focusLigandAnchor = useMolstarFocus({
     format,
@@ -93,7 +93,7 @@ export const MolstarViewer = memo(function MolstarViewer({
     confidenceBackend,
     scenePreset,
     leadOptStyleVariant,
-    suppressAutoFocus,
+    suppressAutoFocus: isAutoFocusSuppressed,
     autoFocusLigand: shouldAutoFocusLigand,
     focusLigandAnchor,
     setError
@@ -104,11 +104,11 @@ export const MolstarViewer = memo(function MolstarViewer({
     applyMolstarHighlights({
       viewer: viewerRef.current,
       structureText,
-      highlightResidues: suppressResidueSelection ? [] : highlightResidues,
+      highlightResidues: isResidueSelectionSuppressed ? [] : highlightResidues,
       activeResidue,
       highlightAtoms,
       activeAtom,
-      suppressAutoFocus,
+      suppressAutoFocus: isAutoFocusSuppressed,
       disableExternalFocus: scenePreset === 'lead_opt' && leadOptStyleVariant === 'results',
       hadExternalHighlightsRef,
       suppressPickEventsRef
@@ -121,8 +121,8 @@ export const MolstarViewer = memo(function MolstarViewer({
     activeResidue,
     highlightAtoms,
     activeAtom,
-    suppressAutoFocus,
-    suppressResidueSelection,
+    isAutoFocusSuppressed,
+    isResidueSelectionSuppressed,
     scenePreset,
     viewerRef,
     suppressPickEventsRef
@@ -130,12 +130,10 @@ export const MolstarViewer = memo(function MolstarViewer({
 
   useEffect(() => {
     if (!ready || !viewerRef.current || !structureText.trim()) return;
-    if (scenePreset !== 'lead_opt' || suppressAutoFocus) return;
-    // Deferred ligand focus after the appearance pipeline settles. We intentionally do NOT
-    // re-apply color themes here — that is the pipeline's job. This effect re-runs on every
-    // colorMode / structureReadyVersion change, and the previous version called
-    // tryApplyElementSymbolThemeToCurrentScene (a 6s poll + viewer.setStyle rebuild) 2-4x per
-    // AF<->Std toggle, which froze the browser on large structures.
+    if (scenePreset !== 'lead_opt' || isAutoFocusSuppressed) return;
+    // Deferred ligand focus after the appearance pipeline settles. Color themes are
+    // NOT re-applied here — that is the pipeline's job (rebuilding styles on every
+    // AF<->Std toggle freezes large structures).
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled || !viewerRef.current) return;
@@ -151,7 +149,7 @@ export const MolstarViewer = memo(function MolstarViewer({
     scenePreset,
     structureReadyVersion,
     structureText,
-    suppressAutoFocus,
+    isAutoFocusSuppressed,
     viewerRef
   ]);
 

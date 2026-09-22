@@ -23,6 +23,10 @@ export interface BuildRunUiStateParams {
   affinityPreviewError: string;
   affinityDockMode: boolean;
   affinityDockPocketPresent: boolean;
+  /** Dock mode with no pocket: blind whole-surface search (protenix2dock). */
+  affinityDockBlind: boolean;
+  /** Unsaved draft edits exist (drives the Restore Saved / Run Current menu). */
+  hasUnsavedChanges: boolean;
   affinityTargetChainCount: number;
   affinityLigandChainId: string;
   affinityLigandSmiles: string;
@@ -74,6 +78,7 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
     affinityConfidenceOnly,
     affinityConfidenceOnlyLocked,
     draftBackend,
+    hasUnsavedChanges,
   } = params;
 
   const componentStepLabel = 'Components';
@@ -99,11 +104,10 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
         ? 'Building preview input...'
         : !affinityPreviewCurrent
           ? affinityPreviewError || 'Failed to prepare preview input from uploaded files.'
-          : params.affinityDockMode && !params.affinityDockPocketPresent
-            // Dock mode cannot run without a pocket box (submit enforces it): surface the
-            // blocker HERE so runBlockedReason names it and the copilot can resolve it with
-            // task_detail:set_docking_pocket_box instead of eating a failed submit.
-            ? 'Set a docking pocket box before running.'
+          : params.affinityDockMode && !params.affinityDockPocketPresent && !params.affinityDockBlind
+            // pocket-required dock: name the blocker so the copilot can resolve it;
+            // blind dock is deliberate and runs without one
+            ? 'Set a docking pocket box before running — or enable Blind docking.'
             : affinityUseActivity && !affinityTargetChainCount
               ? 'No target chain could be inferred from target structure.'
               : affinityUseActivity && !affinityLigandChainId.trim()
@@ -182,6 +186,8 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
     affinityReadyReason,
     runBlockedReason,
     runDisabled,
-    canOpenRunMenu: false
+    // The unsaved-changes run choice (Restore Saved vs Run Current) is only
+    // meaningful when there ARE unsaved changes and the run is actionable.
+    canOpenRunMenu: hasUnsavedChanges && !runDisabled
   };
 }

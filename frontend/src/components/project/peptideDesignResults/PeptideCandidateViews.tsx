@@ -1,7 +1,6 @@
 /**
- * The two candidate presentation views (table row + card) of the peptide
- * design results workspace. Extracted as pure memo components — all data
- * arrives via props, no workspace closures.
+ * Candidate presentation views (table row + card) for the peptide design
+ * results workspace. Pure memo components; all data arrives via props.
  */
 import { memo, useCallback, useMemo, type KeyboardEvent, type MouseEvent } from 'react';
 import {
@@ -18,8 +17,8 @@ import './PeptideCandidateViews.css';
 
 interface PeptideCandidateTableRowProps {
   candidate: PeptideDesignCandidate;
-  selected: boolean;
-  cardMode: boolean;
+  isSelected: boolean;
+  isCardMode: boolean;
   scoreMin: number | null;
   scoreMax: number | null;
   onOpen: (candidateId: string) => void;
@@ -28,8 +27,8 @@ interface PeptideCandidateTableRowProps {
 
 export const PeptideCandidateTableRow = memo(function PeptideCandidateTableRow({
   candidate,
-  selected,
-  cardMode,
+  isSelected,
+  isCardMode,
   scoreMin,
   scoreMax,
   onOpen,
@@ -48,8 +47,8 @@ export const PeptideCandidateTableRow = memo(function PeptideCandidateTableRow({
     );
   }, [candidate.modifications, candidate.sequence]);
   const handleRowClick = useCallback(() => {
-    if (cardMode) onSelect(candidate.id);
-  }, [candidate.id, cardMode, onSelect]);
+    if (isCardMode) onSelect(candidate.id);
+  }, [candidate.id, isCardMode, onSelect]);
   const handleOpen = useCallback((event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     onOpen(candidate.id);
@@ -57,7 +56,7 @@ export const PeptideCandidateTableRow = memo(function PeptideCandidateTableRow({
 
   return (
     <tr
-      className={selected ? 'selected' : ''}
+      className={isSelected ? 'selected' : ''}
       onClick={handleRowClick}
     >
       <td className="col-rank">{candidate.rank}</td>
@@ -121,21 +120,20 @@ export const PeptideCandidateTableRow = memo(function PeptideCandidateTableRow({
 
 interface PeptideCandidateCardProps {
   candidate: PeptideDesignCandidate;
-  selected: boolean;
+  isSelected: boolean;
   scoreMin: number | null;
   scoreMax: number | null;
-  /** Whether any candidate this run carries an ipSAE value — the pill hides entirely on runs
-   *  whose scoring backend produced none, instead of a dead "IPSAE -" chip. */
-  showIpsae: boolean;
+  /** Whether any candidate carries an ipSAE value; the pill hides on runs with none. */
+  isIpsaeVisible: boolean;
   onSelect: (candidateId: string) => void;
 }
 
 export const PeptideCandidateCard = memo(function PeptideCandidateCard({
   candidate,
-  selected,
+  isSelected,
   scoreMin,
   scoreMax,
-  showIpsae,
+  isIpsaeVisible,
   onSelect
 }: PeptideCandidateCardProps) {
   const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreMin, scoreMax));
@@ -160,7 +158,7 @@ export const PeptideCandidateCard = memo(function PeptideCandidateCard({
 
   return (
     <article
-      className={`lead-opt-result-card peptide-result-card${selected ? ' selected' : ''}`}
+      className={`lead-opt-result-card peptide-result-card${isSelected ? ' selected' : ''}`}
       onClick={handleSelect}
       onKeyDown={handleKeyDown}
       role="button"
@@ -218,7 +216,7 @@ export const PeptideCandidateCard = memo(function PeptideCandidateCard({
           <span className="lead-opt-card-pill-key">ipTM</span>
           <strong>{formatInterfaceMetric(candidate.iptm)}</strong>
         </span>
-        {showIpsae ? (
+        {isIpsaeVisible ? (
           <span className={`lead-opt-card-pill conf-tone-${ipsaeTone}`}>
             <span className="lead-opt-card-pill-key">IPSAE</span>
             <strong>{formatInterfaceMetric(candidate.ipsae)}</strong>

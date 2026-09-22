@@ -16,7 +16,6 @@ from backend.worker.tasks import (
 from backend.worker.lead_opt_halo_task import lead_optimization_halo_task
 from gpu_manager import get_redis_client, get_gpu_status
 from backend.runtime.affinity_preview import AffinityPreviewError, build_affinity_preview
-from backend.routes.admin import register_admin_routes
 from backend.routes.task import register_task_routes
 from backend.routes.affinity import register_affinity_routes
 from backend.routes.lead_opt import register_lead_opt_routes
@@ -41,33 +40,27 @@ from backend.scheduling.capability_router import (
     resolve_queue_for_capability,
 )
 
-# --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# 创建全局任务监控实例
 task_monitor = TaskMonitor(logger=logger)
 
 _monitor_store_lock = threading.Lock()
 _monitor_store: MonitorStore | None = None
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = config.RESULTS_BASE_DIR
-# Hard cap on request body size: structure uploads (PDB/CIF/SDF) are at most a few MB; a cap
-# here stops an oversized/malicious upload from being fully buffered in memory before any
-# handler-level validation runs.
+# Cap request bodies so oversized uploads are rejected before being fully buffered.
 app.config['MAX_CONTENT_LENGTH'] = config.MAX_UPLOAD_BYTES
 
 
 @app.before_request
 def _exempt_worker_result_uploads():
-    # Result archives legitimately reach gigabytes (embedded MSA caches), and
-    # /upload_result/<task_id> is called only by authenticated workers from inside the cluster
-    # with files this very service asked them to produce. The external-upload cap must not
-    # reject them at the final step of a completed GPU run. Werkzeug reads the limit lazily at
-    # first body access, so clearing it here applies to this request only.
+    # Result archives can reach gigabytes (embedded MSA caches) and /upload_result is
+    # called only by authenticated workers, so exempt it. Werkzeug reads the limit
+    # lazily, so clearing it here is per-request.
     if request.path.startswith('/upload_result/'):
         app.config['MAX_CONTENT_LENGTH'] = None
     else:
@@ -76,13 +69,12 @@ def _exempt_worker_result_uploads():
 
 @app.errorhandler(413)
 def _request_entity_too_large(_error):
-    # The default 413 body is an HTML page; API clients expect JSON with the limit named.
+    # Default 413 body is HTML; API clients expect JSON.
     return jsonify({
         'error': f'Request body exceeds the upload limit ({config.MAX_UPLOAD_BYTES} bytes).'
     }), 413
 
-# Browser clients (V-Bio frontend) call this API directly.
-# Enable permissive CORS by default so both localhost and remote host:port frontends can submit tasks.
+# Frontend calls this API directly from the browser; permissive CORS by default.
 _cors_origins_raw = os.environ.get("BOLTZ_CORS_ALLOW_ORIGINS", "*").strip()
 if _cors_origins_raw == "*":
     _cors_origin_allowlist = None
@@ -95,7 +87,7 @@ def _resolve_cors_origin() -> str:
         return origin or "*"
     if origin and origin in _cors_origin_allowlist:
         return origin
-    # Origin not allowlisted: emit no ACAO header so the browser blocks the response.
+    # Not allowlisted: no ACAO header, browser blocks the response.
     return ""
 
 def _apply_cors_headers(response):
@@ -120,13 +112,6 @@ def handle_cors_preflight():
 def add_cors_headers(response):
     return _apply_cors_headers(response)
 
-# MSA 缓存配置（与监控 GC 共用同一目录与保留期）
-MSA_CACHE_CONFIG = {
-    'cache_dir': config.BOLTZ_MSA_CACHE_DIR,
-    'max_age_days': config.MSA_CACHE_RETENTION_DAYS,
-    'max_size_gb': 5,
-    'enable_cache': True
-}
 
 os.makedirs(config.RESULTS_BASE_DIR, exist_ok=True)
 os.makedirs(config.EXPORTS_BASE_DIR, exist_ok=True)
@@ -147,38 +132,8 @@ result_archive_service = ResultArchiveService(
 )
 
 
-def download_results(task_id: str):
-    """Shared download handler used by prediction/lead-opt route modules."""
-    logger.info('Received shared download request for task ID: %s', task_id)
-    try:
-        filename, filepath = result_archive_service.resolve_result_archive_path(task_id)
-    except FileNotFoundError as exc:
-        logger.warning('Failed to resolve results for task %s: %s', task_id, exc)
-        return jsonify({'error': str(exc)}), 404
-    except PermissionError as exc:
-        logger.error('Invalid result path for task %s: %s', task_id, exc)
-        return jsonify({'error': 'Invalid file path detected.'}), 400
-    except Exception as exc:
-        logger.exception('Unexpected error while resolving results for task %s: %s', task_id, exc)
-        return jsonify({'error': f'Failed to resolve result archive: {exc}'}), 500
 
-    directory = app.config['UPLOAD_FOLDER']
-    logger.info('Serving full result file %s for task %s from %s.', filename, task_id, filepath)
-    return send_from_directory(
-        directory,
-        filename,
-        as_attachment=True,
-        conditional=False,
-        etag=False,
-        max_age=0,
-    )
-
-# --- Authentication Decorator ---
 def require_api_token(f):
-    """
-    Decorator to validate API token from request headers.
-    Logs unauthorized access attempts.
-    """
     @wraps(f)
     def decorated_function(*args, **kwargs):
         token = request.headers.get('X-API-Token')
@@ -286,7 +241,6 @@ register_task_routes(
     celery_app=celery_app,
     task_monitor=task_monitor,
     predict_task=predict_task,
-    config_module=config,
     logger=logger,
     find_result_archive=result_archive_service.find_result_archive,
     resolve_result_archive_path=result_archive_service.resolve_result_archive_path,
@@ -309,15 +263,6 @@ register_export_routes(
 )
 
 
-register_admin_routes(
-    app,
-    require_api_token=require_api_token,
-    msa_cache_config=MSA_CACHE_CONFIG,
-    colabfold_jobs_dir=config.COLABFOLD_JOBS_DIR,
-    logger=logger,
-    task_monitor=task_monitor,
-    get_gpu_status_fn=get_gpu_status,
-)
 
 if __name__ == '__main__':
     # For production, use a WSGI server like Gunicorn/uWSGI instead of app.run().

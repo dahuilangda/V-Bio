@@ -76,9 +76,8 @@ export function useProjectTaskStatusContext({
     return 0;
   }, [displayTaskState, statusInfo, statusContextTaskRow?.task_id, project?.task_id]);
 
-  // Elapsed time is intentionally NOT computed here: deriving it from a ticking clock
-  // would force every consumer of this context to re-render every second. The header's
-  // <ElapsedSeconds> chip computes it locally from displaySubmittedAt/displayTaskState.
+  // Elapsed time is not computed here — a ticking clock would re-render every
+  // consumer each second. The header's <ElapsedSecondsChip> computes it locally.
 
   const isActiveRuntime = useMemo(() => {
     return displayTaskState === 'QUEUED' || displayTaskState === 'RUNNING';

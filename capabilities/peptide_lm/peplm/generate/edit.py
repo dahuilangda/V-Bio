@@ -1,22 +1,11 @@
-"""Proposal operators: structure-guided editing and NCAA point moves.
-
-edit: keep the elite prefix up to its least-confident residue, regenerate the
-tail with the agent (the causal-LM span editor — PepEVOLVE/Pepti-Agent style
-residue editing, generalized to tails). The prefix stays visible in the prompt
-so GRPO treats the trajectory as conditioned (prompt-masked) and improves the
-edit operator itself.
-
-mut: epsilon-exploration point moves — conservative substitutions (V-Bio
-table) plus NCAA swaps: replace a natural residue with an NCAA token (or vice
-versa), the channel that injects NCAA gradients into a prior pretrained on
-natural peptides only.
-"""
+"""Proposal operators: structure-guided FIM editing and NCAA point moves."""
 
 from __future__ import annotations
 
 import random
 
 from peplm.candidate import Candidate
+from peplm.shared import placement_allows
 from peplm.residues import NCAA_TOKENS, placement_of
 from peplm.vocab import is_residue_token
 
@@ -28,18 +17,34 @@ CONSERVATIVE = {
 }
 
 
-def worst_positions(cand: Candidate, k: int = 1) -> list[int]:
-    """Residue indices (into cand.residues) with the lowest per-residue
-    pLDDT — the structure-guided edit map (residue analogue of HALO's
-    per-atom pLDDT editing)."""
+def worst_positions(cand: Candidate, k: int = 1,
+                    rng: "random.Random | None" = None) -> list[int]:
+    """Residue indices to edit: sampled with probability proportional to
+    (1 - per-residue pLDDT), so low-confidence residues are redesigned
+    preferentially. Protected positions (Cys anchors, user-fixed) are
+    never sampled."""
     plddts = cand.metrics.get("binder_plddt")
     res = cand.residues
     if not plddts or len(plddts) != len(res):
         return []
-    order = sorted(range(len(res)), key=lambda i: plddts[i])
+    protected = getattr(cand, "_protected", set())
+    if rng is not None:
+        weights = [max(0.0, 1.0 - float(plddts[i]))
+                   if i not in protected else 0.0
+                   for i in range(len(res))]
+        total = sum(weights)
+        if total > 0:
+            picks = set()
+            for _ in range(min(k * 3, len(res))):
+                picks.update(rng.choices(range(len(res)),
+                                         weights=[w / total for w in weights],
+                                         k=1))
+                if len(picks) >= k:
+                    break
+            return sorted(picks)[:k]
+    order = sorted((i for i in range(len(res)) if i not in protected),
+                   key=lambda i: plddts[i])
     return order[:k]
-
-
 
 
 def parent_modality(parent) -> str:
@@ -48,8 +53,7 @@ def parent_modality(parent) -> str:
 
 
 class _PlanCfg:
-    """Minimal config facade for build_plan inside the edit operator (the
-    engine passes exactly the fields the plan needs)."""
+    """Minimal config facade for build_plan."""
 
     def __init__(self, len_range, design_mode, bicyclic_layout, ncaa_range,
                  ncaa_decode_bias=0.0, cys_positions=(),
@@ -92,21 +96,17 @@ def edit_candidates(agent, vocab, parent: Candidate, n: int, device,
                     fixed_abs: dict | None = None,
                     pool_tokens: list[str] | None = None,
                     plan_kwargs: dict | None = None) -> list[Candidate]:
-    """FIM span editing (ProteinMPNN's fixed-context redesign as an LM
-    operator): mask the span around the parent's least-confident residue,
-    regenerate it conditioned on BOTH flanks. Trained-in from pretraining
-    (50% PSM lines), so the infill policy is the pretrained prior itself.
-
-    Decode-time constraints (upgrade 3): fixed residues inside the fill are
-    enforced with positions RELATIVE to the span origin (the prefix is
-    already satisfied as prompt context); the NCAA pool and length bounds
-    come from the same plan machinery as de novo sampling."""
+    """FIM span editing: mask the span around the parent's least-confident
+    residue, regenerate it conditioned on both flanks. Fixed-residue
+    positions inside the fill are relative to the span origin; the NCAA
+    pool and length bounds come from the same plan machinery as de novo
+    sampling."""
     from peplm.loop.constraints import build_plan
 
     res = parent.residues
     if len(res) < 10:
         return []
-    weak = worst_positions(parent, k=1)
+    weak = worst_positions(parent, k=1, rng=rng)
     protected = getattr(parent, "_protected", set())
     w = rng.randint(3, min(8, len(res) - 4))
     center = weak[0] if weak else rng.randrange(2, len(res) - 2)
@@ -124,17 +124,10 @@ def edit_candidates(agent, vocab, parent: Candidate, n: int, device,
               + ["<suf>"] + suffix_res + ["<mid>"])
     plan = None
     if plan_kwargs:
-        # Constraint index space: the sampler seeds its residue-emission
-        # counter with EVERY residue token in the prompt (prefix + suffix
-        # flanks of the FIM window), so fill token j decodes at
-        # emitted = len(prefix_res) + len(suffix_res) + j. Absolute
-        # sequence positions must therefore be remapped by that offset —
-        # and only for positions INSIDE the regenerated span; positions in
-        # the flanks ride the prompt as fixed context and must not be
-        # re-enforced (the old `pos - a` mapping was off by the suffix
-        # length, so decode-time forcing never fired where intended and
-        # could fire on the wrong residue; correctness silently depended
-        # on the post-hoc overwrite below).
+        # Constraint index space: the sampler counts prompt residues too,
+        # so fill token j decodes at emitted = len(prefix_res) +
+        # len(suffix_res) + j. Only span positions are remapped; flanks
+        # ride the prompt as fixed context and are not re-enforced.
         off = len(prefix_res) + len(suffix_res)
         fixed_rel = {pos - a + off: tok
                      for pos, tok in (fixed_abs or {}).items()
@@ -178,14 +171,12 @@ def mutate_candidate(parent: Candidate, rng: random.Random,
                      ncaa_max: int | None = None) -> Candidate:
     """One point move: conservative aa swap, or NCAA swap (either direction).
 
-    NCAA legality follows the CALLER's pool exactly: an explicitly passed (or
-    parent-attribute) empty pool means the user restricted the design to
-    natural residues — no NCAA move may happen. Only when no pool information
-    exists at all (standalone use) does the full preset catalog apply.
-    ``ncaa_max`` additionally caps the natural->NCAA channel at the user's
-    non-natural count budget, mirroring the decode-time constraint plan.
+    An explicitly passed (or parent) empty pool means natural-only design —
+    no NCAA move may happen; only when no pool info exists at all does the
+    full preset catalog apply. ``ncaa_max`` caps the natural->NCAA channel
+    at the user's non-natural budget.
     """
-    res = list(parent.residues)
+    res = parent.residues
     if not res:
         return parent
     protected = getattr(parent, "_protected", set())
@@ -222,7 +213,7 @@ def mutate_candidate(parent: Candidate, rng: random.Random,
         elif len(res[idx]) == 1:
             res[idx] = rng.choice(CONSERVATIVE.get(res[idx], "ACDEFGHIKLMNPQRSTVWY"))
     elif len(res[idx]) > 1:
-        # NCAA -> its base or another NCAA sharing the base
+        # NCAA -> its base residue
         base = res[idx][1:-1]
         from peplm.residues import NCAA_PRESETS
         base_res = NCAA_PRESETS[base]["base"]

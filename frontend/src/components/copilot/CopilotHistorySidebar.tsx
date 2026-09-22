@@ -1,6 +1,6 @@
 /**
- * Chat session history sidebar — extracted from ProjectCopilotModal.
- * Zero local state; sessions computed by parent (p.sessions useMemo).
+ * Chat session history sidebar.
+ * Stateless; sessions are computed by the parent.
  */
 import { MessageSquarePlus, Trash2 } from 'lucide-react';
 import { formatDateTime } from '../../utils/date';
@@ -15,7 +15,7 @@ interface CopilotHistorySidebarProps {
   sessions: CopilotSessionSummary[];
   activeSessionId: string;
   onSelect: (sessionId: string) => void;
-  onDelete: (sessionId: string) => void;
+  deleteAction: (sessionId: string) => void;
   onNewChat: () => void;
 }
 
@@ -43,7 +43,7 @@ export function CopilotHistorySidebar(p: CopilotHistorySidebarProps) {
                     <button
                       className="copilot-history-delete"
                       type="button"
-                      onClick={() => void p.onDelete(session.id)}
+                      onClick={() => void p.deleteAction(session.id)}
                       aria-label="Delete chat"
                       title="Delete chat"
                     >

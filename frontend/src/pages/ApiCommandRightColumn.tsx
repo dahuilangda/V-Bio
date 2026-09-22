@@ -2,8 +2,8 @@
  * The command column of the API access builder: the copyable command cards
  * (environment, YAML preview, submit, status, result, screening, task
  * action) and the command history list. All command strings and workflow
- * labeling are computed by ApiAccessPage; the ~21 values this column reads
- * arrive as three named prop groups — clipboard, commands, workflow.
+ * labeling are computed by ApiAccessPage; props arrive as three named
+ * groups — clipboard, commands, workflow.
  */
 import type { Dispatch, SetStateAction } from 'react';
 import { CommandItem } from './ApiCommandItem';
@@ -19,16 +19,16 @@ import './ApiCommandRightColumn.css';
 
 export interface ApiCommandClipboardProps {
   copiedActionId: string;
-  copyText: (text: string, okMessage: string, historyLabel?: string, copyId?: string) => Promise<void>;
+  copyTextAction: (text: string, okMessage: string, historyLabel?: string, copyId?: string) => Promise<void>;
   commandHistory: CommandHistoryEntry[];
   setCommandHistory: Dispatch<SetStateAction<CommandHistoryEntry[]>>;
-  applyCommandHistory: (entry: CommandHistoryEntry) => void;
+  onApplyCommandHistory: (entry: CommandHistoryEntry) => void;
 }
 
 export interface ApiCommandStringsProps {
   commandEnv: string;
   yamlBuilderText: string;
-  downloadGeneratedYaml: () => void;
+  onDownloadGeneratedYaml: () => void;
   commandSubmitWithHints: string;
   commandStatus: string;
   commandResults: string;
@@ -60,15 +60,15 @@ export function ApiCommandRightColumn({
 }: ApiCommandRightColumnProps) {
   const {
     copiedActionId,
-    copyText,
+    copyTextAction,
     commandHistory,
     setCommandHistory,
-    applyCommandHistory
+    onApplyCommandHistory
   } = clipboard;
   const {
     commandEnv,
     yamlBuilderText,
-    downloadGeneratedYaml,
+    onDownloadGeneratedYaml,
     commandSubmitWithHints,
     commandStatus,
     commandResults,
@@ -93,8 +93,8 @@ export function ApiCommandRightColumn({
           index={1}
           title="Environment"
           command={commandEnv}
-          copied={copiedActionId === 'copy-env'}
-          onCopy={() => { void copyText(commandEnv, 'Environment command copied.', 'Environment', 'copy-env'); }}
+          isCopied={copiedActionId === 'copy-env'}
+          onCopy={() => { void copyTextAction(commandEnv, 'Environment command copied.', 'Environment', 'copy-env'); }}
         />
 
         {(isPredictionWorkflow || isVirtualScreeningWorkflow) && (
@@ -102,9 +102,9 @@ export function ApiCommandRightColumn({
             index=""
             title="YAML Preview"
             command={yamlBuilderText}
-            copied={copiedActionId === 'copy-yaml-preview'}
-            onCopy={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Preview', 'copy-yaml-preview'); }}
-            extraAction={{ label: 'Download generated YAML', onClick: downloadGeneratedYaml }}
+            isCopied={copiedActionId === 'copy-yaml-preview'}
+            onCopy={() => { void copyTextAction(yamlBuilderText, 'Generated YAML copied.', 'YAML Preview', 'copy-yaml-preview'); }}
+            extraAction={{ label: 'Download generated YAML', onClick: onDownloadGeneratedYaml }}
           />
         )}
 
@@ -118,9 +118,9 @@ export function ApiCommandRightColumn({
                 ? 'Virtual Screening/nesso'
                 : `Affinity/${effectiveAffinityBackend}`})`}
           command={commandSubmitWithHints}
-          copied={copiedActionId === 'copy-submit'}
-          onCopy={() => { void copyText(commandSubmitWithHints, 'Submit command copied.', 'Submit', 'copy-submit'); }}
-          disabled={!isSupportedSubmitWorkflow}
+          isCopied={copiedActionId === 'copy-submit'}
+          onCopy={() => { void copyTextAction(commandSubmitWithHints, 'Submit command copied.', 'Submit', 'copy-submit'); }}
+          isDisabled={!isSupportedSubmitWorkflow}
         >
           {!isSupportedSubmitWorkflow && (
             <p className="muted small">Select a Prediction, Virtual Screening, or Affinity project to generate submit command.</p>
@@ -131,8 +131,8 @@ export function ApiCommandRightColumn({
           index={3}
           title="Check Status"
           command={commandStatus}
-          copied={copiedActionId === 'copy-status'}
-          onCopy={() => { void copyText(commandStatus, 'Status command copied.', 'Status', 'copy-status'); }}
+          isCopied={copiedActionId === 'copy-status'}
+          onCopy={() => { void copyTextAction(commandStatus, 'Status command copied.', 'Status', 'copy-status'); }}
           titleTip="Uses the $TASK_ID captured from the submit response."
         />
 
@@ -140,8 +140,8 @@ export function ApiCommandRightColumn({
           index={4}
           title="Download Result"
           command={commandResults}
-          copied={copiedActionId === 'copy-result'}
-          onCopy={() => { void copyText(commandResults, 'Result command copied.', 'Result', 'copy-result'); }}
+          isCopied={copiedActionId === 'copy-result'}
+          onCopy={() => { void copyTextAction(commandResults, 'Result command copied.', 'Result', 'copy-result'); }}
         />
 
         {commandScreeningResults && (
@@ -149,8 +149,8 @@ export function ApiCommandRightColumn({
             index={5}
             title="Screening Ranking"
             command={commandScreeningResults}
-            copied={copiedActionId === 'copy-screening'}
-            onCopy={() => { void copyText(commandScreeningResults, 'Screening ranking command copied.', 'Screening Ranking', 'copy-screening'); }}
+            isCopied={copiedActionId === 'copy-screening'}
+            onCopy={() => { void copyTextAction(commandScreeningResults, 'Screening ranking command copied.', 'Screening Ranking', 'copy-screening'); }}
             hint="compounds[0] is the strongest binder (lowest affinity_pred_value, log10 IC50 in µM)."
           />
         )}
@@ -159,8 +159,8 @@ export function ApiCommandRightColumn({
           index={commandScreeningResults ? '6' : '5'}
           title={builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task'}
           command={commandTaskAction}
-          copied={copiedActionId === 'copy-task-action'}
-          onCopy={() => { void copyText(commandTaskAction, 'Task action command copied.', builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task', 'copy-task-action'); }}
+          isCopied={copiedActionId === 'copy-task-action'}
+          onCopy={() => { void copyTextAction(commandTaskAction, 'Task action command copied.', builderTaskOperation === 'delete' ? 'Delete Task' : 'Cancel Task', 'copy-task-action'); }}
           hint={`Operation mode: ${builderTaskOperation}.`}
         />
       </div>
@@ -168,8 +168,8 @@ export function ApiCommandRightColumn({
       <CommandHistory
         history={commandHistory}
         copiedId={copiedActionId}
-        onCopy={copyText}
-        onApply={applyCommandHistory}
+        onCopy={copyTextAction}
+        onApply={onApplyCommandHistory}
         onClear={() => setCommandHistory([])}
       />
     </div>

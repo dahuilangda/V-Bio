@@ -53,11 +53,11 @@ export interface ProjectResultsSectionProps {
   peptideFallbackIptm: number | null;
   statusInfo: Record<string, unknown> | null;
   progressPercent: number;
-  canPredictStructures: boolean;
+  isStructurePredictionAllowed: boolean;
   virtualScreeningComponents: InputComponent[];
   predictionRecords: Record<string, VirtualScreeningPredictionRecord>;
   onPredictionRecordsChange?: (records: Record<string, VirtualScreeningPredictionRecord>) => void;
-  onPeptideRequestStructure?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
+  requestStructureAction?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
 }
 
 export const ProjectResultsSection = memo(function ProjectResultsSection({
@@ -101,11 +101,11 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
   peptideFallbackIptm,
   statusInfo,
   progressPercent,
-  canPredictStructures,
+  isStructurePredictionAllowed,
   virtualScreeningComponents,
   predictionRecords,
   onPredictionRecordsChange,
-  onPeptideRequestStructure
+  requestStructureAction
 }: ProjectResultsSectionProps) {
   const initialPredictionColorMode = useMemo<'default' | 'alphafold'>(
     () => (displayStructureColorMode === 'alphafold' ? 'alphafold' : 'default'),
@@ -117,7 +117,6 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
 
   // Render-time adjustment (no effect pass): the viewer reverts to the task's
   // default color mode whenever the opened task or its default changes.
-  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   const [prevPredictionColorModeKey, setPrevPredictionColorModeKey] = useState({
     initialPredictionColorMode,
     projectTaskId
@@ -150,7 +149,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
         projectTaskId={projectTaskId}
         projectTaskState={projectTaskState}
         progressPercent={progressPercent}
-        canPredictStructures={canPredictStructures}
+        isStructurePredictionAllowed={isStructurePredictionAllowed}
         components={virtualScreeningComponents}
         predictionRecords={predictionRecords}
         onPredictionRecordsChange={onPredictionRecordsChange}
@@ -181,7 +180,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
         statusInfo={statusInfo || {}}
         projectTaskState={projectTaskState}
         progressPercent={progressPercent}
-        onRequestStructure={onPeptideRequestStructure}
+        onRequestStructure={requestStructureAction}
       />
     );
   }
@@ -201,8 +200,8 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
               leadOptStyleVariant="results"
               ligandFocusChainId={selectedResultLigandChainId || ''}
               interactionGranularity="element"
-              suppressAutoFocus={false}
-              showSequence={false}
+              isAutoFocusSuppressed={false}
+              isSequenceVisible={false}
               emptyMessage={
                 isAffinityOnlyPrediction
                   ? 'Nesso-1 produced affinity signals without a 3D structure.'

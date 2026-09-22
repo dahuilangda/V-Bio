@@ -9,11 +9,11 @@ function headerProps(overrides: Partial<HeaderProps> = {}): HeaderProps {
   return {
     projectName: 'Docking',
     taskCountText: '12 tasks',
-    refreshing: false,
+    isRefreshing: false,
     createTaskHref: '/create',
     backToCurrentTaskHref: '/back',
-    canEdit: true,
-    exportingExcel: false,
+    isEditable: true,
+    isExportingExcel: false,
     exportProgress: null,
     filteredCount: 12,
     onDownloadExcel: () => {},
@@ -41,7 +41,7 @@ describe('ProjectTasksHeader export progress UI', () => {
 
   it('turns the button into a cancel control while exporting', () => {
     const html = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'exporting', done: 10, total: 100 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'exporting', done: 10, total: 100 } })
     );
     expect(html).toContain('title="Cancel export"');
     expect(html).toContain('aria-label="Cancel export"');
@@ -53,7 +53,7 @@ describe('ProjectTasksHeader export progress UI', () => {
 
   it('shows indeterminate ring + popover while submitting', () => {
     const html = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'submitting', done: 0, total: 840 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'submitting', done: 0, total: 840 } })
     );
     expect(html).toContain('task-export-anchor');
     expect(html).toContain('Exporting Excel');
@@ -65,7 +65,7 @@ describe('ProjectTasksHeader export progress UI', () => {
 
   it('shows percentage, filled bar and counts while exporting', () => {
     const html = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'exporting', done: 840, total: 840 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'exporting', done: 840, total: 840 } })
     );
     expect(html).toContain('>100%</span>');
     expect(html).toContain('width:100%');
@@ -76,28 +76,28 @@ describe('ProjectTasksHeader export progress UI', () => {
 
   it('shows partial progress and download phase text', () => {
     const half = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'exporting', done: 420, total: 840 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'exporting', done: 420, total: 840 } })
     );
     expect(half).toContain('>50%</span>');
     expect(half).toContain('width:50%');
     expect(half).toContain('420 / 840 tasks');
 
     const downloading = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'downloading', done: 840, total: 840 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'downloading', done: 840, total: 840 } })
     );
     expect(downloading).toContain('Preparing download…');
   });
 
   it('formats large counts with locale separators', () => {
     const html = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'exporting', done: 1234, total: 5678 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'exporting', done: 1234, total: 5678 } })
     );
     expect(html).toMatch(/1,234 \/ 5,678 tasks/);
   });
 
   it('shows the collecting phase while the full task list loads', () => {
     const partial = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'collecting', done: 240, total: 13089 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'collecting', done: 240, total: 13089 } })
     );
     expect(partial).toContain('Loading tasks');
     expect(partial).toContain('Loading tasks 240 / 13,089');
@@ -105,7 +105,7 @@ describe('ProjectTasksHeader export progress UI', () => {
     expect(partial).toContain('width:2%');
 
     const complete = renderHeader(
-      headerProps({ exportingExcel: true, exportProgress: { phase: 'collecting', done: 13089, total: 13089 } })
+      headerProps({ isExportingExcel: true, exportProgress: { phase: 'collecting', done: 13089, total: 13089 } })
     );
     expect(complete).toContain('Loading tasks 13,089 / 13,089');
     expect(complete).toContain('>100%</span>');

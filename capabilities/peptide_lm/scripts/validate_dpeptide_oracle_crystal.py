@@ -1,7 +1,7 @@
 """Crystal validation of the D-peptide oracle against 3LNJ.
 
-Protocol (the production D-peptide mirror workflow, exercised end to end on a
-real crystal complex):
+Protocol (the production D-peptide mirror workflow on a real crystal
+complex):
   1. target    = L-MDM2 from the 3LNJ crystal (chain A), the user-upload role;
   2. mirror    = x -> -x, giving the fixed D-MDM2 target;
   3. design    = the crystal D-PMI peptide's L-sequence (PMI motif), placed at
@@ -13,7 +13,7 @@ real crystal complex):
                  D-PMI coordinates (direct registry + best superposition).
 
 Run:
-  /data/Boltz2Score/.venv/bin/python \
+  a python environment with the requirements installed \
     capabilities/peptide_lm/scripts/validate_dpeptide_oracle_crystal.py \
     --device cuda:1
 """
@@ -61,7 +61,7 @@ def main() -> int:
     from peplm.dpeptide import mirror as dpm
     from peplm.dpeptide.scoring import dock_peptide, load_model_once
 
-    # ---- 1) target: L-MDM2 crystal chain A, written standalone (upload role)
+    # 1) target: L-MDM2 crystal chain A, written standalone (upload role)
     src = gemmi.read_structure(str(FIXTURE))
     src.setup_entities()
     target_st = gemmi.Structure()
@@ -83,7 +83,7 @@ def main() -> int:
                            for r in pep_chain for a in r if a.name == "CA"])
     print(f"[crystal] peptide sequence {seq} ({len(crystal_ca)} res)")
 
-    # ---- 2) mirror target, resolve mirrored pocket at crystal peptide centroid
+    # 2) mirror target, resolve mirrored pocket at crystal peptide centroid
     pocket = crystal_ca.mean(axis=0)
     pocket_m = (-pocket[0], pocket[1], pocket[2])
     d_target = gemmi.read_structure(str(target_path))
@@ -93,9 +93,9 @@ def main() -> int:
     d_path = out_root / "d_target.pdb"
     d_target.write_pdb(str(d_path))
 
-    # ---- 3) stage: crystal-geometry L-peptide (the ideal conformer) at pocket
-    # here we deliberately start from the crystal conformer itself: this asks
-    # the oracle to keep/certify a crystal-like pose, the hardest reference.
+    # 3) stage the crystal-geometry L-peptide (the ideal conformer) at the
+    # pocket: deliberately the crystal conformer itself, the hardest
+    # keep/certify reference for the oracle
     place_st = gemmi.Structure()
     place_st.name = "staged"
     model = gemmi.Model("1")
@@ -133,12 +133,12 @@ def main() -> int:
     staged_path = out_root / "staged.pdb"
     place_st.write_pdb(str(staged_path))
 
-    # ---- 4) fixed-receptor docking oracle (MSA on via env)
+    # 4) fixed-receptor docking oracle (MSA on via env)
     model_module = load_model_once()
     result = dock_peptide(staged_path, out_root / "oracle", model_module=model_module,
                           seed=args.seed, pocket_box=6.0)
 
-    # ---- 5) display flip + align back to the upload frame
+    # 5) display flip + align back to the upload frame
     from peplm.dpeptide.pipeline import flip_product
     from peplm.dpeptide import chirality_report
 
@@ -165,7 +165,7 @@ def main() -> int:
     n = min(len(prod_pts), len(ref_pts))
     receptor_rmsd = float(np.sqrt(((prod_pts[:n] - ref_pts[:n]) ** 2).sum(1).mean()))
 
-    # ---- 6) peptide RMSD vs crystal D-PMI (direct + best registry)
+    # 6) peptide RMSD vs crystal D-PMI (direct + best registry)
     prod_pep = np.array([[a.pos.x, a.pos.y, a.pos.z]
                          for r in prot[1] for a in r if a.name == "CA"])
     m = min(len(prod_pep), len(crystal_ca))

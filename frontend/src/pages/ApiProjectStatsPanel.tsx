@@ -1,14 +1,11 @@
-/**
- * Project stats panel — extracted from ApiAccessPage.
- * All external refs parameterized: values, callbacks, normalizers, icons.
- */
+/** Project stats panel; all external refs parameterized (values, callbacks, normalizers, icons). */
 import { BarChart3, ChevronLeft, ChevronRight, Clock3, KeyRound, Search, ShieldCheck } from 'lucide-react';
 import { formatIso } from './apiAccessHelpers';
 import { PROJECT_STATS_PAGE_SIZE, type ProjectStatsRow, type ProjectStatsSort, type ProjectStatsWorkflowFilter, type UsageWindow } from './apiAccessHelpers';
 
 interface ProjectStatsPanelProps {
   filteredProjectStatsRows: ProjectStatsRow[];
-  projectStatsLoading: boolean;
+  isProjectStatsLoading: boolean;
   projectStatsPage: number;
   projectStatsPageCount: number;
   projectStatsSearch: string;
@@ -108,7 +105,7 @@ export function ProjectStatsPanel(p: ProjectStatsPanelProps) {
         </tr>
       </thead>
       <tbody>
-        {p.projectStatsLoading ? (
+        {p.isProjectStatsLoading ? (
           <tr>
             <td colSpan={7} className="muted">Loading project stats...</td>
           </tr>

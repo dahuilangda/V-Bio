@@ -1,8 +1,3 @@
-/**
- * Server-backed auth operations (F2): profile, user search, admin user management, and API
- * tokens — all through the management API with the caller's session. These replaced direct
- * anonymous writes to app_users/api_tokens, which the database no longer permits.
- */
 import { requestManagement } from './backendClient';
 import type { AppUser } from '../types/models';
 
@@ -55,6 +50,7 @@ export async function fetchMe(): Promise<ServerUser> {
 }
 
 export async function updateProfile(patch: {
+  email?: string;
   name?: string;
   avatar_url?: string;
   password?: string;

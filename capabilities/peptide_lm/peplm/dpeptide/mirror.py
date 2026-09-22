@@ -1,6 +1,6 @@
-"""Structure mirroring for D-peptide design (validated protocol).
+"""Structure mirroring for D-peptide design.
 
-Mirror algebra (eight rounds of experiments in /data/Boltz2Score/dpeptide_test):
+Mirror algebra:
     design goal        L-target + D-peptide
     equivalent problem D-target + L-peptide   (= mirror of the goal)
     answer reference   mirror(deposited complex)
@@ -25,7 +25,7 @@ UNMAPPED_CAP_RESIDUES = {"NH2", "NHE", "ACE", "NMA", "FOR", "ACB"}
 
 WATER_RESIDUES = {"HOH", "WAT", "H2O"}
 def mirror_structure(structure: gemmi.Structure) -> gemmi.Structure:
-    """In-place x -> -x enantiomerization of every atom (exact, validated)."""
+    """In-place x -> -x enantiomerization of every atom."""
     for model in structure:
         for chain in model:
             for residue in chain:
@@ -91,8 +91,8 @@ def chirality_violations(
     min_volume is a violation too: a near-plane CA is distorted geometry,
     not a chirality we can trust. Glycine (no CB) is skipped — achiral.
 
-    The mean-volume report hides inversions (an 11 L / 9 D mixture still
-    averages "L"); this per-residue form is the hard-gate primitive.
+    The mean-volume report hides inversions (11 L / 9 D still averages
+    "L"); this per-residue form is the hard gate.
     """
     expect = expect.strip().upper()
     if expect not in ("L", "D"):
@@ -110,3 +110,4 @@ def chirality_violations(
         if not ok:
             violations.append((int(residue.seqid.num), residue.name, volume))
     return violations
+

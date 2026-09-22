@@ -235,11 +235,9 @@ class MonitorCollector:
                 self._retry.append((message_id, fields))
 
     def _msa_health_sweep(self) -> None:
-        """colabfold 专用 GPU 池饥饿检测。
-
-        available 空且 in_use 里存在"租约已老 + 心跳消失"的持有者 = 泄漏租约。
-        等待中的 search 包装器会自动回收这类租约（自愈），这里负责让故障在监控
-        侧可见：每次巡检打 WARNING，事件按小时桶去重入库。"""
+        """colabfold 专用 GPU 池饥饿检测：available 空且 in_use 中存在
+        租约老化 + 心跳消失的持有者即泄漏租约；等待方会自动回收，
+        这里只负责告警，事件按小时桶去重入库。"""
         try:
             if self.redis.lrange(self.msa_pool_key, 0, -1):
                 return
@@ -264,8 +262,7 @@ class MonitorCollector:
             )
             LOGGER.warning(details)
             from backend.monitoring.event_transport import publish_monitor_event
-            from datetime import datetime, timezone
-
+        
             hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
             publish_monitor_event(self.redis, {
                 "kind": "infra",

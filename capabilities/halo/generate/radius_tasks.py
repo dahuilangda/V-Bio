@@ -25,7 +25,7 @@ import random
 import re
 from collections import Counter, deque
 
-from rdkit import Chem, RDLogger
+from rdkit import RDLogger
 
 from halo.generate.safe_prior import CONT
 from halo.generate.safe_tasks import (FragmentClassifier, canonicalize_digits,
@@ -103,9 +103,9 @@ def build_unified_items(vocab, corpus_pairs, hop_pairs=None, *, max_len: int = 2
                         samples_per_mol: int = 2, log=print, mv: bool = False):
     """corpus_pairs: (smiles, safe). hop_pairs: (a_smiles, b_smiles) or
     (a_smiles, b_smiles, b_safe_view) when the B-side SAFE encoding is
-    pre-computed (multi-view hop pairs) - the B-side molecule provides the
-    hop-mode example (its env conditions a replacement core that REALLY
-    occurred in a scaffold-hop context).
+    pre-computed (multi-view hop pairs); the B-side molecule provides the
+    hop-mode example (its env conditions a replacement core that occurred
+    in a scaffold-hop context).
     Returns (ids, loss_start) items in the unified <gen> format.
     mv=True selects the multi-view recipe: hop-heavy policies and hop radii
     concentrated on the paired extremes {r=1, r=99} the ladder metric uses."""
@@ -125,10 +125,8 @@ def build_unified_items(vocab, corpus_pairs, hop_pairs=None, *, max_len: int = 2
         if not gen_frags:
             stats["empty_gen"] += 1
             return
-        # canonicalize the FINAL sequence (kept first, then generated): the
-        # kept block leads, so its digits number 1..k by appearance and the
-        # generation continues the scheme - "next new digit = smallest
-        # unused" becomes a deterministic rule the model can learn
+        # canonicalize the full kept+generated sequence: the kept block leads,
+        # so digit numbering stays deterministic ("next new digit = smallest unused")
         full = canonicalize_digits(".".join(list(kept_frags) + list(gen_frags)))
         frags_c = full.split(".")
         if len(frags_c) != len(kept_frags) + len(gen_frags):

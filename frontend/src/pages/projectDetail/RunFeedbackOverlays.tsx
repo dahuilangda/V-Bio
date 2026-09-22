@@ -6,13 +6,12 @@ export interface RunFeedbackOverlaysProps {
   runSuccessNotice: string | null;
   taskHistoryPath: string;
   onOpenTaskHistory: (event: MouseEvent<HTMLElement>) => void;
-  isRunRedirecting: boolean;
-  showQuickRunFab: boolean;
-  onRunAction: () => void;
-  runDisabled: boolean;
+  isQuickRunFabVisible: boolean;
+  runAction: () => void;
+  isRunDisabled: boolean;
   runBlockedReason: string;
   workflowRunLabel: string;
-  submitting: boolean;
+  isSubmitting: boolean;
   error: string | null;
   resultError: string | null;
   affinityPreviewError: string | null;
@@ -22,12 +21,12 @@ export interface RunFeedbackOverlaysProps {
 export function RunFeedbackOverlays({
   runSuccessNotice,
   onOpenTaskHistory,
-  showQuickRunFab,
-  onRunAction,
-  runDisabled,
+  isQuickRunFabVisible,
+  runAction,
+  isRunDisabled,
   runBlockedReason,
   workflowRunLabel,
-  submitting,
+  isSubmitting,
   error,
   resultError,
   affinityPreviewError,
@@ -49,16 +48,16 @@ export function RunFeedbackOverlays({
         </div>
       )}
 
-      {showQuickRunFab && (
+      {isQuickRunFabVisible && (
         <button
           type="button"
           className="run-fab"
-          onClick={onRunAction}
-          disabled={runDisabled}
+          onClick={runAction}
+          disabled={isRunDisabled}
           title={runBlockedReason || workflowRunLabel}
           aria-label={runBlockedReason || workflowRunLabel}
         >
-          {submitting ? <LoaderCircle size={16} className="spin" /> : <RunPlayIcon size={16} />}
+          {isSubmitting ? <LoaderCircle size={16} className="spin" /> : <RunPlayIcon size={16} />}
         </button>
       )}
 

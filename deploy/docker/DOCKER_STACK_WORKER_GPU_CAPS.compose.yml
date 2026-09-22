@@ -19,7 +19,6 @@ x-gpu-worker-base: &gpu_worker_base
     - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
     - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
     - ${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}:${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}
-    - /data/Boltz2Score:/data/Boltz2Score:ro
   command: >-
     bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint gpu-worker"
 

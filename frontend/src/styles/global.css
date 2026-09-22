@@ -26,8 +26,7 @@
   --draft: #6d6d6d;
   --radius: 12px;
 
-  /* Fluid type scale: scales smoothly from phone to wide desktop. Tokens keep
-     their names so every existing consumer becomes fluid automatically. */
+  /* Fluid type scale (phone to wide desktop). */
   --text-2xs: clamp(10.5px, 0.66rem + 0.1vw, 11px);
   --text-xs: clamp(11.5px, 0.72rem + 0.12vw, 12px);
   --text-sm: clamp(12.5px, 0.78rem + 0.15vw, 13px);
@@ -39,9 +38,7 @@
   --lh-tight: 1.2;
   --lh-normal: 1.45;
 
-  /* Breakpoint scale (single source of truth; viewport media queries use these
-     via @media declarations — CSS vars can't be used in media conditions, so
-     these document the canonical values for authors). */
+  /* Breakpoint scale (media conditions can't use CSS vars). */
   --bp-sm: 600px;
   --bp-md: 900px;
   --bp-lg: 1200px;
@@ -120,20 +117,15 @@ h3 {
   height: 64px;
   padding: 0 var(--gutter);
   border-bottom: 1px solid var(--line);
-  /* Opaque-ish white on purpose: a frosted-glass (backdrop-filter) variant here
-   * trips WebKit compositing bugs — after heavy SPA updates on the components tab
-   * Safari froze the header's paint AND hit-testing (Chrome unaffected). At 93%
-   * alpha the blur was barely visible anyway, so the header is a plain painted
-   * surface now. */
+  /* Opaque on purpose: a backdrop-filter variant trips WebKit compositing bugs here. */
   background: #f7fbf9;
   display: flex;
   align-items: center;
   justify-content: space-between;
   position: sticky;
   top: 0;
-  /* App chrome ladder: nav (500) < modal-mask (600) < command palette (1200).
-   * Must stay above JSME's GWT widget layers (z-index 100/200) — they cover the
-   * nav strip otherwise and swallow all header clicks on the components tab. */
+  /* Chrome ladder: nav (500) < modal-mask (600) < command palette (1200);
+   * must stay above JSME's GWT layers. */
   z-index: 500;
 }
 
@@ -714,7 +706,7 @@ select:focus {
 
 
 
-/* Mobile project card list — hidden on desktop, shown via media query below. */
+/* Mobile project card list; shown via media query below. */
 
 
 
@@ -950,9 +942,9 @@ select:focus {
 }
 
 
-/* Small screens: switch the project list from table to card grid so no horizontal scroll is needed.
-   Only hide the project-list table (not the task-list table, which also uses .project-table-wrap).
-   The .project-card-list sibling only exists on the ProjectsPage, so we scope via :has(). */
+/* Small screens: hide the project table and show the card grid instead.
+   Scoped via :has() — .project-card-list only exists on the ProjectsPage
+   (the task-list table also uses .project-table-wrap). */
 @media (max-width: 900px) {
   .panel:has(.project-card-list) .project-table-wrap {
     display: none;
@@ -966,11 +958,8 @@ select:focus {
 
 
 @media (max-width: 1100px) {
-  /* Phones/narrow tablets: the sticky vertical stepper uses a negative
-     margin-left that renders it fully off-screen at small viewport widths
-     (width 36px, margin -36..-78px). Convert it to the same centered
-     horizontal row used in the 1101-1540px window so Basics/Components/
-     Constraints/Results remain reachable. */
+  /* Phones/narrow tablets: the sticky stepper's negative margin renders it
+     fully off-screen; convert it to the centered horizontal row. */
   .workspace-shell {
     display: grid;
     grid-template-columns: 1fr;
@@ -1340,7 +1329,7 @@ select:focus {
 
 }
 
-/* ── Mobile breakpoint (phones): tighten everything for small viewports ── */
+/* Mobile breakpoint (phones): tighten everything for small viewports */
 @media (max-width: 600px) {
   .page-header h1 {
     font-size: var(--text-xl);
@@ -1425,13 +1414,8 @@ select:focus {
 }
 
 
-/* ── Mobile touch hardening ─────────────────────────────────────────────
-   1. iOS Safari zooms the page when focusing inputs with font-size < 16px.
-      The app-wide form font is --text-md (≈13.5-14.5px), so every text/select
-      field triggered a zoom-in that never zoomed back. 16px on coarse/small
-      viewports stops the zoom at the source.
-   2. Tap targets below ~40px are hard to hit with a thumb: checkboxes and
-      detail tabs get larger hit areas on phones. */
+/* Mobile touch hardening: 16px inputs stop iOS Safari's focus zoom;
+   checkboxes and tabs get larger (>=40px) tap areas. */
 @media (max-width: 860px), (pointer: coarse) {
   input:not([type='checkbox']):not([type='radio']):not([type='range']),
   select,
@@ -1470,7 +1454,7 @@ select:focus {
   }
 }
 
-/* 861-1100 band: with the full link set + user chip the fixed-height header wraps badly —
+/* 861-1100 band: the fixed-height header wraps badly with the full link set;
    collapse to the hamburger one step earlier than the phone layout. */
 @media (max-width: 1100px) {
 
@@ -1521,30 +1505,6 @@ select:focus {
   }
 }
 
-.peptide-residue-config.collapsed .peptide-residue-pool {
-  display: none;
-}
-.peptide-residue-config-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid #e1ebe6;
-  border-radius: 6px;
-  background: #f7fbf9;
-  cursor: pointer;
-  font: inherit;
-  color: #274336;
-  text-align: left;
-}
-.peptide-residue-config-toggle:hover {
-  background: #eef6f2;
-}
-.peptide-residue-config-toggle .peptide-residue-selection-summary {
-  margin-left: auto;
-  font-size: 11px;
-  color: #697970;
-}
 
 /* Residues used for design: collapsible toggle head */
 button.peptide-residue-config-head {
@@ -1577,4 +1537,66 @@ button.peptide-residue-config-head .peptide-residue-selection-summary {
   margin-left: auto;
   font-size: 11px;
   color: #697970;
+}
+
+.peptide-submit-confirm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.peptide-submit-confirm-table td {
+  padding: 5px 0;
+  vertical-align: top;
+}
+
+.peptide-submit-confirm-table td:first-child {
+  width: 45%;
+  padding-right: 12px;
+}
+
+.peptide-submit-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.peptide-submit-confirm-email {
+  display: block;
+  margin-top: 14px;
+}
+
+.peptide-submit-confirm-email input {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.peptide-preset-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.peptide-preset-chip {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.peptide-preset-chip.active {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: #fff;
+  font-weight: 600;
+}
+
+.peptide-preset-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

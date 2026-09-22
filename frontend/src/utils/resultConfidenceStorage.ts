@@ -65,8 +65,6 @@ const PEPTIDE_REQUEST_OPTION_KEYS = [
   'peptide_mutation_rate',
   'peptideResiduePool',
   'peptide_residue_pool',
-  'peptideCustomResidueDefinitions',
-  'peptide_custom_residue_definitions',
   'peptideNonNaturalMin',
   'peptide_non_natural_min',
   'peptideNonNaturalMax',
@@ -94,12 +92,8 @@ function asRecordArray(value: unknown): Array<Record<string, unknown>> {
 
 const PEPTIDE_CANDIDATE_ROW_COLLECTION_KEYS = ['best_sequences', 'current_best_sequences', 'candidates'] as const;
 
-/**
- * Preferred-structure pulls know fewer candidate structure names than the
- * persisted rows from a full parse. Field-level merge keeps those names alive;
- * wholesale replacement (the old copyMissingFields behavior) erased them and
- * broke candidate switching after the first preferred-structure click.
- */
+// Field-level merge: preferred-structure pulls know fewer candidate structure names
+// than persisted rows, so never replace the collections wholesale.
 function mergeCandidateRowCollections(
   merged: Record<string, unknown>,
   base: Record<string, unknown>

@@ -1,8 +1,7 @@
 /**
  * Message-bubble cards of the copilot transcript: trace steps, thinking
  * disclosure, observation/question cards and the memoized message item.
- * Zero modal-state dependencies — every card is driven purely by its props
- * (or the message it renders), so they were lifted out of the modal 1:1.
+ * Purely prop-driven; no modal-state dependencies.
  */
 import { memo, useCallback, useMemo, useState } from 'react';
 import { ChevronRight, Sparkles } from 'lucide-react';
@@ -21,12 +20,8 @@ function author(message: ProjectCopilotMessage): string {
 
 // Planner trace + memory helpers live in ./copilotTraceUi (pure + unit-tested).
 
-// Reasoning steps — plain muted text, one short phrase per step (wording in formatTraceStep).
-// The latest streaming step brightens; everything else stays quiet so the panel reads as part of
-// the message instead of a debug log.
-// Rows are memoized per step object: trace steps are append-only (identity never changes), so a
-// streaming turn that adds step N re-renders ONLY step N instead of re-formatting and reconciling
-// every earlier step on each SSE frame.
+// Reasoning steps, one short phrase each (formatTraceStep); the latest streaming step brightens.
+// Rows are memoized per step object (append-only identity) so streaming re-renders only the new step.
 const TraceStepRow = memo(function TraceStepRow({ step, isLast }: { step: CopilotTraceStep; isLast: boolean }) {
   return (
     <li className={`copilot-trace-item${isLast ? ' is-current' : ''}`}>
@@ -35,7 +30,7 @@ const TraceStepRow = memo(function TraceStepRow({ step, isLast }: { step: Copilo
   );
 });
 
-function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; highlightLast?: boolean }) {
+function TraceStepList({ steps, isLastHighlighted }: { steps: CopilotTraceStep[]; isLastHighlighted?: boolean }) {
   const lastIndex = steps.length - 1;
   return (
     <ol className="copilot-trace-list">
@@ -43,25 +38,19 @@ function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; hi
         <TraceStepRow
           key={`${step.round}-${step.event}-${index}`}
           step={step}
-          isLast={Boolean(highlightLast) && index === lastIndex}
+          isLast={Boolean(isLastHighlighted) && index === lastIndex}
         />
       ))}
     </ol>
   );
 }
 
-// Collapsible "thinking / thinking…" disclosure — a quiet inline section of the message: a small
-// animated sparkle toggle while live, muted step text below, smooth expand/collapse.
-// Memoized: finished messages hold a stable steps array from metadata, so parent re-renders
-// (typing, dragging, disabled flips, task-page polling) skip the whole card.
-// History cards start COLLAPSED: a long transcript otherwise mounts every trace step of every
-// message at once (thousands of <li>), which turns each layout pass — poll re-renders, the
-// per-step auto-scroll during streaming — into a full-document layout and freezes the panel.
-export const CopilotThinkingCard = memo(function CopilotThinkingCard({ steps, live, pending, onExpand }: { steps: CopilotTraceStep[]; live?: boolean; pending?: boolean; onExpand?: () => void }) {
-  const [open, setOpen] = useState(Boolean(live));
-  // Live with no steps yet: a bare "Thinking…" indicator. No card chrome, no divider, no empty
-  // expandable body — those would float above nothing and read as a stray line / empty box.
-  if (live && steps.length === 0) {
+// Collapsible "thinking" disclosure, memoized. History cards start collapsed so a
+// long transcript doesn't mount every trace step of every message at once.
+export const CopilotThinkingCard = memo(function CopilotThinkingCard({ steps, isLive, isPending, onExpand }: { steps: CopilotTraceStep[]; isLive?: boolean; isPending?: boolean; onExpand?: () => void }) {
+  const [open, setOpen] = useState(Boolean(isLive));
+  // Live with no steps yet: a bare "Thinking…" indicator, no card chrome.
+  if (isLive && steps.length === 0) {
     return (
       <span className="copilot-thinking-inline">
         <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
@@ -69,34 +58,31 @@ export const CopilotThinkingCard = memo(function CopilotThinkingCard({ steps, li
       </span>
     );
   }
-  const label = live ? 'Thinking' : 'Reasoning';
+  const label = isLive ? 'Thinking' : 'Reasoning';
   return (
-    <div className={`copilot-thinking-card${live ? ' is-live' : ''}${open ? ' is-open' : ''}`}>
+    <div className={`copilot-thinking-card${isLive ? ' is-live' : ''}${open ? ' is-open' : ''}`}>
       <button
         type="button"
         className="copilot-thinking-head"
         onClick={() => {
           const next = !open;
           setOpen(next);
-          // Lazy trace: the transcript list projection omits planner_trace (the heaviest
-          // metadata field); the first expand of a finished message fetches just that
-          // message's steps instead of shipping every turn's trace with the list.
-          if (next && pending && onExpand) onExpand();
+          // Lazy trace: the list projection omits planner_trace; first expand fetches this message's steps.
+          if (next && isPending && onExpand) onExpand();
         }}
         aria-expanded={open}
       >
         <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
         <span className="copilot-thinking-title">{label}</span>
         <span className="copilot-thinking-meta">
-          {pending ? '' : `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`}
+          {isPending ? '' : `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`}
         </span>
         <ChevronRight className="copilot-thinking-chev" size={12} aria-hidden="true" />
       </button>
       <div className="copilot-thinking-body">
         <div className="copilot-thinking-body-inner">
-          {/* Collapsed = the step tree is not mounted at all (grid 0fr still lays out the
-              children, so a long transcript's thousands of <li> keep costing every layout). */}
-          {open ? <TraceStepList steps={steps} highlightLast={live} /> : null}
+          {/* Collapsed = not mounted; grid 0fr would still lay out the children. */}
+          {open ? <TraceStepList steps={steps} isLastHighlighted={isLive} /> : null}
         </div>
       </div>
     </div>
@@ -112,9 +98,8 @@ interface ObservationRecord {
   fields: { key: string; value: string }[];
 }
 
-// Flatten the planner_observations metadata into displayable records. Each observation may contain
-// multiple records (search results) or a single record (resolve). Only user-facing scalar fields
-// are kept; long values (SMILES, sequences) are preserved in full so the user can copy them.
+// Flatten planner_observations into displayable records (search results carry many, resolve
+// one). Long values (SMILES, sequences) are kept in full so the user can copy them.
 function readObservationRecords(value: unknown): ObservationRecord[] {
   if (!Array.isArray(value)) return [];
   const records: ObservationRecord[] = [];
@@ -143,13 +128,11 @@ function readObservationRecords(value: unknown): ObservationRecord[] {
   return records;
 }
 
-// Renders retrieved records in a collapsible section under the assistant message. The user always
-// sees the authoritative data (sequence, SMILES, accession, ...) even when the model's message
-// only summarizes it. Long values are shown in a scrollable <pre> so they don't break the layout.
+// Retrieved records in a collapsible section so the user sees the authoritative data
+// (sequence, SMILES, ...) even when the message only summarizes it.
 function CopilotObservationCard({ records }: { records: ObservationRecord[] }) {
-  // Auto-expand when any record contains a long field (sequence, SMILES) — the model's message
-  // often says "Here is the sequence:" but truncates the actual value due to token limits. The user
-  // needs to see the authoritative data without having to know to click "Retrieved data".
+  // Auto-expand on long fields — the message often truncates the value; the user
+  // shouldn't have to know to click "Retrieved data".
   const hasLongField = records.some((rec) => rec.fields.some((f) => f.value.length > 60));
   const [expanded, setExpanded] = useState(hasLongField);
   return (
@@ -179,28 +162,21 @@ function CopilotObservationCard({ records }: { records: ObservationRecord[] }) {
   );
 }
 
-// Renders the planner's structured questions as clickable chips so the user resolves an ambiguity
-// (task type, modeling backend, ...) with one click instead of typing. A choice question lists its
-// options as chips plus an "Other ___" free-text answer (unless the planner set allowOther=false);
-// confirm is yes/no; freeform just highlights the prompt above the composer.
+// Planner questions as clickable chips. Choice questions add an "Other ___" free-text answer
+// (unless allowOther=false); confirm is yes/no; freeform points at the composer.
 function CopilotQuestionCard({
   questions,
-  disabled,
+  isDisabled,
   onAnswer
 }: {
   questions: CopilotPlannerQuestion[];
-  disabled: boolean;
+  isDisabled: boolean;
   onAnswer: (answer: string) => void;
 }) {
-  // For a single question, answer immediately on chip click (no local state needed). For multiple
-  // questions, accumulate answers locally so the user can fill them all in before submitting — this
-  // avoids answering one question disabling the rest mid-stream.
+  // Single question answers immediately; multiple questions accumulate locally before submitting.
   const isSingle = questions.length === 1;
   const [answers, setAnswers] = useState<Record<number, string>>({});
-  // "Other ___" free-text state per choice question: which question has its input open, and the
-  // draft text. The user's answer may fall outside the planner's options — the free-text escape
-  // guarantees a choice question can always be answered, and the planner treats the reply as the
-  // user's own resolution.
+  // "Other ___" free-text state per choice question.
   const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({});
   const [otherText, setOtherText] = useState<Record<number, string>>({});
   const recordAnswer = (index: number, text: string) => {
@@ -241,7 +217,7 @@ function CopilotQuestionCard({
                       type="button"
                       className={`copilot-question-chip${selected ? ' is-selected' : ''}`}
                       key={`q-${questionIndex}-o-${optionIndex}`}
-                      disabled={disabled}
+                      disabled={isDisabled}
                       onClick={() => recordAnswer(questionIndex, `${question.text} ${option.value}`)}
                       title={option.hint || option.label}
                     >
@@ -254,7 +230,7 @@ function CopilotQuestionCard({
                     type="button"
                     className={`copilot-question-chip copilot-question-other-chip${otherOpen[questionIndex] ? ' is-open' : ''}`}
                     key={`q-${questionIndex}-other`}
-                    disabled={disabled}
+                    disabled={isDisabled}
                     onClick={() => setOtherOpen((prev) => ({ ...prev, [questionIndex]: !prev[questionIndex] }))}
                   >
                     Other…
@@ -268,7 +244,7 @@ function CopilotQuestionCard({
                   className="copilot-question-other-input"
                   type="text"
                   value={otherText[questionIndex] || ''}
-                  disabled={disabled}
+                  disabled={isDisabled}
                   placeholder="Type your answer…"
                   onChange={(e) => setOtherText((prev) => ({ ...prev, [questionIndex]: e.target.value }))}
                   onKeyDown={(e) => {
@@ -281,7 +257,7 @@ function CopilotQuestionCard({
                 <button
                   type="button"
                   className="copilot-question-other-submit"
-                  disabled={disabled || !String(otherText[questionIndex] || '').trim()}
+                  disabled={isDisabled || !String(otherText[questionIndex] || '').trim()}
                   onClick={() => submitOther(questionIndex, question.text)}
                 >
                   Submit
@@ -300,7 +276,7 @@ function CopilotQuestionCard({
                       type="button"
                       className={`copilot-question-chip${selected ? ' is-selected' : ''}`}
                       key={`q-${questionIndex}-${opt.value}`}
-                      disabled={disabled}
+                      disabled={isDisabled}
                       onClick={() => recordAnswer(questionIndex, `${question.text} ${opt.value}`)}
                     >
                       {opt.label}
@@ -320,7 +296,7 @@ function CopilotQuestionCard({
         <button
           type="button"
           className="copilot-question-submit"
-          disabled={disabled || !allAnswered}
+          disabled={isDisabled || !allAnswered}
           onClick={submit}
         >
           {allAnswered ? 'Submit answers' : `Answer ${questions.length - Object.keys(answers).length} more question(s)`}
@@ -330,9 +306,7 @@ function CopilotQuestionCard({
   );
 }
 
-// ReactMarkdown parses the full message content on every render — with a long transcript that is
-// seconds of synchronous work per pass. Content strings are immutable once a message lands, so
-// parse each distinct body exactly once and reuse the element for every other re-render.
+// ReactMarkdown is expensive; memoize so each distinct body is parsed exactly once.
 const CopilotMarkdown = memo(function CopilotMarkdown({ content }: { content: string }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
@@ -341,18 +315,17 @@ const CopilotMarkdown = memo(function CopilotMarkdown({ content }: { content: st
   );
 });
 
-// Message rendering runs ReactMarkdown (expensive). Memoize so a message only re-renders when its
-// own content changes — not on every unrelated Copilot state update (typing, dragging, resize,
-// caret moves), which otherwise re-parsed markdown for every message and froze the panel.
+// Memoize so a message only re-renders when its own content changes, not on every
+// unrelated copilot state update.
 const EMPTY_TRACE: CopilotTraceStep[] = [];
 export const CopilotMessageItem = memo(function CopilotMessageItem({
   message,
-  disabled,
+  isDisabled,
   onAnswerQuestion,
   onLoadTrace
 }: {
   message: ProjectCopilotMessage;
-  disabled: boolean;
+  isDisabled: boolean;
   onAnswerQuestion: (answer: string) => void;
   onLoadTrace: (messageId: string) => void;
 }) {
@@ -361,8 +334,7 @@ export const CopilotMessageItem = memo(function CopilotMessageItem({
     () => (message.role === 'assistant' ? readPlannerTrace(metadata?.planner_trace) : []),
     [message.role, metadata]
   );
-  // The list projection ships every transcript message WITHOUT planner_trace; an assistant
-  // row whose metadata simply lacks the key still owes its steps (fetched on first expand).
+  // List projection omits planner_trace; a missing key means steps are owed (fetched on expand).
   const tracePending = message.role === 'assistant' && Boolean(metadata) && !('planner_trace' in (metadata || {}));
   const handleExpandTrace = useCallback(() => {
     onLoadTrace(message.id);
@@ -373,9 +345,7 @@ export const CopilotMessageItem = memo(function CopilotMessageItem({
   );
   const plannerState = String(metadata?.planner_state || '').trim();
   const showQuestions = plannerState === 'needs_input' && questions.length > 0;
-  // Retrieved records from read skills — shown in a collapsible section so the user always sees
-  // the authoritative data even when the model's message only summarizes it (e.g. "Here is the sequence:"
-  // without pasting 395 chars, which models routinely truncate in structured output).
+  // Retrieved records from read skills, shown even when the message only summarizes them.
   const observations = useMemo(
     () => (message.role === 'assistant' ? readObservationRecords(metadata?.planner_observations) : []),
     [message.role, metadata]
@@ -394,12 +364,12 @@ export const CopilotMessageItem = memo(function CopilotMessageItem({
       </div>
       {showObservations ? <CopilotObservationCard records={observations} /> : null}
       {showQuestions ? (
-        <CopilotQuestionCard questions={questions} disabled={disabled} onAnswer={onAnswerQuestion} />
+        <CopilotQuestionCard questions={questions} isDisabled={isDisabled} onAnswer={onAnswerQuestion} />
       ) : null}
       {trace.length > 0 ? (
         <CopilotThinkingCard steps={trace} />
       ) : tracePending ? (
-        <CopilotThinkingCard steps={EMPTY_TRACE} pending onExpand={handleExpandTrace} />
+        <CopilotThinkingCard steps={EMPTY_TRACE} isPending onExpand={handleExpandTrace} />
       ) : null}
     </article>
   );

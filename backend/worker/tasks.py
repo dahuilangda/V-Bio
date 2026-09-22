@@ -1,20 +1,18 @@
+import redis
 import os
 import sys
-import glob
 import traceback
 import tempfile
 import json
 import subprocess
 import shutil
 import logging
-import signal
 import threading
 import time
 import re
-import base64
 import zipfile
 import shlex
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -53,17 +51,12 @@ def _ensure_repo_root_on_path() -> Path | None:
 _ensure_repo_root_on_path()
 
 
-try:
-    import psutil
-except ImportError:
-    psutil = None
 
-# Configure standard logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Subprocess timeout defaults. Peptide parent/candidate workflows support
-# disabling hard timeouts entirely so queue contention does not kill long runs.
+# Subprocess timeout defaults; peptide workflows can disable hard timeouts to
+# survive queue contention.
 SUBPROCESS_TIMEOUT = int(getattr(config, "PREDICTION_SUBPROCESS_TIMEOUT_SECONDS", 10800) or 10800)
 PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT = int(
     getattr(config, "PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS", 0) or 0
@@ -112,10 +105,10 @@ def _raise_if_task_cancelled(self: Any, redis_client: Any, task_id: str) -> None
 
 
 def _resolve_worker_temp_root() -> str:
-    """
-    Resolve a host-visible temp root for Docker-outside-of-Docker workflows.
-    Keep orchestration staging under RESULTS_BASE_DIR so worker-visible absolute
-    paths match the host daemon view.
+    """Resolve a host-visible temp root for Docker-outside-of-Docker workflows.
+
+    Staging lives under RESULTS_BASE_DIR so worker paths match the host
+    daemon view.
     """
     raw_root = str(os.environ.get("WORKER_SHARED_TMP_ROOT", "") or "").strip()
     if raw_root:
@@ -178,10 +171,8 @@ def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool 
 
 
 def _acquire_gpu_with_non_peptide_wait_registration(task_id: str, timeout: int = 3600) -> int:
-    """
-    Register non-peptide waiting intent before blocking on GPU allocation.
-    This enables peptide subtask workers to yield and avoid starving regular tasks.
-    """
+    """Register non-peptide waiting intent before blocking on GPU allocation,
+    so peptide subtask workers yield instead of starving regular tasks."""
     wait_registered = False
     try:
         register_non_peptide_gpu_waiter(task_id)
@@ -308,10 +299,9 @@ def _terminate_task_container(container_name: str) -> None:
 
 
 def _terminate_task_containers_by_task_id(task_id: str) -> None:
-    """
-    Best-effort cleanup for all runtime containers tied to a task.
-    This protects against orphaned `docker run` containers when upper-level subprocesses are killed.
-    """
+    """Best-effort cleanup of runtime containers tied to a task (guards
+    against orphaned `docker run` containers when upper-level subprocesses
+    are killed)."""
     task_token = str(task_id or "").strip()
     if not task_token:
         return
@@ -389,9 +379,8 @@ def _build_gpu_docker_python_command(
         command.extend(["--volume", f"{host_cache_dir}:{container_cache_dir}"])
         command.extend(["--env", f"BOLTZ_CACHE={container_cache_dir}"])
 
-    # MSA sequence cache: mount a host directory from the big /data partition so
-    # task containers stop growing their writable layers with ~MB-sized .a3m
-    # files (the old default /tmp/boltz_msa_cache accumulated 7+ GB per host).
+    # MSA cache lives on the big /data partition so container writable layers
+    # stop accumulating ~MB-sized .a3m files.
     msa_cache_host = str(getattr(config, "BOLTZ_MSA_CACHE_DIR", "") or "").strip()
     if msa_cache_host:
         try:
@@ -412,16 +401,12 @@ def _build_gpu_docker_python_command(
 
 
 def _should_skip_large_result_file(file_name: str) -> bool:
-    """Filter heavy intermediate confidence arrays not needed by the UI.
+    """Skip heavy PAE/PDE matrices the UI never reads.
 
-    The Boltz writer emits full PAE/PDE matrices per diffusion sample as
-    ``pae_<record>_model_<n>.npz`` / ``pde_...npz`` (~4 MB per sample, ~2/3 of
-    the archive). Every consumer downstream (frontend bundle parser, /view
-    archive builder, excel export) reads PAE/PDE summaries from the confidence
-    JSON, never from these arrays — skipping them cuts a 16-sample dock archive
-    from ~78 MB to ~10 MB. ``plddt_*.npz`` stay: they are a few KB each.
-    Historical ``*_data_`` prefixes are kept for archives produced by older
-    writers.
+    The Boltz writer emits pae_*/pde_*.npz per diffusion sample (~4 MB each,
+    ~2/3 of the archive); every consumer reads PAE/PDE summaries from the
+    confidence JSON instead. pldt_*.npz stay (a few KB each). ``*_data_``
+    prefixes are kept for archives from older writers.
     """
     lower = file_name.lower()
     if not lower.endswith(".npz"):
@@ -468,13 +453,6 @@ class TaskProgressTracker:
     def start_heartbeat(self):
         """启动心跳线程"""
         self._stop_heartbeat = False
-        # TaskMonitor._analyze_task reads task_start/task_update to detect stuck tasks
-        # (max duration / no-progress); nothing wrote them, so both checks were dead.
-        try:
-            self.redis_client.setex(f"task_start:{self.task_id}", 86400, datetime.now().isoformat())
-            self.redis_client.setex(f"task_update:{self.task_id}", 86400, datetime.now().isoformat())
-        except Exception as e:
-            logger.warning(f"Task {self.task_id}: Failed to record task start timestamps: {e}")
         self._heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
         self._heartbeat_thread.start()
         logger.info(f"Task {self.task_id}: Started heartbeat monitoring")
@@ -482,8 +460,8 @@ class TaskProgressTracker:
     def stop_heartbeat(self, *, clear_status: bool = False):
         """停止心跳线程.
 
-        By default, keep task_status for a while so API /status can still infer
-        terminal FAILURE/SUCCESS when Celery backend state is temporarily stale.
+        Keep task_status by default so /status can still infer terminal state
+        when the Celery backend state is stale.
         """
         self._stop_heartbeat = True
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
@@ -497,12 +475,11 @@ class TaskProgressTracker:
             logger.warning(f"Failed to cleanup Redis keys for task {self.task_id}: {e}")
     
     def _heartbeat_worker(self):
-        """心跳工作线程。
+        """心跳工作线程.
 
-        Resilient loop: a single Redis blip used to kill the heartbeat permanently while
-        the task kept running for hours — every liveness check (monitor, /status) then
-        saw a live task as dead. Retry with capped backoff; only a stop signal or a
-        sustained outage (consecutive failures) ends the thread.
+        Retry with capped backoff; only a stop signal or a sustained outage
+        (30 consecutive failures) ends the thread — a live task must never
+        look dead because of one Redis blip.
         """
         consecutive_failures = 0
         while not self._stop_heartbeat:
@@ -532,8 +509,7 @@ class TaskProgressTracker:
             if isinstance(payload, dict) and payload:
                 status_data["payload"] = payload
             self.redis_client.setex(self.status_key, TASK_STATUS_TTL_SECONDS, json.dumps(status_data))
-            # Refresh the no-progress clock TaskMonitor uses for stuck detection.
-            self.redis_client.setex(f"task_update:{self.task_id}", 86400, status_data["timestamp"])
+
             publish_task_status(
                 self.redis_client,
                 task_id=self.task_id,
@@ -623,9 +599,8 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> list[int]:
 def _gpu_pool_device_count() -> int:
     """Authoritative GPU-pool size (valid devices registered at pool init).
 
-    No config/env fallback tiers: the pool is what actually schedules
-    candidate subtasks, so its own registry is the single source of truth.
-    A missing/empty pool is a hard error, not a guess.
+    The pool is what schedules candidate subtasks; a missing/empty pool is
+    a hard error, not a guess.
     """
     from gpu_manager import get_gpu_status as get_gpu_status_fn
 
@@ -891,8 +866,8 @@ def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
 def _trim_sdf_to_first_valid_molecule(path: str) -> bool:
     """Keep only the first valid molecule in an SDF file.
 
-    Returns True when the file was rewritten because multiple valid molecules
-    were present; otherwise returns False.
+    Returns True when the file was rewritten (multiple valid molecules were
+    present), else False.
     """
     normalized_path = str(path or "").strip()
     if not normalized_path or not normalized_path.lower().endswith(".sdf"):
@@ -974,19 +949,17 @@ RESULT_UPLOAD_BACKOFF_SECONDS = 5.0
 
 
 class ResultUploadError(RuntimeError):
-    """All result-upload attempts failed. The local archive is then the ONLY copy of a
-    finished GPU run's output — callers must let the task fail loudly, never silently."""
+    """All upload attempts failed. The local archive is then the ONLY copy of a
+    finished GPU run's output — fail loudly, never silently."""
 
 
 def upload_result_to_central_api(task_id: str, local_file_path: str, filename: str) -> dict:
     """
-    Uploads a local file to the centralized API server.
-
-    This upload is the only delivery path for a finished GPU run's results: a single
-    transient 5xx or network blip used to convert hours of compute into a FAILURE with
-    the local temp dir wiped. Transient failures (5xx, connection/read errors) retry
-    with exponential backoff; 4xx responses are permanent and fail immediately. A 2xx
-    with a non-JSON body counts as success (the response text is only bookkeeping).
+    Uploads a local file to the centralized API server — the only delivery
+    path for a finished GPU run's results. Transient failures (5xx,
+    connection/read errors) retry with exponential backoff; 4xx responses are
+    permanent and fail immediately. A 2xx with a non-JSON body counts as
+    success.
     """
     upload_url = f"{config.CENTRAL_API_URL}/upload_result/{task_id}"
     headers = {'X-API-Token': config.BOLTZ_API_TOKEN}
@@ -1033,11 +1006,44 @@ def upload_result_to_central_api(task_id: str, local_file_path: str, filename: s
         f"All {RESULT_UPLOAD_ATTEMPTS} upload attempts failed for task {task_id}: {last_error}"
     ) from last_error
 
+@celery_app.task(name="backend.worker.tasks.flush_notification_digest")
+def flush_notification_digest(to_email: str) -> None:
+    """Send the batched summary for one recipient (scheduled with a countdown
+    when their digest window opened; see backend.services.mailer)."""
+    try:
+        from backend.services.mailer import flush_notification_digest as flush
+        flush(to_email)
+    except Exception:
+        logger.error("digest flush failed for %s", to_email, exc_info=True)
+
+
+def _notify_task_terminal(args: dict, task_id: str, state: str, kind: str) -> None:
+    """Optional completion email (notify_email at submit).
+
+    Plain module function on purpose: celery decorators bind self.
+    """
+    email = str(args.get("notify_email") or "").strip()
+    if not email:
+        return
+    try:
+        from backend.services.mailer import send_task_notification
+        send_task_notification(
+            to_email=email,
+            task_id=task_id,
+            state=state,
+            task_kind=kind,
+            project_id=str(args.get("project_id") or "") or None,
+        )
+    except Exception:
+        logger.error("notification dispatch failed for task %s", task_id,
+                     exc_info=True)
+
+
 @celery_app.task(bind=True)
 def predict_task(self, predict_args: dict):
     """
-    Celery task responsible for launching an isolated subprocess to perform computation.
-    This task includes GPU management, subprocess timeout control, progress tracking, and authenticated upload.
+    Launch an isolated prediction subprocess: GPU management, subprocess
+    timeout control, progress tracking, and authenticated result upload.
     """
     gpu_id = -1
     allocated_gpu_ids: list[int] = []
@@ -1104,8 +1110,7 @@ def predict_task(self, predict_args: dict):
             proc_env.pop("BOLTZ_ASSIGNED_GPU_ID", None)
         else:
             proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-            # Expose the scheduler-assigned host GPU index for nested docker runtimes
-            # so they do not fall back to GPU 0.
+            # Host GPU index for nested docker runtimes so they don't fall back to GPU 0.
             proc_env["BOLTZ_ASSIGNED_GPU_ID"] = str(gpu_id)
         proc_env["BOLTZ_TASK_ID"] = task_id
         _raise_if_task_cancelled(self, redis_client, task_id)
@@ -1166,9 +1171,9 @@ def predict_task(self, predict_args: dict):
                         if status_text:
                             tracker.update_status("running", status_text, payload=runtime_meta)
                         try:
-                            # the progress thread runs outside the task
-                            # request context, so update_state cannot infer
-                            # the task id — pass it explicitly
+                            # progress thread runs outside the task request
+                            # context, so update_state needs the task id
+                            # passed explicitly
                             self.update_state(
                                 state='PROGRESS', meta=runtime_meta,
                                 task_id=task_id)
@@ -1279,6 +1284,7 @@ def predict_task(self, predict_args: dict):
         self.update_state(state='SUCCESS', meta=final_meta)
         logger.info(f"Task {task_id}: Prediction completed and results uploaded successfully. Final status: SUCCESS.")
         tracker.update_status("completed", "Task completed successfully")
+        _notify_task_terminal(predict_args, task_id, "SUCCESS", "prediction")
         return final_meta
 
     except Ignore:
@@ -1288,6 +1294,7 @@ def predict_task(self, predict_args: dict):
         if tracker:
             tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
         self.update_state(state='FAILURE', meta=_build_failure_meta(e))
+        _notify_task_terminal(predict_args, task_id, "FAILURE", "prediction")
         raise e
 
     finally:
@@ -1314,12 +1321,45 @@ def predict_task(self, predict_args: dict):
             logger.info(f"Task {task_id}: Cleanup completed")
 
 
-@celery_app.task(bind=True, name="tasks.peptide_candidate_worker_task")
+@celery_app.task(
+    bind=True, name="tasks.peptide_candidate_worker_task",
+    # Transient-infrastructure retry: network/timeout failures get backoff
+    # with jitter (prevents GPU-pool thundering herd). Application errors
+    # fail fast; acks_late + reject_on_worker_lost handle worker-crash
+    # requeue instead.
+    autoretry_for=(ConnectionError, TimeoutError),
+    retry_backoff=30,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def peptide_candidate_worker_task(self, worker_payload: dict):
     """
     Execute one peptide-design candidate as an independent Celery task.
     GPU allocation is handled inside backend.runtime.run_single_prediction worker mode.
     """
+    # Poison-pill guard: reject_on_worker_lost requeues with retries
+    # unchanged, so max_retries never increments on the crash-requeue path.
+    # Track delivery attempts and abort after 4 to stop the loop.
+    redelivery_key = f"vbio:redelivery:{self.request.id}"
+    try:
+        guard_redis = get_redis_client()
+        attempts = guard_redis.incr(redelivery_key)
+        guard_redis.expire(redelivery_key, 3600)
+        if attempts > 4:
+            raise RuntimeError(
+                f"Candidate task {self.request.id[:8]} exceeded 4 worker "
+                "redeliveries — aborting to protect the GPU pool")
+    except RuntimeError:
+        raise
+    except redis.RedisError:
+        # Redis unreachable: guard disabled for this delivery; the counter
+        # TTL bounds the exposure window.
+        logger.warning("redelivery guard unavailable (Redis unreachable) for %s",
+                       self.request.id)
+
     task_id = self.request.id
     if not isinstance(worker_payload, dict):
         raise ValueError("peptide_candidate_worker_task requires a dict payload.")
@@ -1402,9 +1442,7 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     time_limit=config.BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS,
 )
 def boltz2score_task(self, score_args: dict):
-    """
-    Celery task for running Boltz2Score (confidence; optional affinity).
-    """
+    """Celery task for running Boltz2Score (confidence; optional affinity)."""
     gpu_id = -1
     reported_gpu_id = -1
     task_id = self.request.id
@@ -1417,9 +1455,9 @@ def boltz2score_task(self, score_args: dict):
         tracker.start_heartbeat()
         tracker.update_status("starting", "Initializing Boltz2Score task")
 
-        # Fail before GPU allocation for a dock request that could never run: dock builds the
-        # ligand from SMILES, and an empty SMILES would only fail deep inside the container
-        # after the GPU has been reserved.
+        # Fail before GPU allocation: dock builds the ligand from SMILES, and
+        # an empty SMILES would only fail deep inside the container after
+        # the GPU is reserved.
         if str(score_args.get('mode') or 'dock').strip().lower() == 'dock' and not str(score_args.get('ligand_smiles') or '').strip():
             raise RuntimeError("dock mode requires a non-empty ligand_smiles.")
 
@@ -1516,9 +1554,9 @@ def boltz2score_task(self, score_args: dict):
         )
         requested_mode = str(score_args.get('mode') or 'dock').strip().lower()
         if requested_mode not in {'score', 'pose', 'refine', 'interface', 'dock'}:
-            # The route validates modes at submission; an unknown mode here means route/worker
-            # drift or a task enqueued outside the API. Running it as 'score' would silently
-            # change the requested computation, so fail the task with the reason instead.
+            # The route validates modes; an unknown mode here means route/worker
+            # drift or a task enqueued outside the API — fail instead of
+            # silently running as 'score'.
             raise ValueError(
                 f"Unsupported boltz2score mode {requested_mode!r}; "
                 "expected one of score/pose/refine/interface/dock."
@@ -1550,12 +1588,10 @@ def boltz2score_task(self, score_args: dict):
             else BOLTZ2SCORE_DEFAULT_DIFFUSION_SAMPLES
         )
 
-        # 非 score 模式（pose/refine/interface/dock）的扩散参数由 capabilities
-        # 内部的 MODE_CONFIGS 提供（上游 benchmark 验证配置，见
-        # capabilities/boltz2score/core/flexible_optimization.py）。这里的
-        # score-only 默认 sampling_steps=1 一旦透传，会覆盖各模式默认并触发
-        # Karras sigma 调度除零（steps/(N-1)=0/0 → sigma 表全 NaN → SVD
-        # error code 3）；因此这些模式只在用户显式指定时才覆盖这三个参数。
+        # 非 score 模式的扩散参数由 capabilities 的 MODE_CONFIGS 提供
+        # （benchmark 验证配置）。score-only 默认 sampling_steps=1 一旦透传，
+        # 会触发 Karras sigma 调度除零（sigma 表全 NaN → SVD error 3）；
+        # 这些模式只在用户显式指定时才覆盖。
         defer_diffusion_defaults = requested_mode != 'score'
 
         def _resolve_diffusion_arg(key: str, default: Any) -> Any:
@@ -1597,8 +1633,8 @@ def boltz2score_task(self, score_args: dict):
             "--num_workers", "0",
             "--mode", requested_mode,
         ]
-        # 扩散参数为 None（dock 未显式指定）时不传，让 capabilities 落到
-        # dock_default 的验证配置，而不是被 CLI 的 score-only 默认覆盖。
+        # 扩散参数为 None（未显式指定）时不传，让 capabilities 落到各模式
+        # 验证配置，而不是被 CLI 的 score-only 默认覆盖。
         if recycling_steps is not None:
             boltz2score_entry.extend(["--recycling_steps", str(recycling_steps)])
         if sampling_steps is not None:
@@ -1675,7 +1711,7 @@ def boltz2score_task(self, score_args: dict):
         tracker.update_status("running", "Executing Boltz2Score subprocess")
         logger.info(
             "Task %s: Boltz2Score settings: mode=%s, compute_ipsae=%s, structure_refine=%s, use_msa_server=%s, "
-            "recycling_steps=%d, sampling_steps=%d, diffusion_samples=%d, max_parallel_samples=%d, seed=%s, msa_server_url=%s",
+            "recycling_steps=%s, sampling_steps=%s, diffusion_samples=%s, max_parallel_samples=%s, seed=%s, msa_server_url=%s",
             task_id,
             requested_mode,
             compute_ipsae,
@@ -1782,13 +1818,14 @@ def boltz2score_task(self, score_args: dict):
             'result_file': os.path.basename(output_archive_path)
         }
         self.update_state(state='SUCCESS', meta=final_meta)
+        _notify_task_terminal(score_args, task_id, "SUCCESS", "boltz2score job")
         tracker.update_status("completed", "Task completed successfully")
         logger.info(f"Task {task_id}: Boltz2Score completed and results uploaded successfully.")
         return final_meta
 
     except Ignore:
-        # Cancellation checkpoints raise Ignore — it must propagate untouched, else the task
-        # reads as FAILURE in Redis and the /status API shows a cancelled task as failed.
+        # Cancellation checkpoints raise Ignore — it must propagate untouched,
+        # else a cancelled task reads as FAILURE in /status.
         raise
 
     except Exception as e:
@@ -1796,6 +1833,7 @@ def boltz2score_task(self, score_args: dict):
         if tracker:
             tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
         self.update_state(state='FAILURE', meta=_build_failure_meta(e))
+        _notify_task_terminal(score_args, task_id, "FAILURE", "boltz2score job")
         raise e
 
     finally:

@@ -1,7 +1,6 @@
 /**
  * Copilot panel header — title + actions + drag handle.
- * Drag handlers stay in the parent (they own position state); this is the
- * JS-moves-out controlled pattern (agent plan cut #6).
+ * Drag handlers stay in the parent; it owns the position state.
  */
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { MessageSquarePlus, MessageSquareText, PanelLeft, Settings, X } from 'lucide-react';
@@ -10,7 +9,7 @@ interface CopilotHeaderProps {
   title: string;
   subtitle: string;
   isAdmin: boolean;
-  historyOpen: boolean;
+  isHistoryOpen: boolean;
   onToggleHistory: () => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
@@ -23,7 +22,7 @@ interface CopilotHeaderProps {
 export function CopilotHeader(p: CopilotHeaderProps) {
   return (
     <div
-      className={`copilot-head copilot-drag-handle${p.historyOpen ? ' history-open' : ''}`}
+      className={`copilot-head copilot-drag-handle${p.isHistoryOpen ? ' history-open' : ''}`}
       onPointerDown={p.onDragStart}
       onPointerMove={p.onDragMove}
       onPointerUp={p.onDragEnd}

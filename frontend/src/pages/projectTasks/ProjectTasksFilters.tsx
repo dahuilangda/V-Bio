@@ -24,9 +24,9 @@ export interface ProjectTasksFiltersProps {
   onBackendFilterChange: (value: string) => void;
   backendOptions: string[];
   tableMode: TaskTableMode;
-  compactMetricsView: boolean;
+  isCompactMetricsView: boolean;
   filteredMatchedCount: number;
-  showAdvancedFilters: boolean;
+  isAdvancedFiltersVisible: boolean;
   onToggleAdvancedFilters: () => void;
   advancedFilterCount: number;
   submittedWithinDays: SubmittedWithinDaysOption;
@@ -39,13 +39,13 @@ export interface ProjectTasksFiltersProps {
   onMinIptmChange: (value: string) => void;
   maxPae: string;
   onMaxPaeChange: (value: string) => void;
-  failureOnly: boolean;
+  isFailureOnly: boolean;
   onFailureOnlyChange: (checked: boolean) => void;
   structureSearchMode: StructureSearchMode;
   onStructureSearchModeChange: (value: StructureSearchMode) => void;
   structureSearchQuery: string;
   onStructureSearchQueryChange: (value: string) => void;
-  structureSearchLoading: boolean;
+  isStructureSearchLoading: boolean;
   structureSearchError: string | null;
   structureSearchMatches: Record<string, boolean>;
   visibleMetricColumns: TaskMetricColumnKey[];
@@ -65,9 +65,9 @@ export function ProjectTasksFilters({
   onBackendFilterChange,
   backendOptions,
   tableMode,
-  compactMetricsView,
+  isCompactMetricsView,
   filteredMatchedCount,
-  showAdvancedFilters,
+  isAdvancedFiltersVisible,
   onToggleAdvancedFilters,
   advancedFilterCount,
   submittedWithinDays,
@@ -80,13 +80,13 @@ export function ProjectTasksFilters({
   onMinIptmChange,
   maxPae,
   onMaxPaeChange,
-  failureOnly,
+  isFailureOnly,
   onFailureOnlyChange,
   structureSearchMode,
   onStructureSearchModeChange,
   structureSearchQuery,
   onStructureSearchQueryChange,
-  structureSearchLoading,
+  isStructureSearchLoading,
   structureSearchError,
   structureSearchMatches,
   visibleMetricColumns,
@@ -148,7 +148,7 @@ export function ProjectTasksFilters({
               ))}
             </select>
           </label>
-          {!compactMetricsView && (
+          {!isCompactMetricsView && (
             <label className="project-filter-field">
               <Filter size={14} />
               <select
@@ -171,7 +171,7 @@ export function ProjectTasksFilters({
           <span className="muted small">{filteredMatchedCount} matched</span>
           <button
             type="button"
-            className={`btn btn-ghost btn-compact advanced-filter-toggle ${showAdvancedFilters ? 'active' : ''}`}
+            className={`btn btn-ghost btn-compact advanced-filter-toggle ${isAdvancedFiltersVisible ? 'active' : ''}`}
             onClick={onToggleAdvancedFilters}
             title="Toggle advanced filters"
             aria-label="Toggle advanced filters"
@@ -183,7 +183,7 @@ export function ProjectTasksFilters({
         </div>
       </div>
 
-      {showAdvancedFilters && (
+      {isAdvancedFiltersVisible && (
         <div className="advanced-filter-panel">
           <div className="advanced-filter-grid">
             <label className="advanced-filter-field">
@@ -200,7 +200,7 @@ export function ProjectTasksFilters({
                 <option value="90">Last 90 days</option>
               </select>
             </label>
-            {!compactMetricsView && (
+            {!isCompactMetricsView && (
               <label className="advanced-filter-field">
                 <span>Seed</span>
                 <select
@@ -214,7 +214,7 @@ export function ProjectTasksFilters({
                 </select>
               </label>
             )}
-            {!compactMetricsView && (
+            {!isCompactMetricsView && (
               <>
                 <label className="advanced-filter-field">
                   <span>Min pLDDT</span>
@@ -261,13 +261,13 @@ export function ProjectTasksFilters({
               <label className="advanced-filter-checkbox-row">
                 <input
                   type="checkbox"
-                  checked={failureOnly}
+                  checked={isFailureOnly}
                   onChange={(e) => onFailureOnlyChange(e.target.checked)}
                 />
                 <span>Failures / errors only</span>
               </label>
             </div>
-            {!compactMetricsView ? (
+            {!isCompactMetricsView ? (
               <div className="advanced-filter-field-wide task-advanced-metrics-query-row">
                 <div className="advanced-filter-field advanced-filter-check task-metric-columns-panel">
                   <span>Metric Columns</span>
@@ -327,7 +327,7 @@ export function ProjectTasksFilters({
                     />
                   </div>
                   <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
-                    {structureSearchLoading
+                    {isStructureSearchLoading
                       ? 'Searching...'
                       : structureSearchError
                         ? 'Invalid query'
@@ -366,7 +366,7 @@ export function ProjectTasksFilters({
                   <JSMEEditor smiles={structureSearchQuery} height={300} onSmilesChange={onStructureSearchQueryChange} />
                 </div>
                 <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
-                  {structureSearchLoading
+                  {isStructureSearchLoading
                     ? 'Searching...'
                     : structureSearchError
                       ? 'Invalid query'
