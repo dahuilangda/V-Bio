@@ -7990,7 +7990,7 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
     chains = sorted(st[0], key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
     if len(chains) < 2:
         return (0.0, {})
-    pep = chains[1]
+    pep = chains[-1]  # shortest chain = the peptide (multi-chain receptors)
     ca = np.array([
         [a.pos.x, a.pos.y, a.pos.z]
         for r in pep for a in r if a.name == "CA"
