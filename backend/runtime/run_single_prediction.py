@@ -7567,13 +7567,28 @@ def _dpeptide_dispatch_refine(
 
     bond_pairs = _staged_bicyclic_bond_pairs(staged_path)
     if cyclic_headtail and not bond_pairs:
-        # staged peptide chain is B, residues numbered 1..L (production
-        # writer contract, see compute_bond_contact_pairs)
+        # Find the PEPTIDE chain from the staged complex instead of
+        # assuming "B": multi-chain receptors (e.g. the RANKL trimer A/B/C)
+        # re-letter the peptide to D and the hardcoded B bond pointed at a
+        # receptor chain (measured: every cyclic candidate's refine
+        # rejected with "bond pair does not touch the peptide chain"). The
+        # peptide is the shortest polymer chain (receptors are 80-600 aa,
+        # designed peptides 4-25); residues are numbered 1..L by the
+        # production writer contract.
         st_len = gemmi.read_structure(str(staged_path))
         st_len.setup_entities()
-        pep_len = sum(1 for r in st_len[0]["B"] if r.het_flag != "H")
-        if pep_len >= 4:
-            bond_pairs = f"B:1:N,B:{pep_len}:C"
+        poly = [(ch.name, sum(1 for r in ch if r.het_flag != "H"))
+                for ch in st_len[0] if sum(1 for r in ch if r.het_flag != "H") >= 3]
+        if not poly:
+            raise RuntimeError(
+                f"cyclic head-tail dispatch: staged complex {staged_path} "
+                "carries no polymer chains")
+        poly.sort(key=lambda kv: kv[1])
+        pep_letter, pep_len = poly[0]
+        # guard: the peptide must be clearly the small chain (a malformed
+        # staging with two receptor-sized chains would mis-pick)
+        if pep_len >= 4 and (len(poly) == 1 or pep_len * 3 < poly[1][1]):
+            bond_pairs = f"{pep_letter}:1:N,{pep_letter}:{pep_len}:C"
     linker_ccd = "SEZ"
     if bond_pairs:
         try:
