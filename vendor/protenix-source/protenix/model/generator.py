@@ -487,6 +487,27 @@ def sample_diffusion(
             else:
                 keep = 1.0
             x_l = keep * (base + init_noise_scale * noise_full) + (1.0 - keep) * noise_full
+            if init_mask is not None and init_coords is not None:
+                # Centre the FREE chains' noise cloud on the PINNED
+                # (receptor) centroid. The stock noise is zero-centred world
+                # coordinates: a receptor uploaded in its crystal frame
+                # (RANKL trimer ~87 A off origin) sits outside the cloud
+                # core and the denoiser never attaches the peptide --
+                # measured 2026-09-22: every trimer refine crystallised the
+                # peptide 195-265 A away, interface 208-265 A, while a
+                # near-origin receptor (MDM2) bound fine purely by luck of
+                # its coordinate frame. One-time init translation only; the
+                # pose/conformation stay model-generated.
+                _free_rows = init_mask.to(device) == 0
+                if bool(_free_rows.any()):
+                    _pin_rows = init_mask.to(device) == 1
+                    _ref_c = init_base[_pin_rows].mean(dim=0)
+                    _free_c = x_l[..., _free_rows, :].mean(
+                        dim=-2, keepdim=True)
+                    x_l[..., _free_rows, :] = x_l[..., _free_rows, :] + (
+                        _ref_c.view((1,) * (_free_c.dim() - 1) + (3,))
+                        - _free_c
+                    )
         else:
             x_l = noise_schedule[0] * torch.randn(
                 size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype
