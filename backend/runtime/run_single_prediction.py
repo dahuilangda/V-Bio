@@ -8004,9 +8004,20 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
     nonlocal_c = int(((np.abs(iuj[0] - iuj[1]) >= 3) & (d[iuj] < 4.5)).sum())
     rg_ratio = rg / n
     penalty = 0.0
-    if rg_ratio < 0.62 and nonlocal_c < 3:
+    # Calibrated against known structured cyclic peptides (2026-09-23):
+    # SFTI-1 (14aa, disulfide-stapled) runs rg/n ~0.46; kalata B1
+    # cyclotide (29aa) ~0.29 — small rings are NATURALLY compact and the
+    # old flat 0.62 cutoff penalised every 10-16aa candidate (measured:
+    # all RANKL cyclic candidates at 0.48-0.61 got -0.30, crushing every
+    # composite to zero). The size-aware expected band scales as
+    # ~2.8/sqrt(n) (empirical fit to structured macrocycles); use the
+    # tighter of that and 0.62, and require BOTH low compactness AND
+    # near-zero nonlocal contacts (the true molten signature).
+    expected_rg_ratio = min(0.62, 2.8 / (n ** 0.5))
+    if rg_ratio < expected_rg_ratio * 0.75 and nonlocal_c < 2:
         penalty = 0.30
     return (penalty, {"rg_over_n": round(rg_ratio, 3),
+                      "expected_rg_over_n": round(expected_rg_ratio, 3),
                       "nonlocal_contacts": nonlocal_c})
 
 
