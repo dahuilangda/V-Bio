@@ -8708,9 +8708,10 @@ def _assert_product_chirality(
     receptor_chains = protein_chains[:-1]
     peptide_chain = protein_chains[-1]
 
-    rec_report = []
-    for _rec in receptor_chains:
-        rec_report.extend(chirality_report(st, _rec.name))
+    # chirality_report returns a ChiralityReport (not iterable); the
+    # downstream gate reads .n_scored / .n_positive — use the first
+    # receptor chain's report, per-chain violations covered by rec_bad
+    rec_report = chirality_report(st, receptor_chains[0].name)
     pep_report = chirality_report(st, peptide_chain.name)
     from peplm.dpeptide import chirality_violations
     # Product frame contract: receptor ALL-L, peptide ALL-D — per residue.
