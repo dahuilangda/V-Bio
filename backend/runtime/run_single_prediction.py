@@ -8762,7 +8762,7 @@ def _assert_product_chirality(
             if ca is not None:
                 ref_pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
         prod_pts = []
-        for residue in receptor_chain:
+        for residue in receptor_chains[0]:
             ca = residue.find_atom("CA", "*")
             if ca is not None:
                 prod_pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
