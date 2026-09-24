@@ -6,6 +6,8 @@ services:
       context: ../..
       dockerfile: deploy/docker/DOCKER_BACKEND_RUNTIME.Dockerfile
     container_name: vbio-cpu-worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     working_dir: ${BOLTZ_HOST_ROOT}
     env_file:
