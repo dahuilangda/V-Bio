@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 from collections import Counter
 from pathlib import Path
 
-PEPLM_ROOT = Path(__file__).resolve().parents[2]
+# In-repo: .../peptide_lm/ (script at peplm/integrate/); in-container
+# the script runs from /peptide_lm/peplm/integrate/ via mount — same layout.
+_here = Path(__file__).resolve().parent          # .../peplm/integrate
+PEPLM_ROOT = _here.parent.parent                  # .../peptide_lm
 sys.path.insert(0, str(PEPLM_ROOT))
 
 import torch
@@ -27,7 +31,9 @@ import torch
 def load_policy(device: str, adapter_dir: str | None):
     from peplm.models.esm3_policy import ESM3Policy
 
-    model_path = PEPLM_ROOT / "models" / "external" / "esm3_sm_open_v1.pth"
+    model_path = Path(os.environ.get(
+        "ESM3_MODEL_PATH",
+        str(PEPLM_ROOT / "models" / "external" / "esm3_sm_open_v1.pth")))
     policy = ESM3Policy(
         checkpoint=model_path,
         device=device,
