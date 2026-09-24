@@ -306,10 +306,8 @@ def protenix2dock_task(self, score_args: dict):
             # The design loop polls {task_tmp}/out/confidence.json where
             # task_tmp = .../dpeptide_task_<celery id>; build the contract in
             # that exact location.
-            contract_root = os.path.join(
-                "/data/boltz_central_results/_runtime_tmp",
-                f"dpeptide_task_{task_id}",
-            )
+            contract_root = str(
+                Path(config.RESULTS_BASE_DIR) / "_runtime_tmp" / f"dpeptide_task_{task_id}")
             os.makedirs(contract_root, exist_ok=True)
             out_root = os.path.join(contract_root, "out")
             tag = str(score_args.get("staged_filename") or "d_space_staged").strip() or "staged"
