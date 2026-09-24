@@ -327,7 +327,7 @@ def load_affinity_model(
 
     # NOTE: sampling_steps must be >= 2 — the upstream sigma schedule divides
     # by (num_sampling_steps - 1), so 1 step yields 0/0 = NaN sigma which
-    # poisons the whole affinity prediction (verified 2026-08-15).
+    # poisons the whole affinity prediction .
     predict_affinity_args = {
         "recycling_steps": recycling_steps,
         "sampling_steps": 200 if affinity_refine else 2,

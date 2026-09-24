@@ -41,7 +41,7 @@ services:
       MSA_SKIP_TEMPLATES: ${MSA_SKIP_TEMPLATES:-1}
       COLABFOLD_ENABLE_GPU: ${COLABFOLD_ENABLE_GPU:-0}
       # GPU 租约：与 celery worker 共享的 redis GPU 池（gpu_manager 协议）。
-      MSA_GPU_REDIS_HOST: ${MSA_GPU_REDIS_HOST:-172.17.3.200}
+      MSA_GPU_REDIS_HOST: ${MSA_GPU_REDIS_HOST:-localhost}
       MSA_GPU_REDIS_PORT: ${MSA_GPU_REDIS_PORT:-6379}
       MSA_GPU_WAIT_SECONDS: ${MSA_GPU_WAIT_SECONDS:-600}
       # 单条 GPU search 的硬超时：卡死的 CUDA search 被击杀后租约正常归还，

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import shlex
 import subprocess
 import zipfile
@@ -129,7 +130,7 @@ def protenix2dock_task(self, score_args: dict):
         tracker.update_status("running", f"Acquired GPU {gpu_id}. Starting protenix2dock.", payload={"progress": {"progress_percent": 10.0}})
         _tasks._raise_if_task_cancelled(self, redis_client, task_id)
 
-        task_temp_dir = f"/data/boltz_central_results/_runtime_tmp/p2d_task_{task_id}"
+        task_temp_dir = str(Path(config.RESULTS_BASE_DIR) / "_runtime_tmp" / f"p2d_task_{task_id}")
         os.makedirs(task_temp_dir, exist_ok=True)
         output_dir = os.path.join(task_temp_dir, "output")
         work_dir = os.path.join(task_temp_dir, "work")
