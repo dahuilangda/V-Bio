@@ -1,47 +1,32 @@
-"""ESM3-based proposal engine for the peptide design workflow.
+"""ESM3 proposal engine for the peptide design workflow.
 
-Drop-in replacement for BackendProposer (PepMLM): same interface, but
-sequence proposals come from the ESM3 3B masked language model with
-optional GRPO fine-tuning between generations.
-
-Architecture: ESM3 runs in a SUBPROCESS using the Boltz2Score venv's
-Python (which has esm>=3.4 + torch+CUDA); the parent process (CPU worker)
-communicates via JSON files. This keeps the 3B model off the CPU worker's
-memory and gives it a dedicated GPU slot.
+Generates receptor-conditioned candidate sequences via a 3B masked
+language model with GRPO fine-tuning between generations. The model
+runs in a GPU subprocess (Boltz2Score venv: esm>=3.4 + torch+CUDA);
+this module handles file-based communication and format conversion.
+The adapter persists across generations within one design task so GRPO
+updates accumulate.
 """
 from __future__ import annotations
 
 import json
-import math
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-_ROOT = Path(__file__).resolve().parents[3]  # V-Bio root
-
-# The Boltz2Score venv has esm 3.4.1 + torch 2.11 + CUDA
+_ROOT = Path(__file__).resolve().parents[3]
 _ESM3_PYTHON = "/data/Boltz2Score/.venv/bin/python"
-_ESM3_INFERENCE_SCRIPT = str(
-    Path(__file__).parent / "_esm3_inference_worker.py")
-
-# Residue encoding shared with the ESM3 loop
-_AA3_TO_1 = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
-}
+_WORKER = str(Path(__file__).parent / "_esm3_inference_worker.py")
 
 
 class ESM3Proposer:
-    """Same interface as BackendProposer but backed by ESM3.
+    """Receptor-conditioned sequence proposals from ESM3 + GRPO.
 
-    The ESM3 model (3B params, bf16) runs in a GPU subprocess; this class
-    handles file-based communication and format conversion. The adapter
-    directory persists across generations within one design task, so GRPO
-    updates accumulate.
+    Interface: propose / pseudo_perplexity / learn (same contract as
+    the production design workflow's proposer protocol).
     """
 
     def __init__(
@@ -76,60 +61,45 @@ class ESM3Proposer:
         n: int,
         plddt_hint: float | None = None,
     ) -> list[tuple[str, list[dict], list[int], str]]:
-        """Generate n candidate sequences via ESM3.
-
-        Returns [(base_sequence, modifications, cys_anchors, proposal_group)]
-        matching BackendProposer's contract.
-        """
-        # Determine peptide length for this generation
+        """Generate n candidate sequences conditioned on the receptor."""
         if self.peptide_length:
             pep_len = self.peptide_length
         elif elite_rows:
-            # adaptive: sample around elite lengths
-            import random
             elite_lens = [len(r.get("sequence", "")) for r in elite_rows if r.get("sequence")]
-            if elite_lens:
-                pep_len = random.choice(elite_lens)
-            else:
-                pep_len = (self.len_range[0] + self.len_range[1]) // 2
+            pep_len = random.choice(elite_lens) if elite_lens else sum(self.len_range) // 2
         else:
-            import random
             pep_len = random.randint(self.len_range[0], self.len_range[1])
 
-        # Build the inference request
         req = {
             "mode": "propose",
             "receptor_sequence": self.receptor_sequence,
             "peptide_length": pep_len,
-            "n_samples": max(n * 3, 48),  # oversample for diversity filter
+            "n_samples": max(n * 3, 48),
             "n_keep": n,
-            "temperature": 0.9 + 0.1 * min(self._generation, 3),  # anneal
+            "temperature": 0.9 + 0.1 * min(self._generation, 3),
             "seed": self.seed + self._generation,
             "adapter_dir": self.adapter_dir,
             "device": self.device,
         }
-
         result = self._run_inference(req)
         if result is None:
-            self._log("[esm3-proposer] inference failed, falling back to random")
-            return self._random_fallback(natural_pool, n, pep_len)
+            raise RuntimeError(
+                "ESM3 inference failed — check GPU availability and the "
+                "Boltz2Score venv (/data/Boltz2Score/.venv, needs esm>=3.4)")
 
-        sequences = result.get("sequences", [])
-        proposals = []
-        for i, item in enumerate(sequences):
-            seq = item.get("sequence", "")
-            if not seq or len(seq) < 4:
-                continue
-            group = item.get("group", f"gen{self._generation}_denovo")
-            proposals.append((seq, [], [], group))
+        proposals = [
+            (item["sequence"], [], [], item.get("group", "denovo"))
+            for item in result.get("sequences", [])
+            if item.get("sequence") and len(item["sequence"]) >= 4
+        ]
 
         self._generation += 1
-        self._log(f"[esm3-proposer] gen{self._generation}: {len(proposals)} proposals "
-                   f"(len={pep_len}, best_logprob={result.get('best_logprob', '?')})")
+        self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals "
+                  f"(len={pep_len})")
         return proposals
 
     def pseudo_perplexity(self, sequence: str) -> float:
-        """ESM3 mean negative log-likelihood (lower = more confident)."""
+        """Mean negative log-likelihood under the current policy."""
         req = {
             "mode": "perplexity",
             "receptor_sequence": self.receptor_sequence,
@@ -138,29 +108,20 @@ class ESM3Proposer:
             "device": self.device,
         }
         result = self._run_inference(req)
-        if result is None:
-            return 10.0  # fallback: moderate penalty
-        return float(result.get("perplexity", 10.0))
+        return float(result.get("perplexity", 10.0)) if result else 10.0
 
     def learn(self, elite_rows: list[dict], all_rows: list[dict]):
-        """GRPO update on the ESM3 adapter from evaluation results."""
-        # Convert production rows to rollouts
-        rollouts = []
-        for row in all_rows:
-            seq = row.get("sequence", "")
-            score = row.get("composite_score") or row.get("ipsae_dom") or 0.0
-            if seq and isinstance(score, (int, float)):
-                rollouts.append({"sequence": seq, "reward": float(score)})
-
+        """GRPO update from oracle evaluation results."""
+        rollouts = [
+            {"sequence": row.get("sequence", ""),
+             "reward": float(row.get("composite_score") or row.get("ipsae_dom") or 0)}
+            for row in all_rows
+            if row.get("sequence") and isinstance(
+                row.get("composite_score") or row.get("ipsae_dom"), (int, float))
+        ]
         if len(rollouts) < 2:
-            self._log("[esm3-proposer] insufficient rollouts for GRPO, skipping")
+            self._log("[esm3] insufficient rollouts for GRPO, skipping")
             return
-
-        # Assign groups (de novo vs refill)
-        groups = {}
-        for row in all_rows:
-            g = row.get("proposal_group") or f"gen{self._generation}"
-            groups.setdefault(g, []).append(row.get("sequence", ""))
 
         req = {
             "mode": "learn",
@@ -171,52 +132,36 @@ class ESM3Proposer:
             "new_adapter_dir": str(self.work_dir / f"adapter_gen{self._generation + 1}"),
             "device": self.device,
         }
-
         result = self._run_inference(req)
         if result and result.get("adapter_dir"):
             self.adapter_dir = result["adapter_dir"]
-            self._log(f"[esm3-proposer] GRPO update done → {self.adapter_dir}")
-        else:
-            self._log("[esm3-proposer] GRPO update skipped (insufficient groups)")
+            self._log(f"[esm3] GRPO update → {self.adapter_dir}")
 
     def _run_inference(self, request: dict) -> dict | None:
-        """Run ESM3 inference in a subprocess with GPU access."""
+        """Run the ESM3 worker subprocess and return its JSON response."""
         req_file = self.work_dir / "request.json"
         resp_file = self.work_dir / "response.json"
         resp_file.unlink(missing_ok=True)
-
         req_file.write_text(json.dumps(request))
 
         env = dict(os.environ)
         env["PYTHONPATH"] = str(_ROOT / "capabilities" / "peptide_lm")
-        gpu_idx = request.get("device", "cuda:0")
-        if "cuda:" in gpu_idx:
-            env["CUDA_VISIBLE_DEVICES"] = gpu_idx.split(":")[1]
+        gpu = request.get("device", "cuda:0")
+        if "cuda:" in gpu:
+            env["CUDA_VISIBLE_DEVICES"] = gpu.split(":")[1]
+            request["device"] = "cuda:0"  # visible device is always 0
+            req_file.write_text(json.dumps(request))
 
         try:
             proc = subprocess.run(
-                [_ESM3_PYTHON, _ESM3_INFERENCE_SCRIPT, str(req_file), str(resp_file)],
+                [_ESM3_PYTHON, _WORKER, str(req_file), str(resp_file)],
                 capture_output=True, text=True, timeout=600, env=env,
             )
             if proc.returncode != 0:
-                self._log(f"[esm3-proposer] subprocess rc={proc.returncode}: "
-                          f"{proc.stderr[-300:]}")
+                self._log(f"[esm3] worker rc={proc.returncode}: {proc.stderr[-200:]}")
                 return None
             if resp_file.exists():
                 return json.loads(resp_file.read_text())
-        except (subprocess.TimeoutExpired, Exception) as exc:
-            self._log(f"[esm3-proposer] inference error: {exc}")
+        except Exception as exc:
+            self._log(f"[esm3] worker error: {exc}")
         return None
-
-    def _random_fallback(self, pool, n, pep_len):
-        """Diversity fallback when ESM3 is unavailable."""
-        import random
-        rng = random.Random(self.seed + self._generation)
-        one_letter = [_AA3_TO_1.get(c, "A") for c in pool if c in _AA3_TO_1]
-        if not one_letter:
-            one_letter = list("ACDEFGHIKLMNPQRSTVWY")
-        out = []
-        for i in range(n):
-            seq = "".join(rng.choice(one_letter) for _ in range(pep_len))
-            out.append((seq, [], [], f"fallback_{i}"))
-        return out

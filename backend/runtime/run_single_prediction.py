@@ -9109,160 +9109,44 @@ def run_peptide_design_backend(
             file=sys.stderr,
         )
 
-    _plm_log_path = Path(temp_dir) / "proposals.log"
+    # ---- Proposal engine: ESM3 (3B masked LM + GRPO) ----
+    # Sequences come from a receptor-conditioned ESM3 policy running in a
+    # GPU subprocess; GRPO updates between generations steer the policy
+    # toward high-scoring interfaces. The adapter persists across
+    # generations within one design task.
+    _proposer_log_path = Path(temp_dir) / "proposals.log"
 
-    def _plm_log(message: str) -> None:
-        print(f"[peptidelm] {message}", file=sys.stderr)
+    def _proposer_log(message: str) -> None:
+        print(f"[esm3] {message}", file=sys.stderr)
         try:
-            with open(_plm_log_path, "a", encoding="utf-8") as _pf:
+            with open(_proposer_log_path, "a", encoding="utf-8") as _pf:
                 _pf.write(f"{time.strftime('%H:%M:%S')} {message}\n")
         except OSError:
             pass
 
+    _esm3_sys_path = "/data/V-Bio/capabilities/peptide_lm"
+    sys.path.insert(0, _esm3_sys_path)
     try:
-        _plm_sys_path = "/data/V-Bio/capabilities/peptide_lm"
-        sys.path.insert(0, _plm_sys_path)
-        try:
-            from peplm.integrate.backend_proposer import BackendProposer
-        finally:
-            sys.path.remove(_plm_sys_path)
-        # user-fixed residues from the sequence mask letters (X = free)
-        _plm_fixed: List[Dict[str, Any]] = []
-        for _idx, _ch in enumerate(sequence_mask or ""):
-            if _ch in "ACDEFGHIKLMNPQRSTVWY":
-                _plm_fixed.append({"position": _idx + 1, "residue": _ch})
-        # adaptive length only when the user left it unset
-        _plm_len: Optional[int] = binder_length
-        if "peptideBinderLength" not in options and "peptide_binder_length" not in options:
-            _plm_len = None
-        # explicit length window (frontend min/max inputs) beats both: it is
-        # a range for adaptive design, or collapses to a fixed value when
-        # min == max (parsed once next to the binder_length read above)
-        _plm_range: Optional[Tuple[int, int]] = None
-        if _length_lo is not None and _length_hi is not None:
-            _plm_range = (_length_lo, _length_hi)
-            _plm_len = None
-        # manual Cys anchors reference absolute positions, so they pin the
-        # design length to the value the anchors were validated against
-        if bicyclic_manual_anchors:
-            if _plm_range is not None and _plm_range[0] != _plm_range[1]:
-                raise ValueError(
-                    "绝对位置 Cys 要求固定的肽长度（min = max）：请锁定长度范围，"
-                    "或改用环拓扑 / 按比例模式以适配长度区间。"
-                )
-            _plm_range = None
-            _plm_len = binder_length
-        # length-function layouts (ring / ratio) keep working across the open
-        # range — they only raise the effective minimum length
-        if cys_layout_spec is not None:
-            if _plm_range is not None:
-                _lo, _hi = _plm_range
-                if cys_layout_spec["mode"] == "ring":
-                    core = int(cys_layout_spec["ring1"]) + int(cys_layout_spec["ring2"]) + 3
-                    if core > _hi:
-                        raise ValueError(
-                            f"环 1 ({cys_layout_spec['ring1']}) + 环 2 ({cys_layout_spec['ring2']}) "
-                            f"+ 3 个 Cys 至少需要 {core} aa，超过长度上限 {_hi}。")
-                    _plm_range = (max(_lo, core), _hi)
-                else:
-                    from peplm.loop.constraints import min_feasible_length_ratio
-                    feasible = min_feasible_length_ratio(
-                        float(cys_layout_spec["pct1"]),
-                        float(cys_layout_spec["pct2"]),
-                        float(cys_layout_spec["pct3"]))
-                    if feasible > _hi:
-                        raise ValueError(
-                            "当前比例即使拉到最大长度也放不下三个 Cys（相邻锚点至少间隔 2 个残基）；"
-                            "请调开比例或提高长度上限。")
-                    _plm_range = (max(_lo, feasible), _hi)
-            else:
-                # fixed length: resolve the layout once at that length
-                from peplm.loop.constraints import resolve_bicyclic_anchors
-                resolved = resolve_bicyclic_anchors(
-                    binder_length, {}, (), cys_layout_spec)
-                if resolved is None:
-                    raise ValueError(
-                        f"肽长度 {binder_length} aa 放不下当前 Cys 布局：请减小环大小或调整比例。")
-                design_params["cys_positions"] = sorted(resolved)
-        # user NCAA pool: preset selections + custom drawn CCDs
-        _plm_pool = [str(row.get("ccd") or "").strip().upper()
-                     for row in (unnatural_pool or []) if row.get("ccd")]
-        peptidelm_proposer = BackendProposer(
-            peptide_length=_plm_len,
-            len_range=_plm_range,
-            ncaa_min=nonnatural_min,
-            ncaa_max=nonnatural_max,
-            ncaa_pool=_plm_pool,
-            cyclic=(design_mode == "cyclic"),
-            design_mode=design_mode,
-            cys_positions=list(design_params.get("cys_positions") or []),
-            cys_layout=cys_layout_spec,
-            allow_extra_cys=allow_extra_cys,
-            fixed_residues=_plm_fixed,
-            ncaa_decode_bias=float(options.get("peptideNcaaDecodeBias") or 0.5),
-            # per-residue SS3 profile ("heee...", 's'=通配) switches the
-            # proposer to the SS-conditioned prior (vocab superset) —
-            # target-appropriate structural priors, e.g. hairpin profiles
-            # for TNF-family receptor grooves
-            ss_profile=(
-                str(options.get("peptideSSProfile") or
-                    options.get("peptide_ss_profile") or "").strip() or None
-            ) or _auto_ss_profile(pocket_sequence_contacts, binder_length or 12),
-            target_sequence=(
-                _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
-                if peptide_chirality in ("d", "l") else None),
-            target_pocket_positions=(
-                [int(pos) for _, pos in pocket_sequence_contacts]
-                if pocket_sequence_contacts else None),
-            device=os.environ.get("VBIO_PEPTIDELM_DEVICE") or (
-                "cuda" if _torch_cuda_available() else "cpu"),
-            log=_plm_log,
-        )
-        layout_hint = ""
-        if cys_layout_spec is not None:
-            layout_hint = (
-                f", cys={cys_layout_spec['mode']}"
-                + (f"(ring {cys_layout_spec['ring1']}/{cys_layout_spec['ring2']})"
-                   if cys_layout_spec["mode"] == "ring" else
-                   (f"(pct {cys_layout_spec['pct1']}/{cys_layout_spec['pct2']}/{cys_layout_spec['pct3']})"
-                    if cys_layout_spec["mode"] == "ratio" else ""))
-            )
-        elif design_params.get("cys_positions"):
-            layout_hint = f", cys=absolute{[p + 1 for p in design_params['cys_positions']]}"
-        # ESM3 proposal engine switch: replaces PepMLM with ESM3 3B +
-        # GRPO. The ESM3 model runs in a GPU subprocess (Boltz2Score venv
-        # has esm>=3.4 + torch+CUDA); the design workflow's generation
-        # loop, candidate gates, and shipping all stay unchanged.
-        _proposer_backend = str(options.get("peptideProposerBackend") or "esm3").strip().lower()
-        if _proposer_backend == "esm3":
-            from peplm.integrate.esm3_proposer import ESM3Proposer
-            _esm3_gpu = os.environ.get("VBIO_ESM3_GPU", "0")
-            peptidelm_proposer = ESM3Proposer(
-                receptor_sequence=(
-                    _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
-                    if peptide_chirality in ("d", "l") else ""),
-                peptide_length=_plm_len,
-                len_range=_plm_range,
-                cyclic=(design_mode == "cyclic"),
-                device=f"cuda:{_esm3_gpu}",
-                seed=random_seed,
-                work_dir=str(work_root / "esm3_proposer"),
-                log=_plm_log,
-            )
-            print(
-                f"[esm3] ESM3 提案引擎已启用（3B, GRPO, length={_plm_len or '自适应'}, "
-                f"mode={design_mode}, GPU={_esm3_gpu}）",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"[peptidelm] 提案引擎已启用（length={'自适应' if _plm_len is None else _plm_len}, "
-                f"NCAA 池 {len(_plm_pool)} 个, 固定残基 {len(_plm_fixed)} 个, "
-                f"mode={design_mode}{layout_hint}）",
-                file=sys.stderr,
-            )
-    except Exception as exc:
-        raise RuntimeError(f"PeptideLM 提案引擎初始化失败：{exc}") from exc
+        from peplm.integrate.esm3_proposer import ESM3Proposer
+    finally:
+        sys.path.remove(_esm3_sys_path)
+
+    _esm3_gpu = os.environ.get("VBIO_ESM3_GPU", "0")
+    proposer = ESM3Proposer(
+        receptor_sequence=(
+            _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
+            if peptide_chirality in ("d", "l") else ""),
+        peptide_length=binder_length,
+        len_range=(_length_lo or 8, _length_hi or 25),
+        cyclic=(design_mode == "cyclic"),
+        device=f"cuda:{_esm3_gpu}",
+        seed=random_seed,
+        work_dir=str(Path(temp_dir) / "esm3_proposer"),
+        log=_proposer_log,
+    )
+    _proposer_log(
+        f"ESM3 proposal engine ready (length={binder_length or 'adaptive'}, "
+        f"mode={design_mode}, GPU={_esm3_gpu})")
 
     # D-peptide mirror workflow context: mirror the target once so every
     # candidate is designed against the fixed D-target (see module docstring
@@ -9486,7 +9370,7 @@ def run_peptide_design_backend(
                         {"sequence": s, "modifications": [], "plddts": []}
                         for s in seed_sequences[:2]
                     ]
-            for lm_base, lm_mods, lm_anchors, lm_group in peptidelm_proposer.propose(
+            for lm_base, lm_mods, lm_anchors, lm_group in proposer.propose(
                 natural_pool,
                 unnatural_pool,
                 _proposer_elites,
@@ -9541,13 +9425,11 @@ def run_peptide_design_backend(
                 },
             )
 
-        # Fail-fast surrogate screen (BindCraft dedup + PepMLM pre-rank):
-        # (a) near-duplicate kill (Hamming ≤ 1) — GRPO needs intra-group
-        #     diversity; clones produce identical rewards → zero advantage
-        # (b) pseudo-PPL ranking: when 2x oversampled, keep the prior-
-        #     plausibility top population_size — exp(mean NLL) under the
-        #     target-conditioned prior anti-correlates with ipTM (PepMLM,
-        #     Nat Biotech 2025). ZERO GPU cost.
+        # Fail-fast surrogate screen (dedup + prior pre-rank):
+        # (a) exact-duplicate kill — GRPO needs intra-group diversity;
+        #     clones produce identical rewards → zero advantage
+        # (b) prior plausibility ranking: when 2x oversampled, keep the
+        #     top population_size by ESM3 log-likelihood. ZERO GPU cost.
         # Exact-dedup within the generation only: edit children are SUPPOSED
         # to be near their parent (that's how the pLDDT-weighted editor
         # explores); near-dup filtering here killed generations 2+ entirely
@@ -9564,15 +9446,15 @@ def run_peptide_design_backend(
         if len(_screened) > population_size:
             try:
                 _scored = sorted(
-                    ((peptidelm_proposer.pseudo_perplexity(
+                    ((proposer.pseudo_perplexity(
                         str(c.get("sequence") or "")), c)
                      for c in _screened),
                     key=lambda pair: pair[0])
                 _before = len(_screened)
                 _screened = [c for _, c in _scored[:population_size]]
                 print(
-                    f"[d-peptide] pseudo-PPL pre-rank: {_before} -> "
-                    f"{len(_screened)} (prior plausibility top half)",
+                    f"[d-peptide] prior pre-rank: {_before} -> "
+                    f"{len(_screened)} (ESM3 likelihood top half)",
                     file=sys.stderr)
             except Exception:
                 pass  # ranking is advisory; an encoder hiccup must not kill the run
@@ -10124,7 +10006,7 @@ def run_peptide_design_backend(
             # PeptideLM: GRPO update on this generation's scored rows so the
             # proposal policy improves round over round
             try:
-                peptidelm_proposer.learn(
+                proposer.learn(
                     elite_population,
                     [row for row in all_results if row.get("generation") == generation]
                     + generation_rejected_rows,
