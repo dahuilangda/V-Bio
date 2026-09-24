@@ -65,11 +65,25 @@ class Handler(BaseHTTPRequestHandler):
         pep_len = int(req.get("peptide_length", 14))
         n = int(req.get("n_samples", 48))
         keep = int(req.get("n_keep", 16))
+        # Chunk the sampling: a long receptor context with a full
+        # parallel batch exhausts GPU memory. Process in chunks and
+        # concatenate trajectories before filtering.
+        CHUNK = 8
+        all_trajs = []
         with torch.no_grad():
-            trajs = policy.sample_batch(
-                receptor=receptor, pep_len=pep_len, n=n, keep=keep,
-                temperature=float(req.get("temperature", 0.9)),
-                num_steps=8, strategy="entropy")
+            remaining = n
+            while remaining > 0:
+                batch = min(CHUNK, remaining)
+                trajs = policy.sample_batch(
+                    receptor=receptor, pep_len=pep_len, n=batch,
+                    keep=batch,
+                    temperature=float(req.get("temperature", 0.9)),
+                    num_steps=8, strategy="entropy")
+                all_trajs.extend(trajs)
+                remaining -= batch
+                if remaining > 0:
+                    torch.cuda.empty_cache()
+        trajs = all_trajs
         seqs = []
         for t in trajs:
             s = policy.decode_tokens(t.peptide_tokens)
