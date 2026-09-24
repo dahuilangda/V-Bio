@@ -127,19 +127,13 @@ def _make_band_projector(idx, up, lo, device, pin_mask=None):
 
     Constrains ATOMS, not groups: without it a steric shove dislodges one
     atom off its residue, since nothing in the sampler negotiates that
-    atom against its own bonds (measured: free-chain bonds off by up to
-    0.22 A with aromatic rings collapsed to CG-CZ 1.5 A). Projected after
     the clash bands so bond geometry wins the negotiation -- the
     official PairwiseDistancePotential ordering, angles then bonds.
 
     Pinned endpoints (pin_mask == 1) take zero correction: they are the
     fixed receptor, and a band whose one end is pinned must move only its
     free end (SHAKE with a fixed anchor). Without this the clash shell
-    pushed the receptor off its input pose (measured: pin deviation up to
-    1.8 A and aromatic rings pulled to 2.2-3.4 A fighting the chemistry
-    bands). (Freezing the rigid-template atoms the same way was measured
-    and rejected: exocyclic bonds 0.21-0.33 A -- the outside atom cannot
-    absorb the junction correction alone.)
+    pushes the receptor off its input pose.
 
     Damped per-pair Jacobi sweeps: a direct minimum-norm solve goes
     singular when many pairs share atoms; this form is unconditionally
@@ -273,8 +267,6 @@ def sample_diffusion(
             init_coords, 0 = start from noise). [N_atom].
         init_noise_scale (float): fraction of the schedule's initial noise level
             mixed into the initialised coordinates (0.0 = pure init).
-                        [lower, upper] holds the free chains at the placed geometry —
-            neither drifting away nor penetrating the receptor wall.
 
     Returns:
         torch.Tensor: the denoised coordinates of x in inference stage
@@ -291,8 +283,6 @@ def sample_diffusion(
         tfg = TFGEngine(tfg_cfg, device=device, dtype=torch.float32)
 
 
-
-
     # Analytic aromatic side-chain rebuild (the AF3/protenix
     # construction principle: side-chain internal geometry comes from
     # the CCD template placed on the backbone frame, chi torsions owned
@@ -303,11 +293,8 @@ def sample_diffusion(
     #      network's CURRENT side chain,
     #   3. rotate the placed template about CA-CB and CB-CG to those
     #      chi values, then write CB..side chain back.
-    # The rebuilt side chain satisfies every bond AND angle band
-    # exactly -- it IS the intersection point; the Jacobi bands only
-    # ever negotiated toward it and measured boat-shaped six-rings on
-    # the way (CG +0.39 A toward CB, all ring bonds in-band: pairwise
-    # distances cannot exclude boats).
+    # Pairwise distances cannot exclude boat-shaped rings; the rebuild
+    # replaces the internal geometry exactly rather than negotiating.
     _ring_project = None
     _ring_atom_rows = None
     if ring_rows is not None and ring_coords is not None \
@@ -419,7 +406,7 @@ def sample_diffusion(
     # not any guidance channel is active, and they are what keeps the free
     # chain's internal geometry intact while the sampler moves it.
     # NOTE the rigid-template atoms deliberately stay MOBILE here: freezing
-    # them (frozen_rows, same mechanism as the receptor pin) measured
+    # them (frozen_rows, same mechanism as the receptor pin) — freezing
     # 0.21-0.33 A exocyclic bonds and 1/8 clean samples -- the junction
     # displacement cannot be absorbed by the outside atom alone within the
     # Jacobi budget. The negotiated split (both ends move) costs only
@@ -433,9 +420,7 @@ def sample_diffusion(
     # (there the model's own poses stay clash-free and the 37k floors
     # only fight the chemistry bands); runs that need the floors turn
     # it ON via the env because a soft-guided sampler can park a
-    # fraction of samples pressed into the rim residues (measured
-    # 2026-09-20: n22 4-10 without, clean with, bonds 0.041 — the
-    # chemistry bands run AFTER the shell, so covalent geometry wins).
+    # fraction of samples pressed into the rim residues.
     _clash_project = None
     _clash_enabled = os.environ.get(
         "PROTENIX_CLASH_SHELL_PROJECT", "0").strip().lower() in ("1", "true")
@@ -493,10 +478,6 @@ def sample_diffusion(
                 # coordinates: a receptor uploaded in its crystal frame
                 # (RANKL trimer ~87 A off origin) sits outside the cloud
                 # core and the denoiser never attaches the peptide --
-                # measured 2026-09-22: every trimer refine crystallised the
-                # peptide 195-265 A away, interface 208-265 A, while a
-                # near-origin receptor (MDM2) bound fine purely by luck of
-                # its coordinate frame. One-time init translation only; the
                 # pose/conformation stay model-generated.
                 _free_rows = init_mask.to(device) == 0
                 if bool(_free_rows.any()):
@@ -527,7 +508,7 @@ def sample_diffusion(
                 # random SE(3) augmentation would kick the free part in a
                 # random orientation every step while the pin snaps the
                 # receptor back — the free chains drift away and lose
-                # chirality (measured: 16 A displacement on 3LNJ). Recenter
+                # chirality . Recenter
                 # on the PINNED centroid only: the receptor stays at its
                 # absolute position (the pin below becomes a no-op) and the
                 # free part keeps its relative geometry.
@@ -634,7 +615,7 @@ def sample_diffusion(
             # it only re-introduces the boat drift. The clash shell
             # rides the same per-step channel when active.
             # Aromatic chemistry, two routes selected by
-            # PROTENIX_AROMATIC_MODE (19-variant sweep, 2026-09-21):
+            # PROTENIX_AROMATIC_MODE:
             #
             # "project" (default) -- template Kabsch pass then the bond
             # bands. Interface quality leads: 6-7/8 shipping-clean,

@@ -522,8 +522,7 @@ def _solve_constraint_projection(
         # atoms (bond pairs + contacts on one linker) make J J^T
         # near-singular, and a flat eps*I is not enough — the solve then
         # returns huge lambda and the projection delta goes non-finite,
-        # poisoning the linker atoms for the rest of sampling (measured: 9
-        # linker atoms NaN at diffusion step 1). Regularize relative to the
+        # poisoning the linker atoms for the rest of sampling. Regularize relative to the
         # row scale and fall back to least squares if the solve still
         # degenerates.
         row_scale = denom.diagonal(dim1=-2, dim2=-1).clamp(min=1.0)
@@ -541,12 +540,11 @@ def _solve_constraint_projection(
             lam = torch.linalg.lstsq(denom, vv_f).solution
         dx_flat = -(gf.transpose(-1, -2) @ lam)  # [N*3]
         # Bound the displacement: a near-singular (yet finite) solve can emit
-        # a bounded-looking lambda whose dx is tens of A — measured: a Cys SG
-        # pushed 32 A from its CA, snapping the bicyclic ring. A linearized
+        # a bounded-looking lambda whose dx is tens of A. A linearized
         # projection is only valid for step-sized violations anyway; clamp
         # per-atom movement so larger violations converge over successive
         # steps instead of teleporting atoms.
-        # A/B switch for the confidence non-regression study (default on).
+        # env override to disable (regression testing).
         if os.environ.get("PROTENIX_DISABLE_TFG_CLAMP", "").strip() not in {"1", "true", "yes"}:
             dx_flat = dx_flat.clamp(-3.0, 3.0)
         if not bool(torch.isfinite(dx_flat).all()):
@@ -815,8 +813,7 @@ class PairwiseDistancePotential(Potential):
 
         The clash family projects only below PROTENIX_CLASH_PROJECT_FLOOR
         (default 2.6 A) -- a guard against catastrophic interpenetration
-        (measured blind runs: 0.36 A min distance, 458 violating pairs
-        when the energy channel alone fights the denoiser prior). The
+        when the energy channel alone fights the denoiser prior. The
         2.6-3.4 A packing band is left entirely to the denoiser's
         interface prior: projecting the full 3.1 A shell every step is a
         purely radial force that flattened binders into one-atom-thick
