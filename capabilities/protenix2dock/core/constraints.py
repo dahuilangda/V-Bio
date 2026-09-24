@@ -54,13 +54,12 @@ def backbone_shape_pairs(
     Returns (rows, lower, upper) tuples. Three families:
     - i,i+1: virtual bond [3.5, 4.2] — omega dihedral reporter
     - i,i+2: [4.8, 7.2] — helix ~5.4, extended ~6.8, turn 5-6.5;
-      prevents extreme compression (measured 1.7-2.8 in distorted
-      helices) without locking secondary structure
+      prevents extreme compression without locking secondary structure
     - i,i+3: [4.5, 10.2] — helix ~5.0, extended ~9.8; same rationale
 
     The clash guard pushes individual atoms along pair axes; without
     these shape pairs the 200-step accumulation gradually unwinds helices
-    (measured: sampler raw output d(i,i+2) spread 1.7-9.4 A vs crystal
+ spread 1.7-9.4 A vs crystal
     4.8-5.8). Wide bands allow both helix and strand but block the
     degenerate compressions/overextensions the min-norm solver finds
     when it only sees bonds+angles.
@@ -624,9 +623,7 @@ def compute_ccd_bond_bands(
     The CCD component templates define the rest length of every bond in a
     standard residue; the sampler moves atoms one at a time, so without
     this each steric adjustment can dislodge an atom off its residue
-    instead of distributing through the bond network (measured: free-chain
-    backbone bonds off by up to 0.22 A, aromatic rings collapsed from
-    CG-CZ 2.80 to 1.5 A). The bands ride a damped-Jacobi projection applied
+    instead of distributing through the bond network. The bands ride a damped-Jacobi projection applied
     after the guidance channels each step -- the official
     PairwiseDistancePotential ordering, angles then bonds last, so bond
     geometry wins the negotiation.
@@ -649,8 +646,7 @@ def compute_ccd_bond_bands(
     plausible = {"CC", "CN", "CO", "CS", "SS", "CP", "OP", "NP", "SP"}
     # AROMATIC SIDE CHAINS ARE HANDS-OFF: with the TFG guidance off, the
     # raw model produces F/Y/W/H side chains with perfect CCD geometry
-    # (measured 2026-09-21 T2 control: ring planes 0.000-0.007 A, junction
-    # angles +-3 deg, OH in-plane) -- every distance projection we ran on
+    # -- every distance projection we ran on
     # those atoms (bond bands, ring bands, junction angle bands, TFG's own
     # projected channel) only degraded them (boat rings to 0.53 A, OH 1.6 A
     # out of plane). The bands therefore cover the backbone and the
@@ -675,8 +671,7 @@ def compute_ccd_bond_bands(
     # atoms>]. The TFG mu-gradient on those atoms is re-expressed as a
     # pure chi1/chi2 rotation (least-squares onto the two torsion
     # velocity fields) so the steric push turns the side chain instead
-    # of deforming the ring (T5/T6: direct per-atom gradients measured
-    # ring buckling + junction-angle damage at every weight tried).
+    # of deforming the ring.
     _bb_keep = ("N", "CA", "C", "O", "OXT")
     aro_dof_rows: list[list[int]] = []
     _dof_by_res: dict[tuple[int, int], list[int]] = {}
@@ -741,17 +736,14 @@ def compute_ccd_bond_bands(
     # Aromatic side-chain geometry. Distance bands (any width) CANNOT
     # enforce ring planarity: a buckled six-ring satisfies every pairwise
     # distance within the +-0.12 band while its atoms sit ~0.95 A off the
-    # ring plane (measured 2026-09-20 on every sample of the aromatic
-    # 14-mer run: ring planarity RMSD 0.93-0.95 A, max intra-ring pair
-    # deviation exactly the 0.12 band width). Aromatic rings are therefore
+    # ring plane. Aromatic rings are therefore
     # carried as RIGID TEMPLATES: the sampler Kabsch-fits the CCD-ideal
     # ring onto the network's current ring each step and replaces the
     # internal coordinates -- placement and orientation stay the
     # network's decision, only the internal shape + planarity are pinned.
     # TRP's fused indole (both rings + the shared edge) is ONE rigid body;
     # TYR's phenol OH lies in the ring plane by sp2 chemistry and rides
-    # the same body (measured 1.4-1.8 A out of plane when left to the
-    # distance bands); PRO's pyrrolidine puckers physically and stays a
+    # the same body; PRO's pyrrolidine puckers physically and stays a
     # distance band.
     # Aromatic side-chain geometry. The sampler rebuilds each aromatic
     # side chain ANALYTICALLY every step (CCD template placed on the
@@ -760,8 +752,7 @@ def compute_ccd_bond_bands(
     # comes from the CCD component template, never from pairwise
     # distances. A rebuilt side chain satisfies every bond AND angle
     # band exactly (the intersection point itself -- no Jacobi
-    # negotiation, which measured boat-shaped six-rings: CG +0.39 A
-    # toward CB, CD1/CD2 -0.25 A, all ring bonds inside their bands).
+    # negotiation, which permits boat-shaped rings).
     # chi1/chi2 stay fully network-owned; PRO's pyrrolidine puckers
     # physically and stays a distance band.
     _rigid_rings = {
@@ -789,8 +780,7 @@ def compute_ccd_bond_bands(
     # Rigid templates + junction angle bands exist ONLY for the explicit
     # rebuild mode (PROTENIX_AROMATIC_REBUILD=1). The default route hands
     # aromatic side chains to the network entirely (see aro_side_rows) --
-    # every constraint we ever placed on those atoms measured worse than
-    # the untouched network output.
+    # constraints on those atoms degrade the network output.
     _rebuild_mode = os.environ.get(
         "PROTENIX_AROMATIC_REBUILD", "").strip() in ("1", "true")
     for (a, r), rnames in name_by_res.items():
@@ -820,16 +810,13 @@ def compute_ccd_bond_bands(
         # Junction ANGLE bands across the rigid-body boundary: the rigid
         # replacement fits the template onto the network's ring placement
         # (total-RMSD), which drags the anchor atom CG and leaves the
-        # CA-CB-CG / CB-CG-CD1 angles free to wander (measured 2026-09-21:
-        # CA-CG and CB-CD deviations 0.1-0.6 A vs 0.01-0.06 in the staged
-        # reference, TYR OH 1.4-1.8 A out of plane). Pin every
+        # CA-CB-CG / CB-CG-CD1 angles free to wander. Pin every
         # body/non-body atom pair at template 1-3 distance (<= 2.8 A):
         # these distances are INVARIANT to both chi1 (rotation about
         # CA-CB) and chi2 (rotation about CB-CG), so the junction angles
         # lock while both torsions stay fully network-owned. Also the
         # backbone N-CB pair (angle N-CA-CB): without it the model's raw
-        # backbone-angle noise shows at exactly these residues (measured
-        # 126.5 deg vs ideal 110 on the aromatic peptide, staged 110.4).
+        # backbone-angle noise shows at exactly these residues.
         # Angle pairs ride the regular bond width (band, +-0.04 A =
         # ~+-2.5 deg) -- the ring pair marker (negative) is reserved for
         # the +-0.12 planarisation width.
@@ -894,8 +881,8 @@ def compute_ccd_bond_bands(
     # Drop intra-template pairs from the DISTANCE bands: a pair with both
     # atoms inside the same rigid aromatic template is already exact (the
     # sampler re-places that template every step), and keeping it as a
-    # band only hands the Jacobi sweep a drift DOF -- measured 2026-09-21:
-    # the junction angle corrections propagate through those bands and
+    # band only hands the Jacobi sweep a drift DOF: the junction angle
+    # corrections propagate through those bands and
     # buckle the six-rings into BOAT conformations (CG +0.39 A toward CB,
     # CD1/CD2 -0.25 A behind, every ring bond still inside its +-0.04
     # band: a boat satisfies all 1-2 distances). The fused 9-atom TRP

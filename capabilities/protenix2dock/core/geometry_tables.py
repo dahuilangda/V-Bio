@@ -144,7 +144,7 @@ SIDECHAIN_ANGLES = {
     # ASP flanks (sp2 sums with the centre: 119.1+117.6+123.3 = 360)
     ("CB", "CG", "OD1"): 119.1, ("CB", "CG", "OD2"): 117.6,
     # GLU carboxylate vs GLN amide share the CG-CD-OE1/2 flanking
-    # geometry (measured delta <= 1.3 deg) -- one shared value per
+    # geometry -- one shared value per
     # triplet; sp2 sums close at 360 for both centres
     ("CG", "CD", "OE1"): 120.3, ("CG", "CD", "OE2"): 117.0,
     # amides (Asn / Gln)

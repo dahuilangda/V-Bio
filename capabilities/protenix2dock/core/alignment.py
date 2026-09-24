@@ -277,8 +277,7 @@ def align_complex_init_coords(
         if require_complete:
             # score mode: the output CIF must be the input structure,
             # bit-exact. A CCD rebuild or a zeroed row would SHIFT residues
-            # in the shipped file (measured: user uploads with missing side
-            # atoms came back with fabricated/origin-collapsed atoms) —
+            # in the shipped file —
             # fail loudly instead.
             raise ValueError(
                 f"score mode requires every assembled atom to come from "
