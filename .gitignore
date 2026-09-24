@@ -113,3 +113,23 @@ backend/runtime/psslm_data/rankl_cyclic_final.yaml
 Thumbs.db
 backend/runtime/CD73_4H2I_dimer.pdb
 backend/runtime/CD73_7DX9_AB.pdb
+
+# Model weights and training data (too large for git)
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+capabilities/peptide_lm/runs/
+capabilities/peptide_lm/models/external/
+capabilities/peptide_lm/models/prior.pt
+capabilities/peptide_lm/models/ss_track.pt
+
+# Design outputs and runtime artifacts
+/data/boltz_central_results/
+vbio_runs/
+*.zip
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db
