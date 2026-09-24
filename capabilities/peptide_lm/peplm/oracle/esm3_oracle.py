@@ -240,8 +240,8 @@ def refill_candidate(sequence: str, parent_cif: Path, cfg: OracleConfig,
             "--peptide_chain", cfg.peptide_chain,
             *(["--bond_pairs", bond] if bond else []),
             "--bond_upper", "2.2",
-            "--pocket_upper", "14.0",
-            "--pocket_res", cfg.pocket,
+            # pocket mode removed from the engine; blind inpainting
+            # localises via the model's own docking prior
         ]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -328,8 +328,8 @@ def dock_candidate(sequence: str, cfg: OracleConfig, run_dir: Path,
             # peptide mode reads this as the ANCHOR-BOX radius: each binder
             # atom within R of the solvent-side anchor point (pocket
             # centroid + outward*8)
-            "--pocket_upper", "14.0",
-            "--pocket_res", cfg.pocket,
+            # pocket mode removed from the engine; blind inpainting
+            # localises via the model's own docking prior
             "--diffusion_samples", str(cfg.diffusion_samples),
             "--blind_peptide",
             # no --interface_chains: protenix2dock derives the peptide

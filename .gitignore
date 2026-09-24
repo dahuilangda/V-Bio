@@ -111,3 +111,5 @@ backend/runtime/psslm_data/rankl_cyclic_final.yaml
 *.swo
 .DS_Store
 Thumbs.db
+backend/runtime/CD73_4H2I_dimer.pdb
+backend/runtime/CD73_7DX9_AB.pdb
