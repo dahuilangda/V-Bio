@@ -187,7 +187,7 @@ class ESM3Policy(torch.nn.Module):
                                dim=-1)
             aa_lp = lp[..., self.aa_ids]  # [n, pep, 20]
             # top-k, not top-3: the SFT-grounded conditional is near-uniform
-            # per position (measured H~2.92 of ln 20), where top-3 collapses
+            # per position (entropy near ln 20), where top-3 collapses
             # to the tilt-top tokens (G/S/C) at every position
             k = max(1, min(int(top_k), len(self.aa_ids)))
             top_lp, top_idx = aa_lp.topk(k, dim=-1)

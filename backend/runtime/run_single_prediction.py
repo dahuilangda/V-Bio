@@ -6303,7 +6303,7 @@ def _dpeptide_uploaded_target_structure(predict_args: Dict[str, Any], out_dir: P
 def _binder_msa_assignment(binder_sequence: str) -> str:
     """MSA for one designed binder, cache-first, HARD failure on miss.
 
-    Policy (2026-09-04, "MSA everywhere" + no-fallback): the env-database MSA
+    Policy ("MSA everywhere" + no-fallback): the env-database MSA
     service returns usable alignments for designed peptides too, and the MSA
     measurably improves results — a candidate without its MSA is not
     equivalent and must not silently run degraded. A transport/search failure
@@ -6331,7 +6331,7 @@ def _binder_msa_assignment(binder_sequence: str) -> str:
         if _ensure_nonempty_a3m_file(cached_msa_path, sequence, context="binder 缓存校验", header="binder"):
             return cached_msa_path
     msa_timeout = MSA_SERVER_TIMEOUT_SECONDS if MSA_SERVER_TIMEOUT_SECONDS > 0 else 600
-    # Measured boundary (2026-09-04): the env-db CPU stages (result2msa) on a
+    # Measured boundary: the env-db CPU stages (result2msa) on a
     # short designed peptide can run tens of minutes — the GPU prefilter is
     # NOT the bottleneck. The auto tier (uniref for short binders) keeps the
     # per-generation prefetch at seconds; env stays available for long chains.
@@ -6465,7 +6465,7 @@ def _dpeptide_predict_target_structure(
     # the dispatched prediction task resolves its MSA INSIDE its GPU lease, so
     # a cache miss there + a full GPU pool forms a circular wait — every
     # refine wave holds all cards while the target's mmseqs search queues
-    # behind them, and vice versa (measured 2026-09-19 on a design task).
+    # behind them, and vice versa on a design task).
     # Seeding the shared cache (prediction-side plain key msa_<md5>.a3m)
     # turns the in-task fetch into a cache hit. Failure is non-fatal: the
     # sub-task retries in-task exactly as before this prefetch existed.
@@ -6659,7 +6659,7 @@ def _pocket_contacts_for_staged_space(
     within the peptidePocketBox radius. Every requested residue must resolve
     — a silently wrong pocket site is worse than a loud failure.
     """
-    # Pocket guidance was REMOVED (2026-09-21, user decision): the
+    # Pocket guidance was REMOVED, user decision): the
     # receptor-fixed blind generation localises via the model's own
     # docking prior. Frontend submissions carrying the legacy option are
     # ignored with a log line instead of erroring.
@@ -7275,7 +7275,7 @@ def _dpeptide_stage_conformer_in_pocket(
     if not pocket_pts and not has_reference and pose_matters:
         # No silent centroid fallback when the pose feeds the sampler: without
         # a pocket the binder gets buried at the receptor centroid (measured
-        # 0.16 A min distance on the 2026-09-04 MDM2 runs). pose_matters=False
+        # 0.16 A min distance on the MDM2 runs). pose_matters=False
         # (blind inpainting route) discards the peptide start entirely — the
         # engine re-noises those rows — so any placement is acceptable.
         raise ValueError(
@@ -7428,7 +7428,7 @@ def _dpeptide_stage_conformer_in_pocket(
                 # a1 = peptide side "B:<cys>:SG" (the residue to project),
                 # a2 = linker side "L:1:<anchor>" (the anchor atom). The old
                 # parser took a2's resnum — the linker residue is always 1,
-                # so EVERY anchor relaxed against Cys-1 (2026-09-04: staged
+                # so EVERY anchor relaxed against Cys-1 staged
                 # ring bonds landed 3.4 A while two converged by accident).
                 _, cys_num, _ = a1.strip().split(":")
                 _, _, anchor = a2.strip().split(":")
@@ -7445,7 +7445,7 @@ def _dpeptide_stage_conformer_in_pocket(
 
     # Self-check hard gate: the staged pose ENTERS the diffusion sampler as
     # the inpainting reference. A pose with inter-chain hard clashes is a
-    # garbage reference — measured on 2026-09-04, a 95-clash staged start
+    # garbage reference — measured, a 95-clash staged start
     # flipped >50% of binder CA chiralities in every refined sample. The
     # sampler must never receive a buried pose silently: zero <2.2 A pairs
     # and at least one <6 A contact (anchored, not floating) or we fail.
@@ -7538,7 +7538,7 @@ class DpeptideStaleWorkerError(RuntimeError):
     The worker task contract echoes the flags it honored into the dpeptide
     contract; a missing/mismatched echo means the celery process predates the
     flag (long-running worker, code updated on disk after its start) — the
-    2026-09-04 demo failure: ``blind_peptide`` was dropped, the run silently
+    demo failure: ``blind_peptide`` was dropped, the run silently
     downgraded to a clashing staged-local refine and every candidate was
     chirality-rejected. Raised task-level (not per-candidate) so the run fails
     fast with the actionable fix: restart the GPU worker container.
@@ -7635,7 +7635,7 @@ def _dpeptide_dispatch_refine(
             "seed": int(seed),
             # blind inpainting route flag — the worker appends --blind_peptide
             # and echoes it back; the collector's expect_blind contract check
-            # (2026-09-04 incident guard) fails the candidate if it's missing.
+            # incident guard) fails the candidate if it's missing.
             "blind_peptide": bool(blind),
             # PocketPotential per-pair upper bound: boltz2's pocket
             # max_distance default is 6.0 (= POCKET_CONTACT_MAX_A + 1, so the
@@ -7656,7 +7656,7 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
     Mirror-space contract: receptor chain must be all-D, designed peptide
     all-L (the product flip then yields L-target + D-peptide). The diffusion
     sampler has no improper-dihedral term — under contradictory guidance it
-    inverts CA centres (measured 2026-09-04: 11-15 of 17 residues flipped on
+    inverts CA centres (observed: 11-15 of 17 residues flipped on
     buried starts). A mixed-chirality refined complex is a sampler failure:
     reject the candidate loudly instead of shipping a product whose peptide
     is part-L after the flip.
@@ -7680,7 +7680,7 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
     # receptor copy to check. The old chains[0]/chains[1] pick assumed a
     # single receptor: on a multi-chain receptor (RANKL trimer A/B/C + D)
     # chains[1] was a second RECEPTOR copy and every candidate died at the
-    # gate with 144/144 phantom violations (measured 2026-09-22).
+    # gate with 144/144 phantom violations.
     peptide = protein_chains[-1]
     receptor_chains = protein_chains[:-1]
     rec_bad = []
@@ -7724,7 +7724,7 @@ def _dpeptide_composite_from_refined(
     Interface objective is ipSAE (interface_score), matching the published
     Mirror-Peptidizer BO fitness (0.6*ipsae_dom + 0.4*plddt - ...) and the
     engine's own ipsae-favoring ranking weights — ipTM systematically
-    overrates strained/anchored poses (measured on the 2026-09-04 A/B: the
+    overrates strained/anchored poses (A/B comparison: the
     staged-local arm scored ipTM 0.82 while its poses were 10-21 A off and
     chirality-broken; the blind arm's honest ipTM was 0.73 with 1.5-2.0 A
     redock RMSD). Weights mirror the native interface branch: with a user
@@ -7846,7 +7846,7 @@ def _dpeptide_collect_refine(
         raise RuntimeError(
             f"D-space refine produced no samples under {structure_dir}.")
     # Selection policy: module-level _select_dspace_samples, unit tested
-    # against the 2026-09-18 MDM-2 failure set.
+    # against the MDM-2 failure set.
     # Tuple layout (see _select_dspace_samples): 0 intact, 1 engaged,
     # 2 -clashes, 3 iptm, 4 cif.NAME, 5 cif PATH, 6 detached, 7 contacts.
     ranked = _select_dspace_samples(scored)
@@ -7860,7 +7860,7 @@ def _dpeptide_collect_refine(
     # failed candidate, not a low-ranked one. Ranking alone could not
     # prevent this — when every sample interpenetrates the least-jammed
     # one shipped and the composite's contact count then REWARDED the
-    # burial (2026-09-15: shipped ranks carried peptide atoms 1.2-1.9 A
+    # burial shipped ranks carried peptide atoms 1.2-1.9 A
     # from receptor atoms).
     _min_d, _n22, _n28 = _interchain_clash_profile(Path(best[5]))
     # Gate aligned with physical interfaces: crystals carry contacts down
@@ -7979,7 +7979,7 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
 
     Structured rings of 10-16 residues (cyclic RGDfK, SFTI-style) run
     Rg/n ~0.7-0.9 with several non-local contacts (beta-turns); molten
-    blobs measure 0.42-0.60 with 0-2 contacts (2026-09-15 audit of every
+    blobs measure 0.42-0.60 with 0-2 contacts (audit of every
     shipped rank). The confidence head cannot separate them (pLDDT 80 on
     blobs), so the shape signal has to come from geometry. Soft penalty,
     not rejection — early generations may legitimately hold only blobs
@@ -8004,7 +8004,7 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
     nonlocal_c = int(((np.abs(iuj[0] - iuj[1]) >= 3) & (d[iuj] < 4.5)).sum())
     rg_ratio = rg / n
     penalty = 0.0
-    # Calibrated against known structured cyclic peptides (2026-09-23):
+    # Calibrated against known structured cyclic peptides:
     # SFTI-1 (14aa, disulfide-stapled) runs rg/n ~0.46; kalata B1
     # cyclotide (29aa) ~0.29 — small rings are NATURALLY compact and the
     # old flat 0.62 cutoff penalised every 10-16aa candidate (measured:
@@ -8113,7 +8113,7 @@ def _select_dspace_samples(scored):
     Sort key (descending): covalent integrity, interface ENGAGEMENT, clash
     count, ipTM, name. Engagement outranks clash-freedom because a detached
     peptide has zero clashes and would otherwise outrank every bound
-    (necessarily touching) sample — the 2026-09-18 MDM-2 failure shipped
+    (necessarily touching) sample — a MDM-2 failure shipped
     ranks 3.9-20 A off the receptor under a bound sample's ipSAE 0.92.
 
     Tuple layout: (intact, engaged, -clashes, iptm, cif.name, cif,
@@ -8289,7 +8289,7 @@ def _pocket_chemistry_demands(
 
     Returns {"acid": n, "basic": n, "aromatic": n} anchors the peptide should
     supply, or None when the pocket makes no strong demand (term inactive).
-    Interface physics diagnostics (2026-09-09 RANKL post-mortem): a peptide
+    Interface physics diagnostics: a peptide
     can pack as well as the native ligand (Sc 0.445 vs 0.424) yet score
     poorly when the polar lock is missing — zero salt bridges against a
     4-Lys/1-Arg rim, zero aromatics against Y/H. A basic rim demands acidic
@@ -8592,7 +8592,7 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
     # the peptide is the SHORTEST polymer chain (multi-chain receptors put
     # receptor copies at every length tier; the old polymer[1] pick measured
     # a second receptor copy's termini -- a constant ~15.8 A on the RANKL
-    # trimer, phantom-"opening" every ring, 2026-09-22)
+    # trimer, phantom-"opening" every ring,
     pep = polymer[-1]
     residues = [r for r in pep if r.het_flag != "H"]
     if len(residues) < 4:
@@ -8914,7 +8914,7 @@ def run_peptide_design_backend(
         cys_position_mode = str(options.get("peptideBicyclicCysPositionMode") or "auto").strip().lower()
         fix_terminal_cys = _read_bool_option(options, "peptideBicyclicFixTerminalCys", True)
         allow_extra_cys = _read_bool_option(options, "peptideBicyclicIncludeExtraCys", False)
-        # Anchor layout semantics (2026-09-06): the peptide length is a range,
+        # Anchor layout semantics: the peptide length is a range,
         # so absolute Cys positions alone cannot express the user's intent.
         # `peptideBicyclicCysLayout` selects how anchors follow the length:
         #   ring     — pin the two ring sizes; Cys3 rides the C-terminus and
@@ -9205,7 +9205,7 @@ def run_peptide_design_backend(
                 binder_length=binder_length)
     else:
         d_reference_peptide = None
-    # 2026-09-09 协议修订（对齐 dock 模式 2026-09-04 决策 + boltz2 原生口袋
+    # 协议修订（对齐 dock 模式 决策 + boltz2 原生口袋
     # 语义）：一切 de-novo D-肽（linear/cyclic/bicyclic，无参考肽结构）走
     # native blind inpainting——肽纯噪声 + 完整调度，受体每步钉住，姿态由
     # 扩散先验生成；环拓扑以 pose 无关的 TFG 键对随精修携带；用户口袋经
@@ -9218,11 +9218,11 @@ def run_peptide_design_backend(
         peptide_chirality == 'd' and d_reference_peptide is None)
     if (peptide_chirality == 'd' and not pocket_sequence_contacts
             and not blind_linear_route):
-        # 无口袋 D-肽此前静默退化到"靶点质心摆位"(2026-09-04 事故: staged 埋置
+        # 无口袋 D-肽此前静默退化到"靶点质心摆位" 事故: staged 埋置
         # 0.16 A,精修全面翻手性)。BICYCLIC/参考锚定模式必须有口袋或参考;
         # 线性/环肽模式走盲 inpainting(受体钉住+肽从噪声,姿态由 MSA 先验产生,
         # A/B 实测红dock RMSD 1.5-2.0 A),不需要口袋。
-        # 2026-09-09 协议修订(与 dock 模式 2026-09-04 决策对齐): cyclic+D 不再
+        # 协议修订(与 dock 模式 决策对齐): cyclic+D 不再
         # 走"自研刚体摆位+局部精修"——该路由把肽 Cage 在任意局部摆位
         # (sigma_max=0.05 ≈ ±0.8 A 活动半径),精修矛盾以塌缩收场(实测
         # pocket_min 0.35 A、CA-CB 断裂,integrity=BROKEN)。cyclic 与 linear
@@ -9490,7 +9490,7 @@ def run_peptide_design_backend(
             # cache: the engine-side resolve_msa is cache-first and falls
             # through to the MSA SERVER on a miss — a de novo candidate
             # would hard-fetch (30-min timeout when the server is starved,
-            # measured 2026-09-19: generation 1 lost 3/8 candidates) instead
+            # generation 1 lost 3/8 candidates) instead
             # of running single-sequence. A query-only a3m under the exact
             # cache key (tier = length rule, aligned with input_prep and
             # _binder_msa_assignment) turns that miss into the official
@@ -10207,7 +10207,7 @@ def run_peptide_design_backend(
                         # mode A (reference-anchored) only: restore the
                         # covalent LINK topology; the user's uploaded pose IS
                         # the binding mode (never clash-searched). The de-novo
-                        # clash-free placement route was removed 2026-09-09 —
+                        # clash-free placement route was removed —
                         # its invented pose only fed the sampler a wrong local
                         # minimum the local refine window could not escape.
                         _pocket_place_for_refine(
@@ -10269,7 +10269,7 @@ def run_peptide_design_backend(
             # MODEL-generated pose — keep it (mode-A style, keep_pose=True)
             # and let the refine run under the fixed receptor with native
             # PocketPotential guidance pulling the peptide into the user
-            # pocket. The clash-search re-placement was removed 2026-09-09:
+            # pocket. The clash-search re-placement was removed
             # it discarded the model pose in favor of an invented one.
             if (peptide_chirality == 'l' and pocket_sequence_contacts
                     and structure_file is not None):
@@ -10325,7 +10325,7 @@ def run_peptide_design_backend(
 
             # L chirality WITHOUT pocket: the native prediction carries a
             # model-generated pose that has bypassed every geometric gate
-            # (measured 2026-09-19: 12/24 shipped ranks with interface
+            # 12/24 shipped ranks with interface
             # min 1.66-2.23 A). Stage the native complex and dispatch the
             # same fixed-receptor refine the pocket route uses -- minus the
             # pocket conditioning. The state guard, constraint bands, and

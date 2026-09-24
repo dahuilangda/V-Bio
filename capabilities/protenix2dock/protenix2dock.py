@@ -283,8 +283,7 @@ def _cif_interface_geometry(cif_path, ligand_chain: str):
     Returns (min_dist, clash_pairs) between the binder chain and every
     other polymer chain, or None when the CIF is missing/unreadable. This
     is the geometric gate the best-sample selection was missing: a sample
-    with a buried main-chain interpenetration (measured 1.55 A, d3ddb001
-    sample 0) can top the ipsae chart precisely BECAUSE the interface is
+    with a buried main-chain interpenetration can top the ipsae chart precisely BECAUSE the interface is
     over-buried — score alone selects for it.
     """
     try:
@@ -377,9 +376,7 @@ def add_interface_metrics(summary: dict, output_dir: Path, ligand_chain="B",
     # Geometric gate on the shipped best: among samples with a physically
     # clean interface (no heavy-atom pair under 2.2 A), ship the
     # highest-scoring one. Score alone selects for over-buried interfaces
-    # (measured: d3ddb001 sample 0 topped the chart at ipsae_dom 0.7-class
-    # while carrying a 1.55 A main-chain interpenetration — 22 clash
-    # pairs). When NO sample is clean the score winner still ships but is
+    #. When NO sample is clean the score winner still ships but is
     # flagged so downstream consumers can demand a re-run.
     clean = [e for e in summary["confidences"]
              if e.get("interface_clash_pairs") == 0
@@ -407,7 +404,7 @@ def _center_complex_on_receptor(
     The trunk/denoiser were trained on origin-centred complexes: an upload
     in its crystal frame (RANKL trimer, centroid ~87 A off origin) is out
     of distribution and the sampler never attaches the free chain --
-    measured 2026-09-22, every trimer refine crystallised the peptide
+    an off-origin receptor can prevent peptide attachment entirely
     195-265 A away (interface 208+ A) while origin-centred receptors bound
     normally. The output is therefore delivered in the centred frame
     (translation is biologically meaningless; superposition downstream is
@@ -506,7 +503,7 @@ def _run_peptide_engine(
     # alignments for designed peptides and the MSA measurably improves the
     # refine; a no-MSA run is not an equivalent candidate and must not
     # silently proceed).
-    # 1800s matches the measured env-db boundary: the GPU prefilter is fast,
+    # 1800s matches the env-db boundary: the GPU prefilter is fast,
     # but the CPU result2msa stage on a 20-aa designed peptide runs 30-60 min
     # (thousands of weak env hits). A shorter deadline systematically fails.
     peptide_msa_timeout = int(os.environ.get("P2D_PEPTIDE_MSA_TIMEOUT_SECONDS", "1800"))
@@ -705,8 +702,7 @@ def _run_peptide_engine(
     # every diffusion step (centre_random_augmentation, AF3 Alg. 19), so an
     # absolute-coordinate clamp is only valid in the frame the step began in
     # -- the free atoms ride the frame while the clamped ones do not, putting
-    # the state outside the training distribution (measured: shipped peptide
-    # backbone bonds off by up to 0.22 A, aromatic rings collapsed). The
+    # the state outside the training distribution. The
     # restraint instead aligns the reference onto the current frame by Kabsch
     # at every evaluation and penalises one-sided deviation with a bounded
     # linear gradient -- Boltz-2's force-template formulation.
@@ -714,8 +710,7 @@ def _run_peptide_engine(
     # (a zero coordinate row would pull them to the origin).
     # One representative atom per receptor residue (CB, else CA): the
     # target is held as a rigid body, so anchoring every atom would apply an
-    # independent pull to each and stretch its own bonds (measured: half the
-    # receptor's bonds pushed out of tolerance). boltz-2 makes the same
+    # independent pull to each and stretch its own bonds. boltz-2 makes the same
     # choice -- its force-template restrains `token_to_rep_atom` only.
     ref_mask = np.zeros(len(coords), dtype=np.float32)
     for entity in range(len(receptor_names)):
@@ -762,7 +757,7 @@ def _run_peptide_engine(
             # rebuild mode only: the analytic side-chain rebuild moves
             # interface atoms onto exact CCD geometry; without the clash
             # floors those corrections bury into the pinned receptor
-            # (measured n22 8-32, 1/8 clean). Default route has no
+            #. Default route has no
             # rebuilds -- the network's own side chains need no floors.
             if os.environ.get("PROTENIX_AROMATIC_REBUILD", "") in ("1", "true"):
                 os.environ.setdefault("PROTENIX_CLASH_SHELL_PROJECT", "1")
@@ -792,8 +787,7 @@ def _run_peptide_engine(
         # runs the term at constant weight. A linear chain cannot ball up
         # within `upper` of one atom -- anchor forced a 16-mer (~50 A
         # extended) into a 12 A ball and crushed it into the receptor
-        # (measured 2026-09-20: interface min 0.22 A, CA chirality +0.0 in
-        # 2/4 samples). Linear chains take boltz2's per-residue contact
+        #. Linear chains take boltz2's per-residue contact
         # groups with its guidance weight ramp instead.
         # cyclic topology still feeds the TFG bond list (head-tail amide);
         is_cyclic = any(headtail_refs)

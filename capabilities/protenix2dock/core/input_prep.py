@@ -54,7 +54,7 @@ def auto_msa_mode(sequence: str, min_env_aa: int = MSA_ENV_MIN_AA) -> str:
     """Length-predicted search tier (the a-priori cost model).
 
     The env-db cost sits in the CPU result2msa stage and scales with the
-    weak-hit count, which explodes for SHORT queries: measured —
+    weak-hit count, which explodes for SHORT queries --
     a 20-aa designed peptide ran 30-60 min while a 22-aa protein-like
     sequence took 20 s and an 83-aa receptor minutes (long chains have
     specific k-mer matches, so the env stage stays well-behaved). Length is
@@ -234,10 +234,7 @@ def _fetch_msa_from_server(
         time.sleep(5)
     else:
         # Client gave up: cancel the ticket so the server does not keep
-        # burning a worker slot + GPU lease on an orphan (measured: env-db
-        # result2msa for a 20-aa designed peptide runs 30-60 min on CPU;
-        # an abandoned ticket otherwise occupies the queue long after every
-        # client is gone). Best-effort — cancellation must never mask the
+        # burning a worker slot + GPU lease on an orphan. Best-effort — cancellation must never mask the
         # original timeout.
         try:
             requests.delete(f"{base}/ticket/{ticket}", timeout=15)
