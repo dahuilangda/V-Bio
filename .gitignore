@@ -133,3 +133,9 @@ vbio_runs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# JAX compilation cache (5.8GB)
+.af3_jax_cache/
+
+# Node modules at root (frontend has its own)
+node_modules/
