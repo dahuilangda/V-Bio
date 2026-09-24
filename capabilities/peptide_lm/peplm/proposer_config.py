@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class ProposerConfig:
-    """All proposal-engine knobs in one place; see BackendProposer
+    """All proposal-engine knobs in one place; see ESM3Proposer
     docstring for per-field semantics."""
     # length
     peptide_length: int | None = None
