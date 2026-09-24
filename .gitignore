@@ -16,16 +16,6 @@ build/
 *.egg-info/
 .eggs/
 
-# Tests
-**/tests/
-*.test.ts
-*.test.tsx
-*.test.js
-*.test.jsx
-*.spec.ts
-*.spec.tsx
-test_*.py
-*_test.py
 capabilities/peptide_lm/peplm/bench/esm3_policy_smoke.py
 
 # Env

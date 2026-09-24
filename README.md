@@ -17,7 +17,7 @@ capabilities/   模型服务代码
 后端和 worker 使用 Docker 部署：
 
 ```bash
-cd /data/V-Bio
+cd V-Bio
 # 先按实际地址和 token 修改 deploy/docker/*.env
 docker compose -f deploy/docker/DOCKER_STACK_REDIS.compose.yml   --env-file deploy/docker/DOCKER_STACK_REDIS.env up -d
 docker compose -f deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.compose.yml   --env-file deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.env up -d --build
@@ -26,7 +26,7 @@ docker compose -f deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.compose.yml   --e
 前端和 management API：
 
 ```bash
-cd /data/V-Bio
+cd V-Bio
 bash frontend/run.sh start
 ```
 
@@ -40,7 +40,7 @@ bash frontend/run.sh start
 VITE_API_BASE_URL=http://<HOST_IP>:5000
 VITE_API_TOKEN=<BOLTZ_API_TOKEN>
 VITE_SUPER_ADMIN_USERNAMES=dahuilangda
-VITE_SUPER_ADMIN_EMAILS=dahuilangda@hotmail.com
+VITE_SUPER_ADMIN_EMAILS=<admin@example.com>
 VBIO_JWT_CLIENTS_FILE=frontend/.run/jwt_clients.json
 VBIO_SESSION_SECRET=<server-session-secret>
 ```

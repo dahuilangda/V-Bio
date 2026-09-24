@@ -21,7 +21,7 @@ LIG="${2:?pass the ligand sdf path}"
 OUT="${3:-/tmp/bench_modes}"
 SMILES="Brc1cccc(Nc2nc(OCC3CCCCC3)c3nc[nH]c3n2)c1"
 PY="${BOLTZ2_VENV_PYTHON:?set BOLTZ2_VENV_PYTHON to a python with boltz installed}"
-MSA="${MSA_SERVER_URL:-http://172.17.3.200:8080}"
+MSA="${MSA_SERVER_URL:?MSA_SERVER_URL must be set}"
 mkdir -p "$OUT"
 
 run_timed() {

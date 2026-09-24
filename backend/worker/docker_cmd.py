@@ -58,9 +58,9 @@ def protenix_runtime_mounts(command: list[str]) -> list[str]:
         "--volume", f"{config.PROTENIX_MODEL_DIR}:/workspace/model:ro",
         "--volume", f"{config.PROTENIX_COMMON_CACHE_DIR}:/cache/common:ro",
         # rw：protenix2dock 回写共享 MSA 缓存
-        "--volume", "/data/boltz_msa_cache:/data/msa_cache",
+        "--volume", f"{config.BOLTZ_MSA_CACHE_DIR}:/data/msa_cache",
         "--volume", "/dev/shm:/dev/shm",
-        "--env", "PYTHONPATH=/workspace/vbio/vendor/protenix-source",
+        "--env", f"PYTHONPATH={REPO_MOUNT_CONTAINER}/vendor/protenix-source",
         "--env", "PROTENIX_ROOT_DIR=/cache",
     ])
     # Writable whole-module cache: model construction takes ~80 s per task;
