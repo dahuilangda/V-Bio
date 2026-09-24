@@ -283,3 +283,10 @@ NESSO_NO_KERNELS = os.environ.get("NESSO_NO_KERNELS", "true")
 NESSO_RECYCLING_STEPS = _parse_int_env("NESSO_RECYCLING_STEPS", 5, minimum=0)
 NESSO_NUM_WORKERS = _parse_int_env("NESSO_NUM_WORKERS", 2, minimum=1)
 NESSO_PRECISION = os.environ.get("NESSO_PRECISION", "bf16-mixed")
+
+
+# 9. ESM3 集成 (peptide design proposal engine)
+ESM3_SERVER_URL = os.environ.get(
+    "ESM3_SERVER_URL", "http://localhost:9333")
+ESM3_TIMEOUT_SECONDS = _parse_int_env("ESM3_TIMEOUT_SECONDS", 600, minimum=60)
+ESM3_GPU_ID = os.environ.get("ESM3_GPU_ID", "0")

@@ -7774,7 +7774,7 @@ def _dpeptide_collect_refine(
     reload the file); fail the task loudly instead of letting a downgraded
     staged-local refine chirality-reject every candidate for hours.
     """
-    task_tmp = Path("/data/boltz_central_results/_runtime_tmp") / \
+    task_tmp = Path(config.RESULTS_BASE_DIR) / "_runtime_tmp" / \
         f"dpeptide_task_{async_result.id}"
     conf_path = task_tmp / "out" / "confidence.json"
     # Poll no longer than the dispatched GPU task itself is allowed to run
@@ -7827,7 +7827,7 @@ def _dpeptide_collect_refine(
     # "cand_001" name let consecutive tasks overwrite each other's evidence
     # exactly when a defect needed diagnosing
     runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip().replace(":", "_")
-    keep_dir = Path("/data/boltz_central_results/_runtime_tmp") / \
+    keep_dir = Path(config.RESULTS_BASE_DIR) / "_runtime_tmp" / \
         f"dpeptide_keep_{runtime_task_id or 'local'}_{Path(refined_cif).parent.name}"
     keep_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(staged_path, keep_dir / "staged.pdb")
@@ -9124,14 +9124,14 @@ def run_peptide_design_backend(
         except OSError:
             pass
 
-    _esm3_sys_path = "/data/V-Bio/capabilities/peptide_lm"
+    _esm3_sys_path = str(CAPABILITIES_DIR / "peptide_lm")
     sys.path.insert(0, _esm3_sys_path)
     try:
         from peplm.integrate.esm3_proposer import ESM3Proposer
     finally:
         sys.path.remove(_esm3_sys_path)
 
-    _esm3_gpu = os.environ.get("VBIO_ESM3_GPU", "0")
+    _esm3_gpu = getattr(config, "ESM3_GPU_ID", "0")
     proposer = ESM3Proposer(
         receptor_sequence=(
             _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
