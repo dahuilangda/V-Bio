@@ -72,6 +72,8 @@ def main():
     ap.add_argument("--oversample", type=int, default=48)
     ap.add_argument("--refills_per_parent", type=int, default=3)
     ap.add_argument("--seed", type=int, default=101)
+    ap.add_argument("--min_entropy", type=float, default=2.2,
+                    help="sequence diversity floor for oracle eligibility")
     ap.add_argument("--sft_epochs", type=int, default=0,
                     help="masked-SFT warm-up epochs before RL (0 = skip)")
     ap.add_argument("--adapter_in", default=None,
@@ -108,6 +110,9 @@ def main():
         stats = sft_warmup(policy, pairs, epochs=args.sft_epochs)
         print(f"[run] SFT done: {stats}")
 
+    import peplm.score.peptide_reward as _pr
+    _orig_elig = _pr.sequence_is_eligible
+    _pr.sequence_is_eligible = lambda s, **kw: _orig_elig(s, min_entropy=args.min_entropy)
     loop = ESM3Loop(
         policy,
         OracleConfig(template=Path(args.template),

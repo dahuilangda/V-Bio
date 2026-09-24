@@ -91,7 +91,7 @@ class ESM3Loop:
                        pep_start=pep_start)
 
     def _novel(self, seq: str) -> bool:
-        return sequence_is_eligible(seq) and self.reward.memory.is_novel(seq)
+        return sequence_is_eligible(seq, min_entropy=getattr(self, '_min_entropy', 2.2)) and self.reward.memory.is_novel(seq)
 
     # round
     def round(self, r: int) -> dict:

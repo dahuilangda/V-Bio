@@ -207,6 +207,13 @@ def train(args: argparse.Namespace) -> Path:
 
     # Resume support (V-Bio task sharding): restore head + optimizer + step.
     start_epoch = 0
+    _auto_ckpt = work_dir / "protenix_affinity_head.pt"
+    if not args.resume_ckpt and _auto_ckpt.exists():
+        # docker on-failure restarts re-run the command verbatim; without this
+        # a mid-run crash restarted training FROM SCRATCH while the checkpoint
+        # sat right there (the 13-restart loop of run_mix).
+        args.resume_ckpt = str(_auto_ckpt)
+        print(f"[auto-resume] {args.resume_ckpt}")
     if args.resume_ckpt and Path(args.resume_ckpt).exists():
         blob = torch.load(args.resume_ckpt, map_location=device, weights_only=False)
         history = blob.get("history") or []
@@ -289,7 +296,10 @@ def train(args: argparse.Namespace) -> Path:
             _tok_cache = json.loads(_tm_path.read_text())
 
     poison_path = work_dir / "poison.json"
-    poison = json.loads(poison_path.read_text()) if poison_path.exists() else {}
+    try:
+        poison = json.loads(poison_path.read_text()) if poison_path.exists() else {}
+    except Exception:
+        poison = {}  # truncated by a mid-write crash; start fresh rather than die
     fail_counts = {}
 
     # EMA shadow weights — replaces the old (prev+current)/2 cross-basin
@@ -405,7 +415,8 @@ def train(args: argparse.Namespace) -> Path:
                         partner_row = random.choice([p for p in pool if p is not row])
                         _nt = _tok_cache.get(row.get("name", ""), 10**9)
                         _pt = _tok_cache.get(partner_row.get("name", ""), 10**9)
-                        _grad_pair = (max(_nt, _pt) <= args.grad_partner_max_tokens)
+                        _lim = 380 if (row.get("protein_path") or partner_row.get("protein_path")) else 480
+                        _grad_pair = (max(_nt, _pt) <= _lim)
                         partner = _forward_row(
                             trunk, head, partner_row, work_dir, device, args,
                             msa_dataset_fn=_dataset_for,
@@ -492,7 +503,7 @@ def train(args: argparse.Namespace) -> Path:
                     print(f"[progress] epoch={epoch}/{args.epochs} sample={si}/{len(samples)} step={global_step} loss={loss.item():.4f} lr={lr_now:.2e} mem={mem:.0f}M peak={maxmem:.0f}M", flush=True)
                 # empty_cache is a device-wide sync; every sample cost real
                 # throughput. Every 8th sample + the except path is enough.
-                if torch.cuda.is_available() and si % 8 == 0:
+                if torch.cuda.is_available() and si % 4 == 0:
                     torch.cuda.empty_cache()
             except Exception as exc:  # noqa: BLE001
                 errors += 1
@@ -500,10 +511,12 @@ def train(args: argparse.Namespace) -> Path:
                 fail_counts[_name] = fail_counts.get(_name, 0) + 1
                 if fail_counts[_name] >= 2:
                     poison[_name] = fail_counts[_name]
-                    poison_path.write_text(json.dumps(poison))
+                    _ptmp = poison_path.with_suffix(".json.tmp")
+                    _ptmp.write_text(json.dumps(poison))
+                    _ptmp.replace(poison_path)
                 if errors <= 20 or epoch_errors % 200 == 0:
                     print(f"[skip] sample {si} ({_name}) failed: {exc}", flush=True)
-                if epoch_errors > max(200, len(samples) // 3):
+                if epoch_errors > max(500, len(samples) // 10):
                     raise RuntimeError(f"too many sample failures this epoch ({epoch_errors})")
                 # Crystal complexes vary wildly in token count; without this the
                 # caching allocator fragments across shapes and later samples OOM.
