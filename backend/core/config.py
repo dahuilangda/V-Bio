@@ -253,7 +253,7 @@ NOTIFY_DIGEST_WINDOW_SECONDS = int(os.environ.get("NOTIFY_DIGEST_WINDOW_SECONDS"
 PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
 PROTENIX_SOURCE_DIR = os.environ.get(
     "PROTENIX_SOURCE_DIR",
-    "/data/V-Bio/vendor/protenix-source"
+    str(Path(__file__).resolve().parents[2] / "vendor" / "protenix-source")
 )
 PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "--entrypoint=")
 PROTENIX_INFER_EXTRA_ARGS = os.environ.get("PROTENIX_INFER_EXTRA_ARGS", "")
