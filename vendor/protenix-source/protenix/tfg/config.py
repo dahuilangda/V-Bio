@@ -455,8 +455,7 @@ class TFGConfig:
     # denoiser's x0 prediction before the update. DISABLED by default: in a
     # mixed-quality system (init-coords receptor + from-noise peptide) the
     # x0 prediction of the noisy part is unreliable early, and aligning the
-    # whole state to it tears the well-formed part (measured: receptor
-    # worst-bond deviation 18 A with it on, 0.7 A with it off). Boltz-2 can
+    # whole state to it tears the well-formed part. Boltz-2 can
     # afford it because every chain starts from the same noise level.
     align_to_x0: bool = False
 
@@ -549,7 +548,7 @@ def protenix2dock_guidance(guidance_cfg):
     peptide/dock runs write the inter-chain VDW constraints npz, whose
     presence activates a gentle VinaSteric mu-gradient (projected channel
     EMPTY under energy-only -- the projected pairs are the aromatic-ring
-    boat mechanism, T1/T3 vs T2 control 2026-09-21).
+    boat mechanism).
 
     Env switches (checked in priority order):
       PROTENIX_TFG_ENERGY_ONLY=1 -- keep only the soft steric mu-gradient,
@@ -578,9 +577,7 @@ def protenix2dock_guidance(guidance_cfg):
         # guidance.enable=true unless --no_guidance was passed, and the
         # stock-true config carries the full physical-potential stack
         # whose projected channel (the injected free-chain bond/angle
-        # pairs) buckles aromatic rings into boats (T1/T3 vs T2 control,
-        # 2026-09-21: ring planes 0.41-0.53 A with TFG, 0.000-0.007 A
-        # without).
+        # pairs) buckles aromatic rings into boats 
         if isinstance(guidance_cfg, dict):
             out = dict(guidance_cfg)
             out["enable"] = False

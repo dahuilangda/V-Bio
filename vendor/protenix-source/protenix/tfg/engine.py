@@ -153,7 +153,7 @@ class TFGEngine:
         has weight 0 for the first quarter of steps, so particles the
         denoiser prior dragged off the pocket survived every early FK event
         and by the time the weight ramped up they were 70+ A away with no
-        good particle left to copy (measured: 3/8 samples in repeated runs).
+        good particle left to copy.
         """
         total = torch.zeros(
             coords.shape[:-2], device=coords.device, dtype=torch.float32
@@ -546,11 +546,7 @@ class TFGEngine:
                 # squares fit of the per-atom gradients onto the two
                 # torsion velocity fields. The steric push then TURNS the
                 # side chain out of the receptor instead of deforming the
-                # ring: per-atom gradients on ring atoms measured boat
-                # buckling and junction-angle damage at every weight
-                # tried (T5: w0.6 -> P N-CA-CB 146 deg; T6: w0.15 ->
-                # CB-CG-CD1 141 deg), while the untouched sampler keeps
-                # ring planes at 0.000-0.008 A.
+                # ring.
                 dofs = input_feature_dict.get("aro_dof")
                 if dofs is not None and dofs.numel() > 0:
                     with torch.autocast("cuda", enabled=False):
@@ -572,7 +568,7 @@ class TFGEngine:
                             # torsion velocity fields, EXPLICITLY expanded to
                             # identical shapes (torch.cross broadcasting
                             # [F,1,3]x[F,m,3] silently made [F,m,3] values
-                            # for the [F,3] CG slot -- measured crash)
+                            # for the [F,3] CG slot)
                             m = int(ring.numel())
                             u1e = u1[:, None, :].expand(-1, m, 3)
                             u2e = u2[:, None, :].expand(-1, m, 3)

@@ -829,7 +829,7 @@ class Protenix(nn.Module):
         if os.environ.get("PROTENIX_TFG_ENERGY_ONLY", "").strip() in ("1", "true"):
             # energy-only mode: the projected channel must stay EMPTY --
             # these pairs' minimum-norm solve on x0 is the aromatic-ring
-            # boat mechanism (T1/T3 vs T2 control)
+            # boat mechanism
             constraints = None
         if constraints and "pairwise_distance_index" in input_feature_dict:
             n = constraints["pairwise_distance_index"].shape[1] \
