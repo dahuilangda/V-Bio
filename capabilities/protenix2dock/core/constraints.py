@@ -128,8 +128,8 @@ def compute_free_chain_tfg_constraints(
     asym_to_entity = info["asym_to_entity"]
 
     # Aromatic side chains are hands-off here too (TFG runs): the projected channel's corrections on ring atoms are
-    # what buckled F/Y six-rings into boats wherever TFG ran (T1/T3 vs
-    # T2 control, 2026-09-21). Backbone atoms of aromatic residues stay.
+    # what buckled F/Y six-rings into boats wherever TFG ran. Backbone
+    # atoms of aromatic residues stay.
     _aro = {"PHE", "TYR", "TRP", "HIS"}
 
     def _is_aro_side(i: int) -> bool:
