@@ -1,21 +1,17 @@
-"""ESM3 proposal engine for the peptide design workflow.
+"""ESM3 proposal engine — HTTP client to the host ESM3 service.
 
-Spawns a persistent GPU service process (ESM3 3B loaded once) and
-communicates via stdin/stdout JSON lines. Adapter state persists across
-generations so GRPO updates accumulate within a design task.
+The 3B model runs as a daemon on the host (Boltz2Score venv + CUDA,
+started by deploy/scripts/start_esm3_service.sh). This client is
+container-agnostic: any worker with network access to the host can
+generate proposals.
 """
 from __future__ import annotations
 
 import json
 import os
 import random
-import subprocess
-import threading
-from pathlib import Path
-
-_ROOT = Path(__file__).resolve().parents[3]
-_PYTHON = "/data/Boltz2Score/.venv/bin/python"
-_SERVICE = str(Path(__file__).parent / "_esm3_service.py")
+import urllib.request
+from typing import Any
 
 
 class ESM3Proposer:
@@ -31,61 +27,24 @@ class ESM3Proposer:
         seed: int = 42,
         work_dir: str = "/tmp/esm3_proposer",
         log=print,
-        **_unused,
+        **_unused: Any,
     ):
         self.receptor_sequence = receptor_sequence
         self.peptide_length = peptide_length
         self.len_range = len_range
-        self.cyclic = cyclic
-        self.seed = seed
         self._log = log
         self._generation = 0
-        self._req_counter = 0
         self._adapter_dir: str | None = None
+        self._endpoint = os.environ.get(
+            "VBIO_ESM3_URL", "http://172.17.3.200:9333")
 
-        self._proc: subprocess.Popen | None = None
-        self._lock = threading.Lock()
-        self._start_service(device)
-
-    def _start_service(self, device: str):
-        gpu = device.split(":")[-1] if "cuda:" in device else "0"
-        env = dict(os.environ)
-        env["CUDA_VISIBLE_DEVICES"] = gpu
-        env["PYTHONPATH"] = str(_ROOT / "capabilities" / "peptide_lm")
-        self._proc = subprocess.Popen(
-            [_PYTHON, _SERVICE],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
-
-        ready_line = self._proc.stdout.readline()
-        ready = json.loads(ready_line) if ready_line.strip() else {}
-        if not ready.get("ready"):
-            stderr = self._proc.stderr.read()[-500:] if self._proc.poll() else ""
-            raise RuntimeError(f"ESM3 service failed to start: {stderr}")
-        self._log(f"[esm3] service ready (GPU {gpu})")
-
-    def _request(self, payload: dict) -> dict | None:
-        if self._proc is None or self._proc.poll() is not None:
-            return None
-        self._req_counter += 1
-        payload["id"] = f"req-{self._req_counter}"
-        if self._adapter_dir:
-            payload.setdefault("adapter_dir", self._adapter_dir)
-
-        with self._lock:
-            try:
-                self._proc.stdin.write(json.dumps(payload) + "\n")
-                self._proc.stdin.flush()
-                line = self._proc.stdout.readline()
-                if not line.strip():
-                    return None
-                return json.loads(line)
-            except (BrokenPipeError, OSError):
-                return None
+    def _post(self, payload: dict) -> dict:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            self._endpoint, data=data,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            return json.loads(resp.read())
 
     def propose(
         self,
@@ -103,7 +62,7 @@ class ESM3Proposer:
         else:
             pep_len = random.randint(*self.len_range)
 
-        result = self._request({
+        result = self._post({
             "mode": "propose",
             "receptor_sequence": self.receptor_sequence,
             "peptide_length": pep_len,
@@ -111,11 +70,11 @@ class ESM3Proposer:
             "n_keep": n,
             "temperature": 0.9 + 0.1 * min(self._generation, 3),
         })
-        if result is None or not result.get("ok"):
-            raise RuntimeError(f"ESM3 propose failed: {result}")
+        if not result.get("ok"):
+            raise RuntimeError(f"ESM3 propose failed: {result.get('error')}")
 
         proposals = [
-            (item["sequence"], [], [], item.get("group", "denovo"))
+            (item["sequence"], [], [], "denovo")
             for item in result.get("sequences", [])
             if item.get("sequence") and len(item["sequence"]) >= 4
         ]
@@ -125,12 +84,12 @@ class ESM3Proposer:
         return proposals
 
     def pseudo_perplexity(self, sequence: str) -> float:
-        result = self._request({
+        result = self._post({
             "mode": "perplexity",
             "receptor_sequence": self.receptor_sequence,
             "peptide_sequence": sequence,
         })
-        return float(result.get("perplexity", 10.0)) if result and result.get("ok") else 10.0
+        return float(result.get("perplexity", 10.0)) if result.get("ok") else 10.0
 
     def learn(self, elite_rows: list[dict], all_rows: list[dict]):
         rollouts = [
@@ -142,26 +101,20 @@ class ESM3Proposer:
         ]
         if len(rollouts) < 2:
             return
-
-        adapter_path = Path(f"/tmp/esm3_adapter_gen{self._generation}")
-        result = self._request({
+        adapter = f"/tmp/esm3_adapter_gen{self._generation}"
+        result = self._post({
             "mode": "learn",
             "receptor_sequence": self.receptor_sequence,
             "peptide_length": self.peptide_length or 14,
             "rollouts": rollouts,
-            "new_adapter_dir": str(adapter_path),
+            "new_adapter_dir": adapter,
         })
-        if result and result.get("ok") and result.get("adapter_dir"):
+        if result.get("ok") and result.get("adapter_dir"):
             self._adapter_dir = result["adapter_dir"]
             self._log(f"[esm3] GRPO update → gen {self._generation}")
 
     def close(self):
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.stdin.close()
-                self._proc.wait(timeout=10)
-            except Exception:
-                self._proc.kill()
+        pass
 
     def __del__(self):
         self.close()
