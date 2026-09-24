@@ -5225,7 +5225,7 @@ def _auto_ss_profile(pocket_contacts, binder_length: int):
 
     TNF-family receptor grooves are helical/extended binding sites — the
     natural binders use short helices packing into the groove. Without SS
-    conditioning the prior is coil-dominated (46% coil measured) → pLDDT 50-72.
+    conditioning the prior is coil-dominated (46% coil) → pLDDT 50-72.
     Profile: 40% helix (h), 40% loop (l), 20% wildcard (s) — the helix block
     gives conformational preference; loops cap the ends for cyclization
     compatibility; wildcards leave room for the RL to discover.
@@ -6951,8 +6951,7 @@ def _relax_staged_bicyclic_strain(
               file=sys.stderr)
 
     # Receptor steric guard: the bond projections below can shove peptide
-    # or linker atoms into the receptor wall (measured on the bs3 fixture:
-    # a 2.00 A contact after relief). Every sweep, push any free heavy atom
+    # or linker atoms into the receptor wall    # a 2.00 A contact after relief). Every sweep, push any free heavy atom
     # closer than 2.3 A to a receptor atom back out along the contact
     # normal; the bond projections and this guard converge jointly.
     from scipy.spatial import cKDTree as _RelaxKD
@@ -7274,8 +7273,7 @@ def _dpeptide_stage_conformer_in_pocket(
             + " not found on the mirrored D-target")
     if not pocket_pts and not has_reference and pose_matters:
         # No silent centroid fallback when the pose feeds the sampler: without
-        # a pocket the binder gets buried at the receptor centroid (measured
-        # 0.16 A min distance on the MDM2 runs). pose_matters=False
+        # a pocket the binder gets buried at the receptor centroid        # 0.16 A min distance on the MDM2 runs). pose_matters=False
         # (blind inpainting route) discards the peptide start entirely — the
         # engine re-noises those rows — so any placement is acceptable.
         raise ValueError(
@@ -7445,7 +7443,7 @@ def _dpeptide_stage_conformer_in_pocket(
 
     # Self-check hard gate: the staged pose ENTERS the diffusion sampler as
     # the inpainting reference. A pose with inter-chain hard clashes is a
-    # garbage reference — measured, a 95-clash staged start
+    # garbage reference
     # flipped >50% of binder CA chiralities in every refined sample. The
     # sampler must never receive a buried pose silently: zero <2.2 A pairs
     # and at least one <6 A contact (anchored, not floating) or we fail.
@@ -7575,8 +7573,7 @@ def _dpeptide_dispatch_refine(
         # Find the PEPTIDE chain from the staged complex instead of
         # assuming "B": multi-chain receptors (e.g. the RANKL trimer A/B/C)
         # re-letter the peptide to D and the hardcoded B bond pointed at a
-        # receptor chain (measured: every cyclic candidate's refine
-        # rejected with "bond pair does not touch the peptide chain"). The
+        # receptor chain        # rejected with "bond pair does not touch the peptide chain"). The
         # peptide is the shortest polymer chain (receptors are 80-600 aa,
         # designed peptides 4-25); residues are numbered 1..L by the
         # production writer contract.
@@ -7695,8 +7692,7 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
             + ",".join(f"{n}{r}" for n, r, _ in rec_bad[:6]))
     # Peptide flips: the free-diffusion chain has no improper-dihedral term;
     # 1-3 CA inversions per 11-13-mer are numerical artifacts of the mirror
-    # refinement, not design failures (measured: ipTM 0.749 candidate killed
-    # by 5 flips). The SEQUENCE is the chirality source of truth; the product
+    # refinement, not design failures    # by 5 flips). The SEQUENCE is the chirality source of truth; the product
     # flip mirrors coordinates wholesale. Score-penalize, don't kill.
     pep_total = sum(1 for r in peptide if r.het_flag != "H"
                     and r.name not in ("GLY",))
@@ -7864,7 +7860,7 @@ def _dpeptide_collect_refine(
     # from receptor atoms).
     _min_d, _n22, _n28 = _interchain_clash_profile(Path(best[5]))
     # Gate aligned with physical interfaces: crystals carry contacts down
-    # to 2.52 A (3LNJ measured) and post-polish samples sit at 2.55-2.6,
+    # to 2.52 A (3LNJ) and post-polish samples sit at 2.55-2.6,
     # so the packing-band COUNT (pairs < 2.8) is not a violation signal.
     # True interpenetration is min < 2.3 or ANY pair < 2.2.
     if _min_d < 2.3 or _n22 > 0:
@@ -7945,7 +7941,7 @@ def _covalent_detached_atoms(
     Catches every covalent tear the diffusion projections produced on the
     free chains — terminal side chains (OH/CD1/CD2/...), backbone C-N, even
     whole-residue rips — which the CA-CB-only integrity report misses
-    (measured on shipped ranks: 30+ detached atoms across 25 structures).
+.
     """
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
@@ -8007,8 +8003,7 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
     # Calibrated against known structured cyclic peptides:
     # SFTI-1 (14aa, disulfide-stapled) runs rg/n ~0.46; kalata B1
     # cyclotide (29aa) ~0.29 — small rings are NATURALLY compact and the
-    # old flat 0.62 cutoff penalised every 10-16aa candidate (measured:
-    # all RANKL cyclic candidates at 0.48-0.61 got -0.30, crushing every
+    # old flat 0.62 cutoff penalised every 10-16aa candidate    # all RANKL cyclic candidates at 0.48-0.61 got -0.30, crushing every
     # composite to zero). The size-aware expected band scales as
     # ~2.8/sqrt(n) (empirical fit to structured macrocycles); use the
     # tighter of that and 0.62, and require BOTH low compactness AND
@@ -8062,8 +8057,7 @@ def _backbone_intact(cif: Path, min_ca_ca: float = 2.80) -> bool:
     """Every consecutive CA-CA virtual bond >= min_ca_ca.
 
     Guards against backbone crush: clash pushes without an omega-band can
-    fold CA(i) onto CA(i+1) (measured 1.8 A on shipped products while the
-    sampler output was a clean helix).
+    fold CA(i) onto CA(i+1)    sampler output was a clean helix).
     """
     import gemmi
     st = gemmi.read_structure(str(cif))
@@ -8206,7 +8200,7 @@ def _structure_integrity_report(
     """Per-residue backbone bond integrity of every polymer chain.
 
     A CB pushed tens of A away passes the chirality gate (the sign still
-    reads D) and the linker gate (SG untouched) — measured on a shipped
+    reads D) and the linker gate (SG untouched)
     product: CA-CB 30.4 A. Any broken bond here means some projection or
     transform deformed the structure; callers reject on it.
     """
@@ -8385,14 +8379,14 @@ def _pocket_place_for_refine(
     _target_center = np.mean(np.array(pts), axis=0)
     # clash-minimal rigid placement: deterministic rotations x radial offsets,
     # scored against the staged receptor (centroid-on-pocket buries the binder
-    # in the pocket wall — measured 0.3 A min distance); mode A skips it —
+    # in the pocket wall
     # the staged pose already carries the reference binding mode
     # Reference-anchored only: the staged pose (user's upload or model
     # output) is kept as-is; the covalent LINK topology is restored below
     st_pl.setup_entities()
     st_pl.write_pdb(str(staged_path))
     # gemmi's write_pdb dropped the LINK records above — restore the covalent
-    # topology or the refine diffusion breaks the ring (measured 13 A bonds)
+    # topology or the refine diffusion breaks the ring
     if require_bonds:
         _append_staged_bicyclic_links(
             staged_path, bicyclic_cys_positions, linker_ccd)
@@ -8450,8 +8444,7 @@ def _pocket_collect_refine(
     # physically invalid — no argument rescues it.
     # The pocket gate is now SOFT: rejecting every off-pocket candidate left
     # the frontend with zero results whenever the sampler's site preference
-    # disagreed with the user pocket (measured: up to 92% rejection under
-    # contention). Instead the candidate ships with off_pocket=True; the
+    # disagreed with the user pocket    # contention). Instead the candidate ships with off_pocket=True; the
     # composite heavily penalizes it (pocket_satisfaction near 0), so
     # in-pocket candidates always outrank off-pocket ones when both exist —
     # but the user always gets results, ranked honestly.
@@ -8590,7 +8583,7 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
     if len(polymer) < 2:
         return {"chain": None, "n_c_distance": None, "all_bonded": False}
     # the peptide is the SHORTEST polymer chain (multi-chain receptors put
-    # receptor copies at every length tier; the old polymer[1] pick measured
+    # receptor copies at every length tier; the old polymer[1] pick read
     # a second receptor copy's termini -- a constant ~15.8 A on the RANKL
     # trimer, phantom-"opening" every ring,
     pep = polymer[-1]
@@ -8846,9 +8839,9 @@ def run_peptide_design_backend(
         )
     # Constrained rings require HARD covalent-bond enforcement. Protenix's TFG
     # projects bond/angle atom pairs back into their RDKit bounds every
-    # guidance step (measured L products: 1.2-2.2 A); Boltz2's bond feature is
+    # guidance step; Boltz2's bond feature is
     # only a soft diffusion prior and lets constrained rings fall apart under
-    # refinement (measured 11-15 A). Rings are therefore Protenix-only for
+    # refinement. Rings are therefore Protenix-only for
     # both chirality settings; linear peptides may use any engine.
     if design_mode in ("cyclic", "bicyclic") and peptide_backend != "protenix":
         raise ValueError(
@@ -9172,7 +9165,7 @@ def run_peptide_design_backend(
     dpeptide_reference_target: Optional[Path] = None
     d_target_staged: Optional[Path] = None
     if peptide_chirality == 'd':
-        # template_inputs were popped from predict_args at the main() boundary;
+        # template_inputs were popped from predict_args at the main boundary;
         # without re-attaching them the uploaded structure is invisible here
         # and the display products cannot be aligned to the user's frame.
         if template_inputs:
@@ -9389,7 +9382,7 @@ def run_peptide_design_backend(
                     "modifications": lm_mods,
                     "cys_positions": [int(p) for p in (lm_anchors or [])],
                     # GRPO grouping key from the proposer (de novo pool /
-                    # per-parent edit cohort) — carried through to learn()
+                    # per-parent edit cohort) — carried through to learn
                     "proposal_group": lm_group,
                 })
                 if len(generation_candidates) >= population_size:
@@ -9433,7 +9426,7 @@ def run_peptide_design_backend(
         # Exact-dedup within the generation only: edit children are SUPPOSED
         # to be near their parent (that's how the pLDDT-weighted editor
         # explores); near-dup filtering here killed generations 2+ entirely
-        # (measured: gen-1 edits are Hamming-1 from parents by design).
+        #.
         # Cross-generation exact dedup lives in evaluated_sequences.
         _screened: list = []
         _seen_seqs: set = set()
@@ -9468,7 +9461,7 @@ def run_peptide_design_backend(
 
         # De novo peptides: MSA is evolutionary noise (a designed sequence
         # has no homologs — any hits mis-anchor the folder's coevolution
-        # assumptions, measured +340s/generation of pure polling waste).
+        # assumptions, +340s/generation of pure polling waste).
         # Literature: "AF2 with MSA is overconfident on poor de novo designs"
         # (Korbeld 2024); practitioner consensus is single-sequence mode for
         # the binder + receptor template for the target side. Only SEED/
@@ -9926,10 +9919,10 @@ def run_peptide_design_backend(
                 "cys_positions": job.get("cys_positions") if isinstance(job.get("cys_positions"), list) else [],
                 "generation": generation,
                 # GRPO cohort key set by the proposer (de novo pool /
-                # per-parent edit group) — consumed by learn()
+                # per-parent edit group) — consumed by learn
                 "proposal_group": job.get("proposal_group") or "ungrouped",
                 # pre-folding chemistry match vs the pocket's demands —
-                # consumed by learn() as the chem_comp reward part
+                # consumed by learn as the chem_comp reward part
                 "chem_comp": _pocket_chemistry_complementarity(
                     candidate_sequence, pocket_chem_demands),
                 # pocket-route rows carry the soft off-pocket flag; the
@@ -11197,7 +11190,7 @@ except Exception:
     _af3_parsers = None
 
 def _count_non_lowercase(seq: str) -> int:
-    return sum(1 for ch in seq if not ch.islower())
+    return sum(1 for ch in seq if not ch.islower)
 
 def _normalize_a3m(a3m_text: str):
     # Pad sequences so non-lowercase lengths match, avoiding featurizer shape errors.
@@ -11205,8 +11198,8 @@ def _normalize_a3m(a3m_text: str):
     seq_chunks = []
     entries = []
     changed = False
-    for line in (a3m_text or "").splitlines():
-        line = line.strip()
+    for line in (a3m_text or "").splitlines:
+        line = line.strip
         if not line:
             continue
         if line.startswith(">"):
@@ -11239,9 +11232,9 @@ try:
     from alphafold3.constants import residue_names as _af3_residue_names
     _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
     if isinstance(_ccd_overrides, dict):
-        for _ccd, _one in _ccd_overrides.items():
-            _ccd = str(_ccd or "").strip().upper()
-            _one = str(_one or "").strip().upper()[:1]
+        for _ccd, _one in _ccd_overrides.items:
+            _ccd = str(_ccd or "").strip.upper
+            _one = str(_one or "").strip.upper[:1]
             if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
                 _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
 except Exception as _exc:
@@ -11277,14 +11270,14 @@ if _af3_parsers is not None:
 
     if callable(_orig_lazy):
         def _safe_lazy_parse_fasta_string(fasta_string: str):
-            if not fasta_string or not str(fasta_string).strip():
+            if not fasta_string or not str(fasta_string).strip:
                 logging.warning("alphafold3.parsers.lazy_parse_fasta_string: empty FASTA input; returning no sequences.")
-                return iter(())
+                return iter()
             try:
                 return _orig_lazy(fasta_string)
             except Exception as exc:  # noqa: BLE001
                 logging.warning(f"alphafold3.parsers.lazy_parse_fasta_string: failed to parse FASTA ({exc}); returning no sequences.")
-                return iter(())
+                return iter()
 
         _af3_parsers.lazy_parse_fasta_string = _safe_lazy_parse_fasta_string
 
@@ -11297,8 +11290,8 @@ try:
         def _ensure_release_date_in_mmcif_text(text: str) -> str:
             if "_pdbx_audit_revision_history.revision_date" in text:
                 return text
-            lines = text.splitlines()
-            insert_at = 1 if lines and lines[0].lower().startswith("data_") else 0
+            lines = text.splitlines
+            insert_at = 1 if lines and lines[0].lower.startswith("data_") else 0
             injection = [
                 "_pdbx_database_status.recvd_initial_deposition_date 1970-01-01",
                 "_pdbx_database_status.date_of_initial_deposition 1970-01-01",
@@ -11319,7 +11312,7 @@ try:
                 return False
             sample = value[:2048]
             return (
-                sample.lstrip().startswith("data_")
+                sample.lstrip.startswith("data_")
                 or "_atom_site." in sample
                 or "_entry.id" in sample
                 or "_pdbx_database_status." in sample
@@ -11332,7 +11325,7 @@ try:
                 for idx, arg in enumerate(safe_args):
                     if _looks_like_mmcif_text(arg):
                         safe_args[idx] = _ensure_release_date_in_mmcif_text(arg)
-                for key, value in list(safe_kwargs.items()):
+                for key, value in list(safe_kwargs.items):
                     if _looks_like_mmcif_text(value):
                         safe_kwargs[key] = _ensure_release_date_in_mmcif_text(value)
             except Exception:
