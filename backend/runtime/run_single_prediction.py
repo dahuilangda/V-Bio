@@ -9229,12 +9229,38 @@ def run_peptide_design_backend(
             )
         elif design_params.get("cys_positions"):
             layout_hint = f", cys=absolute{[p + 1 for p in design_params['cys_positions']]}"
-        print(
-            f"[peptidelm] 提案引擎已启用（length={'自适应' if _plm_len is None else _plm_len}, "
-            f"NCAA 池 {len(_plm_pool)} 个, 固定残基 {len(_plm_fixed)} 个, "
-            f"mode={design_mode}{layout_hint}）",
-            file=sys.stderr,
-        )
+        # ESM3 proposal engine switch: replaces PepMLM with ESM3 3B +
+        # GRPO. The ESM3 model runs in a GPU subprocess (Boltz2Score venv
+        # has esm>=3.4 + torch+CUDA); the design workflow's generation
+        # loop, candidate gates, and shipping all stay unchanged.
+        _proposer_backend = str(options.get("peptideProposerBackend") or "esm3").strip().lower()
+        if _proposer_backend == "esm3":
+            from peplm.integrate.esm3_proposer import ESM3Proposer
+            _esm3_gpu = os.environ.get("VBIO_ESM3_GPU", "0")
+            peptidelm_proposer = ESM3Proposer(
+                receptor_sequence=(
+                    _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
+                    if peptide_chirality in ("d", "l") else ""),
+                peptide_length=_plm_len,
+                len_range=_plm_range,
+                cyclic=(design_mode == "cyclic"),
+                device=f"cuda:{_esm3_gpu}",
+                seed=random_seed,
+                work_dir=str(work_root / "esm3_proposer"),
+                log=_plm_log,
+            )
+            print(
+                f"[esm3] ESM3 提案引擎已启用（3B, GRPO, length={_plm_len or '自适应'}, "
+                f"mode={design_mode}, GPU={_esm3_gpu}）",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[peptidelm] 提案引擎已启用（length={'自适应' if _plm_len is None else _plm_len}, "
+                f"NCAA 池 {len(_plm_pool)} 个, 固定残基 {len(_plm_fixed)} 个, "
+                f"mode={design_mode}{layout_hint}）",
+                file=sys.stderr,
+            )
     except Exception as exc:
         raise RuntimeError(f"PeptideLM 提案引擎初始化失败：{exc}") from exc
 
