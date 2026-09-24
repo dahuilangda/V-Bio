@@ -391,6 +391,54 @@ class ESM3Policy(torch.nn.Module):
         return traj
 
     # training
+    # -- Production integration helpers (ESM3Proposer interface) --
+
+    def decode_tokens(self, token_ids: list[int]) -> str | None:
+        """Decode sequence token IDs to a one-letter amino acid string."""
+        vocab = self.toks.sequence.vocab
+        inv = {v: k for k, v in vocab.items()}
+        letters = []
+        for tid in token_ids:
+            ch = inv.get(tid, "")
+            if len(ch) == 1 and ch in AA20:
+                letters.append(ch)
+            elif ch in ("<cls>", "<eos>", "<pad>", "|", "<mask>"):
+                continue
+            else:
+                return None  # non-standard token → reject
+        return "".join(letters) or None
+
+    def encode_peptide(self, sequence: str, pep_len: int) -> list[int] | None:
+        """Encode a peptide sequence to token IDs (padded to pep_len)."""
+        sequence = sequence.upper()[:pep_len]
+        if len(sequence) < pep_len:
+            sequence = sequence + "G" * (pep_len - len(sequence))
+        vocab = self.toks.sequence.vocab
+        try:
+            return [vocab[ch] for ch in sequence]
+        except KeyError:
+            return None
+
+    def score_sequence(self, receptor: str, peptide: str) -> float | None:
+        """Mean log-likelihood of the peptide tokens given the receptor."""
+        import torch.nn.functional as Fn
+        ctx = self.encode_context(receptor, len(peptide))
+        pep_ids = self.encode_peptide(peptide, len(peptide))
+        if pep_ids is None:
+            return None
+        pep_start = ctx.shape[1] - len(peptide) - 1
+        toks = ctx.clone()
+        for i, tid in enumerate(pep_ids):
+            toks[0, pep_start + i] = tid
+        with torch.no_grad():
+            logits = self._forward_sequence_logits(toks)
+            lp = Fn.log_softmax(logits[0, pep_start:pep_start + len(peptide), :], dim=-1)
+            aa_lp = lp[:, self.aa_ids]
+            # gather the actual token's logprob
+            tok_tensor = torch.tensor(pep_ids, device=self.device)
+            scores = aa_lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
+            return float(scores.mean())
+
     def adapter_parameters(self):
         return [p for p in self.model.parameters() if p.requires_grad]
 
