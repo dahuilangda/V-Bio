@@ -680,9 +680,9 @@ def _run_peptide_engine(
         init_mask[pep_rows] = 0.0
         log.info("blind peptide: %d peptide atoms start from pure noise "
                  "(full schedule)", int((mask[pep_rows] > 0).sum()))
-        # BLIND ROUTE RUNS TFG IN ENERGY-ONLY MODE. Root fix (2026-09-21
+        # BLIND ROUTE RUNS TFG IN ENERGY-ONLY MODE. Root fix (
         # T1-T4 A/B): the raw sampler produces F/Y/W/H side chains with
-        # perfect CCD geometry (T2/T4: ring planes 0.000-0.008 A,
+        # perfect CCD geometry (ring planes near zero,
         # junction angles +-3 deg, OH in-plane); the TFG PROJECTED
         # projected channel that the TFG guidance fed whenever the
         # constraints npz exists (peptide mode writes it unconditionally
@@ -937,7 +937,7 @@ def main(argv=None):
                 log.info("dock mode: %d ligand covalent bond bands", len(lig_cov[1]))
             # Pocket-guided docking (the same PocketPotential the peptide
             # path uses, applied to the ligand's free atoms): the user's
-            # pocket guidance removed (2026-09-21, user decision):
+            # pocket guidance removed (user decision):
             # the            # ligand always samples the whole surface; the model's own
             # docking prior locates the binding site
             else:
