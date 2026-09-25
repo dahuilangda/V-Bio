@@ -57,6 +57,8 @@ class ESM3Loop:
         gpus: tuple[int, ...] = (3,),
         seed: int = 101,
         weak_frac: float = 0.4,
+        ss_profile: str | None = None,
+        peptide_first: bool = False,
         log=print,
     ):
         self.pol = policy
@@ -68,6 +70,9 @@ class ESM3Loop:
         self.gpus = list(gpus)
         self.seed = seed
         self.weak_frac = weak_frac
+        self.ss_profile = ss_profile
+        self.peptide_first = peptide_first
+        self._ss8_t = None   # set in round(): full-length cpu ss8 ids
         self._pep_len = pep_len
         self.reward = RelativeReward()
         self.updater = MaskedGRPOUpdater(policy)
@@ -88,7 +93,8 @@ class ESM3Loop:
                        rewards=rewards,
                        group=group,
                        credit=[float(c) for c in credit],
-                       pep_start=pep_start)
+                       pep_start=pep_start,
+                       ss8=self._ss8_t)
 
     def _novel(self, seq: str) -> bool:
         return sequence_is_eligible(seq, min_entropy=getattr(self, '_min_entropy', 2.2)) and self.reward.memory.is_novel(seq)
@@ -98,7 +104,12 @@ class ESM3Loop:
         t0 = time.time()
         parents = self.history[-1]["parents"] if self.history else []
         bd = self.bdg
-        pep_start = self.pol.peptide_start(self.rec_seq)
+        pep_start = self.pol.peptide_start(
+            self.rec_seq, self._pep_len, peptide_first=self.peptide_first)
+        self._ss8_t = (self.pol.encode_ss8(
+                           self.rec_seq, self._pep_len, self.ss_profile,
+                           peptide_first=self.peptide_first).cpu()
+                       if self.ss_profile else None)
         pending: list[dict] = []       # oracle queue (unregistered until sent)
 
         # 1a) sibling refills per parent: a group that cannot reach >= 2
@@ -111,7 +122,9 @@ class ESM3Loop:
             while len(group) < bd.refills_per_parent and attempts < bd.refills_per_parent * 3:
                 attempts += 1
                 tr = self.pol.refill(self.rec_seq, parent["tokens"], weak,
-                                     num_steps=3, temperature=0.7)
+                                     num_steps=3, temperature=0.7,
+                                     ss_profile=self.ss_profile,
+                                     peptide_first=self.peptide_first)
                 if tr is None:
                     continue
                 seq = self._decode(tr.peptide_tokens)
@@ -131,7 +144,8 @@ class ESM3Loop:
         trajs = self.pol.sample_batch(
             self.rec_seq, pep_len=self.pep_len, n=bd.oversample,
             keep=min(n_denovo + 4, bd.oversample), temperature=0.9,
-            num_steps=6)
+            num_steps=6, ss_profile=self.ss_profile,
+            peptide_first=self.peptide_first)
         seen = {p["seq"] for p in pending}
         n_denovo_live = 0
         for tr in trajs:

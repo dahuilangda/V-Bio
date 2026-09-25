@@ -131,28 +131,65 @@ class ESM3Policy(torch.nn.Module):
         self.pad_id = seq_vocab.get("<pad>", 1)
 
     # encoding
-    def encode_context(self, receptor: str, pep_len: int) -> torch.Tensor:
-        """[1, L] token ids: cls + receptor + mask*pep_len + eos.
+    def encode_context(self, receptor: str, pep_len: int, *,
+                       peptide_first: bool = False) -> torch.Tensor:
+        """[1, L] token ids with the masked peptide block leading or
+        trailing the receptor.
 
         No chainbreak: ESM3-open is single-chain pretrained (the '|'
         token is out-of-distribution), so receptor and peptide ride one
-        continuous sequence — the PepMLM conditioning format."""
+        continuous sequence. Trailing placement makes the model read
+        the mask block as a C-terminal tail (disorder-enriched in the
+        pretraining distribution); leading placement trades that for
+        the milder N-terminal prior."""
         rec_ids = [self.toks.sequence.vocab[c] for c in receptor.upper()]
-        ids = ([self.toks.sequence.vocab["<cls>"]] + rec_ids
-               + [self.mask_id] * pep_len
-               + [self.toks.sequence.vocab["<eos>"]])  # cls=0, eos=2
+        cls_id = self.toks.sequence.vocab["<cls>"]
+        eos_id = self.toks.sequence.vocab["<eos>"]
+        pep_ids = [self.mask_id] * pep_len
+        ids = ([cls_id] + pep_ids + rec_ids + [eos_id] if peptide_first
+               else [cls_id] + rec_ids + pep_ids + [eos_id])  # cls=0, eos=2
         return torch.tensor([ids], device=self.device)
 
-    def peptide_start(self, receptor: str) -> int:
-        """Absolute index of the first peptide token: cls + receptor."""
-        return 1 + len(receptor)
+    def peptide_start(self, receptor: str, pep_len: int, *,
+                      peptide_first: bool = False) -> int:
+        """Absolute index of the first peptide token."""
+        return 1 if peptide_first else 1 + len(receptor)
 
-    def _forward_sequence_logits(self, tokens: torch.Tensor) -> torch.Tensor:
+    def encode_ss8(self, receptor: str, pep_len: int, ss_profile: str,
+                   *, peptide_first: bool = False) -> torch.Tensor:
+        """[1, L] secondary-structure conditioning track.
+
+        The ss8 track is a model input (ss8_embed), not just a head:
+        giving the peptide block an explicit DSSP profile (e.g. 'H'*
+        pep_len for a helical binder) steers infilling toward
+        structure-forming residues. Positions without information —
+        receptor, specials — carry token 0, which the SDK also uses
+        as the fill for an absent track. Profile shorter than the
+        peptide is tiled cyclically."""
+        ss_toks = self.toks.secondary_structure
+        prof = (ss_profile.upper()
+                * (pep_len // max(len(ss_profile), 1) + 1))[:pep_len]
+        try:
+            pep_ss = [ss_toks.vocab_to_index[c] for c in prof]
+        except KeyError as exc:
+            raise ValueError(
+                f"ss_profile chars must be DSSP G/H/I/T/E/B/S/C, "
+                f"got {exc} in {ss_profile!r}") from exc
+        n_rec = len(receptor)
+        ids = ([0] + pep_ss + [0] * n_rec + [0] if peptide_first
+               else [0] * (1 + n_rec) + pep_ss + [0])
+        return torch.tensor([ids], device=self.device)
+
+    def _forward_sequence_logits(self, tokens: torch.Tensor,
+                                 ss8: torch.Tensor | None = None
+                                 ) -> torch.Tensor:
         """Sequence-head-only forward under bf16 autocast (bf16 weights
         reject fp32 activations); skipping the structure/function heads
-        roughly halves the per-step cost."""
+        roughly halves the per-step cost. ss8 must be supplied whenever
+        it conditioned the sampling — the policy family otherwise
+        changes between rollout and training."""
         with torch.autocast("cuda", dtype=self.dtype):
-            out = self.model(sequence_tokens=tokens)
+            out = self.model(sequence_tokens=tokens, ss8_tokens=ss8)
         return out.sequence_logits
 
     # sampling
@@ -167,6 +204,8 @@ class ESM3Policy(torch.nn.Module):
         num_steps: int = 0,
         strategy: str = "random",
         top_k: int = 20,
+        ss_profile: str | None = None,
+        peptide_first: bool = False,
     ) -> list[Trajectory]:
         """Sample ``n`` peptides, return the DPP-best ``keep``.
 
@@ -176,13 +215,18 @@ class ESM3Policy(torch.nn.Module):
         greedy DPP over quality (mean token logprob) x similarity
         (1 - sequence identity).
         """
-        ctx = self.encode_context(receptor, pep_len)  # [1, L]
+        ctx = self.encode_context(receptor, pep_len,
+                                  peptide_first=peptide_first)  # [1, L]
         L = ctx.shape[1]
-        pep_start = L - pep_len - 1  # positions of the mask block (0-based)
+        pep_start = (self.peptide_start(receptor, pep_len,
+                                        peptide_first=peptide_first))
+        ss8 = (self.encode_ss8(receptor, pep_len, ss_profile,
+                               peptide_first=peptide_first)
+               if ss_profile else None)
 
         toks = ctx.repeat(n, 1).clone()
         if num_steps <= 0:
-            logits = self._forward_sequence_logits(toks).float()
+            logits = self._forward_sequence_logits(toks, ss8).float()
             lp = F.log_softmax(logits[:, pep_start:pep_start + pep_len, :],
                                dim=-1)
             aa_lp = lp[..., self.aa_ids]  # [n, pep, 20]
@@ -205,19 +249,21 @@ class ESM3Policy(torch.nn.Module):
                                 mean_logprob=float(traj_mean[i]))
                      for i in range(n)]
         else:
-            trajs = self._iterative_unmask(toks, pep_start, pep_len, n,
+            trajs = self._iterative_unmask(toks, ss8, pep_start, pep_len, n,
                                            num_steps, temperature, strategy,
                                            top_k=top_k)
 
         return self._dpp_filter(trajs, keep)
 
     def _iterative_unmask(
-        self, toks: torch.Tensor, pep_start: int, pep_len: int, n: int,
+        self, toks: torch.Tensor, ss8: torch.Tensor | None,
+        pep_start: int, pep_len: int, n: int,
         num_steps: int, temperature: float, strategy: str, top_k: int = 20,
     ) -> list[Trajectory]:
         """MaskGIT loop with trajectory recording (per-step likelihoods
         for GRPO): random or entropy (most-confident-first) unmask
-        ordering, temperature annealing."""
+        ordering, temperature annealing. ss8 conditions every step but
+        is not part of the state snapshots — replay it alongside them."""
         trajs = [Trajectory(peptide_tokens=[], states=[], revealed=[],
                             old_logprob=[]) for _ in range(n)]
         remaining = torch.ones(n, pep_len, dtype=torch.bool,
@@ -225,7 +271,7 @@ class ESM3Policy(torch.nn.Module):
         per_step = max(1, math.ceil(pep_len / num_steps))
 
         for step in range(num_steps):
-            raw = self._forward_sequence_logits(toks).float()
+            raw = self._forward_sequence_logits(toks, ss8).float()
             # ordering confidence from the plain AA log-softmax
             lp = F.log_softmax(raw[:, pep_start:pep_start + pep_len, :],
                                dim=-1)
@@ -340,13 +386,19 @@ class ESM3Policy(torch.nn.Module):
         num_steps: int = 4,
         temperature: float = 0.7,
         top_k: int = 20,
+        ss_profile: str | None = None,
+        peptide_first: bool = False,
     ) -> Optional[Trajectory]:
         """Resample only the weak positions; confident positions stay as
         observed context. Returns None when nothing changed."""
         pep_len = len(parent_tokens)
-        ctx = self.encode_context(receptor, pep_len)
-        L = ctx.shape[1]
-        pep_start = L - pep_len - 1
+        ctx = self.encode_context(receptor, pep_len,
+                                  peptide_first=peptide_first)
+        pep_start = self.peptide_start(receptor, pep_len,
+                                       peptide_first=peptide_first)
+        ss8 = (self.encode_ss8(receptor, pep_len, ss_profile,
+                               peptide_first=peptide_first)
+               if ss_profile else None)
         toks = ctx.clone()
         for j, tok in enumerate(parent_tokens):
             toks[0, pep_start + j] = tok
@@ -360,7 +412,7 @@ class ESM3Policy(torch.nn.Module):
         per_step = max(1, math.ceil(remaining_n / num_steps))
 
         for step in range(num_steps):
-            logits = self._forward_sequence_logits(toks).float()
+            logits = self._forward_sequence_logits(toks, ss8).float()
             lp = F.log_softmax(logits[0], dim=-1)  # [L, V]
             t_anneal = max(temperature * (1 - step / num_steps), 1e-3) ** 2
             open_pos = [j for j in remask_positions
@@ -419,19 +471,26 @@ class ESM3Policy(torch.nn.Module):
         except KeyError:
             return None
 
-    def score_sequence(self, receptor: str, peptide: str) -> float | None:
+    def score_sequence(self, receptor: str, peptide: str,
+                       ss_profile: str | None = None,
+                       peptide_first: bool = False) -> float | None:
         """Mean log-likelihood of the peptide tokens given the receptor."""
         import torch.nn.functional as Fn
-        ctx = self.encode_context(receptor, len(peptide))
+        ctx = self.encode_context(receptor, len(peptide),
+                                  peptide_first=peptide_first)
         pep_ids = self.encode_peptide(peptide, len(peptide))
         if pep_ids is None:
             return None
-        pep_start = ctx.shape[1] - len(peptide) - 1
+        pep_start = self.peptide_start(receptor, len(peptide),
+                                       peptide_first=peptide_first)
+        ss8 = (self.encode_ss8(receptor, len(peptide), ss_profile,
+                               peptide_first=peptide_first)
+               if ss_profile else None)
         toks = ctx.clone()
         for i, tid in enumerate(pep_ids):
             toks[0, pep_start + i] = tid
         with torch.no_grad():
-            logits = self._forward_sequence_logits(toks)
+            logits = self._forward_sequence_logits(toks, ss8)
             lp = Fn.log_softmax(logits[0, pep_start:pep_start + len(peptide), :], dim=-1)
             aa_lp = lp[:, self.aa_ids]
             # gather the actual token's logprob

@@ -293,7 +293,8 @@ class _StubPolicy:
             old_logprob=[-1.0] * len(seq), temps=[0.9] * len(seq))
 
     def sample_batch(self, receptor, pep_len, n, keep, temperature=0.9,
-                     num_steps=0, strategy="random"):
+                     num_steps=0, strategy="random", ss_profile=None,
+                     peptide_first=False):
         import random as _r
         _StubPolicy.calls = getattr(_StubPolicy, "calls", 0) + 1
         rng = _r.Random(_StubPolicy.calls * 104729 + num_steps * 1000 + n)
@@ -305,7 +306,7 @@ class _StubPolicy:
         return out
 
     def refill(self, receptor, parent_tokens, remask, num_steps=4,
-               temperature=0.7):
+               temperature=0.7, ss_profile=None, peptide_first=False):
         import random as _r
         import torch
         _StubPolicy.calls = getattr(_StubPolicy, "calls", 0) + 1
@@ -323,8 +324,8 @@ class _StubPolicy:
             peptide_tokens=new, states=states, revealed=revealed,
             old_logprob=[-1.0] * len(remask), temps=[temperature] * len(remask))
 
-    def peptide_start(self, receptor):
-        return 1 + len(receptor)
+    def peptide_start(self, receptor, pep_len, *, peptide_first=False):
+        return 1 if peptide_first else 1 + len(receptor)
 
     def save_adapter(self, path):
         self.saved += 1

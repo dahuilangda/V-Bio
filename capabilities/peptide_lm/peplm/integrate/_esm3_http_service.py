@@ -1,7 +1,8 @@
 """ESM3 HTTP service — runs on the HOST (Boltz2Score venv, CUDA).
 
-Loads the 3B model once, serves propose/perplexity/learn over HTTP.
-Workers reach it at http://<host>:9333 regardless of their container.
+Loads the esm3_sm_open_v1 checkpoint once, serves
+propose/refill/perplexity/learn over HTTP. Workers reach it at
+http://<host>:9333 regardless of their container.
 """
 from __future__ import annotations
 
@@ -60,6 +61,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _conditioning(self, req):
+        """Sampling-time conditioning, reused by every mode so the
+        policy family never shifts between propose and learn."""
+        return {
+            "ss_profile": req.get("ss_profile") or None,
+            "peptide_first": bool(req.get("peptide_first", False)),
+        }
+
     def _propose(self, req):
         import math
         from collections import Counter
@@ -67,6 +76,7 @@ class Handler(BaseHTTPRequestHandler):
         pep_len = int(req.get("peptide_length", 14))
         n = int(req.get("n_samples", 48))
         keep = int(req.get("n_keep", 16))
+        cond = self._conditioning(req)
         # Chunk the sampling: a long receptor context with a full
         # parallel batch exhausts GPU memory. Process in chunks and
         # concatenate trajectories before filtering.
@@ -80,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
                     receptor=receptor, pep_len=pep_len, n=batch,
                     keep=batch,
                     temperature=float(req.get("temperature", 0.9)),
-                    num_steps=8, strategy="entropy")
+                    num_steps=8, strategy="entropy", **cond)
                 all_trajs.extend(trajs)
                 remaining -= batch
                 if remaining > 0:
@@ -109,6 +119,7 @@ class Handler(BaseHTTPRequestHandler):
         positions = req.get("remask_positions", [])
         receptor = req.get("receptor_sequence", "")
         temperature = float(req.get("temperature", 0.7))
+        cond = self._conditioning(req)
         if not parent or not positions:
             return {"error": "parent_sequence and remask_positions required"}
 
@@ -122,6 +133,7 @@ class Handler(BaseHTTPRequestHandler):
                 parent_tokens=parent_tokens,
                 remask_positions=[int(p) for p in positions],
                 temperature=temperature,
+                **cond,
             )
         if traj is None:
             return {"sequence": None, "reason": "no change"}
@@ -132,7 +144,8 @@ class Handler(BaseHTTPRequestHandler):
     def _perplexity(self, req):
         score = policy.score_sequence(
             req.get("receptor_sequence", ""),
-            req.get("peptide_sequence", ""))
+            req.get("peptide_sequence", ""),
+            **self._conditioning(req))
         return {"perplexity": float(-score) if score is not None else 10.0}
 
     def _learn(self, req):
@@ -143,6 +156,7 @@ class Handler(BaseHTTPRequestHandler):
         boundary carries sequences and rewards, not per-step states."""
         data = req.get("rollouts", [])
         pep_len = int(req.get("peptide_length", 14))
+        cond = self._conditioning(req)
         groups: dict[str, list] = {}
         for rd in data:
             groups.setdefault(rd.get("group", "default"), []).append(rd)
@@ -182,17 +196,23 @@ class Handler(BaseHTTPRequestHandler):
         opt.zero_grad()
         total_loss = torch.tensor(0.0, device=policy.device)
         ctx_cache = {}
+        rec_seq = req.get("receptor_sequence", "")
+        ss8 = (policy.encode_ss8(rec_seq, pep_len, cond["ss_profile"],
+                                 peptide_first=cond["peptide_first"])
+               if cond["ss_profile"] else None)
+        pep_start = policy.peptide_start(
+            rec_seq, pep_len, peptide_first=cond["peptide_first"])
         for tokens, adv, credit in updates:
             seq = "".join(policy.decode_tokens(tokens) or [])
             if seq not in ctx_cache:
                 ctx_cache[seq] = policy.encode_context(
-                    req.get("receptor_sequence", ""), pep_len)
+                    rec_seq, pep_len,
+                    peptide_first=cond["peptide_first"])
             ctx = ctx_cache[seq]
-            pep_start = ctx.shape[1] - pep_len - 1
             toks = ctx.clone()
             for i, tid in enumerate(tokens):
                 toks[0, pep_start + i] = tid
-            logits = policy._forward_sequence_logits(toks)
+            logits = policy._forward_sequence_logits(toks, ss8)
             lp = Fn.log_softmax(
                 logits[0, pep_start:pep_start + pep_len, :], dim=-1)
             tok_tensor = torch.tensor(tokens, device=policy.device)

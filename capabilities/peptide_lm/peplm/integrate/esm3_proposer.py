@@ -19,10 +19,15 @@ import urllib.request
 from typing import Any
 
 try:
-    from backend.core.config import ESM3_SERVER_URL, ESM3_TIMEOUT_SECONDS
+    from backend.core.config import (
+        ESM3_SERVER_URL, ESM3_TIMEOUT_SECONDS,
+        ESM3_SS_PROFILE, ESM3_PEPTIDE_FIRST,
+    )
 except ImportError:
     ESM3_SERVER_URL = "http://localhost:9333"
     ESM3_TIMEOUT_SECONDS = 600
+    ESM3_SS_PROFILE = "H"
+    ESM3_PEPTIDE_FIRST = False
 
 _RETRY_ATTEMPTS = 2
 _RETRY_DELAY_S = 3
@@ -92,6 +97,12 @@ class ESM3Proposer:
         self._log = log
         self._generation = 0
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
+        # ss8 conditioning + context layout, identical across
+        # propose/refill/perplexity/learn so the policy family is stable
+        self._cond = {
+            "ss_profile": ESM3_SS_PROFILE or None,
+            "peptide_first": bool(ESM3_PEPTIDE_FIRST),
+        }
 
     def _post(self, payload: dict, retries: int = _RETRY_ATTEMPTS) -> dict:
         data = json.dumps(payload).encode()
@@ -166,6 +177,7 @@ class ESM3Proposer:
                 "n_samples": max(n * 3, 48),
                 "n_keep": n,
                 "temperature": temperature,
+                **self._cond,
             })
             sequences = [
                 item for item in result.get("sequences", [])
@@ -237,6 +249,7 @@ class ESM3Proposer:
                     "parent_sequence": seq,
                     "remask_positions": positions,
                     "temperature": 0.7 + 0.1 * random.random(),
+                    **self._cond,
                 })
                 if result.get("ok"):
                     mutated = result.get("sequence")
@@ -265,6 +278,7 @@ class ESM3Proposer:
                 "mode": "perplexity",
                 "receptor_sequence": self.receptor_sequence,
                 "peptide_sequence": sequence,
+                **self._cond,
             })
             return float(result.get("perplexity", 10.0))
         except Exception as exc:
@@ -296,6 +310,7 @@ class ESM3Proposer:
                 "receptor_sequence": self.receptor_sequence,
                 "peptide_length": self.peptide_length or 14,
                 "rollouts": rollouts,
+                **self._cond,
             })
             if result.get("ok"):
                 self._log(f"[esm3] GRPO update → gen {self._generation}")
