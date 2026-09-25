@@ -290,3 +290,8 @@ ESM3_SERVER_URL = os.environ.get(
     "ESM3_SERVER_URL", "http://localhost:9333")
 ESM3_TIMEOUT_SECONDS = _parse_int_env("ESM3_TIMEOUT_SECONDS", 600, minimum=60)
 ESM3_GPU_ID = os.environ.get("ESM3_GPU_ID", "0")
+# 二级结构条件 (DSSP: G/H/I/T/E/B/S/C)，按肽长循环平铺；空串关闭条件
+ESM3_SS_PROFILE = os.environ.get("ESM3_SS_PROFILE", "H")
+# 肽块置于上下文首部（N 端先验）而非尾部（C 端无序先验）
+ESM3_PEPTIDE_FIRST = os.environ.get("ESM3_PEPTIDE_FIRST", "false").lower() in (
+    "1", "true", "yes", "on")

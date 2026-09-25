@@ -43,6 +43,10 @@ class Rollout:
     # advantage toward the positions the oracle blamed; empty = uniform
     credit: list = field(default_factory=list)
     pep_start: int = 0
+    # ss8 conditioning recorded at sampling time: replay must forward
+    # the same track, or new/old logprobs come from different policies.
+    # [L] cpu tensor of ss8 token ids, None when sampling was unconditional.
+    ss8: object = None
 
     def __len__(self):
         return len(self.revealed)
@@ -171,7 +175,7 @@ class MaskedGRPOUpdater:
                        else [1.0] * len(weights))
             for state, (pos, tok), old_lp, t_s, w in zip(
                     r.states, r.revealed, r.old_logprob, temps, weights):
-                events.append((state, pos, tok, old_lp, t_s, a * w))
+                events.append((state, pos, tok, old_lp, t_s, a * w, r.ss8))
         return events
 
     @staticmethod
@@ -189,6 +193,9 @@ class MaskedGRPOUpdater:
         pol = self.policy.model
         device = self.policy.device
         batch = torch.stack([ev[0].to(device) for ev in events])  # [E, L]
+        ss8_src = events[0][6]
+        ss8_batch = (torch.stack([ev[6].to(device) for ev in events])
+                     if ss8_src is not None else None)
         pos_t = torch.tensor([ev[1] for ev in events], device=device)
         tok_t = torch.tensor([ev[2] for ev in events], device=device)
         old_t = torch.tensor([ev[3] for ev in events], device=device,
@@ -213,7 +220,7 @@ class MaskedGRPOUpdater:
             return lp.gather(1, tok_t.view(-1, 1)).squeeze(1), lp
 
         with torch.autocast("cuda", dtype=self.policy.dtype):
-            out = pol(sequence_tokens=batch)
+            out = pol(sequence_tokens=batch, ss8_tokens=ss8_batch)
         new_lp, ev_logp = _tempered_gather(out.sequence_logits.float())
 
         rho = torch.exp((new_lp - old_t).clamp(-8.0, 8.0))
@@ -226,7 +233,7 @@ class MaskedGRPOUpdater:
         if self._beta > 0:
             with pol.disable_adapter(), torch.no_grad(), \
                     torch.autocast("cuda", dtype=self.policy.dtype):
-                ref_out = pol(sequence_tokens=batch)
+                ref_out = pol(sequence_tokens=batch, ss8_tokens=ss8_batch)
             _, ref_full = _tempered_gather(ref_out.sequence_logits.float())
             ref_lp = ref_full.gather(1, tok_t.view(-1, 1)).squeeze(1)
             d = ref_lp - new_lp

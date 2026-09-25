@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Start the ESM3 inference service (peptide design proposal engine).
 #
-# The service loads a 3B model once and serves propose/perplexity/learn
-# requests over HTTP. Workers connect to ESM3_SERVER_URL (default
-# http://localhost:9333).
+# The service loads the esm3_sm_open_v1 checkpoint once and serves
+# propose/refill/perplexity/learn requests over HTTP. Workers connect
+# to ESM3_SERVER_URL (default http://localhost:9333).
 #
 # Usage:
 #   ./start_esm3_service.sh              # foreground, GPU 0
