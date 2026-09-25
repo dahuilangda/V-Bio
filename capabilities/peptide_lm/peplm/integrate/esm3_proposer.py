@@ -48,6 +48,31 @@ def _weighted_sample(items: list, probs: list, k: int) -> list:
     return chosen
 
 
+def _sequence_identity(a: str, b: str) -> float:
+    """Fractional identity between two equal-length sequences."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return sum(1 for x, y in zip(a, b) if x == y) / len(a)
+
+
+def _diversity_filter(
+    proposals: list[tuple], threshold: float = 0.85
+) -> list[tuple]:
+    """Reject proposals whose identity to an already-accepted proposal
+    exceeds the threshold. Greedy first-come-first-kept; the caller
+    sorts by quality before filtering so the best variant of each
+    cluster survives."""
+    kept: list[tuple] = []
+    kept_seqs: list[str] = []
+    for prop in proposals:
+        seq = prop[0]
+        if any(_sequence_identity(seq, k) > threshold for k in kept_seqs):
+            continue
+        kept.append(prop)
+        kept_seqs.append(seq)
+    return kept
+
+
 class ESM3Proposer:
     """Receptor-conditioned proposals from ESM3 with pLDDT-guided mutation."""
 
@@ -108,8 +133,15 @@ class ESM3Proposer:
         if n_denovo > 0:
             proposals.extend(self._denovo(n_denovo, elite_rows))
 
+        # Batch diversity filter: reject proposals too similar to ones
+        # already accepted in this batch (Hamming identity > 0.85). This
+        # prevents the mutation mode from clustering every proposal around
+        # the same parent's neighborhood.
+        proposals = _diversity_filter(proposals, threshold=0.85)
+
         self._generation += 1
-        self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals")
+        self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals "
+                  f"(diversity-filtered)")
         return proposals[:n]
 
     def _denovo(self, n: int, elite_rows: list[dict]) -> list:
@@ -121,7 +153,11 @@ class ESM3Proposer:
         else:
             pep_len = random.randint(*self.len_range)
 
-        temperature = 0.9 + 0.1 * min(self._generation, 3)
+        # Progressive temperature: high early (broad exploration),
+        # anneal toward exploitation in later generations, with a floor
+        # to maintain minimum diversity
+        gen = self._generation
+        temperature = max(1.2 - 0.1 * gen, 0.8)
         for _ in range(3):
             result = self._post({
                 "mode": "propose",
@@ -147,12 +183,32 @@ class ESM3Proposer:
     def _mutate_from_elites(self, elite_rows: list[dict], n: int) -> list:
         """BindCraft2 Semigreedy: p(position_to_mutate) ∝ (1 - pLDDT_i).
 
-        Each proposal picks one elite parent, samples 1-3 positions from
-        the (1-pLDDT) distribution, and asks ESM3 to refill only those
-        positions. Confident residues are never touched."""
+        Diversity controls: round-robin across distinct parents (every
+        elite gets mutation budget, not just the top one), mutation
+        count anneals from 3-5 (explore) in early generations to 1-2
+        (exploit) later, and the batch-level diversity filter in
+        propose() rejects near-duplicates."""
+        # Sort elites by score so round-robin starts with the best
+        elites = sorted(
+            [e for e in elite_rows if e.get("sequence")],
+            key=lambda e: -(e.get("composite_score") or 0))
+        if not elites:
+            return []
+
+        # Adaptive mutation count: more positions early (broad search),
+        # fewer later (fine-tuning)
+        gen = self._generation
+        if gen <= 2:
+            k_choices, k_weights = [3, 4, 5], [0.4, 0.3, 0.3]
+        elif gen <= 4:
+            k_choices, k_weights = [2, 3, 4], [0.4, 0.4, 0.2]
+        else:
+            k_choices, k_weights = [1, 2, 3], [0.4, 0.4, 0.2]
+
         proposals = []
-        for _ in range(n):
-            parent = random.choice(elite_rows)
+        for i in range(n):
+            # Round-robin: each elite gets equal mutation budget
+            parent = elites[i % len(elites)]
             seq = parent.get("sequence", "")
             plddts = parent.get("plddts") or []
             if not seq or len(seq) < 4:
@@ -165,11 +221,11 @@ class ESM3Proposer:
             else:
                 weights = [1.0] * pep_len
 
-            # Sample 1-3 positions (weighted categorical, like BindCraft2's
-            # single-residue choice but allowing multi-site for peptides)
+            # Sample positions (weighted categorical)
             total = sum(weights)
             probs = [w / total for w in weights]
-            k = random.choices([1, 2, 3], weights=[0.5, 0.3, 0.2])[0]
+            k = random.choices(k_choices, weights=k_weights)[0]
+            k = min(k, pep_len)
             positions = sorted(_weighted_sample(range(pep_len), probs, k))
 
             # Ask ESM3 to refill only those positions
