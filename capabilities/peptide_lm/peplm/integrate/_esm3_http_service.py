@@ -42,6 +42,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if mode == "propose":
                 resp = self._propose(req)
+            elif mode == "refill":
+                resp = self._refill(req)
             elif mode == "perplexity":
                 resp = self._perplexity(req)
             elif mode == "learn":
@@ -97,6 +99,36 @@ class Handler(BaseHTTPRequestHandler):
         seqs.sort(key=lambda x: -x["logprob"])
         return {"sequences": seqs[:keep]}
 
+    def _refill(self, req):
+        """Resample only the specified positions of a parent sequence.
+
+        Uses ESM3Policy.refill: confident positions stay as context,
+        only the remasked positions are sampled. Returns the mutated
+        sequence or None if refill produced no change."""
+        parent = req.get("parent_sequence", "")
+        positions = req.get("remask_positions", [])
+        receptor = req.get("receptor_sequence", "")
+        temperature = float(req.get("temperature", 0.7))
+        if not parent or not positions:
+            return {"error": "parent_sequence and remask_positions required"}
+
+        parent_tokens = policy.encode_peptide(parent, len(parent))
+        if parent_tokens is None:
+            return {"error": "failed to tokenize parent"}
+
+        with torch.no_grad():
+            traj = policy.refill(
+                receptor=receptor,
+                parent_tokens=parent_tokens,
+                remask_positions=[int(p) for p in positions],
+                temperature=temperature,
+            )
+        if traj is None:
+            return {"sequence": None, "reason": "no change"}
+
+        seq = policy.decode_tokens(traj.peptide_tokens)
+        return {"sequence": seq if seq else None}
+
     def _perplexity(self, req):
         score = policy.score_sequence(
             req.get("receptor_sequence", ""),
@@ -127,7 +159,18 @@ class Handler(BaseHTTPRequestHandler):
             for r in rows:
                 tokens = policy.encode_peptide(r["sequence"], pep_len)
                 if tokens:
-                    updates.append((tokens, (r["reward"] - m) / sd))
+                    adv = (r["reward"] - m) / sd
+                    # Per-residue credit: positions with low pLDDT get
+                    # higher gradient weight (BindCraft2-style — the model
+                    # learns to change what is broken, not what works)
+                    plddts = r.get("plddts") or []
+                    if plddts and len(plddts) == pep_len:
+                        credit = [max(1.0 - float(p), 0.05) for p in plddts]
+                        csum = sum(credit) or 1.0
+                        credit = [c / csum * pep_len for c in credit]
+                    else:
+                        credit = [1.0] * pep_len
+                    updates.append((tokens, adv, credit))
 
         if len(updates) < 2:
             return {"skipped": "tokenization failed"}
@@ -139,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
         opt.zero_grad()
         total_loss = torch.tensor(0.0, device=policy.device)
         ctx_cache = {}
-        for tokens, adv in updates:
+        for tokens, adv, credit in updates:
             seq = "".join(policy.decode_tokens(tokens) or [])
             if seq not in ctx_cache:
                 ctx_cache[seq] = policy.encode_context(
@@ -154,8 +197,12 @@ class Handler(BaseHTTPRequestHandler):
                 logits[0, pep_start:pep_start + pep_len, :], dim=-1)
             tok_tensor = torch.tensor(tokens, device=policy.device)
             scores = lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
-            # REINFORCE: maximize advantage-weighted log-likelihood
-            total_loss = total_loss - adv * scores.mean()
+            # Per-residue weighted REINFORCE: each token's logprob is
+            # weighted by its credit (low pLDDT -> high weight)
+            credit_t = torch.tensor(credit, device=policy.device,
+                                     dtype=scores.dtype)
+            weighted = (scores * credit_t).sum() / credit_t.sum()
+            total_loss = total_loss - adv * weighted
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in policy.model.parameters() if p.requires_grad], 1.0)
