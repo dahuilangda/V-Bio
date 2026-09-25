@@ -142,14 +142,10 @@ def protenix2dock_task(self, score_args: dict):
             raise ValueError(f"Unsupported protenix2dock mode {requested_mode!r}")
 
         msa_server_url = str(getattr(config, "MSA_SERVER_URL", "") or "").strip()
-        # Shared, container-mounted MSA cache (same filename scheme as
-        # this engine's resolver): the boltz pipeline pre-populates it,
-        # so receptor MSAs are cache hits instead of per-candidate
-        # server fetches. A path that is not mounted in the container
-        # silently disables both hit and write-back.
-        msa_cache_dir = str(
-            getattr(config, "BOLTZ_MSA_CACHE_DIR", "/data/boltz_msa_cache")
-            or "").strip()
+        # The per-task engine container mounts the shared MSA cache at
+        # /data/msa_cache (docker_cmd.protenix_runtime_mounts maps the
+        # host's /data/boltz_msa_cache there), so the CLI path must use
+        # the CONTAINER-side name.
 
         seed_raw = score_args.get("seed")
         seed = 42 if seed_raw is None else max(0, int(seed_raw))
@@ -157,7 +153,7 @@ def protenix2dock_task(self, score_args: dict):
             "--mode", requested_mode,
             "--output_dir", output_dir,
             "--work_dir", work_dir,
-            "--msa_cache_dir", msa_cache_dir,
+            "--msa_cache_dir", "/data/msa_cache",
             "--seed", str(seed),
         ]
         if msa_server_url:
