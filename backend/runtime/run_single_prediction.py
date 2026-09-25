@@ -7174,9 +7174,25 @@ def _dpeptide_prepare_d_target(
         target_seq = _dpeptide_target_sequence(base_yaml_data, target_chain_id)
         uploaded = _dpeptide_predict_target_structure(
             target_seq, backend, work_root / "target_pred", seed)
-    target_l = gemmi.read_structure(str(uploaded))
-    target_l.setup_entities()
-    target_l.remove_alternative_conformations()
+    if not uploaded.exists() or uploaded.stat().st_size == 0:
+        raise RuntimeError(
+            f"靶标结构文件为空或不存在: {uploaded} "
+            f"(size={uploaded.stat().st_size if uploaded.exists() else 'N/A'}). "
+            "请检查上传的结构文件，或确认靶标序列能被正确预测。")
+    try:
+        target_l = gemmi.read_structure(str(uploaded))
+        target_l.setup_entities()
+        target_l.remove_alternative_conformations()
+    except (IndexError, RuntimeError, ValueError) as parse_exc:
+        raise RuntimeError(
+            f"靶标结构解析失败: {uploaded} "
+            f"({uploaded.stat().st_size} bytes): {parse_exc}. "
+            "文件可能损坏——请重新上传或重试。") from parse_exc
+    if not any(sum(1 for r in c if r.het_flag != "H") >= 3 for c in target_l[0]):
+        raise RuntimeError(
+            f"靶标结构中没有聚合物链: {uploaded}. "
+            f"文件大小 {uploaded.stat().st_size} bytes. "
+            "请上传有效的 PDB/CIF 结构文件。")
 
     target_d = gemmi.read_structure(str(uploaded))
     target_d.setup_entities()
