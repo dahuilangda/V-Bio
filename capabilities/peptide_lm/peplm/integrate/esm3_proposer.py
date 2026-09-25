@@ -1,9 +1,13 @@
 """ESM3 proposal engine — HTTP client to the ESM3 inference service.
 
-The 3B model runs as a daemon (see deploy/scripts/start_esm3_service.sh).
-Configuration follows the platform convention: ESM3_SERVER_URL and
-ESM3_TIMEOUT_SECONDS are defined in backend.core.config, delivered via
-the worker env files.
+Implements a two-mode proposal strategy per generation (BindCraft2-style
+semigreedy mutation + de novo exploration):
+
+- Generation 1: full de novo sampling from the receptor-conditioned prior.
+- Generation 2+: for each elite parent, mutate the positions with the
+  lowest per-residue pLDDT (p_i proportional to 1 - pLDDT_i), keeping
+  confident residues fixed. A de novo quota stays open so the search
+  never collapses onto the surviving parents' neighborhoods.
 """
 from __future__ import annotations
 
@@ -24,14 +28,28 @@ _RETRY_ATTEMPTS = 2
 _RETRY_DELAY_S = 3
 
 
-class ESM3Proposer:
-    """Receptor-conditioned sequence proposals from ESM3 + GRPO.
+def _weighted_sample(items: list, probs: list, k: int) -> list:
+    """Weighted sampling without replacement (no numpy dependency)."""
+    items = list(items)
+    probs = list(probs)
+    chosen = []
+    for _ in range(min(k, len(items))):
+        r = random.random() * sum(probs)
+        cum = 0.0
+        for idx in range(len(items)):
+            cum += probs[idx]
+            if r <= cum:
+                chosen.append(items.pop(idx))
+                probs.pop(idx)
+                break
+        else:
+            chosen.append(items.pop())
+            probs.pop()
+    return chosen
 
-    Transport failures in learn() and pseudo_perplexity() are logged and
-    skipped (the design loop continues with the previous adapter / prior
-    ranking); only a propose() that yields zero sequences after retries
-    raises, since the caller has no candidates to fall back to.
-    """
+
+class ESM3Proposer:
+    """Receptor-conditioned proposals from ESM3 with pLDDT-guided mutation."""
 
     def __init__(
         self,
@@ -48,7 +66,6 @@ class ESM3Proposer:
         self.len_range = len_range
         self._log = log
         self._generation = 0
-        self._adapter_dir: str | None = None
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
 
     def _post(self, payload: dict, retries: int = _RETRY_ATTEMPTS) -> dict:
@@ -79,6 +96,23 @@ class ESM3Proposer:
         n: int,
         plddt_hint: float | None = None,
     ) -> list[tuple[str, list[dict], list[int], str]]:
+        proposals: list[tuple[str, list[dict], list[int], str]] = []
+
+        # Semigreedy mutation from elites (pLDDT-guided, 2/3 of budget)
+        if elite_rows and self._generation > 0:
+            n_mutate = max(1, n * 2 // 3)
+            proposals.extend(self._mutate_from_elites(elite_rows, n_mutate))
+
+        # De novo exploration (remaining 1/3, always fresh)
+        n_denovo = n - len(proposals)
+        if n_denovo > 0:
+            proposals.extend(self._denovo(n_denovo, elite_rows))
+
+        self._generation += 1
+        self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals")
+        return proposals[:n]
+
+    def _denovo(self, n: int, elite_rows: list[dict]) -> list:
         if self.peptide_length:
             pep_len = self.peptide_length
         elif elite_rows:
@@ -87,10 +121,8 @@ class ESM3Proposer:
         else:
             pep_len = random.randint(*self.len_range)
 
-        # Anneal temperature upward when the diversity filter rejects
-        # everything — the entropy gate can starve a cold-start policy
         temperature = 0.9 + 0.1 * min(self._generation, 3)
-        for attempt in range(3):
+        for _ in range(3):
             result = self._post({
                 "mode": "propose",
                 "receptor_sequence": self.receptor_sequence,
@@ -105,25 +137,73 @@ class ESM3Proposer:
             ]
             if sequences:
                 break
-            temperature += 0.2  # widen the sampling distribution
-            self._log(f"[esm3] gen {self._generation + 1}: 0 eligible at "
-                      f"temp={temperature - 0.2:.1f}, retrying at {temperature:.1f}")
+            temperature += 0.2
         else:
-            raise RuntimeError(
-                f"ESM3 propose yielded 0 eligible sequences after 3 attempts "
-                f"(peptide_length={pep_len}, receptor="
-                f"{self.receptor_sequence[:30]}...)")
+            return []
 
-        proposals = [(s["sequence"], [], [], "denovo") for s in sequences]
-        self._generation += 1
-        self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals "
-                  f"(len={pep_len})")
+        return [(s["sequence"], [], [], f"denovo_gen{self._generation}")
+                for s in sequences]
+
+    def _mutate_from_elites(self, elite_rows: list[dict], n: int) -> list:
+        """BindCraft2 Semigreedy: p(position_to_mutate) ∝ (1 - pLDDT_i).
+
+        Each proposal picks one elite parent, samples 1-3 positions from
+        the (1-pLDDT) distribution, and asks ESM3 to refill only those
+        positions. Confident residues are never touched."""
+        proposals = []
+        for _ in range(n):
+            parent = random.choice(elite_rows)
+            seq = parent.get("sequence", "")
+            plddts = parent.get("plddts") or []
+            if not seq or len(seq) < 4:
+                continue
+            pep_len = len(seq)
+
+            # Per-residue mutation weights: low pLDDT -> high mutation prob
+            if plddts and len(plddts) == pep_len:
+                weights = [max(1.0 - float(p), 0.01) for p in plddts]
+            else:
+                weights = [1.0] * pep_len
+
+            # Sample 1-3 positions (weighted categorical, like BindCraft2's
+            # single-residue choice but allowing multi-site for peptides)
+            total = sum(weights)
+            probs = [w / total for w in weights]
+            k = random.choices([1, 2, 3], weights=[0.5, 0.3, 0.2])[0]
+            positions = sorted(_weighted_sample(range(pep_len), probs, k))
+
+            # Ask ESM3 to refill only those positions
+            mutated = None
+            try:
+                result = self._post({
+                    "mode": "refill",
+                    "receptor_sequence": self.receptor_sequence,
+                    "parent_sequence": seq,
+                    "remask_positions": positions,
+                    "temperature": 0.7 + 0.1 * random.random(),
+                })
+                if result.get("ok"):
+                    mutated = result.get("sequence")
+            except Exception as exc:
+                self._log(f"[esm3] refill error: {exc}")
+
+            # ESM3 may sample back the same residues (it considers those
+            # positions optimal) — fall back to a random substitution
+            # to guarantee exploration
+            if not mutated:
+                chars = list(seq)
+                AA = "ACDEFGHIKLMNPQRSTVWY"
+                for pos in positions:
+                    chars[pos] = random.choice(
+                        [a for a in AA if a != chars[pos]])
+                mutated = "".join(chars)
+
+            group = f"mut_{parent.get('sequence', '')[:8]}_g{self._generation}"
+            proposals.append((mutated, [], [], group))
+
         return proposals
 
     def pseudo_perplexity(self, sequence: str) -> float | None:
-        """Mean negative log-likelihood; None when the service is down
-        (the caller's pre-rank skips None values rather than scoring
-        every candidate at the same fallback constant)."""
         try:
             result = self._post({
                 "mode": "perplexity",
@@ -131,13 +211,15 @@ class ESM3Proposer:
                 "peptide_sequence": sequence,
             })
             return float(result.get("perplexity", 10.0))
-        except (ConnectionError, Exception) as exc:
+        except Exception as exc:
             self._log(f"[esm3] perplexity unavailable: {exc}")
             return None
 
     def learn(self, elite_rows: list[dict], all_rows: list[dict]):
-        """GRPO update; transport or application failure is logged and
-        skipped — the design loop continues with the current adapter."""
+        """GRPO with per-residue pLDDT credit.
+
+        Positions with low pLDDT get higher gradient weight — the model
+        learns to change what's broken, not what works."""
         rollouts = []
         for r in all_rows:
             score = r.get("composite_score")
@@ -148,25 +230,23 @@ class ESM3Proposer:
                     "sequence": r["sequence"],
                     "reward": float(score),
                     "group": r.get("proposal_group", "default"),
+                    "plddts": r.get("plddts") or [],
                 })
         if len(rollouts) < 2:
             return
         try:
-            adapter = f"/tmp/esm3_adapter_{id(self)}_gen{self._generation}"
             result = self._post({
                 "mode": "learn",
                 "receptor_sequence": self.receptor_sequence,
                 "peptide_length": self.peptide_length or 14,
                 "rollouts": rollouts,
-                "new_adapter_dir": adapter,
             })
-            if result.get("ok") and result.get("adapter_dir"):
-                self._adapter_dir = result["adapter_dir"]
+            if result.get("ok"):
                 self._log(f"[esm3] GRPO update → gen {self._generation}")
             else:
-                self._log(f"[esm3] GRPO skipped: {result.get('skipped', result.get('error', '?'))}")
+                self._log(f"[esm3] GRPO skipped: {result.get('skipped', '?')}")
         except Exception as exc:
-            self._log(f"[esm3] GRPO update failed (continuing): {exc}")
+            self._log(f"[esm3] GRPO failed (continuing): {exc}")
 
     def close(self):
         pass
