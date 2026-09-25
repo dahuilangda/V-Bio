@@ -6577,7 +6577,8 @@ def _dpeptide_predict_target_structure(
         cifs: list[Path] = []
         for root in result_roots:
             if root.exists():
-                cifs.extend(c for c in root.rglob("*.cif") if cif_pat.search(str(c)))
+                cifs.extend(c for c in root.rglob("*.cif")
+                    if cif_pat.search(str(c)) and c.stat().st_size > 0)
         if cifs:
             return max(cifs, key=lambda p: p.stat().st_mtime)
         # Results may exist only as the uploaded zip (<celery_id>_results.zip at the
