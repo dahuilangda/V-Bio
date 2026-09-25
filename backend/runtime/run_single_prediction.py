@@ -5610,6 +5610,42 @@ def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[L
     }
 
 
+def _extract_peptide_plddts(structure_file) -> list:
+    """Per-residue pLDDT for the peptide chain, read from the CA B-factor
+    column of the refined structure (protenix writes plddt*100 there).
+    Returns [] on any failure — the proposer treats empty plddts as
+    uniform weight (no pLDDT guidance), matching the pre-upgrade path."""
+    try:
+        import gemmi
+        st = gemmi.read_structure(str(structure_file))
+        st.setup_entities()
+        chains = sorted(
+            [c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3],
+            key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+        if len(chains) < 2:
+            return []
+        pep = chains[-1]  # shortest chain = peptide
+        plddts = [
+            float(r.find_atom("CA", "*").b_iso) / 100.0
+            for r in pep
+            if r.het_flag != "H" and r.find_atom("CA", "*") is not None
+        ]
+        # Staged PDB writers leave B-factor at 0.0 — fall back to the
+        # engine's CIF in the same directory (protenix writes plddt there)
+        if plddts and max(plddts) < 0.01:
+            from pathlib import Path as _P
+            for cif in _P(structure_file).parent.glob("*.cif"):
+                try:
+                    alt = _extract_peptide_plddts(cif)
+                    if alt and max(alt) > 0.01:
+                        return alt
+                except Exception:
+                    continue
+        return plddts
+    except Exception:
+        return []
+
+
 def _peptide_sequence_similarity(seq_a: str, seq_b: str) -> float:
     if not seq_a or not seq_b or len(seq_a) != len(seq_b):
         return 0.0
@@ -9990,7 +10026,8 @@ def run_peptide_design_backend(
                     if structure_file and structure_file.suffix.lower() == ".pdb"
                     else "cif"
                 ),
-                "plddts": metrics.get("plddts") if isinstance(metrics.get("plddts"), list) else [],
+                "plddts": _extract_peptide_plddts(structure_file)
+                if structure_file else [],
             }
             all_results.append(result_row)
             completed_tasks += 1
