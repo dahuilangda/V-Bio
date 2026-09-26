@@ -8883,6 +8883,9 @@ def run_peptide_design_backend(
     structure_mode = str(
         options.get("peptideStructureMode")
         or options.get("structure_mode") or "env").strip().lower()
+    _ss_modes_root = str(CAPABILITIES_DIR / "peptide_lm")
+    if _ss_modes_root not in sys.path:
+        sys.path.insert(0, _ss_modes_root)
     from peplm.integrate.ss_modes import MODES as _SS_MODES
     if structure_mode not in _SS_MODES:
         raise ValueError(
