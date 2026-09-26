@@ -868,6 +868,7 @@ def compute_ccd_bond_bands(
              or asym_to_entity[int(asym[row])] in free_entities)
     ]
     clash_pairs: list[list[int]] = []
+    clash_floors: list[float] = []
     if receptor_rows and free_rows:
         # Full receptor x free-chain cross product, not a distance-filtered
         # subset: blind inpainting discards the staged pose, so the chain
@@ -876,6 +877,29 @@ def compute_ccd_bond_bands(
         for a in receptor_rows:
             for b in free_rows:
                 clash_pairs.append([int(a), int(b)])
+                clash_floors.append(2.6)
+
+    # Intra-chain deep-burial guard: the inter-chain shell above and the
+    # CCD bond bands cover everything EXCEPT non-bonded pairs inside the
+    # free chain — observed as an LYS NZ jammed 1.5 A into an i+2 LEU
+    # side chain. Real geometry keeps |i-j|>=2 heavy-atom pairs above
+    # ~2.4 A (adjacent-residue pairs are valence-close and belong to the
+    # bond bands; SG-SG can be a 2.05 A disulfide and is excluded).
+    _res_id_arr = np.asarray(info["res_id"])
+    _asym_arr = np.asarray(info["asym"])
+    _elem_arr = np.char.upper(np.asarray(info["elements"]).astype(str))
+    for _ia, a in enumerate(free_rows):
+        for _ib, b in enumerate(free_rows):
+            if _ib <= _ia:
+                continue
+            if _asym_arr[a] != _asym_arr[b]:
+                continue
+            if abs(int(_res_id_arr[a]) - int(_res_id_arr[b])) < 2:
+                continue
+            if _elem_arr[a] == "S" and _elem_arr[b] == "S":
+                continue
+            clash_pairs.append([int(a), int(b)])
+            clash_floors.append(2.4)
 
     if not pairs:
         return None
@@ -916,7 +940,7 @@ def compute_ccd_bond_bands(
     # clean estimate obey the same bound. The 2.6-3.4 A packing band stays
     # with the denoiser's interface prior — projecting the full 3.1 A
     # shell every step flattened binders into one-atom-thick pancakes.
-    clash_lower = (np.full(len(clash_pairs), 2.6, dtype=np.float32)
+    clash_lower = (np.asarray(clash_floors, dtype=np.float32)
                    if clash_pairs else None)
     # rigid aromatic templates as padded arrays: ring_rows [R, K] (-1 pad),
     # ring_coords [R, K, 3]; None when the free chains carry no aromatics
