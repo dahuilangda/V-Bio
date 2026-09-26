@@ -641,12 +641,21 @@ def sample_diffusion(
                 if _clash_project is not None:
                     _clash_project(x_l, iters=3)
             else:
+                # Steric guard FIRST, chemistry LAST. The guard's radial
+                # pushes are atom-wise and know nothing about covalent
+                # geometry: running it after the ring/bond projections
+                # bent a PHE CA-CB attachment by 0.34 A and twisted chi
+                # torsions with nothing left to restore them. With this
+                # order the push moves the residue roughly rigidly and
+                # the CCD chemistry (rigid ring Kabsch + intra-residue
+                # +-0.04 A band network) has the final word on covalent
+                # geometry, exactly what it exists for.
+                if _clash_project is not None:
+                    _clash_project(x_l, iters=3)
                 if _ring_project is not None:
                     _ring_project(x_l)
                 if _bond_project is not None:
                     _bond_project(x_l, iters=30)
-                if _clash_project is not None:
-                    _clash_project(x_l, iters=3)
 
         # Deliberately NO projection after the loop: the shipped structure
         # is exactly what the final sampler step produced (including its
