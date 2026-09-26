@@ -964,3 +964,59 @@ def compute_ccd_bond_bands(
     else:
         aro_dof = None
     return index, upper, lower, clash_index, clash_lower, rigid, aro_dof
+
+
+def compute_stereo_peptide_bonds(
+    info: dict[str, Any],
+    mask: np.ndarray,
+    free_entities: set[int] | None = None,
+) -> dict[str, np.ndarray] | None:
+    """Peptide-bond omega stereo constraints for the free chain(s).
+
+    Each non-X-Pro peptide bond contributes the torsion quadruple
+    (CA_i, C_i, N_i+1, CA_i+1) with trans orientation: the amide plane is
+    a partial double bond and |omega| must stay near 180 deg. X-Pro bonds
+    stay free -- cis-Pro (~5% of natural X-Pro) is a legitimate design
+    motif and a hard trans band would forbid it.
+
+    Distance-band proxies cannot see the twist: a 120-160 deg omega keeps
+    both CA-CA and O-CA inside any sane band; only the true dihedral
+    constraint does (StereoBondPotential, 30 deg buffer).
+    """
+    asym = np.asarray(info["asym"])
+    res_id = np.asarray(info["res_id"])
+    atom_names = [str(a) for a in np.asarray(info["atom_names"]).astype(str)]
+    comp_ids = [str(c) for c in np.asarray(info["comp_ids"]).astype(str)]
+    asym_to_entity = info["asym_to_entity"]
+
+    rows: dict[tuple[int, int, str], int] = {}
+    for i in range(len(asym)):
+        if mask[i] <= 0:
+            continue
+        if free_entities is not None and asym_to_entity[int(asym[i])] not in free_entities:
+            continue
+        rows.setdefault((int(asym[i]), int(res_id[i]), atom_names[i]), i)
+
+    quads: list[list[int]] = []
+    orients: list[float] = []
+    by_chain: dict[int, dict[int, dict[str, int]]] = {}
+    for (a, r, name), row in rows.items():
+        by_chain.setdefault(a, {}).setdefault(r, {})[name] = row
+    for ch_res in by_chain.values():
+        for r in sorted(ch_res):
+            atoms = ch_res[r]
+            nxt = ch_res.get(r + 1)
+            if nxt is None:
+                continue
+            if not {"CA", "C"} <= atoms.keys() or not {"N", "CA"} <= nxt.keys():
+                continue
+            if comp_ids[nxt["N"]] == "PRO":
+                continue  # X-Pro may be cis (~5% in nature); stay free
+            quads.append([atoms["CA"], atoms["C"], nxt["N"], nxt["CA"]])
+            orients.append(1.0)
+    if not quads:
+        return None
+    return {
+        "stereo_bond_index": np.asarray(quads, dtype=np.int64).T,
+        "stereo_bond_orientation": np.asarray(orients, dtype=np.float32),
+    }
