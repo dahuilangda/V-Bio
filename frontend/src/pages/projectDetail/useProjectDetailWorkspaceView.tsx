@@ -1017,6 +1017,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
     handleRuntimePeptideChiralityChange,
+    handleRuntimePeptideStructureModeChange,
     handleRuntimePeptideStructureUploadChange,
     handleRuntimePeptideBinderLengthChange,
     handleRuntimePeptideLengthRange,
@@ -1374,6 +1375,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     lowVram: draft.inputConfig.options.lowVram ?? false,
     peptideDesignMode: draft.inputConfig.options.peptideDesignMode ?? 'linear',
     peptideChirality: draft.inputConfig.options.peptideChirality ?? 'l',
+    peptideStructureMode: draft.inputConfig.options.peptideStructureMode ?? 'auto',
     peptideBinderLength: draft.inputConfig.options.peptideBinderLength ?? 20,
     // display fallbacks mirror submission: a locked or unset range collapses
     // to the legacy single length, never a 10-25 window
@@ -1422,6 +1424,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onLowVramChange: handleRuntimeLowVramChange,
     onPeptideDesignModeChange: handleRuntimePeptideDesignModeChange,
     onPeptideChiralityChange: handleRuntimePeptideChiralityChange,
+    onPeptideStructureModeChange: handleRuntimePeptideStructureModeChange,
     onPeptideStructureUploadChange: handleRuntimePeptideStructureUploadChange,
     onPeptideLengthRange: handleRuntimePeptideLengthRange,
     onPeptideUseInitialSequenceChange: handleRuntimePeptideUseInitialSequenceChange,

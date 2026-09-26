@@ -502,6 +502,22 @@ export function handleRuntimePeptideChiralityChangeAction<TDraft extends DraftLi
   });
 }
 
+export function handleRuntimePeptideStructureModeChangeAction<TDraft extends DraftLike>(params: {
+  peptideStructureMode: 'auto' | 'helix' | 'hairpin' | 'strand_loop';
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideStructureMode, setDraft } = params;
+  setDraft((d) => {
+    if (!d) return d;
+    const options = d.inputConfig.options ?? { seed: null };
+    const nextOptions = { ...options, peptideStructureMode };
+    return {
+      ...d,
+      inputConfig: { ...d.inputConfig, options: nextOptions },
+    };
+  });
+}
+
 export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftLike>(params: {
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   setDraft: Dispatch<SetStateAction<TDraft | null>>;

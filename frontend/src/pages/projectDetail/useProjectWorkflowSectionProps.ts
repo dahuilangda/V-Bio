@@ -149,6 +149,7 @@ interface UseProjectWorkflowSectionPropsInput {
   lowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   peptideChirality: 'l' | 'd';
+  peptideStructureMode: 'auto' | 'helix' | 'hairpin' | 'strand_loop';
   peptideBinderLength: number;
   peptideLengthMin: number;
   peptideLengthMax: number;
@@ -202,6 +203,7 @@ interface UseProjectWorkflowSectionPropsInput {
   onLowVramChange: (lowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
+  onPeptideStructureModeChange: (mode: 'auto' | 'helix' | 'hairpin' | 'strand_loop') => void;
   onPeptideLengthRange: (min: number, max: number) => void;
   onPeptideUseInitialSequenceChange: (value: boolean) => void;
   onPeptideInitialSequenceChange: (value: string) => void;
@@ -357,6 +359,7 @@ export function useProjectWorkflowSectionProps({
   onLowVramChange,
   peptideDesignMode,
   peptideChirality,
+  peptideStructureMode,
   peptideBinderLength,
   peptideLengthMin,
   peptideLengthMax,
@@ -394,6 +397,7 @@ export function useProjectWorkflowSectionProps({
   peptideBicyclicCys3Pos,
   onPeptideDesignModeChange,
   onPeptideChiralityChange,
+  onPeptideStructureModeChange,
   onPeptideLengthRange,
   onPeptideUseInitialSequenceChange,
   onPeptideInitialSequenceChange,
@@ -634,6 +638,7 @@ export function useProjectWorkflowSectionProps({
         isLowVram: lowVram,
         peptideDesignMode,
         peptideChirality,
+        peptideStructureMode,
         peptideBinderLength,
         peptideLengthMin,
         peptideLengthMax,
@@ -668,6 +673,7 @@ export function useProjectWorkflowSectionProps({
         onLowVramChange,
         onPeptideDesignModeChange,
         onPeptideChiralityChange,
+        onPeptideStructureModeChange,
         onPeptideLengthRange,
         onPeptideUseInitialSequenceChange,
         onPeptideInitialSequenceChange,

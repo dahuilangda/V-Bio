@@ -162,6 +162,7 @@ export interface PredictionOptions {
   notifyEmail?: string | null;
   peptideDesignMode?: PeptideDesignMode;
   peptideChirality?: 'l' | 'd';
+  peptideStructureMode?: 'auto' | 'helix' | 'hairpin' | 'strand_loop';
   peptideBinderLength?: number;
   peptideLengthMin?: number;
   peptideLengthMax?: number;

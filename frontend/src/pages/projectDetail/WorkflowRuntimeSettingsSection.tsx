@@ -81,6 +81,7 @@ export interface WorkflowRuntimeSettingsSectionProps {
   isLowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   peptideChirality: 'l' | 'd';
+  peptideStructureMode: 'auto' | 'helix' | 'hairpin' | 'strand_loop';
   peptideBinderLength: number;
   peptideLengthMin: number;
   peptideLengthMax: number;
@@ -119,6 +120,9 @@ export interface WorkflowRuntimeSettingsSectionProps {
   onLowVramChange: (isLowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
+  onPeptideStructureModeChange: (
+    mode: 'auto' | 'helix' | 'hairpin' | 'strand_loop'
+  ) => void;
   onPeptideLengthRange: (min: number, max: number) => void;
   onPeptideUseInitialSequenceChange: (value: boolean) => void;
   onPeptideInitialSequenceChange: (value: string) => void;
@@ -150,6 +154,7 @@ export function WorkflowRuntimeSettingsSection({
   isLowVram,
   peptideDesignMode,
   peptideChirality,
+  peptideStructureMode,
   peptideBinderLength,
   peptideLengthMin,
   peptideLengthMax,
@@ -184,6 +189,7 @@ export function WorkflowRuntimeSettingsSection({
   onLowVramChange,
   onPeptideDesignModeChange,
   onPeptideChiralityChange,
+  onPeptideStructureModeChange,
   onPeptideLengthRange,
   onPeptideUseInitialSequenceChange,
   onPeptideInitialSequenceChange,
@@ -911,6 +917,25 @@ export function WorkflowRuntimeSettingsSection({
                   <option value="d" disabled={normalizedBackend !== 'boltz2dock' && normalizedBackend !== 'protenix2dock'}>
                     D-peptide
                   </option>
+                  </select>
+                  </Field>
+                  <Field
+                  label="Structure Mode"
+                  hint="Secondary-structure bias for de-novo proposals: helix favours amphipathic helices, hairpin favours beta-hairpins, strand-loop mixes an extended strand with a turn. Auto leaves the choice to the model."
+                >
+                  <select
+                  value={peptideStructureMode}
+                  onChange={(e) =>
+                    onPeptideStructureModeChange(
+                      (e.target.value as 'auto' | 'helix' | 'hairpin' | 'strand_loop') || 'auto'
+                    )
+                  }
+                  disabled={!isEditable}
+                  >
+                  <option value="auto">Auto (no bias)</option>
+                  <option value="helix">Helix</option>
+                  <option value="hairpin">Hairpin</option>
+                  <option value="strand_loop">Strand-loop</option>
                   </select>
                   </Field>
                 <div className="peptide-structure-seed-row">
