@@ -404,3 +404,35 @@ def test_ligand_bands_reject_mismatched_heavy_atom_count():
     rows = np.arange(10, 13)  # 3 rows vs 3 heavy atoms after RemoveHs -> OK
     assert compute_ligand_covalent_bands(rows, mol) is not None
     assert compute_ligand_covalent_bands(rows[:2], mol) is None  # mismatch
+
+
+def test_clash_guard_pairs_full_crossproduct_and_guard_floor():
+    """The per-step pin-aware clash guard covers the FULL receptor x
+    free-chain pair set (blind inpainting discards the staged pose, so a
+    staged-neighbourhood subset would miss the actual site) and floors at
+    the 2.6 A deep-burial guard, not a 3.1 A packing shell (the packing
+    band belongs to the denoiser's prior)."""
+    import numpy as np
+    from core.constraints import compute_ccd_bond_bands
+
+    # 2 receptor residues + 2 free-chain residues, staged 100 A apart:
+    # the old 12 A staged filter returned an empty clash set here.
+    info = {
+        "asym": np.array([0, 0, 1, 1]),
+        "res_id": np.array([1, 1, 1, 1]),
+        "atom_names": np.array(["CA", "CB", "N", "CA"]),
+        "comp_ids": np.array(["ALA", "ALA", "GLY", "GLY"]),
+        "elements": np.array(["C", "C", "N", "C"]),
+        "asym_to_entity": {0: 0, 1: 1},
+    }
+    coords = np.array(
+        [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0],
+         [100.0, 0.0, 0.0], [101.5, 0.0, 0.0]], dtype=np.float64)
+    mask = np.ones(4)
+    out = compute_ccd_bond_bands(info, coords, mask, free_entities={1})
+    assert out is not None
+    _idx, _up, _lo, clash_index, clash_lower, _rigid, _aro = out
+    assert clash_index is not None and clash_lower is not None
+    # full cross product: 2 receptor atoms x 2 free-chain atoms
+    assert clash_index.shape == (4, 2)
+    assert np.allclose(clash_lower, 2.6, atol=1e-6)
