@@ -902,6 +902,36 @@ class StereoBondPotential(Potential):
         grad_atom = _aggregate_atom_gradients(coords, idx, grad_value, dE)
         return e_sum, grad_atom
 
+    def _project(self, coords, feats, params):
+        """Linearized projection onto the preferred cis/trans state.
+
+        Energy on the denoiser's x0 alone does not protect the EMITTED
+        state (Euler extrapolation + noise): reproducible near-cis amides
+        (omega ~120-160 deg) shipped while distance-band proxies (CA-CA,
+        O-CA) stayed inside tolerance -- only a true dihedral constraint
+        sees the twist. Project every violating quadruple back inside
+        the buffer each step."""
+        idx = feats["stereo_bond_index"]
+        if idx.numel() == 0:
+            return torch.zeros_like(coords)
+        orient = feats["stereo_bond_orientation"]
+        buffer = float(params["buffer"])
+        value, grad_value = _abs_dihedral_value_and_grad(coords, idx, True)
+        trans = orient > 0.5
+        # solver convention (see ChiralAtomPotential._project): pass the
+        # SIGNED DEFICIT -- value minus its bound, negative when violated
+        # -- and mask on deficit < 0
+        deficit = torch.where(
+            trans,
+            value - (float(torch.pi) - buffer),
+            buffer - value,
+        )
+        mask = deficit < 0
+        if mask.sum() == 0:
+            return torch.zeros_like(coords)
+        return _solve_constraint_projection(
+            coords, idx, deficit, grad_value, mask)
+
 
 @register
 class ChiralAtomPotential(Potential):

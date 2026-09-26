@@ -36,6 +36,10 @@ from typing import Any, Callable, Mapping
 import torch
 
 from protenix.tfg.config import TFGConfig, validate_features
+
+# tail-of-schedule steps over which the emitted state's amide stereo
+# gets re-projected (engine.step emission lock)
+_EMISSION_LOCK_STEPS = 20
 from protenix.tfg.potentials import Potential
 from protenix.utils.logger import get_logger
 
@@ -86,6 +90,11 @@ class TFGEngine:
         self.device = device
         self.dtype = dtype
 
+        self._stereo_term = next(
+            (term for term in self.cfg.terms
+             if term.name == "StereoBondPotential"),
+            None,
+        )
         # Projection ordering is fixed; pre-sort once to avoid repeated Python
         # sorting overhead inside the diffusion loop.
         self._projection_terms_sorted = sorted(
@@ -646,6 +655,25 @@ class TFGEngine:
             # chosen diffusion schedule.
             sigma = torch.sqrt(t_hat**2 - c_tau**2)
             x_work = x_next + sigma[..., None, None] * torch.randn_like(x_next)
+            # Emission-state stereo lock: the predictor-corrector update
+            # extrapolates PAST the (constraint-clean) x0 and re-injects
+            # noise, so amide planes can leave the trans basin after the
+            # x0-side projection already satisfied them -- reproducible
+            # omega ~120-160 deg shipped with last-step energy exactly 0.
+            # Over the tail of the schedule (noise floor reached) project
+            # the emitted state's stereo quadruples back inside the buffer.
+            if (
+                step_i >= num_diffusion_steps - _EMISSION_LOCK_STEPS
+                and self._stereo_term is not None
+                and "stereo_bond_index" in input_feature_dict
+            ):
+                # the step RETURNS x_next (the pre-noise Euler state), so
+                # the lock must amend x_next -- patching x_work here was
+                # silently discarded
+                x_next = x_next + self._stereo_term.project(
+                    x_next, input_feature_dict, t
+                )
+                x_work = x_next + sigma[..., None, None] * torch.randn_like(x_next)
             _nan_report("x_next", x_next)
             _nan_report("xt_shift", xt_shift)
             _nan_report("x0_ref_final", x0_ref)

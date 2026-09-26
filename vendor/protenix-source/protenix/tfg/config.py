@@ -570,7 +570,10 @@ def protenix2dock_guidance(guidance_cfg):
         out["steps"]["projection_inner"] = 0
         out["terms"] = {
             "VinaStericPotential": {
-                "interval": 1, "weight": 0.3, "buffer": 0.15}}
+                "interval": 1, "weight": 0.3, "buffer": 0.15},
+        }
+        if os.environ.get("PROTENIX_TFG_STEREO", "").strip() in ("1", "true"):
+            out["terms"]["StereoBondPotential"] = {"interval": 1, "weight": 1.0}
         return out
     if os.environ.get("PROTENIX_DISABLE_TFG", "").strip() in ("1", "true"):
         # Force-disable, not just skip augmentation: run_protenix sets
@@ -605,5 +608,9 @@ def protenix2dock_guidance(guidance_cfg):
         "weight": 0.6,
         "buffer": 0.0,
     }
+    # peptide-bond omega planarity (feats injected with the constraints
+    # npz; X-Pro quadruples are simply absent, so cis-Pro stays legal)
+    if os.environ.get("PROTENIX_TFG_STEREO", "").strip() in ("1", "true"):
+        terms["StereoBondPotential"] = {"interval": 1, "weight": 1.0}
     augmented["terms"] = terms
     return augmented

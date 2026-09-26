@@ -49,6 +49,7 @@ from core.constraints import (
     compute_bond_contact_pairs,
     compute_free_chain_tfg_constraints,
     compute_ligand_covalent_bands,
+    compute_stereo_peptide_bonds,
     compute_vdw_shell_constraints,
 )
 from core.ipsae import compute_ipsae_for_output
@@ -686,6 +687,16 @@ def _run_peptide_engine(
             }
         log.info("inter-chain VDW shell: %d lower-bound pairs (floor 3.1 A)",
                  vdw["pairwise_distance_lower_bound"].shape[0])
+    stereo = compute_stereo_peptide_bonds(info, mask, free_entities=free_entities)
+    if stereo is not None:
+        # gate for the guidance term: validate_features crashes when a
+        # configured term lacks its feats (dock-mode npz carries none)
+        os.environ["PROTENIX_TFG_STEREO"] = "1"
+        if tfg_constraints is None:
+            tfg_constraints = {}
+        tfg_constraints.update(stereo)
+        log.info("peptide-bond omega stereo constraints: %d trans quadruples "
+                 "(X-Pro left free)", stereo["stereo_bond_orientation"].shape[0])
     if tfg_constraints is not None:
         tfg_npz = work_dir / "tfg_constraints.npz"
         np.savez(tfg_npz, **tfg_constraints,

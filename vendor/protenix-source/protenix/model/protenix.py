@@ -825,6 +825,34 @@ class Protenix(nn.Module):
         # VDW clamps and angles-then-bonds projection ordering to the x0
         # prediction of every guided step, keeping the denoiser's
         # clean-structure estimate chemically valid.
+        _stereo_src = p2d.get("tfg_constraints") or {}
+        if "stereo_bond_index" in _stereo_src:
+            # peptide-bond omega (amide planarity): a true dihedral
+            # constraint -- distance-band proxies stay in tolerance while
+            # omega twists to 120-160 deg. The featurizer already emits an
+            # (empty for proteins) stereo track, so CONCATENATE onto it
+            # instead of checking for absence.
+            _sb_idx = torch.from_numpy(
+                np.asarray(_stereo_src["stereo_bond_index"])
+            ).to(s_inputs.device).long()
+            _sb_ori = torch.from_numpy(
+                np.asarray(_stereo_src["stereo_bond_orientation"])
+            ).to(s_inputs.device).float()
+            _have_idx = input_feature_dict.get("stereo_bond_index")
+            if _have_idx is not None and _have_idx.numel() > 0:
+                _have_idx = _have_idx.to(_sb_idx.device, _sb_idx.dtype)
+                if _have_idx.shape[0] != 4:
+                    _have_idx = _have_idx.T
+                _sb_idx = torch.cat([_have_idx, _sb_idx], dim=0)
+                _sb_ori = torch.cat([
+                    input_feature_dict["stereo_bond_orientation"]
+                    .to(_sb_ori.device, _sb_ori.dtype),
+                    _sb_ori], dim=0)
+            input_feature_dict["stereo_bond_index"] = _sb_idx
+            input_feature_dict["stereo_bond_orientation"] = _sb_ori
+            print(f"[protenix2dock] injected {_sb_idx.shape[-1]} "
+                  "peptide-bond omega stereo quadruples into TFG",
+                  flush=True)
         constraints = p2d.get("tfg_constraints")
         if os.environ.get("PROTENIX_TFG_ENERGY_ONLY", "").strip() in ("1", "true"):
             # energy-only mode: the projected channel must stay EMPTY --
