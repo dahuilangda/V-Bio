@@ -147,14 +147,39 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def split_complex_file(complex_path: Path, keep_chains, work_dir: Path):
-    """Split a combined complex into protein PDB + ligand SDF."""
+def classify_complex_chains(complex_path: Path):
+    """(polymer_chains, nonpolymer_chains) of the input complex by entity
+    type — the routing basis for score mode (protein complex vs ligand
+    complex)."""
+    import gemmi
+
+    structure = gemmi.read_structure(str(complex_path))
+    structure.setup_entities()
+    polymers, nonpolymers = [], []
+    for chain in structure[0]:
+        n_poly = sum(
+            1 for r in chain if r.entity_type == gemmi.EntityType.Polymer)
+        if n_poly >= 3:
+            polymers.append(chain.name.strip())
+        elif sum(1 for r in chain) > 0:
+            nonpolymers.append(chain.name.strip())
+    return polymers, nonpolymers
+
+
+def split_complex_file(complex_path: Path, work_dir: Path):
+    """Split a combined complex into protein PDB + ligand SDF.
+
+    Classification is by ENTITY TYPE, not chain name: every polymer chain
+    (peptide or protein) stays on the protein side; only non-polymer
+    entities become the ligand. The old name-based rule turned peptide
+    chains into SDF ligands — scored without proteinChain identity or MSA
+    (measured on 1YCR: peptide pLDDT 0.51 as ligand vs 0.92 as
+    proteinChain)."""
     import gemmi
     from rdkit import Chem
 
     structure = gemmi.read_structure(str(complex_path))
     structure.setup_entities()
-    keep = {c.strip().upper() for c in keep_chains or ["A"] if c.strip()}
 
     def _short(chain_name: str, used: set) -> str:
         # PDB chain IDs are one character; mmCIF-style ids ('Axp') get a
@@ -162,7 +187,8 @@ def split_complex_file(complex_path: Path, keep_chains, work_dir: Path):
         base = (chain_name.strip().upper() or "A")[0]
         out = base
         while out in used:
-            out = chr(ord("A") + (ord(out) - ord("A") + 1) % 26)
+            out = chr(ord("A") + (ord(out) - ord("A") + 1) % 26
+                      ) if len(used) < 26 else out + "x"
         used.add(out)
         return out
 
@@ -172,8 +198,9 @@ def split_complex_file(complex_path: Path, keep_chains, work_dir: Path):
     ligand.add_model(gemmi.Model("1"))
     used_ids: set = set()
     for chain in structure[0]:
-        is_protein = chain.name.strip().upper() in keep
-        target = protein if is_protein else ligand
+        n_poly = sum(
+            1 for r in chain if r.entity_type == gemmi.EntityType.Polymer)
+        target = protein if n_poly >= 3 else ligand
         clone = chain.clone()
         clone.name = _short(clone.name, used_ids)
         target[0].add_chain(clone)
@@ -198,9 +225,8 @@ def split_complex_file(complex_path: Path, keep_chains, work_dir: Path):
 def resolve_inputs(args, work_dir: Path):
     """Return (protein_path, ligand_sdf, ligand_mol) for the requested mode."""
     if args.input:
-        keep = [c for c in (args.target_chain or "").split(",") if c.strip()]
         protein, ligand_sdf, mol = split_complex_file(
-            Path(args.input).expanduser().resolve(), keep, work_dir
+            Path(args.input).expanduser().resolve(), work_dir
         )
         log.info("split complex: %d ligand atoms", mol.GetNumAtoms())
         return protein, ligand_sdf, mol
@@ -864,6 +890,29 @@ def main(argv=None):
                 if args.work_dir else output_dir / "_work")
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    if (args.mode == "score" and args.input
+            and not getattr(args, "_rerouted", False)):
+        # Protein/protein complex (receptor + peptide/protein binder, no
+        # small-molecule entity): the ligand pipeline would cast the second
+        # polymer chain as an SDF ligand — no proteinChain identity, no MSA
+        # (measured on 1YCR: peptide pLDDT 0.51 mis-cast vs 0.92 correct).
+        # Route to the peptide engine's score path instead: both chains are
+        # proteinChains with MSA and the confidence heads score the input
+        # pose directly.
+        polymers, nonpolymers = classify_complex_chains(
+            Path(args.input).expanduser().resolve())
+        if len(polymers) >= 2 and not nonpolymers:
+            log.info(
+                "score mode: protein complex (%d polymer chains) -> "
+                "peptide-engine scoring (proteinChains + MSA)", len(polymers))
+            args.mode = "peptide"
+            args.score_only = True
+            args._rerouted = True
+            if not args.peptide_chain or args.peptide_chain == "B":
+                # production staged-complex contract: the LAST polymer
+                # chain is the designed peptide
+                args.peptide_chain = polymers[-1]
 
     if args.mode in ("peptide", "rediffuse"):
         input_json, peptide_info = _run_peptide_engine(args, work_dir, output_dir)
