@@ -29,7 +29,7 @@ except ImportError:
     ESM3_SS_PROFILE = "H"
     ESM3_PEPTIDE_FIRST = False
 
-from peplm.integrate.ss_modes import MODES, build_ss_profile, normalize_mode
+from peplm.integrate.ss_modes import normalize_mode
 
 _RETRY_ATTEMPTS = 2
 _RETRY_DELAY_S = 3
@@ -188,6 +188,9 @@ class ESM3Proposer:
                 "temperature": temperature,
                 **self._cond,
             })
+            if result.get("ok") is False:
+                self._log(f"[esm3] propose rejected: {result.get('error')}")
+                return []
             sequences = [
                 item for item in result.get("sequences", [])
                 if item.get("sequence") and len(item["sequence"]) >= 4
@@ -317,14 +320,14 @@ class ESM3Proposer:
             result = self._post({
                 "mode": "learn",
                 "receptor_sequence": self.receptor_sequence,
-                "peptide_length": self.peptide_length or 14,
                 "rollouts": rollouts,
                 **self._cond,
             })
             if result.get("ok"):
                 self._log(f"[esm3] GRPO update → gen {self._generation}")
             else:
-                self._log(f"[esm3] GRPO skipped: {result.get('skipped', '?')}")
+                self._log(f"[esm3] GRPO skipped: "
+                          f"{result.get('skipped') or result.get('error') or '?'}")
         except Exception as exc:
             self._log(f"[esm3] GRPO failed (continuing): {exc}")
 

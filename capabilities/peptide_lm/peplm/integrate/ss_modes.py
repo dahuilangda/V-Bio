@@ -25,6 +25,10 @@ beta modes must use the explicit hairpin template).
 """
 from __future__ import annotations
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 MODES = ("auto", "helix", "hairpin", "strand_loop", "hth", "env")
 
 # "env" keeps the legacy ESM3_SS_PROFILE behaviour for callers that never
@@ -90,11 +94,22 @@ def build_ss_profile(mode: str | None, n: int) -> str | None:
         return None
     builder = _BUILDERS.get(mode)
     if builder is None:
+        _logger.warning(
+            "unknown structure mode %r: ss8 conditioning left off", mode)
         return None
     n = max(int(n), 1)
     profile = builder(n)
     assert len(profile) == n, f"{mode} profile length {len(profile)} != {n}"
     return profile
+
+
+def resolve_ss_profile(mode: str | None, legacy_profile: str | None,
+                       n: int) -> str | None:
+    """Effective ss8 template: an explicit legacy profile string wins
+    (raw-ss_profile HTTP callers), else the mode's length-aware builder."""
+    if legacy_profile:
+        return legacy_profile
+    return build_ss_profile(mode, n)
 
 
 def normalize_mode(value: str | None) -> str:

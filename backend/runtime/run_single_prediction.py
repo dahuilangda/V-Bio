@@ -8883,11 +8883,11 @@ def run_peptide_design_backend(
     structure_mode = str(
         options.get("peptideStructureMode")
         or options.get("structure_mode") or "env").strip().lower()
-    if structure_mode not in ("auto", "helix", "hairpin", "strand_loop",
-                              "hth", "env"):
+    from peplm.integrate.ss_modes import MODES as _SS_MODES
+    if structure_mode not in _SS_MODES:
         raise ValueError(
             f"Invalid peptide structure mode '{structure_mode}'. Must be "
-            "auto/helix/hairpin/strand_loop/hth.")
+            f"one of {'/'.join(_SS_MODES)}.")
     # NOTE: the docking-engine REQUIREMENT intentionally lives in the
     # frontend/API contract only. Here `peptideChirality == 'd'` alone triggers
     # the mirror workflow, because live deployments may still submit legacy

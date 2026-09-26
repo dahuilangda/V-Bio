@@ -16,7 +16,7 @@ sys.path.insert(0, str(PEPLM_ROOT))
 
 import torch
 
-from peplm.integrate.ss_modes import build_ss_profile, normalize_mode
+from peplm.integrate.ss_modes import normalize_mode, resolve_ss_profile
 from peplm.models.esm3_policy import ESM3Policy
 
 policy = ESM3Policy(
@@ -83,9 +83,8 @@ class Handler(BaseHTTPRequestHandler):
     def _ss_profile_for(cond, n: int):
         """Exact-length ss8 template: explicit legacy profile wins, else
         the mode's builder; None leaves the ss8 track off."""
-        if cond.get("ss_profile"):
-            return cond["ss_profile"]
-        return build_ss_profile(cond.get("structure_mode"), n)
+        return resolve_ss_profile(cond.get("structure_mode"),
+                                  cond.get("ss_profile"), n)
 
     def _propose(self, req):
         import math

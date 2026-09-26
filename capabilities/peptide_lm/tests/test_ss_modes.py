@@ -10,6 +10,7 @@ from peplm.integrate.ss_modes import (
     helix_profile,
     hth_profile,
     normalize_mode,
+    resolve_ss_profile,
     strand_loop_profile,
 )
 
@@ -17,11 +18,21 @@ VALID = set("GHITEBSC")
 
 
 @pytest.mark.parametrize("mode", ["helix", "hairpin", "strand_loop", "hth"])
-@pytest.mark.parametrize("n", range(6, 26))
+@pytest.mark.parametrize("n", range(1, 41))
 def test_profile_length_is_exact(mode, n):
     profile = build_ss_profile(mode, n)
     assert profile is not None and len(profile) == n
     assert set(profile) <= VALID
+
+
+def test_resolve_priority_legacy_wins():
+    # an explicit raw ss_profile string overrides the mode (legacy callers)
+    assert resolve_ss_profile("hairpin", "HHHH", 16) == "HHHH"
+    assert resolve_ss_profile(None, "H", 14) == "H"
+    # otherwise the length-aware builder decides
+    assert resolve_ss_profile("hairpin", None, 16) == hairpin_profile(16)
+    assert resolve_ss_profile("auto", None, 16) is None
+    assert resolve_ss_profile(None, None, 16) is None
 
 
 def test_auto_and_env_and_unknown_return_none():
