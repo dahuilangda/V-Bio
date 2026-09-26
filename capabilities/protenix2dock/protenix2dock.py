@@ -796,8 +796,17 @@ def _run_peptide_engine(
             _clash_npz = work_dir / "clash_shell.npz"
             np.savez(_clash_npz, pair_index=_clash_idx, lower=_clash_lo)
             os.environ["PROTENIX_CLASH_SHELL_PATH"] = str(_clash_npz)
-            log.info("clash shell bands written: %d one-sided 3.1 A floors "
-                     "(projected only when explicitly enabled)", len(_clash_lo))
+            # Default ON for the peptide route: the TFG projection cleans
+            # the denoiser's x0, but the EMITTED state (Euler extrapolation
+            # + noise + the chemistry projections below) is never itself
+            # guarded — weak-prior interfaces shipped 1-3 sub-2.2 A pairs.
+            # The generator's band projector runs after the chemistry each
+            # step, pin-aware (receptor rows take zero correction), at the
+            # 2.6 A guard floor written above. Explicit env wins.
+            os.environ.setdefault("PROTENIX_CLASH_SHELL_PROJECT", "1")
+            log.info("clash shell bands written: %d one-sided 2.6 A guard "
+                     "floors (per-step pin-aware projection ON)",
+                     len(_clash_lo))
 
     pin_npz = work_dir / "pin_mask.npz"
     np.savez(pin_npz, pin=ref_mask)

@@ -869,12 +869,13 @@ def compute_ccd_bond_bands(
     ]
     clash_pairs: list[list[int]] = []
     if receptor_rows and free_rows:
-        rc = np.asarray(coords[receptor_rows], dtype=np.float64)
-        fc = np.asarray(coords[free_rows], dtype=np.float64)
-        d2 = ((rc[:, None, :] - fc[None, :, :]) ** 2).sum(-1)
-        close = np.argwhere(d2 < (12.0 * 12.0))
-        for a, b in close:
-            clash_pairs.append([int(receptor_rows[a]), int(free_rows[b])])
+        # Full receptor x free-chain cross product, not a distance-filtered
+        # subset: blind inpainting discards the staged pose, so the chain
+        # may settle far from where the staging placed it and a
+        # staged-neighbourhood pair set would not cover the actual site.
+        for a in receptor_rows:
+            for b in free_rows:
+                clash_pairs.append([int(a), int(b)])
 
     if not pairs:
         return None
@@ -910,7 +911,12 @@ def compute_ccd_bond_bands(
     lower = np.maximum(rest_arr - widths, 0.5)
     clash_index = (np.asarray(clash_pairs, dtype=np.int64)
                    if clash_pairs else None)
-    clash_lower = (np.full(len(clash_pairs), 3.1, dtype=np.float32)
+    # Guard floor, not a packing shell: 2.6 A matches the TFG projection
+    # channel's deep-burial guard, so the emitted state and the denoiser's
+    # clean estimate obey the same bound. The 2.6-3.4 A packing band stays
+    # with the denoiser's interface prior — projecting the full 3.1 A
+    # shell every step flattened binders into one-atom-thick pancakes.
+    clash_lower = (np.full(len(clash_pairs), 2.6, dtype=np.float32)
                    if clash_pairs else None)
     # rigid aromatic templates as padded arrays: ring_rows [R, K] (-1 pad),
     # ring_coords [R, K, 3]; None when the free chains carry no aromatics
