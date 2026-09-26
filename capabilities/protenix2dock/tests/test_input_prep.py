@@ -433,6 +433,20 @@ def test_clash_guard_pairs_full_crossproduct_and_guard_floor():
     assert out is not None
     _idx, _up, _lo, clash_index, clash_lower, _rigid, _aro = out
     assert clash_index is not None and clash_lower is not None
-    # full cross product: 2 receptor atoms x 2 free-chain atoms
+    # full cross product: 2 receptor atoms x 2 free-chain atoms, all at
+    # the inter-chain guard floor
     assert clash_index.shape == (4, 2)
     assert np.allclose(clash_lower, 2.6, atol=1e-6)
+
+    # separate the free-chain residues: the |i-j|>=2 intra-chain pair
+    # joins at the tighter 2.4 floor (deep-burial only; real turns pack
+    # down to ~2.4)
+    info["res_id"] = np.array([1, 3, 1, 3])
+    out2 = compute_ccd_bond_bands(info, coords, mask, free_entities={1})
+    idx2, floors2 = out2[3], out2[4]
+    intra = [k for k, (a, b) in enumerate(idx2.tolist())
+             if info["asym"][a] == info["asym"][b]]
+    assert intra and all(
+        np.isclose(floors2[k], 2.4, atol=1e-6) for k in intra)
+    inter = [k for k in range(len(floors2)) if k not in intra]
+    assert all(np.isclose(floors2[k], 2.6, atol=1e-6) for k in inter)
