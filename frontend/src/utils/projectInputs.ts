@@ -451,6 +451,7 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
       affinityMode: DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface' | 'dock',
       peptideDesignMode: DEFAULT_PEPTIDE_DESIGN_MODE,
       peptideChirality: 'l' as 'l' | 'd',
+      peptideStructureMode: 'auto' as const,
       peptideBinderLength: DEFAULT_PEPTIDE_BINDER_LENGTH,
       peptideUseInitialSequence: DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE,
       peptideInitialSequence: DEFAULT_PEPTIDE_INITIAL_SEQUENCE,
@@ -583,6 +584,14 @@ function normalizeOptions(value: unknown): PredictionOptions {
     String(raw.peptideChirality ?? rawObj.peptide_chirality ?? 'l').trim().toLowerCase() === 'd'
       ? 'd'
       : 'l';
+  const structureModeRaw = String(
+    raw.peptideStructureMode ?? rawObj.peptide_structure_mode ?? 'auto'
+  ).trim().toLowerCase();
+  const peptideStructureMode = (['auto', 'helix', 'hairpin', 'strand_loop'] as const).includes(
+    structureModeRaw as 'auto' | 'helix' | 'hairpin' | 'strand_loop'
+  )
+    ? (structureModeRaw as 'auto' | 'helix' | 'hairpin' | 'strand_loop')
+    : 'auto';
   const minPeptideLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
   // length window (min/max); min == max behaves as a fixed value.
   const peptideLengthMin = normalizeIntegerOption(
@@ -719,6 +728,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
       notifyEmail,
       peptideDesignMode,
       peptideChirality,
+      peptideStructureMode,
       peptideStructureUpload: isPeptideStructureUpload(raw.peptideStructureUpload)
         ? raw.peptideStructureUpload
         : null,
@@ -769,6 +779,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
     notifyEmail,
     peptideDesignMode,
     peptideChirality,
+    peptideStructureMode,
     peptideStructureUpload: isPeptideStructureUpload(raw.peptideStructureUpload)
       ? raw.peptideStructureUpload
       : null,

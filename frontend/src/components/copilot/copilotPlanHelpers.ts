@@ -73,6 +73,8 @@ export function formatActionSummary(action: CopilotPlanAction): ActionSummaryEnt
         l: 'L-peptide',
         peptideDesignMode: 'Mode',
         linear: 'Linear', cyclic: 'Cyclic', bicyclic: 'Bicyclic',
+        peptideStructureMode: 'Structure',
+        auto: 'Auto', helix: 'Helix', hairpin: 'Hairpin', strand_loop: 'Strand-loop',
       };
       const parts = Object.entries(value as Record<string, unknown>).map(([k, v]) => {
         const kl = k.replace(/_/g, '');
