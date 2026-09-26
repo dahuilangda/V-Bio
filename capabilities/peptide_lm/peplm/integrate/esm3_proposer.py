@@ -29,6 +29,8 @@ except ImportError:
     ESM3_SS_PROFILE = "H"
     ESM3_PEPTIDE_FIRST = False
 
+from peplm.integrate.ss_modes import MODES, build_ss_profile, normalize_mode
+
 _RETRY_ATTEMPTS = 2
 _RETRY_DELAY_S = 3
 
@@ -88,6 +90,7 @@ class ESM3Proposer:
         len_range: tuple[int, int] = (10, 18),
         cyclic: bool = False,
         seed: int = 42,
+        structure_mode: str = "env",
         log=print,
         **_unused: Any,
     ):
@@ -97,12 +100,18 @@ class ESM3Proposer:
         self._log = log
         self._generation = 0
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
-        # ss8 conditioning + context layout, identical across
-        # propose/refill/perplexity/learn so the policy family is stable
+        # structure_mode travels with every request; the service builds
+        # the ss8 template at each call's actual peptide length (hairpin
+        # turns must sit mid-chain, so a length-mismatched static string
+        # would misalign). "env" keeps the legacy ESM3_SS_PROFILE static
+        # profile for callers that never picked a mode.
+        self.structure_mode = normalize_mode(structure_mode)
         self._cond = {
-            "ss_profile": ESM3_SS_PROFILE or None,
+            "structure_mode": self.structure_mode,
             "peptide_first": bool(ESM3_PEPTIDE_FIRST),
         }
+        if self.structure_mode == "env":
+            self._cond["ss_profile"] = ESM3_SS_PROFILE or None
 
     def _post(self, payload: dict, retries: int = _RETRY_ATTEMPTS) -> dict:
         data = json.dumps(payload).encode()

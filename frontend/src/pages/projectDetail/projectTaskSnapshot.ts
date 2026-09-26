@@ -35,6 +35,7 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'affinityDockPocket',
   'peptideDesignMode',
   'peptideChirality',
+  'peptideStructureMode',
   'peptideBinderLength',
   'peptideLengthMin',
   'peptideLengthMax',

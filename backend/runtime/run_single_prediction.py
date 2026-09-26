@@ -8876,6 +8876,18 @@ def run_peptide_design_backend(
     peptide_chirality = str(options.get("peptideChirality") or options.get("peptide_chirality") or "l").strip().lower()
     if peptide_chirality not in ("l", "d"):
         raise ValueError(f"Invalid peptide chirality '{peptide_chirality}'. Must be 'l' or 'd'.")
+    # Secondary-structure mode for the ESM3 proposal engine: auto leaves
+    # the ss8 track off (model decides), helix/hairpin/strand_loop shape
+    # the proposal composition. Absent key falls back to the
+    # ESM3_SS_PROFILE deployment default ("env") for older task payloads.
+    structure_mode = str(
+        options.get("peptideStructureMode")
+        or options.get("structure_mode") or "env").strip().lower()
+    if structure_mode not in ("auto", "helix", "hairpin", "strand_loop",
+                              "hth", "env"):
+        raise ValueError(
+            f"Invalid peptide structure mode '{structure_mode}'. Must be "
+            "auto/helix/hairpin/strand_loop/hth.")
     # NOTE: the docking-engine REQUIREMENT intentionally lives in the
     # frontend/API contract only. Here `peptideChirality == 'd'` alone triggers
     # the mirror workflow, because live deployments may still submit legacy
@@ -9185,6 +9197,7 @@ def run_peptide_design_backend(
         peptide_length=binder_length,
         len_range=(_length_lo or 8, _length_hi or 25),
         cyclic=(design_mode == "cyclic"),
+        structure_mode=structure_mode,
         device=f"cuda:{_esm3_gpu}",
         seed=random_seed,
         work_dir=str(Path(temp_dir) / "esm3_proposer"),
@@ -9192,7 +9205,7 @@ def run_peptide_design_backend(
     )
     _proposer_log(
         f"ESM3 proposal engine ready (length={binder_length or 'adaptive'}, "
-        f"mode={design_mode}, GPU={_esm3_gpu})")
+        f"mode={design_mode}, structure={structure_mode}, GPU={_esm3_gpu})")
 
     # D-peptide mirror workflow context: mirror the target once so every
     # candidate is designed against the fixed D-target (see module docstring

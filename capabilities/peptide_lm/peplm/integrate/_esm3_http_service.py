@@ -16,6 +16,7 @@ sys.path.insert(0, str(PEPLM_ROOT))
 
 import torch
 
+from peplm.integrate.ss_modes import build_ss_profile, normalize_mode
 from peplm.models.esm3_policy import ESM3Policy
 
 policy = ESM3Policy(
@@ -63,11 +64,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def _conditioning(self, req):
         """Sampling-time conditioning, reused by every mode so the
-        policy family never shifts between propose and learn."""
-        return {
+        policy family never shifts between propose and learn.
+
+        structure_mode (auto/helix/hairpin/...) is resolved to an ss8
+        template AT EACH CALL'S ACTUAL peptide length — a hairpin turn
+        must sit mid-chain, so one static string would misalign when
+        lengths vary. A raw ss_profile string still overrides (legacy
+        ESM3_SS_PROFILE callers)."""
+        mode = req.get("structure_mode")
+        cond = {
+            "structure_mode": normalize_mode(mode) if mode else None,
             "ss_profile": req.get("ss_profile") or None,
             "peptide_first": bool(req.get("peptide_first", False)),
         }
+        return cond
+
+    @staticmethod
+    def _ss_profile_for(cond, n: int):
+        """Exact-length ss8 template: explicit legacy profile wins, else
+        the mode's builder; None leaves the ss8 track off."""
+        if cond.get("ss_profile"):
+            return cond["ss_profile"]
+        return build_ss_profile(cond.get("structure_mode"), n)
 
     def _propose(self, req):
         import math
@@ -90,7 +108,9 @@ class Handler(BaseHTTPRequestHandler):
                     receptor=receptor, pep_len=pep_len, n=batch,
                     keep=batch,
                     temperature=float(req.get("temperature", 0.9)),
-                    num_steps=8, strategy="entropy", **cond)
+                    num_steps=8, strategy="entropy",
+                    ss_profile=self._ss_profile_for(cond, pep_len),
+                    peptide_first=cond["peptide_first"])
                 all_trajs.extend(trajs)
                 remaining -= batch
                 if remaining > 0:
@@ -133,7 +153,8 @@ class Handler(BaseHTTPRequestHandler):
                 parent_tokens=parent_tokens,
                 remask_positions=[int(p) for p in positions],
                 temperature=temperature,
-                **cond,
+                ss_profile=self._ss_profile_for(cond, len(parent)),
+                peptide_first=cond["peptide_first"],
             )
         if traj is None:
             return {"sequence": None, "reason": "no change"}
@@ -142,10 +163,13 @@ class Handler(BaseHTTPRequestHandler):
         return {"sequence": seq if seq else None}
 
     def _perplexity(self, req):
+        seq = req.get("peptide_sequence", "")
         score = policy.score_sequence(
             req.get("receptor_sequence", ""),
-            req.get("peptide_sequence", ""),
-            **self._conditioning(req))
+            seq,
+            ss_profile=self._ss_profile_for(
+                self._conditioning(req), len(seq)),
+            peptide_first=bool(req.get("peptide_first", False)))
         return {"perplexity": float(-score) if score is not None else 10.0}
 
     def _learn(self, req):
@@ -155,7 +179,6 @@ class Handler(BaseHTTPRequestHandler):
         MaskGIT trajectory recording that Rollout requires — the HTTP
         boundary carries sequences and rewards, not per-step states."""
         data = req.get("rollouts", [])
-        pep_len = int(req.get("peptide_length", 14))
         cond = self._conditioning(req)
         groups: dict[str, list] = {}
         for rd in data:
@@ -171,19 +194,25 @@ class Handler(BaseHTTPRequestHandler):
             m = sum(rewards) / len(rewards)
             sd = max(max(rewards) - m, m - min(rewards), 1e-6)
             for r in rows:
-                tokens = policy.encode_peptide(r["sequence"], pep_len)
+                # each rollout trains at ITS OWN length: mutation children
+                # keep their parent's length and a padded-to-pep_len row
+                # would misalign a length-dependent ss8 template
+                n = len(r.get("sequence") or "")
+                if n < 4:
+                    continue
+                tokens = policy.encode_peptide(r["sequence"], n)
                 if tokens:
                     adv = (r["reward"] - m) / sd
                     # Per-residue credit: positions with low pLDDT get
                     # higher gradient weight (BindCraft2-style — the model
                     # learns to change what is broken, not what works)
                     plddts = r.get("plddts") or []
-                    if plddts and len(plddts) == pep_len:
+                    if plddts and len(plddts) == n:
                         credit = [max(1.0 - float(p), 0.05) for p in plddts]
                         csum = sum(credit) or 1.0
-                        credit = [c / csum * pep_len for c in credit]
+                        credit = [c / csum * n for c in credit]
                     else:
-                        credit = [1.0] * pep_len
+                        credit = [1.0] * n
                     updates.append((tokens, adv, credit))
 
         if len(updates) < 2:
@@ -195,26 +224,30 @@ class Handler(BaseHTTPRequestHandler):
             lr=1e-5)
         opt.zero_grad()
         total_loss = torch.tensor(0.0, device=policy.device)
-        ctx_cache = {}
         rec_seq = req.get("receptor_sequence", "")
-        ss8 = (policy.encode_ss8(rec_seq, pep_len, cond["ss_profile"],
-                                 peptide_first=cond["peptide_first"])
-               if cond["ss_profile"] else None)
-        pep_start = policy.peptide_start(
-            rec_seq, pep_len, peptide_first=cond["peptide_first"])
+        ctx_cache: dict[int, tuple] = {}
         for tokens, adv, credit in updates:
-            seq = "".join(policy.decode_tokens(tokens) or [])
-            if seq not in ctx_cache:
-                ctx_cache[seq] = policy.encode_context(
-                    rec_seq, pep_len,
-                    peptide_first=cond["peptide_first"])
-            ctx = ctx_cache[seq]
+            n = len(tokens)
+            if n not in ctx_cache:
+                # context + per-length ss8: hairpin turns sit mid-chain,
+                # so each length needs its own template
+                ss8_n = self._ss_profile_for(cond, n)
+                ctx_cache[n] = (
+                    policy.encode_context(rec_seq, n,
+                                          peptide_first=cond["peptide_first"]),
+                    policy.peptide_start(rec_seq, n,
+                                         peptide_first=cond["peptide_first"]),
+                    policy.encode_ss8(rec_seq, n, ss8_n,
+                                      peptide_first=cond["peptide_first"])
+                    if ss8_n else None,
+                )
+            ctx, pep_start, ss8 = ctx_cache[n]
             toks = ctx.clone()
             for i, tid in enumerate(tokens):
                 toks[0, pep_start + i] = tid
             logits = policy._forward_sequence_logits(toks, ss8)
             lp = Fn.log_softmax(
-                logits[0, pep_start:pep_start + pep_len, :], dim=-1)
+                logits[0, pep_start:pep_start + n, :], dim=-1)
             tok_tensor = torch.tensor(tokens, device=policy.device)
             scores = lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
             # Per-residue weighted REINFORCE: each token's logprob is

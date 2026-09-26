@@ -26,6 +26,7 @@ import {
   handleRuntimePeptideBinderLengthChangeAction,
   handleRuntimePeptideDesignModeChangeAction,
   handleRuntimePeptideChiralityChangeAction,
+  handleRuntimePeptideStructureModeChangeAction,
   handleRuntimePeptideStructureUploadChangeAction,
   handleRuntimePeptideEliteSizeChangeAction,
   handleRuntimePeptideInitialSequenceChangeAction,
@@ -67,6 +68,9 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimeLowVramChange: (lowVram: boolean) => void;
   handleRuntimePeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   handleRuntimePeptideChiralityChange: (chirality: 'l' | 'd') => void;
+  handleRuntimePeptideStructureModeChange: (
+    mode: 'auto' | 'helix' | 'hairpin' | 'strand_loop'
+  ) => void;
   handleRuntimePeptideStructureUploadChange: (upload: {
     fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
   } | null) => void;
@@ -188,6 +192,15 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
   const handleRuntimePeptideChiralityChange = (chirality: 'l' | 'd') => {
     handleRuntimePeptideChiralityChangeAction({
       peptideChirality: chirality,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideStructureModeChange = (
+    structureMode: 'auto' | 'helix' | 'hairpin' | 'strand_loop'
+  ) => {
+    handleRuntimePeptideStructureModeChangeAction({
+      peptideStructureMode: structureMode,
       setDraft
     });
   };
@@ -366,6 +379,7 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
     handleRuntimePeptideChiralityChange,
+    handleRuntimePeptideStructureModeChange,
     handleRuntimePeptideStructureUploadChange,
     handleRuntimePeptideBinderLengthChange,
     handleRuntimePeptideLengthRange,
