@@ -12,6 +12,7 @@ semigreedy mutation + de novo exploration):
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 import urllib.error
@@ -298,21 +299,36 @@ class ESM3Proposer:
             return None
 
     def learn(self, elite_rows: list[dict], all_rows: list[dict]):
-        """GRPO with per-residue pLDDT credit.
+        """GRPO with per-residue pLDDT credit + foldability prerequisite.
 
         Positions with low pLDDT get higher gradient weight — the model
-        learns to change what's broken, not what works."""
+        learns to change what's broken, not what works. Candidates below
+        the pLDDT gate have their reward dampened proportionally: GRPO
+        never reinforces contact-maximizing junk as a positive advantage
+        (measured without this: H 19% / G 16% / hydrophobic 8% after 7
+        auto-mode generations)."""
+        PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
         rollouts = []
         for r in all_rows:
             score = r.get("composite_score")
             if score is None:
                 score = r.get("ipsae_dom")
             if r.get("sequence") and isinstance(score, (int, float)):
+                plddts = r.get("plddts") or []
+                mean_plddt = (
+                    sum(plddts) / len(plddts) * 100 if plddts else None)
+                if mean_plddt is not None and mean_plddt < PLDDT_GATE:
+                    # dampen below-gate rewards toward zero: within a GRPO
+                    # group they still provide negative contrast, but the
+                    # advantage magnitude shrinks with distance from the
+                    # gate so a floppy high-ipSAE candidate cannot dominate
+                    # a foldable one
+                    score = float(score) * (0.1 + 0.9 * mean_plddt / PLDDT_GATE)
                 rollouts.append({
                     "sequence": r["sequence"],
                     "reward": float(score),
                     "group": r.get("proposal_group", "default"),
-                    "plddts": r.get("plddts") or [],
+                    "plddts": plddts,
                 })
         if len(rollouts) < 2:
             return
