@@ -10050,13 +10050,25 @@ def run_peptide_design_backend(
             completed_tasks += 1
             generation_done += 1
 
-            all_results.sort(
-                key=lambda item: (
-                    1 if isinstance(item.get("composite_score"), (int, float)) else 0,
-                    float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
-                ),
-                reverse=True,
-            )
+            # pLDDT hard gate for the generation's elite pool: the next
+            # generation's parents and the GRPO advantage baseline only
+            # see foldable candidates. Without this the composite's ipSAE
+            # dominance reinforces contact-maximizing junk (H/G-rich
+            # sequences with no fold) as parents for mutation.
+            _PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
+
+            def _gen_elite_sort_key(item):
+                plddt = item.get("binder_avg_plddt")
+                plddt_ok = isinstance(plddt, (int, float)) and plddt >= _PLDDT_GATE
+                composite = item.get("composite_score")
+                has_score = isinstance(composite, (int, float))
+                return (
+                    1 if has_score else 0,
+                    1 if plddt_ok else 0,
+                    float(composite) if has_score else float("-inf"),
+                )
+
+            all_results.sort(key=_gen_elite_sort_key, reverse=True)
             elite_population = [
                 {
                     "sequence": str(row.get("sequence") or ""),
@@ -10483,13 +10495,25 @@ def run_peptide_design_backend(
             _finalize_candidate,
         )
 
-    all_results.sort(
-        key=lambda item: (
-            1 if isinstance(item.get("composite_score"), (int, float)) else 0,
-            float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
-        ),
-        reverse=True,
-    )
+    # pLDDT hard gate: only foldable candidates compete for elite slots,
+    # then composite (ipSAE-dominant) ranks within the qualified set.
+    # Without this, GRPO reinforces contact-maximizing junk — histidine/
+    # glycine-rich "peptides" that score ipSAE but have no fold (measured
+    # H 19%, G 16%, hydrophobic 8% after 7 auto-mode generations).
+    _PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
+
+    def _elite_sort_key(item):
+        plddt = item.get("binder_avg_plddt")
+        plddt_ok = isinstance(plddt, (int, float)) and plddt >= _PLDDT_GATE
+        composite = item.get("composite_score")
+        has_score = isinstance(composite, (int, float))
+        return (
+            1 if has_score else 0,
+            1 if plddt_ok else 0,
+            float(composite) if has_score else float("-inf"),
+        )
+
+    all_results.sort(key=_elite_sort_key, reverse=True)
     top_results = _select_nsga2_peptide_elites(all_results, min(24, len(all_results)))
     top_results.sort(key=_peptide_rank_score, reverse=True)
     if not top_results:
