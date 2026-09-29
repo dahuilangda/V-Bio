@@ -315,9 +315,11 @@ class ESM3Proposer:
                 score = r.get("ipsae_dom")
             if r.get("sequence") and isinstance(score, (int, float)):
                 plddts = r.get("plddts") or []
+                # missing plddts = below gate (no foldability evidence);
+                # only apply damping when we have actual per-residue data
                 mean_plddt = (
-                    sum(plddts) / len(plddts) * 100 if plddts else None)
-                if mean_plddt is not None and mean_plddt < PLDDT_GATE:
+                    sum(plddts) / len(plddts) * 100 if plddts else 0.0)
+                if mean_plddt < PLDDT_GATE:
                     # dampen below-gate rewards toward zero: within a GRPO
                     # group they still provide negative contrast, but the
                     # advantage magnitude shrinks with distance from the

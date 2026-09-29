@@ -9684,7 +9684,7 @@ def run_peptide_design_backend(
         # completes. Finalization order is completion order; all_results gets
         # sorted on every append either way.)
         def _finalize_candidate(ctx: Dict[str, Any]) -> None:
-            nonlocal completed_tasks, generation_done
+            nonlocal completed_tasks, generation_done, elite_population
             if ctx.get("reject"):
                 print(ctx["reject"], file=sys.stderr)
                 generation_rejected_rows.append({
@@ -10057,18 +10057,12 @@ def run_peptide_design_backend(
             # sequences with no fold) as parents for mutation.
             _PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
 
-            def _gen_elite_sort_key(item):
-                plddt = item.get("binder_avg_plddt")
-                plddt_ok = isinstance(plddt, (int, float)) and plddt >= _PLDDT_GATE
-                composite = item.get("composite_score")
-                has_score = isinstance(composite, (int, float))
-                return (
-                    1 if has_score else 0,
-                    1 if plddt_ok else 0,
-                    float(composite) if has_score else float("-inf"),
-                )
-
-            all_results.sort(key=_gen_elite_sort_key, reverse=True)
+            # pLDDT hard gate for this generation's elite pool: only
+            # foldable candidates become parents for mutation and GRPO.
+            gated_gen = [r for r in all_results
+                         if isinstance(r.get("binder_avg_plddt"), (int, float))
+                         and r["binder_avg_plddt"] >= _PLDDT_GATE]
+            elite_pool = gated_gen if gated_gen else all_results
             elite_population = [
                 {
                     "sequence": str(row.get("sequence") or ""),
@@ -10076,7 +10070,7 @@ def run_peptide_design_backend(
                     "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
                     "score": row.get("composite_score"),
                 }
-                for row in _select_nsga2_peptide_elites(all_results, elite_size)
+                for row in _select_nsga2_peptide_elites(elite_pool, elite_size)
             ]
             # PeptideLM: GRPO update on this generation's scored rows so the
             # proposal policy improves round over round
@@ -10502,19 +10496,14 @@ def run_peptide_design_backend(
     # H 19%, G 16%, hydrophobic 8% after 7 auto-mode generations).
     _PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
 
-    def _elite_sort_key(item):
-        plddt = item.get("binder_avg_plddt")
-        plddt_ok = isinstance(plddt, (int, float)) and plddt >= _PLDDT_GATE
-        composite = item.get("composite_score")
-        has_score = isinstance(composite, (int, float))
-        return (
-            1 if has_score else 0,
-            1 if plddt_ok else 0,
-            float(composite) if has_score else float("-inf"),
-        )
-
-    all_results.sort(key=_elite_sort_key, reverse=True)
-    top_results = _select_nsga2_peptide_elites(all_results, min(24, len(all_results)))
+    # Hard gate BEFORE NSGA-II: below-gate candidates are excluded from
+    # the pool entirely, not just sorted lower. NSGA-II ignores list
+    # order, so sorting alone was a no-op (audit P1-1).
+    gated = [r for r in all_results
+             if isinstance(r.get("binder_avg_plddt"), (int, float))
+             and r["binder_avg_plddt"] >= _PLDDT_GATE]
+    elite_pool = gated if gated else all_results
+    top_results = _select_nsga2_peptide_elites(elite_pool, min(24, len(elite_pool)))
     top_results.sort(key=_peptide_rank_score, reverse=True)
     if not top_results:
         raise RuntimeError("Peptide design produced no valid candidates.")
