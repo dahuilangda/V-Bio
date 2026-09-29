@@ -1010,7 +1010,7 @@ def compute_stereo_peptide_bonds(
                 continue
             if not {"CA", "C"} <= atoms.keys() or not {"N", "CA"} <= nxt.keys():
                 continue
-            if comp_ids[nxt["N"]] == "PRO":
+            if comp_ids[nxt["N"]].upper() == "PRO":
                 continue  # X-Pro may be cis (~5% in nature); stay free
             quads.append([atoms["CA"], atoms["C"], nxt["N"], nxt["CA"]])
             orients.append(1.0)

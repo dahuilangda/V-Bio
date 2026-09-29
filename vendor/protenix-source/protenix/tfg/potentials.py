@@ -918,13 +918,12 @@ class StereoBondPotential(Potential):
         buffer = float(params["buffer"])
         value, grad_value = _abs_dihedral_value_and_grad(coords, idx, True)
         trans = orient > 0.5
-        # solver convention (see ChiralAtomPotential._project): pass the
-        # SIGNED DEFICIT -- value minus its bound, negative when violated
-        # -- and mask on deficit < 0
+        # solver convention: v = value - bound, negative when violated;
+        # dx = -J*v/|J|^2 pushes value toward the bound
         deficit = torch.where(
             trans,
             value - (float(torch.pi) - buffer),
-            buffer - value,
+            value - buffer,
         )
         mask = deficit < 0
         if mask.sum() == 0:
