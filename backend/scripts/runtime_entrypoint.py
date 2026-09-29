@@ -128,14 +128,6 @@ def run_gpu_worker() -> None:
 
     env = os.environ.copy()
     env["CELERY_WORKER_NAME"] = f"gpu@{socket.gethostname()}"
-    # max-tasks-per-child: the GPU model loads per child fork, so 1 means a
-    # full ~6 GB CUDA context rebuild for EVERY task. Under queue pressure
-    # (>100 tasks) the fork/cleanup cycles fragment GPU memory and eventually
-    # stall the parent (observed: 155-task backlog, zero consumption for 48 h
-    # until manual restart). A pool of 50 amortizes the load while still
-    # recycling children periodically to bound memory leaks.
-    # prefetch-multiplier 1: without it, each of the 4 concurrency slots
-    # prefetches a task, starving other workers when the queue is short.
     _exec_or_die(
         [
             "celery",
