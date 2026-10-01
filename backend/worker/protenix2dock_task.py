@@ -211,7 +211,16 @@ def protenix2dock_task(self, score_args: dict):
             bond_pairs = str(score_args.get("bond_pairs") or "").strip()
             # linker topology (bicyclic SG<->linker) and intra-peptide bonds
             # (cyclic head-tail N-C) both ride --bond_pairs; only the former
-            # carries a linker chain entity
+            # carries a linker chain entity. When the caller didn't label
+            # the linker chain, derive it from any cross-chain bond ref:
+            # the staged linker rides the chain letter AFTER the peptide.
+            if not linker_chain and bond_pairs and ";" in bond_pairs:
+                refs = [r for r in bond_pairs.replace(";", ",").split(",") if ":" in r]
+                for ref in refs:
+                    letter = ref.split(":", 1)[0].strip()
+                    if letter and letter != peptide_chain:
+                        linker_chain = letter
+                        break
             if linker_chain:
                 if not bond_pairs:
                     raise ValueError("peptide mode linker requires bond_pairs.")
