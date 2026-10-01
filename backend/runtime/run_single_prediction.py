@@ -4835,7 +4835,7 @@ def run_protenix_backend(
         print("Protenix 容器使用默认 root 用户（官方镜像推荐）", file=sys.stderr)
     print("Protenix 资源模式: host-mounted（源码 + 权重 + common）", file=sys.stderr)
     print(f"Protenix 缓存挂载: {protenix_common_cache_mount} -> /cache/common", file=sys.stderr)
-    if protenix_common_cache_mount != protenix_common_cache_dir:
+    if protenix_common_overlay_root is not None:
         print(f"Protenix 原始 common cache: {protenix_common_cache_dir}", file=sys.stderr)
 
     docker_command.extend(extra_args)
@@ -4909,6 +4909,26 @@ def run_protenix_backend(
         image=image,
         paths=[protenix_input_dir, protenix_output_dir, protenix_log_path],
     )
+
+    # The overlay (merged CCD + hardlinked common cache) exists only for the container
+    # mount above; the container has exited by now, so drop it before reporting the
+    # result — otherwise it accumulates multi-GB per task under the results root.
+    if protenix_common_overlay_root is not None and protenix_common_overlay_root.is_dir():
+        overlay_unique_bytes = 0
+        try:
+            for p in protenix_common_overlay_root.rglob("*"):
+                # Hardlinks/symlinks share bytes with the shared cache; only
+                # nlink==1 regular files are this task's exclusive data.
+                if p.is_file() and not p.is_symlink() and p.stat().st_nlink == 1:
+                    overlay_unique_bytes += p.stat().st_size
+        except OSError:
+            pass
+        shutil.rmtree(protenix_common_overlay_root, ignore_errors=True)
+        print(
+            f"已清理 Protenix common overlay: {protenix_common_overlay_root} "
+            f"(独占数据 {overlay_unique_bytes / 1e6:.1f}MB)",
+            file=sys.stderr,
+        )
 
     if return_code != 0:
         tail_text = "".join(output_tail[-200:])
@@ -7661,10 +7681,18 @@ def _dpeptide_dispatch_refine(
                   file=sys.stderr)
 
     # linker chain only exists for bicyclic topology (SG <-> linker anchors);
-    # cyclic head-tail pairs are intra-peptide and carry no linker entity
-    has_linker = bool(
-        bond_pairs and "," in bond_pairs
-        and any(ref.startswith("L:") for ref in bond_pairs.replace(";", ",").split(",")))
+    # cyclic head-tail pairs are intra-peptide and carry no linker entity.
+    # The staged linker chain letter follows the receptor chains (C for a
+    # monomer target, D for a dimer, ...) — NOT the literal "L" — so derive
+    # the letter from any cross-chain bond ref.
+    linker_letter = ""
+    if bond_pairs and "," in bond_pairs:
+        refs = [r for r in bond_pairs.replace(";", ",").split(",") if ":" in r]
+        for ref in refs:
+            letter = ref.split(":", 1)[0].strip()
+            if letter and letter != peptide_chain_letter:
+                linker_letter = letter
+                break
     return _celery.send_task(
         "backend.worker.tasks.protenix2dock_task",
         kwargs={"score_args": {
@@ -7679,7 +7707,7 @@ def _dpeptide_dispatch_refine(
             # pair would drag the reported iptm
             "interface_chains": receptor_chain_letters + "," + peptide_chain_letter,
             "bond_pairs": bond_pairs or "",
-            "linker_chain": "L" if has_linker else "",
+            "linker_chain": linker_letter,
             "linker_ccd": linker_ccd,
             "pocket_res": pocket_res or "",
             "seed": int(seed),
@@ -10711,6 +10739,15 @@ def run_peptide_design_backend(
     )
 
 
+# The two CCD artifacts are rewritten (merged) per overlay; every other entry in
+# the shared cache is static and must be linked, never duplicated. Keep the names
+# in one place: the skip set in the materialization loop is load-bearing — an
+# unlisted CCD artifact would be hardlinked over the freshly merged overlay copy.
+_PROTENIX_CCD_CIF = "components.cif"
+_PROTENIX_CCD_PKL = "components.cif.rdkit_mol.pkl"
+_PROTENIX_MERGED_CCD_FILES = (_PROTENIX_CCD_CIF, _PROTENIX_CCD_PKL)
+
+
 def _merge_custom_ccd_with_existing_cache(
     source_common_dir: Path,
     overlay_root: Path,
@@ -10724,8 +10761,8 @@ def _merge_custom_ccd_with_existing_cache(
     if not source_common_dir.is_dir():
         raise RuntimeError(f"Protenix common cache directory is missing: {source_common_dir}")
 
-    source_components = source_common_dir / "components.cif"
-    source_rdkit = source_common_dir / "components.cif.rdkit_mol.pkl"
+    source_components = source_common_dir / _PROTENIX_CCD_CIF
+    source_rdkit = source_common_dir / _PROTENIX_CCD_PKL
     if not source_components.is_file():
         raise FileNotFoundError(f"Missing Protenix CCD components file: {source_components}")
     if not source_rdkit.is_file():
@@ -10742,7 +10779,7 @@ def _merge_custom_ccd_with_existing_cache(
     merged_cif_text = source_components.read_text(encoding="utf-8", errors="replace").rstrip()
     if additions:
         merged_cif_text = merged_cif_text + "\n" + "\n".join(additions) + "\n"
-    (overlay_common / "components.cif").write_text(merged_cif_text, encoding="utf-8")
+    (overlay_common / _PROTENIX_CCD_CIF).write_text(merged_cif_text, encoding="utf-8")
 
     merged_rdkit_mols: Dict[str, Chem.Mol] = {}
     try:
@@ -10756,11 +10793,11 @@ def _merge_custom_ccd_with_existing_cache(
     merged_rdkit_mols.update(custom_mols)
     merged_rdkit_mols.update(extra_mols)
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
-    with (overlay_common / "components.cif.rdkit_mol.pkl").open("wb") as handle:
+    with (overlay_common / _PROTENIX_CCD_PKL).open("wb") as handle:
         pickle.dump(merged_rdkit_mols, handle)
 
     for source_item in source_common_dir.iterdir():
-        if source_item.name in {"components.cif", "components.cif.rdkit_mol.pkl"}:
+        if source_item.name in _PROTENIX_MERGED_CCD_FILES:
             continue
         target_item = overlay_common / source_item.name
         if target_item.is_symlink():
@@ -10769,7 +10806,31 @@ def _merge_custom_ccd_with_existing_cache(
             if source_item.is_dir():
                 if target_item.exists() and not target_item.is_dir():
                     target_item.unlink()
-                shutil.copytree(source_item, target_item, dirs_exist_ok=True)
+                try:
+                    # hf_hub is a multi-GB static tree whose snapshot entries are symlinks
+                    # into blobs/. A default copytree dereferences those symlinks and
+                    # duplicates every blob into each task's overlay, so hardlink the
+                    # files and keep the symlinks as symlinks instead.
+                    shutil.copytree(
+                        source_item,
+                        target_item,
+                        symlinks=True,
+                        copy_function=os.link,
+                        dirs_exist_ok=True,
+                    )
+                except OSError as link_err:
+                    # A partial first pass leaves hardlinks behind, and copyfile's
+                    # samefile guard then fails a plain re-copy on every linked
+                    # entry; start the fallback from a clean target instead.
+                    print(
+                        f"[WARN] Protenix common cache hardlink failed for "
+                        f"{source_item.name} ({link_err}); falling back to full copy",
+                        file=sys.stderr,
+                    )
+                    shutil.rmtree(target_item, ignore_errors=True)
+                    shutil.copytree(
+                        source_item, target_item, symlinks=True, dirs_exist_ok=True
+                    )
             elif source_item.is_file():
                 if target_item.exists():
                     if not target_item.is_file():
