@@ -5311,11 +5311,13 @@ def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
             seq_chars[idx] = mask_char
     # a bicyclic topology needs exactly the masked cysteines: ESM3's
     # mutation path can propose Cys at free positions, tripping the
-    # "exactly 3" validation downstream. Free positions never carry Cys.
+    # "exactly 3" validation downstream. Free positions never carry Cys,
+    # and anything past the mask length is dropped.
     if "C" in sequence_mask:
         for idx, mask_char in enumerate(sequence_mask):
             if mask_char == "X" and idx < len(seq_chars) and seq_chars[idx] == "C":
                 seq_chars[idx] = "S"
+        seq_chars = seq_chars[:len(sequence_mask)]
     return "".join(seq_chars)
 
 
