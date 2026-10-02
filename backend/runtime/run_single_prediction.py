@@ -7778,7 +7778,8 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
     # inversion means the inpainting contract broke). Hard reject.
     if rec_bad:
         raise RuntimeError(
-            f"受体链 {receptor.name} 应为 D, 违规 {len(rec_bad)}: "
+            f"受体链 {[c.name for c in receptor_chains]} 应为 D, "
+            f"违规 {len(rec_bad)}: "
             + ",".join(f"{n}{r}" for n, r, _ in rec_bad[:6]))
     # Peptide flips: the free-diffusion chain has no improper-dihedral term;
     # 1-3 CA inversions per 11-13-mer are numerical artifacts of the mirror
