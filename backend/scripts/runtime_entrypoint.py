@@ -60,7 +60,11 @@ def _resolve_cpu_worker_concurrency(cli_concurrency: str | None) -> int:
         value = 0
 
     if value <= 0:
-        value = detected_cores
+        # cap prefork children: 128 forks of a heavy module invite silent
+        # child deaths (observed: long tasks redelivered via acks_late and
+        # restarted from generation 1); 32 saturates the CPU-bound work
+        # anyway since candidate subtasks run on GPU workers
+        value = min(detected_cores, 32)
     value = min(value, detected_cores)
     return max(1, value)
 

@@ -625,8 +625,12 @@ def register_prediction_routes(
             peptide_target_chain = str(request.form.get('peptide_design_target_chain', '')).strip()
             if peptide_target_chain:
                 predict_args['peptide_design_target_chain'] = peptide_target_chain
-            # Candidate subtasks are dispatched as independent Celery GPU jobs.
-            predict_args['peptide_subtask_queue'] = str(queue_selection.get('queue') or '').strip()
+            # Candidate subtasks ride the DEFAULT queue: peptide design runs
+            # for hours, and a high-priority claim would starve short user
+            # jobs (single structure predictions) behind hundreds of
+            # candidates. Short jobs keep the high lane.
+            subtask_selection = select_queue_for_capability(requested_capability, 'default')
+            predict_args['peptide_subtask_queue'] = str(subtask_selection.get('queue') or '').strip()
             if peptide_structure_input:
                 predict_args['peptide_structure_input'] = peptide_structure_input
         if template_inputs:
