@@ -9134,6 +9134,44 @@ def run_peptide_design_backend(
     all_results: List[Dict[str, Any]] = []
     peptide_started_at = time.time()
 
+    # Generation checkpoint: acks_late redelivers a predict_task whose worker
+    # died mid-run; without persistence the redesign restarts from generation
+    # 1 and burns hours of GPU time. The checkpoint lives under the stable
+    # BOLTZ_TASK_ID (same across redeliveries), not the per-attempt temp dir.
+    _ckpt_root = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / "peptide_checkpoints"
+    _ckpt_path = _ckpt_root / f"{os.environ.get('BOLTZ_TASK_ID', record_id)}.json"
+    _start_generation = 1
+
+    def _save_generation_checkpoint(gen: int) -> None:
+        try:
+            _ckpt_root.mkdir(parents=True, exist_ok=True)
+            _ckpt_path.write_text(json.dumps({
+                "generation": gen,
+                "completed_tasks": completed_tasks,
+                "evaluated": sorted(evaluated_sequences),
+                "elite_population": elite_population,
+                "all_results": all_results,
+            }))
+        except OSError:
+            pass  # checkpoint is best-effort; run continues without it
+
+    if _ckpt_path.is_file():
+        try:
+            _saved = json.loads(_ckpt_path.read_text())
+            _start_generation = int(_saved.get("generation", 1)) + 1
+            completed_tasks = int(_saved.get("completed_tasks", 0))
+            evaluated_sequences = set(_saved.get("evaluated", []))
+            elite_population = list(_saved.get("elite_population", []))
+            all_results = list(_saved.get("all_results", []))
+            if _start_generation > 1:
+                print(
+                    f"[peptide-design] resumed from checkpoint: "
+                    f"generation {_start_generation}, {completed_tasks} "
+                    f"candidates, {len(elite_population)} elites",
+                    file=sys.stderr)
+        except (ValueError, json.JSONDecodeError):
+            _start_generation = 1
+
     def _torch_cuda_available() -> bool:
         try:
             import torch
@@ -9419,7 +9457,7 @@ def run_peptide_design_backend(
         )
     print(f"Peptide design subtask celery queue: {resolved_subtask_queue}", file=sys.stderr)
 
-    for generation in range(1, iterations + 1):
+    for generation in range(_start_generation, iterations + 1):
         _write_peptide_progress(
             progress_path,
             {
@@ -10110,6 +10148,9 @@ def run_peptide_design_backend(
                 }
                 for row in _select_nsga2_peptide_elites(elite_pool, elite_size)
             ]
+            # persist after the elites of this generation are final: a worker
+            # death before the next generation's save would otherwise lose it
+            _save_generation_checkpoint(generation)
             # PeptideLM: GRPO update on this generation's scored rows so the
             # proposal policy improves round over round
             try:
