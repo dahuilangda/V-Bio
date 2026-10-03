@@ -9139,7 +9139,7 @@ def run_peptide_design_backend(
     # 1 and burns hours of GPU time. The checkpoint lives under the stable
     # BOLTZ_TASK_ID (same across redeliveries), not the per-attempt temp dir.
     _ckpt_root = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / "peptide_checkpoints"
-    _ckpt_path = _ckpt_root / f"{os.environ.get('BOLTZ_TASK_ID', record_id)}.json"
+    _ckpt_path = _ckpt_root / f"{os.environ.get('BOLTZ_TASK_ID') or 'local'}.json"
     _start_generation = 1
 
     def _save_generation_checkpoint(gen: int) -> None:
