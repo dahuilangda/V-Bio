@@ -672,7 +672,7 @@ def sample_diffusion(
                 # ONE bond pass to restore any covalent distortion the
                 # second floor pass introduces (POCS alternation).
                 if (_clash_project is not None
-                        and step_i >= num_diffusion_steps - _TAIL_STERIC_STEPS):
+                        and step_i >= len(noise_schedule) - 1 - _TAIL_STERIC_STEPS):
                     _clash_project(x_l, iters=5)
                     if _bond_project is not None:
                         _bond_project(x_l, iters=15)
