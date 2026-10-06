@@ -63,17 +63,38 @@ def _sequence_identity(a: str, b: str) -> float:
     return sum(1 for x, y in zip(a, b) if x == y) / len(a)
 
 
+def _max_homopolymer_run(seq: str) -> int:
+    """Longest run of one identical residue."""
+    best = run = 0
+    prev = ""
+    for c in seq:
+        run = run + 1 if c == prev else 1
+        best = max(best, run)
+        prev = c
+    return best
+
+
+# Runs of >=5 identical residues are a degenerate exploration mode: they
+# score well on contact-count rewards (long uniform side chains bury
+# against any charged surface) but are physically unrealizable — an R7
+# peptide shipped with inter_min 2.08 A, 27 clash pairs, every sample
+# rejected by the final gate after ~40 min of GPU per candidate.
+_MAX_RUN = 5
+
+
 def _diversity_filter(
     proposals: list[tuple], threshold: float = 0.85
 ) -> list[tuple]:
     """Reject proposals whose identity to an already-accepted proposal
-    exceeds the threshold. Greedy first-come-first-kept; the caller
-    sorts by quality before filtering so the best variant of each
-    cluster survives."""
+    exceeds the threshold, plus degenerate homopolymer runs. Greedy
+    first-come-first-kept; the caller sorts by quality before filtering
+    so the best variant of each cluster survives."""
     kept: list[tuple] = []
     kept_seqs: list[str] = []
     for prop in proposals:
         seq = prop[0]
+        if _max_homopolymer_run(seq) >= _MAX_RUN:
+            continue
         if any(_sequence_identity(seq, k) > threshold for k in kept_seqs):
             continue
         kept.append(prop)
