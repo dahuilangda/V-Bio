@@ -122,6 +122,16 @@ class InferenceNoiseScheduler:
         return t_step_list
 
 
+# Tail-of-schedule steric passes: the per-step guard runs BEFORE the
+# chemistry (2ef2c70), so the bond-band Jacobi and ring rebuild can
+# re-collapse long side chains (Arg/Lys guanidinium) into the receptor
+# afterwards — measured on R7 degrader peptides: inter_min 2.08 A with
+# 27 pairs < 2.6 A shipped despite the in-step guard. In the tail the
+# noise is small, so alternating (steric floors, bond bands) twice
+# converges both; floors are inter-chain only and never compress.
+_TAIL_STERIC_STEPS = 20
+
+
 def _make_band_projector(idx, up, lo, device, pin_mask=None):
     """Damped-Jacobi distance-band projector for covalent geometry.
 
@@ -656,6 +666,16 @@ def sample_diffusion(
                     _ring_project(x_l)
                 if _bond_project is not None:
                     _bond_project(x_l, iters=30)
+                # Closing steric pass over the tail steps: the chemistry
+                # above re-distributes side chains and can push their
+                # tips back into the receptor. Re-run the floors, then
+                # ONE bond pass to restore any covalent distortion the
+                # second floor pass introduces (POCS alternation).
+                if (_clash_project is not None
+                        and step_i >= num_diffusion_steps - _TAIL_STERIC_STEPS):
+                    _clash_project(x_l, iters=5)
+                    if _bond_project is not None:
+                        _bond_project(x_l, iters=15)
 
         # Deliberately NO projection after the loop: the shipped structure
         # is exactly what the final sampler step produced (including its
