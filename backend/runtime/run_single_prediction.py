@@ -10666,6 +10666,15 @@ def run_peptide_design_backend(
             next_row["structure_file"] = structure_arcname
             next_row["structure_name"] = Path(structure_arcname).name if structure_arcname else ""
             next_row["structure_path"] = structure_arcname
+            # Mirror the pointer onto the original evaluated row: the zip's
+            # design_results.json serializes all_results, and the frontend 3D
+            # card view resolves each candidate's structure by structure_name
+            # — without this the cards ship nameless ("No structure is
+            # available for this peptide") even though rank_XX files exist.
+            row["rank"] = rank
+            row["structure_file"] = next_row["structure_file"]
+            row["structure_name"] = next_row["structure_name"]
+            row["structure_path"] = next_row["structure_path"]
             next_row.pop("plddts", None)
             zip_rows.append(next_row)
 
