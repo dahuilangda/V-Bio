@@ -7301,6 +7301,12 @@ def _dpeptide_prepare_d_target(
         head = 0
         while head < tail and not _stageable(polymer[head]):
             head += 1
+        if head >= tail:
+            # Fully unstageable chain (e.g. every residue lacks backbone
+            # atoms): skip without consuming a chain letter — an empty
+            # re-lettered chain would shift every later chain's ID and break
+            # the staged-complex chain contract downstream.
+            continue
         chain_letter = chr(ord("A") + poly_chains_written)
         for ordinal, residue in enumerate(polymer[head:tail], start=1):
             for atom in residue:
@@ -8311,7 +8317,15 @@ def _assert_product_bound(
             binder = atoms
         else:
             others.append(atoms)
-    if binder is None or not others:
+    if binder is None:
+        # A missing binder chain means the naming contract broke upstream
+        # (e.g. a flip/renamer); silently passing would wave through
+        # dissociated structures exactly when the geometry changed.
+        raise RuntimeError(
+            f"product structure for rank {rank} has no binder chain "
+            f"'{binder_chain_id}' (chains present: "
+            f"{[c.name for c in st[0]]}) — cannot verify the bound state")
+    if not others:
         return 0.0
     min_d = min(
         float(np.linalg.norm(binder[:, None, :] - o[None, :, :], axis=2).min())
