@@ -6,6 +6,11 @@ x-gpu-worker-base: &gpu_worker_base
     dockerfile: deploy/docker/DOCKER_BACKEND_RUNTIME.Dockerfile
   restart: unless-stopped
   gpus: all
+  extra_hosts:
+    # Docker network alias for the HOST: candidate containers spawned by these
+    # workers reach redis/central-api/colabfold/ESM3 through the host-published
+    # ports via this alias, so nothing depends on the host's bond0 address.
+    - "host.docker.internal:host-gateway"
   working_dir: ${BOLTZ_HOST_ROOT:-/data/V-Bio}
   env_file:
     - ./DOCKER_STACK_WORKER_GPU_CAPS.env
