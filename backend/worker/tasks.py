@@ -1346,6 +1346,7 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     # GPU slot for hours) for a plan the user already cancelled. The payload
     # carries the parent task id; the marker is the same task_cancelled:<id>
     # key terminate_task_runtime writes for the parent.
+    candidate_lock_held = False
     parent_task_id = str((worker_payload or {}).get("parent_task_id") or "").strip()
     if parent_task_id:
         try:
@@ -1359,6 +1360,28 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
         except Exception:
             logger.warning("Candidate %s: parent cancel-marker check failed; starting anyway.",
                            self.request.id[:8])
+
+    # Single-run lock: acks_late + 24h visibility means a candidate that sits
+    # queued >24h (GPU pool contention) is redelivered while the first delivery
+    # may still be running/starting — two processes racing on one candidate_dir.
+    # The lock trades crash-requeue recovery for double-run prevention; the
+    # parent surfaces a missing candidate result honestly, and 24h bounds any
+    # leak. Released in the finally below on normal completion.
+    candidate_lock_key = f"vbio:cand-lock:{self.request.id}"
+    try:
+        lock_redis = get_redis_client()
+        if not lock_redis.set(candidate_lock_key, "held", nx=True, ex=24 * 3600):
+            logger.info(
+                "Candidate %s: single-run lock held elsewhere — duplicate delivery ignored.",
+                self.request.id[:8])
+            raise Ignore()
+    except Ignore:
+        raise
+    except Exception:
+        logger.warning("Candidate %s: single-run lock unavailable; proceeding unlocked.",
+                       self.request.id[:8])
+    else:
+        candidate_lock_held = True
 
     task_id = self.request.id
     if not isinstance(worker_payload, dict):
@@ -1419,6 +1442,15 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
             f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
             f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
         ) from exc
+    finally:
+        if candidate_lock_held:
+            # Release on EVERY exit of the subprocess wait (success, failure,
+            # timeout→retry): the retry must be able to start fresh, while the
+            # 24h TTL only bounds the SIGKILL-without-release leak.
+            try:
+                get_redis_client().delete(f"vbio:cand-lock:{task_id}")
+            except Exception:
+                pass
 
     if process.returncode != 0:
         raise RuntimeError(_format_subprocess_failure("peptide candidate task", task_id, process.returncode, stderr, stdout))

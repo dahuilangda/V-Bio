@@ -1044,8 +1044,11 @@ def copilot_stream() -> Response:
     # Registered eagerly: the stream body runs lazily, so in-generator registration would miss early steers.
     turn_key = str(payload.get("turn_key") or "").strip()
     if turn_key:
-        register_steering(turn_key)
-        register_steering(turn_key + "::followup")
+        # Client-pinned key (legacy path): eager registration so early steers land.
+        # Server-signed keys (no client key) register inside the generator before
+        # the control frame hands the key out — no leak window.
+        register_steering(f"{user_id}::{turn_key}")
+        register_steering(f"{user_id}::{turn_key}::followup")
 
     def plan(on_step, abort, get_steering=None, get_follow_ups=None):
         return copilot_assistant.plan_turn(
@@ -1061,7 +1064,9 @@ def copilot_stream() -> Response:
         )
 
     return Response(
-        stream_with_context(copilot_event_stream(plan, turn_key=turn_key)),
+        stream_with_context(
+            copilot_event_stream(plan, turn_key=turn_key, user_id=user_id)
+        ),
         mimetype="text/event-stream",
     )
 
@@ -1073,16 +1078,19 @@ def copilot_steer() -> Tuple[Response, int]:
         return jsonify({"error": "Copilot is not configured."}), 404
     payload = request.get_json(silent=True) or {}
     turn_key = str(payload.get("turn_key") or "").strip()
+    user_id = str(payload.get("user_id") or "").strip()
     text = str(payload.get("text") or "").strip()
     if not turn_key or not text:
         return jsonify({"error": "turn_key and text are required."}), 400
     if len(text) > 4000:
         return jsonify({"error": "Steering text is too large."}), 413
-    is_follow_up = bool(payload.get("follow_up")) or turn_key.endswith("::followup")
+    # Registry keys are user-namespaced server-side; apply the same namespace.
+    namespaced = f"{user_id}::{turn_key}" if user_id else turn_key
+    is_follow_up = bool(payload.get("follow_up")) or namespaced.endswith("::followup")
     queued = (
-        submit_follow_up(turn_key.removesuffix("::followup"), text)
+        submit_follow_up(namespaced.removesuffix("::followup"), text)
         if is_follow_up
-        else submit_steering(turn_key, text)
+        else submit_steering(namespaced, text)
     )
     if queued:
         return jsonify({"queued": True}), 200
@@ -1097,11 +1105,13 @@ def copilot_stop() -> Tuple[Response, int]:
         return jsonify({"error": "Copilot is not configured."}), 404
     payload = request.get_json(silent=True) or {}
     turn_key = str(payload.get("turn_key") or "").strip()
+    user_id = str(payload.get("user_id") or "").strip()
     if not turn_key:
         return jsonify({"error": "turn_key is required."}), 400
     from management_api.copilot_stream import request_abort
 
-    stopped = request_abort(turn_key)
+    namespaced = f"{user_id}::{turn_key}" if user_id else turn_key
+    stopped = request_abort(namespaced)
     if stopped:
         return jsonify({"stopped": True}), 200
     return jsonify({"stopped": False, "error": "No in-flight turn with that key (it may have finished)."}), 409

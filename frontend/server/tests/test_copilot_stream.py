@@ -55,7 +55,11 @@ class CopilotEventStreamTests(unittest.TestCase):
 
         frames = list(copilot_event_stream(plan, keepalive_seconds=1))
         events = [event for event, _ in _parse_frames(frames)]
-        self.assertEqual(events, ["trace", "trace", "result"])
+        # Control frame first: hands the server-signed turn key to the client
+        # so Stop/steer can target this exact in-flight turn.
+        self.assertEqual(events, ["control", "trace", "trace", "result"])
+        control = json.loads(_parse_frames(frames)[0][1])
+        self.assertIn("turn_key", control)
         # The terminal result frame carries the full turn payload, JSON-serializable.
         result_data = json.loads(_parse_frames(frames)[-1][1])
         self.assertEqual(result_data["content"], "done")
@@ -67,8 +71,8 @@ class CopilotEventStreamTests(unittest.TestCase):
 
         frames = list(copilot_event_stream(plan, keepalive_seconds=1))
         parsed = _parse_frames(frames)
-        self.assertEqual([event for event, _ in parsed], ["error"])
-        self.assertIn("plan exploded", parsed[0][1])
+        self.assertEqual([event for event, _ in parsed], ["control", "error"])
+        self.assertIn("plan exploded", parsed[1][1])
 
     def test_keepalive_emitted_while_a_round_is_in_flight(self) -> None:
         def plan(on_step, abort, get_steering=None, get_follow_ups=None):

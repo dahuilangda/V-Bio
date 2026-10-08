@@ -400,7 +400,8 @@ export async function streamCopilotTurn(
     turnKey?: string;
   },
   onTrace: (step: CopilotTraceStep) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onTurnKey?: (turnKey: string) => void
 ): Promise<CopilotTurnResult> {
   const timeoutController = new AbortController();
   const timer = setTimeout(() => timeoutController.abort(), 180000);
@@ -479,7 +480,12 @@ export async function streamCopilotTurn(
       separator = buffer.indexOf('\n\n');
       const parsed = parseSseFrame(frame);
       if (!parsed) continue;
-      if (parsed.event === 'trace') {
+      if (parsed.event === 'control') {
+        // Server-signed turn key: Stop/steer calls must target THIS turn.
+        const control = (parseJsonSafe(parsed.data) as { turn_key?: string }) || {};
+        const signed = String(control.turn_key || '').trim();
+        if (signed && onTurnKey) onTurnKey(signed);
+      } else if (parsed.event === 'trace') {
         const step = parseOneTraceStep(parseJsonSafe(parsed.data));
         if (step) onTrace(step);
       } else if (parsed.event === 'result') {

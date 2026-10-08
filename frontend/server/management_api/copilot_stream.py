@@ -16,6 +16,7 @@ import json
 import logging
 import queue
 import threading
+import uuid
 from typing import List, Any, Callable, Dict, Iterator
 
 from management_api.copilot_error import safe_error_message
@@ -141,6 +142,7 @@ def copilot_event_stream(
     *,
     keepalive_seconds: float = 15.0,
     turn_key: str = "",
+    user_id: str = "",
 ) -> Iterator[str]:
     """Run a blocking planner call in a worker thread, streaming its trace steps as SSE frames.
 
@@ -149,12 +151,21 @@ def copilot_event_stream(
     ``event: trace`` frames as steps record, then a single terminal ``event: result`` (or
     ``event: error``) frame, then closes. If the consumer stops reading (client disconnect), the
     generator is closed and ``abort`` is set so the worker stops making model calls.
-    """
+
+    Control plane: when the client does not pin a ``turn_key``, the server signs one and hands it
+    over as the FIRST ``event: control`` frame — Stop/steer calls then target this exact turn.
+    Registry keys are namespaced by user_id so one account can never steer another's turn."""
     event_queue: "queue.Queue[Any]" = queue.Queue()
     abort = threading.Event()
+    server_signed_key = not str(turn_key or "").strip()
+    if server_signed_key:
+        turn_key = f"turn-{uuid.uuid4().hex}"
+    registry_key = f"{user_id}::{turn_key}" if user_id else turn_key
     if turn_key:
-        register_abort_event(turn_key, abort)
-    steering_queue = _register_steering(turn_key) if turn_key else None
+        register_abort_event(registry_key, abort)
+    steering_queue = register_steering(registry_key) if turn_key else None
+    followup_registry_key = f"{registry_key}{_FOLLOWUP_SUFFIX}"
+    followup_queue = register_steering(followup_registry_key) if turn_key else None
 
     def on_step(step: Dict[str, Any]) -> None:
         event_queue.put(("trace", step))
@@ -169,7 +180,6 @@ def copilot_event_stream(
             except queue.Empty:
                 return drained
 
-    followup_queue = register_steering(turn_key + "::followup") if turn_key else None
 
     def drain_follow_ups() -> List[str]:
         if followup_queue is None:
@@ -198,6 +208,10 @@ def copilot_event_stream(
     thread.start()
 
     try:
+        if server_signed_key:
+            # Hand the signed key to the client BEFORE any trace frames: Stop/steer
+            # calls need it to target this exact in-flight turn.
+            yield sse_frame("control", {"turn_key": turn_key})
         while True:
             try:
                 item = event_queue.get(timeout=keepalive_seconds)
@@ -213,6 +227,6 @@ def copilot_event_stream(
         # Consumer gone (disconnect) or stream finished — stop the worker's remaining model calls.
         abort.set()
         if turn_key:
-            _unregister_steering(turn_key)
-            _unregister_steering(turn_key + "::followup")
-            _unregister_abort_event(turn_key)
+            _unregister_steering(registry_key)
+            _unregister_steering(followup_registry_key)
+            _unregister_abort_event(registry_key)
