@@ -50,7 +50,9 @@
 
 **部署**：management-api 已带完整 .env 重启（5055 健在，auth 端点 400=正常校验），Copilot 修复即刻生效；后端 worker 的导出/取消修复随 4c8d085 在下次任务自然生效（候选进程每任务新起）。
 
-## 四、下一步路线图（按产品影响排序，未实施）
+## 四、下一步路线图（按产品影响排序）
+
+**2026-10-08 更新**：#5 已实施（tasks.status 读技能 + RECORD_IDENTITY_FIELDS 加 taskId/taskRowId + 任务锚定记忆优先保留 + PLAN_CORRECTNESS 三条指引 + nesso 枚举单源化，commit 7e4eb3d）；**目标保持最小闭环已实施**（同 commit）：needs_input/await_confirmation 终局持久化 {goal_text, outline, plan_id} 到 project_copilot_states（state_key=copilot-goal:{session_id}，complete/failed 清除），客户端 buildCopilotConversationContext 无条件注入 active_goal，服务端 context_block 置顶 ACTIVE GOAL 行。剩余未实施：#1 控制面收尾、#2 观测缓存、#3 真流式、#4 CopilotGoal 完整对象（当前为最小闭环）、#6 评测产品化、#7 单体拆分、#8 债务。
 
 1. **控制面收尾**（最高优先）：服务端签发 `turn_key` 控制帧 + 前端 `streamCopilotTurn` 传入 + Stop 按钮先 `requestCopilotStop`；steering 队列从进程内 dict 换 `project_copilot_states` 行（双 worker 安全）。
 2. **跨轮目标对象 CopilotGoal**：needs_input 时持久 outline（不再丢弃），下轮装载为初始大纲——消除"回答一个选择题后整个计划重推"。
