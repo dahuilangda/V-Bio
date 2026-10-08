@@ -32,12 +32,22 @@ function collectRecentActionResolutions(messages: ProjectCopilotMessage[]): Copi
   return collected;
 }
 
-export function buildCopilotConversationContext(messages: ProjectCopilotMessage[]): Record<string, unknown> {
+export interface CopilotActiveGoal {
+  goal_text: string;
+  outline?: string[];
+  plan_id?: string;
+  state?: string;
+}
+
+export function buildCopilotConversationContext(
+  messages: ProjectCopilotMessage[],
+  activeGoal?: CopilotActiveGoal | null
+): Record<string, unknown> {
   const visibleMessages = messages.filter((message) => message.role === 'user' || message.role === 'assistant');
   // Receipts (system role) aren't in the visible transcript, but the planner needs their
   // outcome: a failed apply means recover/re-propose, an applied one means advance.
   const actionResolutions = collectRecentActionResolutions(messages);
-  if (visibleMessages.length === 0 && actionResolutions.length === 0) {
+  if (visibleMessages.length === 0 && actionResolutions.length === 0 && !activeGoal?.goal_text) {
     return { compression: 'empty', recent_messages: [] };
   }
   const recent = visibleMessages.slice(-COPILOT_RECENT_CONTEXT_MESSAGES).map((message) => ({
@@ -57,6 +67,10 @@ export function buildCopilotConversationContext(messages: ProjectCopilotMessage[
     summary_source_messages: summarySource.length,
     summary: older.length > 0 ? compactCopilotText(olderSummary, COPILOT_CONTEXT_SUMMARY_CHARS) : '',
     recent_messages: recent,
+    // Goal retention: injected UNCONDITIONALLY when persisted — the original
+    // goal otherwise leaves the 6+12 message window after ~18 messages and
+    // long sessions drift (planner reads the ACTIVE GOAL line first).
+    ...(activeGoal?.goal_text ? { active_goal: activeGoal } : {}),
     ...(actionResolutions.length > 0 ? { recent_action_resolutions: actionResolutions } : {})
   };
 }

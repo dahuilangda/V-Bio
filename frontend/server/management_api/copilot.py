@@ -244,9 +244,13 @@ def _compact_memory_records(observations: Dict[str, Dict[str, Any]]) -> List[Dic
                 # Long fields are omitted, not truncated: memory carries identity only.
                 if len(entry) > (1 if source else 0):
                     records.append(entry)
-                    if len(records) >= MAX_MEMORY_RECORDS:
-                        return records
-    return records
+    if len(records) <= MAX_MEMORY_RECORDS:
+        return records
+    # Over cap: task-anchored records survive first (they answer "did my run
+    # finish?" follow-ups), then the newest of the rest.
+    anchored = [r for r in records if "taskId" in r]
+    floating = [r for r in records if "taskId" not in r]
+    return (anchored + floating)[:MAX_MEMORY_RECORDS]
 
 
 def _allowed_source_text(
@@ -831,6 +835,7 @@ class CopilotAssistant:
         max_planner_rounds: int = 8,
         max_malformed_retries: int = 3,
         enable_thinking: bool = False,
+        goal_store: Any = None,
         read_disclosure: str = "full",
     ) -> None:
         # Two-tier disclosure mode ("full" | "summary"); see render_protocol_prompt. Kept as
@@ -890,6 +895,31 @@ class CopilotAssistant:
             ),
             self._worker_status_handler,
         )
+        skills.register(
+            OnlineSkillDefinition(
+                name="tasks.status",
+                description=(
+                    "Read a platform task's live state by task id: state "
+                    "(queued/running/success/failure/revoked), status text, and whether a "
+                    "result archive exists. Use it when the user asks whether a task finished, "
+                    "wants progress, or references a task that is not visible on the current "
+                    "page. Prefer the taskRowId the context exposes; otherwise use the task id "
+                    "from copilot_memory."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Platform task id (UUID) — from task rows, lifecycle receipts, or copilot_memory.",
+                        },
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            self._task_status_handler,
+        )
         register_compute_skills(skills)
         register_translation_skills(skills)
         if self.read_disclosure == "summary":
@@ -919,6 +949,7 @@ class CopilotAssistant:
                 self._skill_contracts_handler,
             )
         self.skill_harness = CopilotSkillHarness(skills=skills)
+        self.goal_store = goal_store
 
     def _worker_status_handler(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Live worker/queue snapshot from the runtime backend's monitor store.
@@ -957,6 +988,46 @@ class CopilotAssistant:
         if not isinstance(capabilities, dict):
             return {"ok": True, "capabilities": {}, "raw": payload if isinstance(payload, dict) else {}}
         return {"ok": True, "capabilities": capabilities}
+
+    def _task_status_handler(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Live task status from the runtime backend by task id."""
+        import os as _os
+
+        import requests as _requests
+
+        task_id = str((arguments or {}).get("task_id") or "").strip()
+        if not task_id:
+            return {"ok": False, "error": "task_id is required."}
+        base_url = _os.environ.get("VBIO_RUNTIME_API_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+        token = (
+            _os.environ.get("VBIO_RUNTIME_API_TOKEN", "").strip()
+            or _os.environ.get("BOLTZ_API_TOKEN", "").strip()
+        )
+        headers = {"X-API-Token": token} if token else {}
+        try:
+            response = self.session.get(
+                f"{base_url}/status/{task_id}", headers=headers, timeout=20
+            )
+        except _requests.RequestException as exc:
+            return {"ok": False, "task_id": task_id, "error": f"status unavailable: {exc}"}
+        if not response.ok:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "error": f"status lookup failed: HTTP {response.status_code}",
+            }
+        payload = response.json() if isinstance(response.json(), dict) else {}
+        state = str(payload.get("state") or "").strip()
+        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+        projected = {
+            "ok": True,
+            "task_id": task_id,
+            "state": state or "UNKNOWN",
+            "status": str(info.get("status") or info.get("message") or "")[:200],
+        }
+        if info.get("result_file"):
+            projected["result_ready"] = True
+        return projected
 
     def _skill_contracts_handler(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         definitions = self.skill_harness._read_definitions()
@@ -1719,7 +1790,7 @@ class CopilotAssistant:
         lines.append("Emit the operations for this step only." + (f"\n{extra_note}" if extra_note else ""))
         return "\n".join(lines)
 
-    def plan_turn(
+    def _plan_turn_impl(
         self,
         *,
         context_type: str,
@@ -1791,8 +1862,28 @@ class CopilotAssistant:
         )
         system_prompt = build_planner_system_prompt(protocol, guidance_section_ids)
         context_json = json.dumps(safe_context_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        # Goal retention: the session's pinned goal rides ABOVE everything in the
+        # context block. Without this line the original goal leaves the 6+12
+        # message window after ~18 messages and the planner drifts (2026-10-08
+        # audit). The client injects active_goal from project_copilot_states;
+        # the server persists it at needs_input/await_confirmation terminals.
+        active_goal = (
+            safe_context_payload.get("active_goal")
+            if isinstance(safe_context_payload.get("active_goal"), dict)
+            else None
+        )
+        active_goal_line = ""
+        goal_text = str((active_goal or {}).get("goal_text") or "").strip()
+        if goal_text:
+            goal_state = str((active_goal or {}).get("state") or "").strip()
+            goal_line = (
+                f"ACTIVE GOAL: {goal_text}"
+                + (f" [state: {goal_state}]" if goal_state else "")
+                + "\n"
+            )
         context_block = (
-            f"context_type: {normalized_context}\n"
+            active_goal_line
+            + f"context_type: {normalized_context}\n"
             + (f"workflow: {workflow_key}\n" if workflow_key else "")
             + (
                 "workflow_input_contract: "
@@ -2313,6 +2404,7 @@ class CopilotAssistant:
                     "content": verified_message,
                     "actions": list(all_step_actions),
                     "state": "needs_input",
+                    "outline": outline,
                     "questions": list(questions),
                     "plan_id": plan_id,
                     "trace": trace.steps(),
@@ -2691,6 +2783,7 @@ class CopilotAssistant:
                         "content": _confirmation_footer(verified_message),
                         "actions": list(all_step_actions),
                         "state": "await_confirmation",
+                        "outline": outline,
                         "questions": [],
                         "plan_id": plan_id,
                         "trace": trace.steps(),
@@ -3195,6 +3288,7 @@ class CopilotAssistant:
                     "content": _confirmation_footer(message),
                     "actions": list(all_step_actions),
                     "state": "await_confirmation",
+                    "outline": outline,
                     "questions": [],
                     "plan_id": plan_id,
                     "trace": trace.steps(),
@@ -3253,6 +3347,77 @@ class CopilotAssistant:
             "trace": trace.steps(),
             "observations": _full_observation_records(observations),
         }
+
+    def plan_turn(
+        self,
+        *,
+        context_type: str,
+        context_payload: Dict[str, Any],
+        user_id: str,
+        username: str,
+        content: str,
+        on_event: Callable[[Dict[str, Any]], None] | None = None,
+        abort: threading.Event | None = None,
+        get_steering: Callable[[], List[str]] | None = None,
+        get_follow_ups: Callable[[], List[str]] | None = None,
+    ) -> Dict[str, Any]:
+        """Goal-retention wrapper: run the turn, then persist/clear the session
+        goal object at terminal boundaries (project_copilot_states via the
+        injected goal_store). Best-effort: a goal-store failure never breaks
+        the turn itself."""
+        result = self._plan_turn_impl(
+            context_type=context_type,
+            context_payload=context_payload,
+            user_id=user_id,
+            username=username,
+            content=content,
+            on_event=on_event,
+            abort=abort,
+            get_steering=get_steering,
+            get_follow_ups=get_follow_ups,
+        )
+        self._persist_session_goal(context_payload=context_payload, user_id=user_id, content=content, result=result)
+        return result
+
+    def _persist_session_goal(
+        self,
+        *,
+        context_payload: Dict[str, Any],
+        user_id: str,
+        content: str,
+        result: Dict[str, Any],
+    ) -> None:
+        store = self.goal_store
+        if store is None:
+            return
+        payload_ctx = context_payload if isinstance(context_payload, dict) else {}
+        session_id = str(payload_ctx.get("copilot_session_id") or "").strip()
+        if not session_id:
+            return
+        state = str((result or {}).get("state") or "")
+        try:
+            if state in ("needs_input", "await_confirmation"):
+                store.save(
+                    user_id=user_id,
+                    session_id=session_id,
+                    data={
+                        "goal_text": str(content or "").strip()[:2000],
+                        "outline": [
+                            str(step.get("description") or "")
+                            for step in (result.get("outline") or [])
+                            if isinstance(step, dict)
+                        ],
+                        "plan_id": str(result.get("plan_id") or ""),
+                        "state": state,
+                    },
+                )
+            elif state in ("complete", "failed"):
+                # Goal consumed (or dead): drop it so the next session turn
+                # does not inherit a stale ACTIVE GOAL line.
+                store.clear(user_id=user_id, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001
+            # Best-effort by contract; never break the turn over goal bookkeeping.
+            self.logger.warning("Copilot goal store update failed: %s", exc)
 
     def _synthesized_choice_terminal(
         self,

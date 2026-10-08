@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 from backend.monitoring.monitor_store import MonitorStore
+from management_api.copilot_goal_store import CopilotGoalStore
 from management_api.auth_service import AuthService
 from management_api.gateway_handlers import GatewayHandlers
 from management_api.http_session import create_pooled_session
@@ -198,6 +199,7 @@ postgrest_client = PostgrestClient(
     session=postgrest_http,
 )
 auth_service = AuthService(postgrest_client)
+copilot_goal_store = CopilotGoalStore(postgrest_client)
 usage_tracker = UsageTracker(postgrest_client, logger)
 task_store = ProjectTaskStore(postgrest_client)
 monitor_store = MonitorStore(VBIO_MONITOR_DATABASE_URL) if VBIO_MONITOR_DATABASE_URL else None
@@ -227,6 +229,7 @@ lead_opt_overlay_service = LeadOptOverlayService(
     task_timeout_seconds=LEAD_OPT_OVERLAY_TIMEOUT_SECONDS,
 )
 copilot_assistant = CopilotAssistant(
+    goal_store=copilot_goal_store,
     chat_api_url=COPILOT_API_URL,
     chat_api_key=COPILOT_API_KEY,
     chat_model=COPILOT_MODEL,

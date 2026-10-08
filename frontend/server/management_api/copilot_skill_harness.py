@@ -133,6 +133,10 @@ RECORD_IDENTITY_FIELDS: Tuple[str, ...] = (
     "target",
     "activityType",
     "units",
+    # Task identity: lifecycle receipts and task rows carry it so follow-ups
+    # like "did the run finish?" resolve without the row being on-screen.
+    "taskId",
+    "taskRowId",
 )
 RECORD_LONG_FIELDS: Tuple[str, ...] = ("smiles", "sequence")
 

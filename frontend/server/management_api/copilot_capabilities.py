@@ -120,7 +120,9 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
 
 
 TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
-    "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix", "protenix2dock", "boltz2dock"]},
+    # Keep in sync with backend/routes/prediction.py accepted backends
+    # (single-source wiring tracked in docs/incremental-review-20261008.md §2).
+    "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix", "nesso", "protenix2dock", "boltz2dock"]},
     "seed": {"type": "int", "min": 0, "max": 2147483647},
     "affinityMode": {
         "type": "enum",

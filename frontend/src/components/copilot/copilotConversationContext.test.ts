@@ -18,6 +18,30 @@ function message(partial: Partial<ProjectCopilotMessage> & { role: ProjectCopilo
   } as ProjectCopilotMessage;
 }
 
+describe('buildCopilotConversationContext goal retention', () => {
+  it('injects the persisted active goal into the planner context unconditionally', () => {
+    const context = buildCopilotConversationContext(
+      [message({ role: 'user', content: 'design a binder for CD73' })],
+      {
+        goal_text: 'design a bicyclic D-peptide binder for CD73',
+        outline: ['pick the pocket', 'run the design'],
+        plan_id: 'p-1',
+        state: 'needs_input'
+      }
+    ) as { active_goal?: { goal_text: string; plan_id: string; state: string } };
+    expect(context.active_goal?.goal_text).toBe('design a bicyclic D-peptide binder for CD73');
+    expect(context.active_goal?.plan_id).toBe('p-1');
+    expect(context.active_goal?.state).toBe('needs_input');
+  });
+
+  it('omits active_goal when no goal is persisted', () => {
+    const context = buildCopilotConversationContext([
+      message({ role: 'user', content: 'hello' })
+    ]) as { active_goal?: unknown };
+    expect('active_goal' in context).toBe(false);
+  });
+});
+
 describe('buildCopilotConversationContext action resolutions', () => {
   it('carries recent confirmation receipts (system role) into the planner context', () => {
     const messages = [
