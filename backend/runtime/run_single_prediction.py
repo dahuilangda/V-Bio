@@ -5250,26 +5250,6 @@ def _next_available_chain_id(used_chain_ids: List[str], preferred: str) -> str:
         suffix += 1
 
 
-def _auto_ss_profile(pocket_contacts, binder_length: int):
-    """Auto SS3 profile for groove-type epitopes when the user provided none.
-
-    TNF-family receptor grooves are helical/extended binding sites — the
-    natural binders use short helices packing into the groove. Without SS
-    conditioning the prior is coil-dominated (46% coil) → pLDDT 50-72.
-    Profile: 40% helix (h), 40% loop (l), 20% wildcard (s) — the helix block
-    gives conformational preference; loops cap the ends for cyclization
-    compatibility; wildcards leave room for the RL to discover.
-    """
-    if not pocket_contacts:
-        return None
-    n = max(8, min(int(binder_length), 25))
-    n_helix = max(3, int(n * 0.4))
-    profile = ("h" * n_helix
-               + "l" * int(n * 0.4)
-               + "s" * (n - n_helix - int(n * 0.4)))
-    return profile[:n]
-
-
 def _pocket_residue_letters(pocket_contacts, yaml_data, target_chain_id):
     """One-letter codes for the user's pocket residues from the target chain's
     sequence — the chemistry profile for warm-start seed construction."""
@@ -6126,8 +6106,12 @@ def _register_peptide_subtask(parent_task_id: str, subtask_id: str) -> None:
         # NFKBIZ gen-6 orphan incident). 14d matches the cancel-marker TTL.
         pipe.expire(key, 14 * 24 * 3600)
         pipe.execute()
-    except Exception:
-        pass
+    except Exception as exc:
+        # A registry miss makes the candidate invisible to cancel/terminate —
+        # silent swallowing here is how orphans happen. At minimum log it.
+        print(f"[peptide-design] WARNING: subtask registry write failed "
+              f"({exc}); cancel/terminate will not see {subtask_token}",
+              file=sys.stderr)
 
 
 def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
@@ -6157,6 +6141,10 @@ def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, p
         "model_name": job.get("model_name"),
         "backend": str(job.get("backend") or "boltz"),
         "worker_args_path": str(job.get("worker_args_path") or ""),
+        # The cancel-marker check on the candidate side keys on the PARENT's
+        # task id (the marker is written per cancelled parent); without this
+        # field a queued candidate cannot know it belongs to a dead plan.
+        "parent_task_id": str(parent_task_id or ""),
     }
     async_result = celery_app.send_task(
         "tasks.peptide_candidate_worker_task",
@@ -8057,11 +8045,20 @@ def _celery_revoke_quiet(async_result: Any, *, terminate: bool = True) -> None:
 
 
 def _chain_mean_plddt_from_structure(path: Path) -> Dict[str, float]:
-    """Mean B-factor (== per-atom pLDDT in engine structure output) per chain."""
+    """Mean B-factor (== per-atom pLDDT in engine structure output) per chain.
+
+    Chains with a short polymer (the SEZ linker: one HETATM residue carrying a
+    handful of high-confidence atoms) are EXCLUDED: their mean reads ~0.93 and,
+    with chain letters sorted, used to outrank the actual peptide — feeding the
+    linker's confidence into binder_avg_plddt, the pLDDT gate, and the
+    composite's binder term for every bicyclic candidate."""
     st = gemmi.read_structure(str(path))
     st.setup_entities()
     means: Dict[str, float] = {}
     for chain in st[0]:
+        polymer = [r for r in chain if r.het_flag != "H"]
+        if len(polymer) < 8:
+            continue
         values = []
         for residue in chain:
             for atom in residue:
@@ -8273,29 +8270,82 @@ def _select_dspace_samples(scored):
 
 
 def _pdb_peptide_sequence(pdb_path: Path, binder_chain_id: str = "B") -> str:
-    """Chain-<binder_chain_id> one-letter sequence of a staged PDB (chain B is
-    the peptide in design-space staging). Empty when the chain is absent."""
+    """One-letter peptide sequence of a staged PDB, auto-detected.
+
+    The named chain is tried first (design-space staging writes the peptide on
+    B), but multi-chain targets re-letter chains — staging writes receptors
+    A..N and the peptide on the next letter ("B for a monomer, C for a
+    dimer"). Fallback: the polymer chain whose length is peptide-sized
+    (8-40 residues). Empty when nothing qualifies."""
     three2one = {
         "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
         "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
         "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
         "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
     }
-    seen, residues = set(), []
+    by_chain: Dict[str, List[str]] = {}
+    seen: set = set()
     try:
         for line in pdb_path.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.startswith("ATOM"):
                 continue
-            if line[21].strip() != binder_chain_id:
+            chain = line[21].strip()
+            key = (chain, line[22:26])
+            if key in seen:
                 continue
-            num = line[22:26]
-            if num in seen:
-                continue
-            seen.add(num)
-            residues.append(three2one.get(line[17:20].strip(), "X"))
+            seen.add(key)
+            by_chain.setdefault(chain, []).append(
+                three2one.get(line[17:20].strip(), "X"))
     except OSError:
         return ""
-    return "".join(residues)
+    named = by_chain.get(binder_chain_id, [])
+    if 8 <= len(named) <= 40:
+        return "".join(named)
+    # Multi-chain staging re-letters chains; the peptide is the polymer chain
+    # of peptide size (8-40 residues) — receptors are longer.
+    for chain in sorted(by_chain):
+        residues = by_chain[chain]
+        if 8 <= len(residues) <= 40:
+            return "".join(residues)
+    return ""
+
+
+def _polymer_chain_roles(
+    structure: "gemmi.Structure",
+    binder_chain_id: str = "",
+) -> Tuple[Optional[str], List[str], List[str]]:
+    """Classify chains into (binder, target_chains, linker_or_short_chains).
+
+    Binder = the named chain when it holds a peptide-length polymer (8-40
+    residues), else the first chain of that size. Target = every polymer chain
+    LONGER than 40 residues (multi-copy receptors included). Everything with a
+    shorter polymer (SEZ linker: one HETATM residue) is excluded from binding
+    measurements — the linker is COVALENTLY bonded to the binder, so counting
+    it as 'target' side pins min distance at the bond length (~1.8 A) and
+    neutralizes any dissociation check for bicyclic products."""
+    binder, targets, others = None, [], []
+    for ch in structure[0]:
+        polymer = [r for r in ch if r.het_flag != "H"]
+        n = len(polymer)
+        if n == 0:
+            continue
+        if n > 40:
+            targets.append(ch.name)
+        elif 8 <= n <= 40:
+            others.append(ch.name)
+        else:
+            others.append(ch.name)
+    if binder_chain_id and binder_chain_id in others:
+        others.remove(binder_chain_id)
+        binder = binder_chain_id
+    else:
+        for name in others:
+            ch = structure[0][name]
+            if 8 <= len([r for r in ch if r.het_flag != "H"]) <= 40:
+                others.remove(name)
+                binder = name
+                break
+    return binder, targets, others
 
 
 def _assert_product_bound(
@@ -8308,11 +8358,16 @@ def _assert_product_bound(
 ) -> float:
     """Export gate: a shipped product must be a BOUND complex.
 
-    A dissociated product (binder farther than max_distance from every other
-    chain) means an upstream stage shipped a pre-docking frame — staged
-    geometries sit 50-100 A off-target. A detached "result" with a high score
-    attached is actively misleading, so the export fails loudly instead.
-    Returns the measured min binder-to-rest heavy-atom distance."""
+    A dissociated product (binder farther than max_distance from the target
+    protein chains) means an upstream stage shipped a pre-docking frame —
+    staged geometries sit 50-100 A off-target. A detached "result" with a high
+    score attached is actively misleading, so the export fails loudly instead.
+    Chain roles come from polymer length, not chain letters: the flipped
+    product re-letters chains (multi-chain targets make the designed peptide
+    chain D, E, ...), and the SEZ linker is covalently bonded to the binder —
+    counting it on the target side would pin min distance at the bond length
+    and neutralize the gate for every bicyclic product.
+    Returns the measured min binder-to-target heavy-atom distance."""
     try:
         st = gemmi.read_structure(str(structure_path))
         st.setup_entities()
@@ -8320,31 +8375,32 @@ def _assert_product_bound(
         raise RuntimeError(
             f"product structure unreadable for rank {rank}: "
             f"{structure_path} ({exc})") from exc
-    binder, others = None, []
+    binder_name, target_names, _linkers = _polymer_chain_roles(st, binder_chain_id)
+    chain_atoms: Dict[str, np.ndarray] = {}
     for ch in st[0]:
         atoms = np.array([
             [a.pos.x, a.pos.y, a.pos.z]
             for residue in ch for a in residue if a.element.name != "H"
         ])
-        if atoms.shape[0] == 0:
-            continue
-        if ch.name == binder_chain_id:
-            binder = atoms
-        else:
-            others.append(atoms)
-    if binder is None:
-        # A missing binder chain means the naming contract broke upstream
-        # (e.g. a flip/renamer); silently passing would wave through
-        # dissociated structures exactly when the geometry changed.
+        if atoms.shape[0] != 0:
+            chain_atoms[ch.name] = atoms
+    binder_atoms = chain_atoms.get(binder_name) if binder_name else None
+    if binder_atoms is None or not target_names:
         raise RuntimeError(
-            f"product structure for rank {rank} has no binder chain "
-            f"'{binder_chain_id}' (chains present: "
-            f"{[c.name for c in st[0]]}) — cannot verify the bound state")
-    if not others:
-        return 0.0
+            f"product structure for rank {rank} ({str(sequence)[:16]}) has no "
+            f"verifiable binder↔target pair (chains: "
+            f"{[(c.name, sum(1 for r in c if r.het_flag != 'H')) for c in st[0]]}) — "
+            "cannot verify the bound state")
+    target_atoms = [
+        chain_atoms[name] for name in target_names if name in chain_atoms
+    ]
+    if not target_atoms:
+        raise RuntimeError(
+            f"product structure for rank {rank} has no target protein chain "
+            f"(expected one of {target_names}) — cannot verify the bound state")
     min_d = min(
-        float(np.linalg.norm(binder[:, None, :] - o[None, :, :], axis=2).min())
-        for o in others
+        float(np.linalg.norm(binder_atoms[:, None, :] - t[None, :, :], axis=2).min())
+        for t in target_atoms
     )
     if min_d > max_distance:
         raise RuntimeError(
@@ -8359,22 +8415,32 @@ def _assert_product_bound(
 def _interchain_clash_profile(
     structure_path: Path,
 ) -> Tuple[float, int, int]:
-    """(min receptor-peptide heavy-atom distance, pairs < 2.2 A, pairs
-    < 2.8 A). Every chain except the largest counts as peptide side; the
-    largest chain is the receptor. A physically valid pose keeps the min
-    above ~2.7 A — anything below 2.2 A is interpenetration, not docking."""
+    """(min binder-target heavy-atom distance, pairs < 2.2 A, pairs < 2.8 A).
+
+    The peptide side is the designed binder ONLY (polymer of 8-40 residues);
+    the receptor side is every chain longer than 40 residues. Receptor-receptor
+    pairs are excluded: multi-copy receptors with inter-chain disulfides
+    (SG-SG ~2.0 A) or metal sites otherwise read as permanent "peptide embedded
+    in receptor" and reject every candidate for that target. Linker chains
+    (< 8 residues, covalently bonded to the binder) are excluded too."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     st.remove_hydrogens()
-    chains = sorted(st[0], key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
-    if len(chains) < 2:
+    binder_chains, target_chains = [], []
+    for ch in st[0]:
+        n = sum(1 for r in ch if r.het_flag != "H")
+        if 8 <= n <= 40:
+            binder_chains.append(ch)
+        elif n > 40:
+            target_chains.append(ch)
+    if not binder_chains or not target_chains:
         return (99.0, 0, 0)
     rec = np.array([
         [a.pos.x, a.pos.y, a.pos.z]
-        for residue in chains[0] for a in residue
+        for chain in target_chains for residue in chain for a in residue
     ])
     min_d, n22, n28 = 99.0, 0, 0
-    for chain in chains[1:]:
+    for chain in binder_chains:
         other = np.array([
             [a.pos.x, a.pos.y, a.pos.z]
             for residue in chain for a in residue
@@ -9293,8 +9359,11 @@ def run_peptide_design_backend(
             _tmp_ckpt = _ckpt_path.with_suffix(".json.tmp")
             _tmp_ckpt.write_text(payload)
             os.replace(_tmp_ckpt, _ckpt_path)
-        except OSError:
-            pass  # checkpoint is best-effort; run continues without it
+        except OSError as exc:
+            # Checkpoint is best-effort, but ENOSPC/permission failures silently
+            # disabled multi-day resume — print so the operator sees it.
+            print(f"[peptide-design] WARNING: checkpoint save failed: {exc}",
+                  file=sys.stderr)
 
     if _ckpt_path.is_file():
         try:
@@ -11592,7 +11661,7 @@ except Exception:
     _af3_parsers = None
 
 def _count_non_lowercase(seq: str) -> int:
-    return sum(1 for ch in seq if not ch.islower)
+    return sum(1 for ch in seq if not ch.islower())
 
 def _normalize_a3m(a3m_text: str):
     # Pad sequences so non-lowercase lengths match, avoiding featurizer shape errors.
@@ -11600,8 +11669,8 @@ def _normalize_a3m(a3m_text: str):
     seq_chunks = []
     entries = []
     changed = False
-    for line in (a3m_text or "").splitlines:
-        line = line.strip
+    for line in (a3m_text or "").splitlines():
+        line = line.strip()
         if not line:
             continue
         if line.startswith(">"):
@@ -11634,9 +11703,9 @@ try:
     from alphafold3.constants import residue_names as _af3_residue_names
     _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
     if isinstance(_ccd_overrides, dict):
-        for _ccd, _one in _ccd_overrides.items:
-            _ccd = str(_ccd or "").strip.upper
-            _one = str(_one or "").strip.upper[:1]
+        for _ccd, _one in _ccd_overrides.items():
+            _ccd = str(_ccd or "").strip.upper()
+            _one = str(_one or "").strip.upper()[:1]
             if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
                 _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
 except Exception as _exc:
@@ -11672,7 +11741,7 @@ if _af3_parsers is not None:
 
     if callable(_orig_lazy):
         def _safe_lazy_parse_fasta_string(fasta_string: str):
-            if not fasta_string or not str(fasta_string).strip:
+            if not fasta_string or not str(fasta_string).strip():
                 logging.warning("alphafold3.parsers.lazy_parse_fasta_string: empty FASTA input; returning no sequences.")
                 return iter()
             try:
@@ -11692,8 +11761,8 @@ try:
         def _ensure_release_date_in_mmcif_text(text: str) -> str:
             if "_pdbx_audit_revision_history.revision_date" in text:
                 return text
-            lines = text.splitlines
-            insert_at = 1 if lines and lines[0].lower.startswith("data_") else 0
+            lines = text.splitlines()
+            insert_at = 1 if lines and lines[0].lower().startswith("data_") else 0
             injection = [
                 "_pdbx_database_status.recvd_initial_deposition_date 1970-01-01",
                 "_pdbx_database_status.date_of_initial_deposition 1970-01-01",
@@ -11714,7 +11783,7 @@ try:
                 return False
             sample = value[:2048]
             return (
-                sample.lstrip.startswith("data_")
+                sample.lstrip().startswith("data_")
                 or "_atom_site." in sample
                 or "_entry.id" in sample
                 or "_pdbx_database_status." in sample

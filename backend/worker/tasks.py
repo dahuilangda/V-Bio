@@ -570,32 +570,6 @@ def _read_float_metric(value: Any) -> Optional[float]:
     return parsed
 
 
-def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> list[int]:
-    if isinstance(raw_gpu_ids, int):
-        return [raw_gpu_ids] if raw_gpu_ids >= 0 else []
-
-    values: list[Any]
-    if isinstance(raw_gpu_ids, str):
-        values = [token for token in re.split(r"[\s,]+", raw_gpu_ids) if token]
-    elif isinstance(raw_gpu_ids, (list, tuple, set)):
-        values = list(raw_gpu_ids)
-    else:
-        return []
-
-    normalized: list[int] = []
-    seen: set[int] = set()
-    for item in values:
-        try:
-            parsed = int(item)
-        except (TypeError, ValueError):
-            continue
-        if parsed < 0 or parsed in seen:
-            continue
-        seen.add(parsed)
-        normalized.append(parsed)
-    return normalized
-
-
 def _gpu_pool_device_count() -> int:
     """Authoritative GPU-pool size (valid devices registered at pool init).
 
@@ -1367,6 +1341,24 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
         # TTL bounds the exposure window.
         logger.warning("redelivery guard unavailable (Redis unreachable) for %s",
                        self.request.id)
+
+    # Parent-plan cancellation: queued candidates must not start (and burn a
+    # GPU slot for hours) for a plan the user already cancelled. The payload
+    # carries the parent task id; the marker is the same task_cancelled:<id>
+    # key terminate_task_runtime writes for the parent.
+    parent_task_id = str((worker_payload or {}).get("parent_task_id") or "").strip()
+    if parent_task_id:
+        try:
+            if get_redis_client().exists(f"task_cancelled:{parent_task_id}"):
+                logger.info(
+                    "Candidate %s: parent plan %s is cancelled — not starting.",
+                    self.request.id[:8], parent_task_id[:8])
+                raise Ignore()
+        except Ignore:
+            raise
+        except Exception:
+            logger.warning("Candidate %s: parent cancel-marker check failed; starting anyway.",
+                           self.request.id[:8])
 
     task_id = self.request.id
     if not isinstance(worker_payload, dict):
