@@ -202,6 +202,10 @@ FILE_METADATA_KEYS = {
 CAPABILITY_CATALOG_SKILL = "platform.capability_catalog"
 # On-demand FULL read-skill contracts (two-tier disclosure, summary mode only).
 SKILLS_CONTRACT_SKILL = "skills.contract"
+# LIVE worker/queue snapshot: turns the copilot's environment awareness from a
+# static catalog into current platform reality (which capabilities have online
+# workers right now) before it plans any submission.
+WORKER_STATUS_SKILL = "platform.worker_status"
 
 # Cap on how many prior-turn records are carried forward as copilot_memory — enough for continuity
 # on a follow-up, small enough to stay well under the context budget.
@@ -866,6 +870,26 @@ class CopilotAssistant:
             ),
             _read_registered_capability_catalog,
         )
+        skills.register(
+            OnlineSkillDefinition(
+                name=WORKER_STATUS_SKILL,
+                description=(
+                    "Read the LIVE worker/queue snapshot: which platform capabilities (boltz2, "
+                    "alphafold3, protenix, nesso, boltz2score, lead_opt, peptide_design, export) "
+                    "have online workers right now, and how many tasks are queued/running. Read "
+                    "this BEFORE planning any task submission when the context does not already "
+                    "show a healthy runtime; if the needed capability is offline, say so as an "
+                    "environment fact and offer alternatives instead of submitting into a "
+                    "guaranteed rejection."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            ),
+            self._worker_status_handler,
+        )
         register_compute_skills(skills)
         register_translation_skills(skills)
         if self.read_disclosure == "summary":
@@ -895,6 +919,44 @@ class CopilotAssistant:
                 self._skill_contracts_handler,
             )
         self.skill_harness = CopilotSkillHarness(skills=skills)
+
+    def _worker_status_handler(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Live worker/queue snapshot from the runtime backend's monitor store.
+
+        Reads the same cluster overview the submission path consults for its
+        "No online workers" 503, so the planner sees the environment fact
+        BEFORE planning a submission instead of in the failure receipt."""
+        import os as _os
+
+        import requests as _requests
+
+        base_url = _os.environ.get("VBIO_RUNTIME_API_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+        token = (
+            _os.environ.get("VBIO_RUNTIME_API_TOKEN", "").strip()
+            or _os.environ.get("BOLTZ_API_TOKEN", "").strip()
+        )
+        headers = {"X-API-Token": token} if token else {}
+        try:
+            response = self.session.get(
+                f"{base_url}/workers/capabilities", headers=headers, timeout=15
+            )
+        except _requests.RequestException as exc:
+            return {
+                "ok": False,
+                "error": f"worker snapshot unavailable: {exc}",
+                "hint": "The runtime backend could not be reached; treat worker availability as UNKNOWN.",
+            }
+        if not response.ok:
+            return {
+                "ok": False,
+                "error": f"worker snapshot unavailable: HTTP {response.status_code}",
+                "hint": "Treat worker availability as UNKNOWN; do not claim a capability is offline.",
+            }
+        payload = response.json()
+        capabilities = payload.get("capabilities")
+        if not isinstance(capabilities, dict):
+            return {"ok": True, "capabilities": {}, "raw": payload if isinstance(payload, dict) else {}}
+        return {"ok": True, "capabilities": capabilities}
 
     def _skill_contracts_handler(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         definitions = self.skill_harness._read_definitions()
@@ -1016,12 +1078,36 @@ class CopilotAssistant:
         # routing model calls through the database proxy couples LLM availability to a proxy the
         # LLM never needed, so a flaky proxy fails even turns that run no lookups. The LLM
         # endpoint is always called directly.
-        response = self.session.post(
-            api_url,
-            headers=headers,
-            json=body,
-            timeout=self.timeout_seconds,
-        )
+        # Gateway-tier retry: 429/5xx are transient model-service conditions — a single 503
+        # used to kill the whole turn while connection-layer blips already got retries.
+        # Two extra attempts with bounded backoff (Retry-After respected) levels that
+        # inconsistency; other 4xx fail immediately for the loop's corrective guidance.
+        response = None
+        for gateway_attempt in range(3):
+            response = self.session.post(
+                api_url,
+                headers=headers,
+                json=body,
+                timeout=self.timeout_seconds,
+            )
+            status = response.status_code
+            if status < 400:
+                break
+            retryable = status == 429 or status in (500, 502, 503, 504)
+            if not retryable or gateway_attempt == 2:
+                break
+            retry_after = response.headers.get("Retry-After", "")
+            try:
+                delay = min(8.0, float(retry_after))
+            except (TypeError, ValueError):
+                delay = 1.0 * (gateway_attempt + 1)
+            self.logger.warning(
+                "Copilot model endpoint returned %s (attempt %d); retrying in %.1fs",
+                status,
+                gateway_attempt + 1,
+                delay,
+            )
+            time.sleep(delay)
         if not response.ok:
             self.logger.error(
                 "Copilot model rejected the required structured-output contract: status=%s response=%s",
@@ -1797,7 +1883,11 @@ class CopilotAssistant:
             # An SSE consumer that disconnected sets the abort event; stop before the next (costly)
             # model call rather than running the whole round budget for a client that's gone.
             if abort is not None and abort.is_set():
-                raise RuntimeError("planner aborted")
+                # Graceful user-stop: break so terminal selection runs — its failed-terminal
+                # copy has an "aborted by user" branch keyed on this issue string. Raising
+                # here bypassed it and surfaced a raw SSE error to the client instead.
+                last_issues = ["aborted by user"]
+                break
             # FOLLOW-UPS (pi agent-loop alignment): queued work for after the current goal.
             # get_follow_ups is drained ONLY when the planner is about to end with a plain
             # complete (the loop's would-stop point); each queued text revives the loop as a
@@ -2242,8 +2332,43 @@ class CopilotAssistant:
                     round_observations = self.skill_harness.execute_operations(
                         read_operations, abort=abort, deadline=turn_deadline
                     )
-                except RuntimeError:
-                    raise
+                except RuntimeError as exc:
+                    # Wave-level abort/deadline used to re-raise here, which surfaced a raw
+                    # SSE error and DISCARDED every observation the turn had already paid
+                    # for (the pressure-exit salvage only serves break paths). Surface the
+                    # not-executed reads as error observations instead: the loop-top abort
+                    # check then lands the graceful user-stop terminal, and the wall-clock
+                    # check lands the pressure-exit salvage over the partial results.
+                    self.logger.warning(
+                        "Copilot read execution stopped early (%s); surfacing as error observations",
+                        exc,
+                    )
+                    round_observations = {
+                        operation.operation_id: {
+                            "skill": operation.skill,
+                            "items": [
+                                {
+                                    "index": operation.index,
+                                    "arguments": CopilotSkillHarness._json_safe(operation.arguments),
+                                    "metadata": {},
+                                    "ok": False,
+                                    "result": None,
+                                    "error": f"read execution stopped early ({exc})",
+                                }
+                            ],
+                            "values": [],
+                            "errors": [
+                                {
+                                    "index": operation.index,
+                                    "error": f"read execution stopped early ({exc})",
+                                }
+                            ],
+                            "ok": False,
+                            "count": 1,
+                            "successCount": 0,
+                        }
+                        for operation in read_operations
+                    }
                 except Exception as exc:
                     self.logger.exception("Copilot read execution failed; surfacing as error observations")
                     round_observations = {
