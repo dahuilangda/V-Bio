@@ -8251,6 +8251,32 @@ def _select_dspace_samples(scored):
     return ranked
 
 
+def _pdb_peptide_sequence(pdb_path: Path, binder_chain_id: str = "B") -> str:
+    """Chain-<binder_chain_id> one-letter sequence of a staged PDB (chain B is
+    the peptide in design-space staging). Empty when the chain is absent."""
+    three2one = {
+        "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+        "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+        "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+        "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+    }
+    seen, residues = set(), []
+    try:
+        for line in pdb_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.startswith("ATOM"):
+                continue
+            if line[21].strip() != binder_chain_id:
+                continue
+            num = line[22:26]
+            if num in seen:
+                continue
+            seen.add(num)
+            residues.append(three2one.get(line[17:20].strip(), "X"))
+    except OSError:
+        return ""
+    return "".join(residues)
+
+
 def _assert_product_bound(
     structure_path: Path,
     binder_chain_id: str,
@@ -10696,27 +10722,46 @@ def run_peptide_design_backend(
                         f"dpeptide_keep_{parent_task_id}_{cand_dir.name}",
                     ):
                         keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / pattern
+                        if not keep_dir.is_dir():
+                            continue
                         if refined_ref and (keep_dir / Path(refined_ref).name).is_file():
                             staged_path = str(keep_dir / Path(refined_ref).name)
                             break
+                        # The keep stores the ranked SAMPLE cifs, not the
+                        # refined_cif basename. Accept a keep sample only when
+                        # its staged.pdb peptide matches this row's sequence —
+                        # a cand index recurs every generation, and a
+                        # generation-collided keep belongs to another sequence.
+                        keep_staged = keep_dir / "staged.pdb"
+                        keep_samples = sorted(keep_dir.glob("d_space_staged_model_*.cif"))
+                        if keep_staged.is_file() and keep_samples:
+                            if _pdb_peptide_sequence(keep_staged) == \
+                                    str(next_row.get("sequence") or "").strip().upper():
+                                staged_path = str(keep_samples[0])
+                                break
                 if not (staged_path and os.path.isfile(staged_path)):
-                    raise RuntimeError(
-                        "D-peptide candidate is missing its D-space refined "
-                        f"structure (rank {rank}, sequence "
-                        f"{str(next_row.get('sequence'))[:16]}, refined="
-                        f"{refined_ref!r}) — refusing to export the staged "
-                        "pre-docking frame as a product"
-                    )
-                from peplm.dpeptide import flip_product as _row_flip
-                display_path = Path(output_archive_path).parent / \
-                    f"_display_rank_{rank:02d}.pdb"
-                _row_flip(Path(staged_path), display_path)
-                if dpeptide_reference_target and Path(dpeptide_reference_target).is_file():
-                    rmsd = _dpeptide_align_product_to_input(
-                        display_path, Path(dpeptide_reference_target))
-                    print(f"[d-peptide] display rank {rank} aligned to the user "
-                          f"frame (receptor RMSD {rmsd:.3f} A)", file=sys.stderr)
-                structure_source_for_rank = str(display_path)
+                    # Checkpoint-resumed exports legitimately lose early-gen
+                    # structures to tmp cleanup. Ship the remaining ranked
+                    # rows and mark this one structureless — the UI shows it
+                    # as "no structure" instead of a detached pseudo-result.
+                    print(
+                        f"[d-peptide] WARNING: rank {rank} "
+                        f"({str(next_row.get('sequence'))[:16]}) has no "
+                        "refined structure on disk (tmp cleaned after a "
+                        "resume) — shipping without a structure",
+                        file=sys.stderr)
+                    structure_source_for_rank = ""
+                else:
+                    from peplm.dpeptide import flip_product as _row_flip
+                    display_path = Path(output_archive_path).parent / \
+                        f"_display_rank_{rank:02d}.pdb"
+                    _row_flip(Path(staged_path), display_path)
+                    if dpeptide_reference_target and Path(dpeptide_reference_target).is_file():
+                        rmsd = _dpeptide_align_product_to_input(
+                            display_path, Path(dpeptide_reference_target))
+                        print(f"[d-peptide] display rank {rank} aligned to the user "
+                              f"frame (receptor RMSD {rmsd:.3f} A)", file=sys.stderr)
+                    structure_source_for_rank = str(display_path)
             if structure_source_for_rank and os.path.isfile(structure_source_for_rank):
                 suffix = Path(structure_source_for_rank).suffix.lower()
                 ext = ".pdb" if suffix == ".pdb" else ".cif"
@@ -10735,13 +10780,15 @@ def run_peptide_design_backend(
                     rank_cif_source = structure_source_for_rank or source_path
             elif peptide_chirality != 'd':
                 # A hollow archive (JSON only) presented "no structure" cards
-                # to the user after a redelivered re-export — fail loudly
-                # instead of shipping results nobody can view.
-                raise RuntimeError(
-                    f"candidate rank {rank} ({str(next_row.get('sequence'))[:16]}) "
-                    f"is missing its structure file "
-                    f"({structure_source_for_rank or 'no path recorded'}) — "
-                    "refusing to export a structureless result archive")
+                # to the user after a redelivered re-export — same policy as
+                # the D route: ship the row structureless, with a warning.
+                print(
+                    f"[peptide] WARNING: rank {rank} "
+                    f"({str(next_row.get('sequence'))[:16]}) structure file "
+                    f"missing ({structure_source_for_rank or 'no path recorded'})"
+                    " — shipping without a structure",
+                    file=sys.stderr)
+                structure_source_for_rank = ""
             next_row["rank"] = rank
             next_row["structure_file"] = structure_arcname
             next_row["structure_name"] = Path(structure_arcname).name if structure_arcname else ""
