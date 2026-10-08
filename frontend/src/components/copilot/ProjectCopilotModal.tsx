@@ -24,7 +24,7 @@ import {
 } from './copilotInputHistory';
 import './ProjectCopilotModal.css';
 import { createCopilotDraftStore } from './copilotDraftStore';
-import { buildCopilotConversationContext } from './copilotConversationContext';
+import { buildCopilotConversationContext, type CopilotActiveGoal } from './copilotConversationContext';
 import { CopilotComposer } from './CopilotComposer';
 import { CopilotPanelShell } from './CopilotPanelShell';
 
@@ -732,6 +732,41 @@ export function ProjectCopilotModal({
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
 
+  // Goal retention: the session's persisted goal (goal_text/outline/plan_id),
+  // loaded from project_copilot_states and injected into every turn's context.
+  const [activeGoal, setActiveGoal] = useState<CopilotActiveGoal | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const session = String(activeSessionId || '').trim();
+    if (!currentUserId || !session) {
+      setActiveGoal(null);
+      return () => { cancelled = true; };
+    }
+    void (async () => {
+      try {
+        const persisted = await getProjectCopilotState(
+          currentUserId,
+          `copilot-goal:${session}`
+        );
+        if (cancelled) return;
+        const goalText = String(persisted?.goal_text || '').trim();
+        setActiveGoal(goalText
+          ? {
+              goal_text: goalText,
+              outline: Array.isArray(persisted?.outline) ? persisted.outline.map(String) : [],
+              plan_id: String(persisted?.plan_id || '').trim(),
+              state: String(persisted?.state || '').trim()
+            }
+          : null);
+      } catch {
+        if (!cancelled) setActiveGoal(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentUserId, activeSessionId, messages.length]);
+  const activeGoalRef = useRef<CopilotActiveGoal | null>(activeGoal);
+  activeGoalRef.current = activeGoal;
+
   const loadMessages = useCallback(async () => {
     if (!isOpen) return;
     const activeSessionIdNow = activeSessionIdRef.current;
@@ -1111,7 +1146,7 @@ export function ProjectCopilotModal({
       mention: `@${attachment.name}`,
       mentioned: content.includes(`@${attachment.name}`)
     }));
-    const conversationContext = buildCopilotConversationContext(sessionMessages);
+    const conversationContext = buildCopilotConversationContext(sessionMessages, activeGoalRef.current);
     const copilotMemory = collectCopilotMemory(sessionMessages, activeSessionId);
     setSending(true);
     // Local controller: abortRef may be nulled during the await below; re-reading it would orphan the stream.
@@ -1162,6 +1197,7 @@ export function ProjectCopilotModal({
           contextType,
           contextPayload: {
             ...contextPayload,
+            copilot_session_id: activeSessionIdRef.current,
             copilot_conversation: conversationContext,
             ...(copilotMemory.length > 0 ? { copilot_memory: copilotMemory } : {}),
             ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {})
