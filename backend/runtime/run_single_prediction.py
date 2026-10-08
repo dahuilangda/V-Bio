@@ -6109,7 +6109,12 @@ def _register_peptide_subtask(parent_task_id: str, subtask_id: str) -> None:
     try:
         pipe = client.pipeline()
         pipe.sadd(key, subtask_token)
-        pipe.expire(key, 24 * 3600)
+        # The registry is the cancel path's map to in-flight candidate tasks.
+        # Design parents legitimately run for DAYS; a 24h TTL let the map
+        # expire mid-run, so a late cancel/terminate could no longer revoke
+        # dispatched candidates and they kept burning GPU as orphans (the
+        # NFKBIZ gen-6 orphan incident). 14d matches the cancel-marker TTL.
+        pipe.expire(key, 14 * 24 * 3600)
         pipe.execute()
     except Exception:
         pass
