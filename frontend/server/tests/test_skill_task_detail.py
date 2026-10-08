@@ -34,7 +34,7 @@ class TestTaskDetailParameterPatchSchema(unittest.TestCase):
         self.assertIn("seed", props)
         self.assertEqual(
             props["backend"]["enum"],
-            ["boltz", "alphafold3", "protenix", "protenix2dock", "boltz2dock"])
+            ["boltz", "alphafold3", "protenix", "nesso", "protenix2dock", "boltz2dock"])
         self.assertIn("componentsReplacement", props)
 
     def test_virtual_screening_backend_is_nesso_only(self):

@@ -10,7 +10,7 @@ import {
   listProjectCopilotMessages,
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
-import { getCopilotConfig, getCopilotSettings, saveCopilotSettings, streamCopilotTurn, submitCopilotSteering, testCopilotSettings } from '../../api/copilotApi';
+import { getCopilotConfig, getCopilotSettings, requestCopilotStop, saveCopilotSettings, streamCopilotTurn, submitCopilotSteering, testCopilotSettings } from '../../api/copilotApi';
 import type { CopilotTestResult } from '../../api/copilotApi';
 import type { CopilotContextType, CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { useAuth } from '../../hooks/useAuth';
@@ -1207,7 +1207,11 @@ export function ProjectCopilotModal({
           content
         },
         (step) => setLiveTrace((prev) => [...prev, step]),
-        controller.signal
+        controller.signal,
+        (signedTurnKey) => {
+          // Control frame: the server signed this turn's key — Stop/steer now target it.
+          activeTurnKeyRef.current = signedTurnKey;
+        }
       );
       if (controller.signal.aborted) return; // switched mid-stream — do not touch the new session
       const planActions = turn.actions;
@@ -1378,6 +1382,14 @@ export function ProjectCopilotModal({
 
   const cancelSending = useCallback(() => {
     abortReasonRef.current = 'user';
+    // Server-side stop first: the signed turn key lets the runtime abort the
+    // in-flight round so the turn lands on the graceful "stopped by user"
+    // terminal (with any already-retrieved data salvaged) instead of the raw
+    // client-abort path. Local abort remains the fallback for dead servers.
+    const turnKey = activeTurnKeyRef.current;
+    if (turnKey) {
+      void requestCopilotStop({ turnKey }).catch(() => undefined);
+    }
     abortRef.current?.abort();
   }, []);
 

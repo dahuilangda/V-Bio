@@ -848,12 +848,15 @@ class AgentLoopBoundaryTests(unittest.TestCase):
             if step.get("event") == "outline":
                 abort.set()
         with patch_host_skills(d):
-            with self.assertRaises(RuntimeError):
-                assistant.plan_turn(context_type="task_detail", context_payload=payload,
-                                    user_id="u", username="alice", content="分析",
-                                    on_event=on_step, abort=abort)
+            result = assistant.plan_turn(context_type="task_detail", context_payload=payload,
+                                         user_id="u", username="alice", content="分析",
+                                         on_event=on_step, abort=abort)
         # Only the first round's model call was made; the aborted round never fired.
         self.assertEqual(len(session.requests), 1)
+        # Graceful user-stop (2026-10-08): the turn lands on the failed terminal with
+        # the aborted-by-user copy — never a raw RuntimeError out of plan_turn.
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("停止", result["content"])
 
     def test_too_many_questions_rejected(self):
         d = CopilotSkillDefinition(name="task_detail:submit_current", label="Start run",
