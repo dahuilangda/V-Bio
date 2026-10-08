@@ -7262,6 +7262,7 @@ def _dpeptide_prepare_d_target(
 
     target_d = gemmi.read_structure(str(uploaded))
     target_d.setup_entities()
+    target_d.remove_alternative_conformations()
     peplm_root = str(_resolve_capability_dir("peptide_lm"))
     if peplm_root not in sys.path:
         sys.path.insert(0, peplm_root)
@@ -7277,11 +7278,31 @@ def _dpeptide_prepare_d_target(
     lines: List[str] = []
     serial = 1
     poly_chains_written = 0
+
+    def _stageable(residue: gemmi.Residue) -> bool:
+        names = {a.name for a in residue}
+        if not {"N", "CA", "C"} <= names:
+            return False
+        return residue.name == "GLY" or "CB" in names
+
     for chain in target_d[0]:
-        if sum(1 for r in chain if r.het_flag != "H") < 3:
+        polymer = [r for r in chain if r.het_flag != "H"]
+        if len(polymer) < 3:
             continue
+        # Trim terminal residues the model would have to rebuild: a staged
+        # residue without complete backbone (or CB for non-Gly) is re-grown
+        # from its L-CCD token with L chirality and then fails the D
+        # chirality gate for every candidate (1HL3 THR332: terminal residue
+        # carrying a single N atom). Head/tail only — interior ordinals stay
+        # put so pocket contacts in sequence numbering keep resolving.
+        tail = len(polymer)
+        while tail > 0 and not _stageable(polymer[tail - 1]):
+            tail -= 1
+        head = 0
+        while head < tail and not _stageable(polymer[head]):
+            head += 1
         chain_letter = chr(ord("A") + poly_chains_written)
-        for ordinal, residue in enumerate(chain, start=1):
+        for ordinal, residue in enumerate(polymer[head:tail], start=1):
             for atom in residue:
                 if atom.element.name == "H":
                     continue
@@ -10596,9 +10617,24 @@ def run_peptide_design_backend(
             structure_arcname = ""
             structure_source_for_rank = source_path
             if peptide_chirality == 'd':
-                staged_path = str(next_row.pop("d_space_refined", "") or "")
-                if not (staged_path and os.path.isfile(staged_path)):
-                    staged_path = str(next_row.get("d_space_staged", "") or "")
+                refined_ref = str(next_row.pop("d_space_refined", "") or "")
+                staged_ref = str(next_row.get("d_space_staged", "") or "")
+                if refined_ref and os.path.isfile(refined_ref):
+                    staged_path = refined_ref
+                elif staged_ref and os.path.isfile(staged_ref):
+                    staged_path = staged_ref
+                else:
+                    # acks_late redelivery after tmp cleanup: the shipped
+                    # samples persist under dpeptide_keep_<task>_<cand>/ —
+                    # prefer the kept refined cif, then the kept staged.pdb
+                    cand_name = Path(refined_ref or staged_ref or "x").parent.name
+                    keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / \
+                        f"dpeptide_keep_{parent_task_id}_{cand_name}"
+                    staged_path = ""
+                    for prev in (refined_ref, "staged.pdb"):
+                        if prev and (keep_dir / Path(prev).name).is_file():
+                            staged_path = str(keep_dir / Path(prev).name)
+                            break
                 if not (staged_path and os.path.isfile(staged_path)):
                     raise RuntimeError(
                         "D-peptide candidate is missing its D-space refined "
