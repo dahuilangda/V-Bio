@@ -7933,10 +7933,19 @@ def _dpeptide_collect_refine(
     # persist staged + refined samples for post-run audits (task tmp dirs are
     # auto-cleaned); keep under the TASK-scoped candidate dir — a shared
     # "cand_001" name let consecutive tasks overwrite each other's evidence
-    # exactly when a defect needed diagnosing
+    # exactly when a defect needed diagnosing. The GENERATION is part of the
+    # dir name too: cand_001 recurs in every generation, and a gen-agnostic
+    # dir let the last writer win — a redelivered export's keep fallback then
+    # shipped gen-6 structures for gen-2 rows.
     runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip().replace(":", "_")
-    keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / \
-        f"dpeptide_keep_{runtime_task_id or 'local'}_{Path(refined_cif).parent.name}"
+    _cand_dir = Path(refined_cif).parent
+    _gen_dir = _cand_dir.parent.name if _cand_dir.parent.name.startswith("gen_") else ""
+    if _gen_dir:
+        keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / \
+            f"dpeptide_keep_{runtime_task_id or 'local'}_{_gen_dir}_{_cand_dir.name}"
+    else:
+        keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / \
+            f"dpeptide_keep_{runtime_task_id or 'local'}_{_cand_dir.name}"
     keep_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(staged_path, keep_dir / "staged.pdb")
     structure_dir = Path(str(metrics.get("structure_dir") or ""))
@@ -8240,6 +8249,56 @@ def _select_dspace_samples(scored):
                        cif, detached, contacts))
     ranked.sort(key=lambda r: (r[0], r[1], r[2], r[3], r[4]), reverse=True)
     return ranked
+
+
+def _assert_product_bound(
+    structure_path: Path,
+    binder_chain_id: str,
+    *,
+    rank: int,
+    sequence: str,
+    max_distance: float = 12.0,
+) -> float:
+    """Export gate: a shipped product must be a BOUND complex.
+
+    A dissociated product (binder farther than max_distance from every other
+    chain) means an upstream stage shipped a pre-docking frame — staged
+    geometries sit 50-100 A off-target. A detached "result" with a high score
+    attached is actively misleading, so the export fails loudly instead.
+    Returns the measured min binder-to-rest heavy-atom distance."""
+    try:
+        st = gemmi.read_structure(str(structure_path))
+        st.setup_entities()
+    except Exception as exc:
+        raise RuntimeError(
+            f"product structure unreadable for rank {rank}: "
+            f"{structure_path} ({exc})") from exc
+    binder, others = None, []
+    for ch in st[0]:
+        atoms = np.array([
+            [a.pos.x, a.pos.y, a.pos.z]
+            for residue in ch for a in residue if a.element.name != "H"
+        ])
+        if atoms.shape[0] == 0:
+            continue
+        if ch.name == binder_chain_id:
+            binder = atoms
+        else:
+            others.append(atoms)
+    if binder is None or not others:
+        return 0.0
+    min_d = min(
+        float(np.linalg.norm(binder[:, None, :] - o[None, :, :], axis=2).min())
+        for o in others
+    )
+    if min_d > max_distance:
+        raise RuntimeError(
+            f"product structure for rank {rank} ({str(sequence)[:16]}) is "
+            f"dissociated: binder-to-target min heavy-atom distance "
+            f"{min_d:.1f} A > {max_distance:.0f} A — refusing to export a "
+            "pre-docking frame as a result (inspect this candidate's refine "
+            "output)")
+    return min_d
 
 
 def _interchain_clash_profile(
@@ -10621,26 +10680,32 @@ def run_peptide_design_backend(
                 staged_ref = str(next_row.get("d_space_staged", "") or "")
                 if refined_ref and os.path.isfile(refined_ref):
                     staged_path = refined_ref
-                elif staged_ref and os.path.isfile(staged_ref):
-                    staged_path = staged_ref
                 else:
-                    # acks_late redelivery after tmp cleanup: the shipped
-                    # samples persist under dpeptide_keep_<task>_<cand>/ —
-                    # prefer the kept refined cif, then the kept staged.pdb
-                    cand_name = Path(refined_ref or staged_ref or "x").parent.name
-                    keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / \
-                        f"dpeptide_keep_{parent_task_id}_{cand_name}"
+                    # acks_late redelivery after tmp cleanup: the refined
+                    # sample persists under dpeptide_keep_<task>_<gen>_<cand>/
+                    # (legacy dirs without the gen segment also match). The
+                    # STAGED frame is deliberately NOT a fallback: staging
+                    # places the peptide by surface search BEFORE docking, so
+                    # a staged "product" is a dissociated complex — shipping
+                    # it presented a floating peptide to the user as a result.
+                    cand_dir = Path(refined_ref or staged_ref or "x").parent
+                    gen_dir = cand_dir.parent.name if cand_dir.parent.name.startswith("gen_") else ""
                     staged_path = ""
-                    for prev in (refined_ref, "staged.pdb"):
-                        if prev and (keep_dir / Path(prev).name).is_file():
-                            staged_path = str(keep_dir / Path(prev).name)
+                    for pattern in (
+                        f"dpeptide_keep_{parent_task_id}_{gen_dir}_{cand_dir.name}",
+                        f"dpeptide_keep_{parent_task_id}_{cand_dir.name}",
+                    ):
+                        keep_dir = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / pattern
+                        if refined_ref and (keep_dir / Path(refined_ref).name).is_file():
+                            staged_path = str(keep_dir / Path(refined_ref).name)
                             break
                 if not (staged_path and os.path.isfile(staged_path)):
                     raise RuntimeError(
                         "D-peptide candidate is missing its D-space refined "
                         f"structure (rank {rank}, sequence "
-                        f"{str(next_row.get('sequence'))[:16]}, staged="
-                        f"{staged_path!r})"
+                        f"{str(next_row.get('sequence'))[:16]}, refined="
+                        f"{refined_ref!r}) — refusing to export the staged "
+                        "pre-docking frame as a product"
                     )
                 from peplm.dpeptide import flip_product as _row_flip
                 display_path = Path(output_archive_path).parent / \
@@ -10656,12 +10721,27 @@ def run_peptide_design_backend(
                 suffix = Path(structure_source_for_rank).suffix.lower()
                 ext = ".pdb" if suffix == ".pdb" else ".cif"
                 structure_arcname = f"structures/rank_{rank:02d}{ext}"
+                # Export gate: a dissociated product (e.g. a staged pre-docking
+                # frame that slipped past a fallback) must fail the export, not
+                # ship a floating peptide with a high score attached.
+                _assert_product_bound(
+                    Path(structure_source_for_rank), binder_chain_id,
+                    rank=rank, sequence=str(next_row.get("sequence") or ""))
                 zipf.write(structure_source_for_rank, structure_arcname)
                 # rank_cif_source stays on the MIRROR-SPACE source: the
                 # product block flips it exactly once. Overwriting it with the
                 # already-flipped display file would double-flip.
                 if rank == 1 and not rank_cif_source:
                     rank_cif_source = structure_source_for_rank or source_path
+            elif peptide_chirality != 'd':
+                # A hollow archive (JSON only) presented "no structure" cards
+                # to the user after a redelivered re-export — fail loudly
+                # instead of shipping results nobody can view.
+                raise RuntimeError(
+                    f"candidate rank {rank} ({str(next_row.get('sequence'))[:16]}) "
+                    f"is missing its structure file "
+                    f"({structure_source_for_rank or 'no path recorded'}) — "
+                    "refusing to export a structureless result archive")
             next_row["rank"] = rank
             next_row["structure_file"] = structure_arcname
             next_row["structure_name"] = Path(structure_arcname).name if structure_arcname else ""

@@ -1039,11 +1039,19 @@ def _notify_task_terminal(args: dict, task_id: str, state: str, kind: str) -> No
                      exc_info=True)
 
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, acks_late=False)
 def predict_task(self, predict_args: dict):
     """
     Launch an isolated prediction subprocess: GPU management, subprocess
     timeout control, progress tracking, and authenticated result upload.
+
+    acks_late=False on purpose: peptide-design parents run for DAYS while the
+    broker visibility timeout is 24h — late-ack multi-day tasks are therefore
+    GUARANTEED redelivered mid-run/after completion, and the duplicate process
+    races the original: it re-exports from checkpoints whose tmp paths were
+    cleaned, ships hollow/dissociated zips over finished ones, and marks
+    finished tasks FAILURE. At-most-once + manual resubmit (checkpointed) is
+    the only safe delivery mode for this task.
     """
     gpu_id = -1
     allocated_gpu_ids: list[int] = []
