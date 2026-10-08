@@ -9251,13 +9251,19 @@ def run_peptide_design_backend(
     def _save_generation_checkpoint(gen: int) -> None:
         try:
             _ckpt_root.mkdir(parents=True, exist_ok=True)
-            _ckpt_path.write_text(json.dumps({
+            payload = json.dumps({
                 "generation": gen,
                 "completed_tasks": completed_tasks,
                 "evaluated": sorted(evaluated_sequences),
                 "elite_population": elite_population,
                 "all_results": all_results,
-            }))
+            })
+            # Atomic replace: a process death mid-write_text used to leave a
+            # truncated JSON, and the resume path then silently restarted from
+            # generation 1 (losing every completed generation).
+            _tmp_ckpt = _ckpt_path.with_suffix(".json.tmp")
+            _tmp_ckpt.write_text(payload)
+            os.replace(_tmp_ckpt, _ckpt_path)
         except OSError:
             pass  # checkpoint is best-effort; run continues without it
 
