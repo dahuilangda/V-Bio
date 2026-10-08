@@ -42,6 +42,16 @@ if str(PROJECT_ROOT) not in sys.path:
 BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
 
 sys.path.append(str(PROJECT_ROOT))
+from backend.runtime.design_constants import (  # noqa: E402
+    BACKBONE_CA_CA_MIN_A,
+    DPEPTIDE_PLDDT_GATE_DEFAULT,
+    PRODUCT_BOUND_MAX_DISTANCE_A,
+    REFINE_ABSOLUTE_PAIR_MIN_A,
+    REFINE_INTERPENETRATION_MIN_A,
+    REFINE_PACKING_BAND_A,
+    SEZ_RING_BOND_CUTOFF_A,
+    plddt_gate_from_env,
+)
 from backend.core.config import (
     MSA_SERVER_URL,
     MSA_SERVER_TIMEOUT_SECONDS,
@@ -7995,7 +8005,7 @@ def _dpeptide_collect_refine(
     # to 2.52 A (3LNJ) and post-polish samples sit at 2.55-2.6,
     # so the packing-band COUNT (pairs < 2.8) is not a violation signal.
     # True interpenetration is min < 2.3 or ANY pair < 2.2.
-    if _min_d < 2.3 or _n22 > 0:
+    if _min_d < REFINE_INTERPENETRATION_MIN_A or _n22 > 0:
         raise RuntimeError(
             f"D-space refine 界面物理违规: 受体-肽最小重原子距离 {_min_d:.2f} A, "
             f"{_n22} 对 < 2.2 A — 肽嵌入受体内部（采样力失衡）")
@@ -8185,7 +8195,7 @@ def _interchain_contact_count(
     return n
 
 
-def _backbone_intact(cif: Path, min_ca_ca: float = 2.80) -> bool:
+def _backbone_intact(cif: Path, min_ca_ca: float = BACKBONE_CA_CA_MIN_A) -> bool:
     """Every consecutive CA-CA virtual bond >= min_ca_ca.
 
     Guards against backbone crush: clash pushes without an omega-band can
@@ -8294,7 +8304,7 @@ def _assert_product_bound(
     *,
     rank: int,
     sequence: str,
-    max_distance: float = 12.0,
+    max_distance: float = PRODUCT_BOUND_MAX_DISTANCE_A,
 ) -> float:
     """Export gate: a shipped product must be a BOUND complex.
 
@@ -8374,8 +8384,8 @@ def _interchain_clash_profile(
         d2 = ((rec[:, None, :] - other[None, :, :]) ** 2).sum(-1)
         d = np.sqrt(d2)
         min_d = min(min_d, float(d.min()))
-        n22 += int((d < 2.2).sum())
-        n28 += int((d < 2.8).sum())
+        n22 += int((d < REFINE_ABSOLUTE_PAIR_MIN_A).sum())
+        n28 += int((d < REFINE_PACKING_BAND_A).sum())
     return (min_d, n22, n28)
 
 
@@ -8880,7 +8890,7 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
                            and distinct == len(bonds)),
         "distinct_cys": distinct,
         "bonds": bonds,
-        "cutoff_a": 2.5,
+        "cutoff_a": SEZ_RING_BOND_CUTOFF_A,
     }
 
 
@@ -10262,7 +10272,7 @@ def run_peptide_design_backend(
             # see foldable candidates. Without this the composite's ipSAE
             # dominance reinforces contact-maximizing junk (H/G-rich
             # sequences with no fold) as parents for mutation.
-            _PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
+            _PLDDT_GATE = plddt_gate_from_env()
 
             # pLDDT hard gate for this generation's elite pool: only
             # foldable candidates become parents for mutation and GRPO.
@@ -10704,7 +10714,7 @@ def run_peptide_design_backend(
     # Without this, GRPO reinforces contact-maximizing junk — histidine/
     # glycine-rich "peptides" that score ipSAE but have no fold (measured
     # H 19%, G 16%, hydrophobic 8% after 7 auto-mode generations).
-    _PLDDT_GATE = float(os.environ.get("DPEPTIDE_PLDDT_GATE", "55"))
+    _PLDDT_GATE = plddt_gate_from_env()
 
     # Hard gate BEFORE NSGA-II: below-gate candidates are excluded from
     # the pool entirely, not just sorted lower. NSGA-II ignores list
