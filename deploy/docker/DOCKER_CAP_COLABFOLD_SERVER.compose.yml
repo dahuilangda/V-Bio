@@ -2,6 +2,11 @@ name: vbio-cap-colabfold-server
 
 services:
   colabfold-server:
+    extra_hosts:
+      # Docker network alias for the HOST: lets the server reach redis and
+      # lets other stacks reach its published port without hardcoding the
+      # host's physical interface address.
+      - "host.docker.internal:host-gateway"
     build:
       context: ../..
       dockerfile: deploy/docker/DOCKER_CAP_COLABFOLD_SERVER.Dockerfile
