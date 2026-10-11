@@ -1,68 +1,246 @@
-"""ESM3 HTTP service — runs on the HOST (Boltz2Score venv, CUDA).
+"""ESM3 HTTP service — runs on the HOST (Boltz2Score venv).
 
-Loads the esm3_sm_open_v1 checkpoint once, serves
-propose/refill/perplexity/learn over HTTP. Workers reach it at
-http://<host>:9333 regardless of their container.
+Serves propose/refill/perplexity/learn over HTTP on :9333. The CUDA model
+does NOT live in this process: requests are proxied to a
+`_esm3_gpu_worker.py` subprocess that owns the CUDA context on a GPU leased
+from the shared Redis pool. The pool's admission gate rejects any card with
+>200MiB compute residue, and a torch context in a resident process holds
+~400-500MB that only dies with the process — so on idle this parent kills
+the subprocess (context gone, memory truly 0) and releases the card. The
+next request acquires again (any free card) and reloads.
+
+Lifecycle knobs (env):
+  ESM3_IDLE_RELEASE_SECONDS  idle window before unload+release (default 600)
+  ESM3_GPU_ACQUIRE_TIMEOUT   pool acquire budget per load (default 900)
+  ESM3_GPU_ID                UNPOOLED emergency card if the pool is unreachable
+  ESM3_ADAPTER_ROOT          LoRA adapter storage root
 """
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 PEPLM_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PEPLM_ROOT))
 
-import os
-import torch
-from pathlib import Path
+from peplm.integrate.ss_modes import normalize_mode  # noqa: F401  (re-export)
 
-from peplm.integrate.ss_modes import normalize_mode, resolve_ss_profile
-from peplm.models.esm3_policy import ESM3Policy
+_GPU_IDLE_RELEASE_SECONDS = float(os.environ.get("ESM3_IDLE_RELEASE_SECONDS", "600"))
+_GPU_ACQUIRE_TIMEOUT_SECONDS = int(os.environ.get("ESM3_GPU_ACQUIRE_TIMEOUT", "900"))
+_FALLBACK_GPU_ID = int(os.environ.get("ESM3_GPU_ID", "0"))
+_LEASE_ID = f"esm3-service-{os.getpid()}"
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_GPU_WORKER_SCRIPT = str(Path(__file__).resolve().parent / "_esm3_gpu_worker.py")
 
-policy = ESM3Policy(
-    checkpoint=PEPLM_ROOT / "models/external/esm3_sm_open_v1.pth",
-    device="cuda:0",
-    dtype=torch.bfloat16,
-)
-print("[esm3-http] model loaded", flush=True)
-
-# GRPO training state, keyed by adapter key ("peptide-l"/"peptide-d"/...):
-# - _adapter_optimizers: PERSISTENT AdamW state. The old code built a fresh
-#   AdamW per learn call, so every "update" was a single 1e-5 step from a
-#   zeroed optimizer — effectively a no-op that reset each generation.
-# - _loaded_adapter_key: which adapter currently weights the live policy.
-#   L/D design tasks request different keys; the service hot-swaps via
-#   policy.load_adapter instead of cross-contaminating one weight set.
-_ADAPTERS_ROOT = Path(os.environ.get(
-    "ESM3_ADAPTER_ROOT", str(PEPLM_ROOT / "adapters")))
-_adapter_optimizers: dict = {}
-_loaded_adapter_key: str | None = None
+_gpu_manager_module = None
 
 
+def _import_gpu_manager():
+    """Import the backend GPU pool client (host process: the repo root is not
+    on sys.path for a script launched by absolute path)."""
+    global _gpu_manager_module
+    if _gpu_manager_module is None:
+        repo = str(_REPO_ROOT)
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        import gpu_manager as module
+        # This venv's redis-py defaults socket_timeout=5s; acquire_gpu blocks
+        # in BLPOP(30s) cycles, which die at 5s with "Timeout reading from
+        # socket" and would push the service into the unpooled fallback.
+        # Rebuild the pool without a read timeout — blocking commands manage
+        # their own deadlines.
+        try:
+            import redis as _redis
+            module.REDIS_CONNECTION_POOL = _redis.ConnectionPool.from_url(
+                module.config.REDIS_URL, decode_responses=True,
+                socket_timeout=None)
+        except Exception as pool_exc:
+            print(f"[esm3-http] WARNING: redis pool rebuild failed ({pool_exc})",
+                  flush=True)
+        _gpu_manager_module = module
+    return _gpu_manager_module
 
-def _ensure_adapter_loaded(key: str) -> None:
-    """Hot-swap the LoRA weights for `key` if a saved adapter exists."""
-    global _loaded_adapter_key
-    if _loaded_adapter_key == key:
-        return
-    adapter_path = _ADAPTERS_ROOT / key
-    if adapter_path.exists():
-        policy.load_adapter(adapter_path)
-    _loaded_adapter_key = key
+
+class _GpuSubprocessManager:
+    """One leased card + one CUDA subprocess; killed and released on idle."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._proc: subprocess.Popen | None = None
+        self._gpu_id: int | None = None
+        self._pooled = False
+        self._last_request = 0.0
+        self._heartbeat_stop = threading.Event()
+
+    # ── request path ──────────────────────────────────────────────────────
+    def request(self, payload: dict) -> dict:
+        """Ensure the worker subprocess is up, forward one request."""
+        with self._lock:
+            self._last_request = time.time()
+            self._ensure_worker()
+            return self._roundtrip(payload)
+
+    def _ensure_worker(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        device_id = self._acquire_device()
+        env = dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = str(device_id)
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        self._proc = subprocess.Popen(
+            [sys.executable, _GPU_WORKER_SCRIPT],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=None, text=True, env=env)
+        # Consume the worker's startup line: it doubles as the readiness
+        # barrier (checkpoint load takes ~1 min) and keeps the response
+        # stream aligned — the first request's readline() must see the
+        # response, not this line.
+        ready = self._proc.stdout.readline()
+        try:
+            ready_info = json.loads(ready)
+            loaded_device = str(ready_info.get("device") or "?")
+        except (json.JSONDecodeError, TypeError):
+            self._discard_worker()
+            raise RuntimeError(f"gpu worker failed to start: {ready[:200]!r}")
+        print(f"[esm3-http] worker ready on {loaded_device} "
+              f"({'pool lease' if self._pooled else 'UNPOOLED fallback'})",
+              flush=True)
+
+    def _acquire_device(self) -> int:
+        if self._gpu_id is not None:
+            return self._gpu_id
+        try:
+            manager = _import_gpu_manager()
+            gpu_id = manager.acquire_gpu(_LEASE_ID, timeout=_GPU_ACQUIRE_TIMEOUT_SECONDS)
+            self._pooled = True
+            self._gpu_id = gpu_id
+            # Heartbeat MUST start before the slow checkpoint load: reconcile
+            # keeps only live-celery or heartbeating leases, and AsyncResult
+            # reads an unknown id as PENDING — without an immediate beat the
+            # lease is reclaimed mid-load and a candidate claims the card.
+            self._start_heartbeat()
+            self._beat_now()
+            return gpu_id
+        except Exception as exc:  # Redis down / pool drained / import failure
+            print(f"[esm3-http] CRITICAL: pool acquire failed ({exc}); "
+                  f"falling back to UNPOOLED cuda:{_FALLBACK_GPU_ID}", flush=True)
+            self._pooled = False
+            self._gpu_id = _FALLBACK_GPU_ID
+            return _FALLBACK_GPU_ID
+
+    def _roundtrip(self, payload: dict) -> dict:
+        proc = self._proc
+        try:
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+        except (BrokenPipeError, ValueError) as exc:
+            self._discard_worker()
+            return {"ok": False, "error": f"gpu worker died: {exc}"}
+        if not line:
+            self._discard_worker()
+            return {"ok": False, "error": "gpu worker closed output (crashed?)"}
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "error": f"bad worker response: {exc}"}
+
+    # ── lease upkeep ──────────────────────────────────────────────────────
+    def _beat_now(self) -> None:
+        try:
+            client = _import_gpu_manager().get_redis_client()
+            client.set(f"task_heartbeat:{_LEASE_ID}", "alive", ex=60)
+        except Exception:
+            pass
+
+    def _start_heartbeat(self) -> None:
+        self._heartbeat_stop.clear()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+
+    def _heartbeat_loop(self) -> None:
+        try:
+            client = _import_gpu_manager().get_redis_client()
+        except Exception:
+            return
+        while not self._heartbeat_stop.wait(30.0):
+            if self._gpu_id is None or not self._pooled:
+                continue
+            try:
+                client.set(f"task_heartbeat:{_LEASE_ID}", "alive", ex=60)
+            except Exception:
+                pass
+
+    # ── idle release ──────────────────────────────────────────────────────
+    def idle_unload_if_due(self) -> None:
+        with self._lock:
+            if self._proc is None:
+                return
+            if time.time() - self._last_request < _GPU_IDLE_RELEASE_SECONDS:
+                return
+            self._drop_worker()
+
+    def _discard_worker(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+            try:
+                self._proc.wait(timeout=10)
+            except Exception:
+                pass
+            self._proc = None
+
+    def _drop_worker(self) -> None:
+        """Kill the CUDA subprocess (context dies → memory truly 0), then
+        return the card to the pool."""
+        self._discard_worker()
+        gpu_id, pooled = self._gpu_id, self._pooled
+        self._gpu_id, self._pooled = None, False
+        self._heartbeat_stop.set()
+        if gpu_id is None:
+            return
+        if not pooled:
+            print(f"[esm3-http] idle unload done (unpooled cuda:{gpu_id})",
+                  flush=True)
+            return
+        try:
+            time.sleep(2.0)  # driver teardown lag before the reclaim probe
+            _import_gpu_manager().release_gpu(gpu_id, _LEASE_ID)
+            print(f"[esm3-http] idle unload done; GPU {gpu_id} released to pool",
+                  flush=True)
+        except Exception as exc:
+            print(f"[esm3-http] WARNING: release_gpu({gpu_id}) failed: {exc}",
+                  flush=True)
+
+    def snapshot(self) -> dict:
+        alive = self._proc is not None and self._proc.poll() is None
+        return {
+            "state": ("loaded" if alive else "idle"),
+            "pooled": self._pooled,
+            "gpu_id": self._gpu_id,
+            "device": (f"cuda:{self._gpu_id}" if alive and self._gpu_id is not None
+                       else "unloaded"),
+        }
 
 
-def _optimizer_for(key: str) -> torch.optim.AdamW:
-    """Persistent AdamW per adapter key: optimizer state (exp_avg/...) must
-    survive between learn calls or every step restarts from zero."""
-    opt = _adapter_optimizers.get(key)
-    if opt is None:
-        opt = torch.optim.AdamW(
-            [p for p in policy.model.parameters() if p.requires_grad],
-            lr=1e-5)
-        _adapter_optimizers[key] = opt
-    return opt
+_MANAGER = _GpuSubprocessManager()
+
+
+def _idle_reaper_loop() -> None:
+    while True:
+        time.sleep(15.0)
+        try:
+            _MANAGER.idle_unload_if_due()
+        except Exception as exc:
+            print(f"[esm3-http] idle reaper error: {exc}", flush=True)
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -77,23 +255,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        mode = req.get("mode", "")
         try:
-            # Propose/refill also run under the adapter's weights: hot-swap
-            # first so generation and GRPO always share one policy lineage.
-            if mode in ("propose", "refill") and req.get("adapter_key"):
-                _ensure_adapter_loaded(str(req["adapter_key"]))
-            if mode == "propose":
-                resp = self._propose(req)
-            elif mode == "refill":
-                resp = self._refill(req)
-            elif mode == "perplexity":
-                resp = self._perplexity(req)
-            elif mode == "learn":
-                resp = self._learn(req)
-            else:
-                resp = {"error": f"unknown mode: {mode}"}
-            resp["ok"] = True
+            # Pool-citizen lifecycle: may block on pool acquire (bounded by
+            # ESM3_GPU_ACQUIRE_TIMEOUT) and reload after an idle unload.
+            resp = _MANAGER.request(req)
         except Exception as exc:
             resp = {"ok": False, "error": str(exc)}
         body = json.dumps(resp).encode()
@@ -103,218 +268,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _conditioning(self, req):
-        """Sampling-time conditioning, reused by every mode so the
-        policy family never shifts between propose and learn.
-
-        structure_mode (auto/helix/hairpin/...) is resolved to an ss8
-        template AT EACH CALL'S ACTUAL peptide length — a hairpin turn
-        must sit mid-chain, so one static string would misalign when
-        lengths vary. A raw ss_profile string still overrides (legacy
-        ESM3_SS_PROFILE callers)."""
-        mode = req.get("structure_mode")
-        cond = {
-            "structure_mode": normalize_mode(mode) if mode else None,
-            "ss_profile": req.get("ss_profile") or None,
-            "peptide_first": bool(req.get("peptide_first", False)),
-        }
-        return cond
-
-    @staticmethod
-    def _ss_profile_for(cond, n: int):
-        """Exact-length ss8 template: explicit legacy profile wins, else
-        the mode's builder; None leaves the ss8 track off."""
-        return resolve_ss_profile(cond.get("structure_mode"),
-                                  cond.get("ss_profile"), n)
-
-    def _propose(self, req):
-        import math
-        from collections import Counter
-        receptor = req["receptor_sequence"]
-        pep_len = int(req.get("peptide_length", 14))
-        n = int(req.get("n_samples", 48))
-        keep = int(req.get("n_keep", 16))
-        cond = self._conditioning(req)
-        # Chunk the sampling: a long receptor context with a full
-        # parallel batch exhausts GPU memory. Process in chunks and
-        # concatenate trajectories before filtering.
-        CHUNK = 8
-        all_trajs = []
-        with torch.no_grad():
-            remaining = n
-            while remaining > 0:
-                batch = min(CHUNK, remaining)
-                trajs = policy.sample_batch(
-                    receptor=receptor, pep_len=pep_len, n=batch,
-                    keep=batch,
-                    temperature=float(req.get("temperature", 0.9)),
-                    num_steps=8, strategy="entropy",
-                    ss_profile=self._ss_profile_for(cond, pep_len),
-                    peptide_first=cond["peptide_first"])
-                all_trajs.extend(trajs)
-                remaining -= batch
-                if remaining > 0:
-                    torch.cuda.empty_cache()
-        trajs = all_trajs
-        seqs = []
-        for t in trajs:
-            s = policy.decode_tokens(t.peptide_tokens)
-            if not s or len(s) != pep_len:
-                continue
-            freq = Counter(s)
-            h = -sum((c / pep_len) * math.log2(c / pep_len) for c in freq.values())
-            if h < 1.5:
-                continue
-            seqs.append({"sequence": s, "logprob": t.mean_logprob})
-        seqs.sort(key=lambda x: -x["logprob"])
-        return {"sequences": seqs[:keep]}
-
-    def _refill(self, req):
-        """Resample only the specified positions of a parent sequence.
-
-        Uses ESM3Policy.refill: confident positions stay as context,
-        only the remasked positions are sampled. Returns the mutated
-        sequence or None if refill produced no change."""
-        parent = req.get("parent_sequence", "")
-        positions = req.get("remask_positions", [])
-        receptor = req.get("receptor_sequence", "")
-        temperature = float(req.get("temperature", 0.7))
-        cond = self._conditioning(req)
-        if not parent or not positions:
-            return {"error": "parent_sequence and remask_positions required"}
-
-        parent_tokens = policy.encode_peptide(parent, len(parent))
-        if parent_tokens is None:
-            return {"error": "failed to tokenize parent"}
-
-        with torch.no_grad():
-            traj = policy.refill(
-                receptor=receptor,
-                parent_tokens=parent_tokens,
-                remask_positions=[int(p) for p in positions],
-                temperature=temperature,
-                ss_profile=self._ss_profile_for(cond, len(parent)),
-                peptide_first=cond["peptide_first"],
-            )
-        if traj is None:
-            return {"sequence": None, "reason": "no change"}
-
-        seq = policy.decode_tokens(traj.peptide_tokens)
-        return {"sequence": seq if seq else None}
-
-    def _perplexity(self, req):
-        seq = req.get("peptide_sequence", "")
-        score = policy.score_sequence(
-            req.get("receptor_sequence", ""),
-            seq,
-            ss_profile=self._ss_profile_for(
-                self._conditioning(req), len(seq)),
-            peptide_first=bool(req.get("peptide_first", False)))
-        return {"perplexity": float(-score) if score is not None else 10.0}
-
-    def _learn(self, req):
-        """Sequence-level policy gradient: score each peptide's tokens
-        under the current policy, apply the group-mean advantage as a
-        scalar reward, and take one gradient step. This avoids the full
-        MaskGIT trajectory recording that Rollout requires — the HTTP
-        boundary carries sequences and rewards, not per-step states."""
-        data = req.get("rollouts", [])
-        cond = self._conditioning(req)
-        groups: dict[str, list] = {}
-        for rd in data:
-            groups.setdefault(rd.get("group", "default"), []).append(rd)
-        valid = {g: r for g, r in groups.items() if len(r) >= 2}
-        if not valid:
-            return {"skipped": "no group with >= 2 members"}
-
-        import torch.nn.functional as Fn
-        updates = []
-        for g, rows in valid.items():
-            rewards = [r["reward"] for r in rows]
-            m = sum(rewards) / len(rewards)
-            sd = max(max(rewards) - m, m - min(rewards), 1e-6)
-            for r in rows:
-                # each rollout trains at ITS OWN length: mutation children
-                # keep their parent's length and a padded-to-pep_len row
-                # would misalign a length-dependent ss8 template
-                n = len(r.get("sequence") or "")
-                if n < 4:
-                    continue
-                tokens = policy.encode_peptide(r["sequence"], n)
-                if tokens:
-                    adv = (r["reward"] - m) / sd
-                    # Per-residue credit: positions with low pLDDT get
-                    # higher gradient weight (BindCraft2-style — the model
-                    # learns to change what is broken, not what works)
-                    plddts = r.get("plddts") or []
-                    if plddts and len(plddts) == n:
-                        credit = [max(1.0 - float(p), 0.05) for p in plddts]
-                        csum = sum(credit) or 1.0
-                        credit = [c / csum * n for c in credit]
-                    else:
-                        credit = [1.0] * n
-                    updates.append((tokens, adv, credit))
-
-        if len(updates) < 2:
-            return {"skipped": "tokenization failed"}
-
-        # One gradient pass over all (tokens, advantage) pairs; the optimizer
-        # is persistent per adapter key so momentum state accumulates.
-        key = str(req.get("adapter_key") or "default")
-        _ensure_adapter_loaded(key)
-        opt = _optimizer_for(key)
-        opt.zero_grad()
-        total_loss = torch.tensor(0.0, device=policy.device)
-        rec_seq = req.get("receptor_sequence", "")
-        ctx_cache: dict[int, tuple] = {}
-        for tokens, adv, credit in updates:
-            n = len(tokens)
-            if n not in ctx_cache:
-                # context + per-length ss8: hairpin turns sit mid-chain,
-                # so each length needs its own template
-                ss8_n = self._ss_profile_for(cond, n)
-                ctx_cache[n] = (
-                    policy.encode_context(rec_seq, n,
-                                          peptide_first=cond["peptide_first"]),
-                    policy.peptide_start(rec_seq, n,
-                                         peptide_first=cond["peptide_first"]),
-                    policy.encode_ss8(rec_seq, n, ss8_n,
-                                      peptide_first=cond["peptide_first"])
-                    if ss8_n else None,
-                )
-            ctx, pep_start, ss8 = ctx_cache[n]
-            toks = ctx.clone()
-            for i, tid in enumerate(tokens):
-                toks[0, pep_start + i] = tid
-            logits = policy._forward_sequence_logits(toks, ss8)
-            lp = Fn.log_softmax(
-                logits[0, pep_start:pep_start + n, :], dim=-1)
-            tok_tensor = torch.tensor(tokens, device=policy.device)
-            scores = lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
-            # Per-residue weighted REINFORCE: each token's logprob is
-            # weighted by its credit (low pLDDT -> high weight)
-            credit_t = torch.tensor(credit, device=policy.device,
-                                     dtype=scores.dtype)
-            weighted = (scores * credit_t).sum() / credit_t.sum()
-            total_loss = total_loss - adv * weighted
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            [p for p in policy.model.parameters() if p.requires_grad], 1.0)
-        opt.step()
-
-        save_dir = Path(req.get("new_adapter_dir") or (_ADAPTERS_ROOT / key))
-        save_dir.mkdir(parents=True, exist_ok=True)
-        policy.save_adapter(save_dir)
-        _loaded_adapter_key = key
-        return {
-            "adapter_dir": str(save_dir),
-            "n_updates": len(updates),
-            "loss": float(total_loss.detach()),
-        }
-
     def do_GET(self):
         if self.path == "/health":
-            body = json.dumps({"ok": True, "model": "esm3", "device": str(policy.device)}).encode()
+            snap = _MANAGER.snapshot()
+            body = json.dumps({
+                "ok": True, "model": "esm3",
+                "device": snap["device"], "state": snap["state"],
+                "pooled": snap["pooled"],
+                "idle_release_seconds": _GPU_IDLE_RELEASE_SECONDS,
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(body))
@@ -324,12 +286,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def log_message(self, fmt, *args):
-        import sys as _s
-        print(f"[esm3-http] {self.address_string()} {fmt % args}", file=_s.stderr, flush=True)
+        print(f"[esm3-http] {self.address_string()} {fmt % args}", file=sys.stderr,
+              flush=True)
 
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9333
+    threading.Thread(target=_idle_reaper_loop, daemon=True).start()
     server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"[esm3-http] listening on :{port}", flush=True)
+    print(f"[esm3-http] listening on :{port} "
+          f"(pool-citizen GPU lifecycle, idle release {_GPU_IDLE_RELEASE_SECONDS:.0f}s)",
+          flush=True)
     server.serve_forever()
