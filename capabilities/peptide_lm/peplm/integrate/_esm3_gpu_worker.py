@@ -1,0 +1,311 @@
+"""GPU subprocess for the ESM3 HTTP service — owns the CUDA context.
+
+The pool's admission gate rejects any GPU with >200MiB of compute memory,
+and a torch CUDA context in a long-lived process holds ~400-500MB that
+cannot be released without ending the process. So ALL CUDA work lives in
+this subprocess: the HTTP parent stays GPU-free, spawns one worker per
+acquired card, and on idle kills it — the context dies with the process and
+the card returns truly empty for the next claimant.
+
+Protocol: one JSON request per line on stdin, one JSON response per line on
+stdout. Stderr is free-form diagnostics (forwarded to the service log).
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+PEPLM_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PEPLM_ROOT))
+
+import torch
+
+from peplm.integrate.ss_modes import normalize_mode, resolve_ss_profile
+from peplm.models.esm3_policy import ESM3Policy
+
+# GRPO training state, keyed by adapter key ("peptide-l"/"peptide-d"/...):
+# - persistent AdamW per key (state survives between learn calls)
+# - which adapter currently weights the live policy (L/D tasks hot-swap)
+_ADAPTERS_ROOT = Path(os.environ.get(
+    "ESM3_ADAPTER_ROOT", str(PEPLM_ROOT / "adapters")))
+_adapter_optimizers: dict = {}
+_loaded_adapter_key: str | None = None
+policy: ESM3Policy | None = None
+
+
+def _log(message: str) -> None:
+    print(f"[esm3-gpu] {message}", file=sys.stderr, flush=True)
+
+
+def _ensure_adapter_loaded(key: str) -> None:
+    global _loaded_adapter_key
+    if _loaded_adapter_key == key:
+        return
+    adapter_path = _ADAPTERS_ROOT / key
+    if adapter_path.exists():
+        policy.load_adapter(adapter_path)
+    _loaded_adapter_key = key
+
+
+def _optimizer_for(key: str) -> torch.optim.AdamW:
+    opt = _adapter_optimizers.get(key)
+    if opt is None:
+        opt = torch.optim.AdamW(
+            [p for p in policy.model.parameters() if p.requires_grad],
+            lr=1e-5)
+        _adapter_optimizers[key] = opt
+    return opt
+
+
+def _conditioning(req: dict) -> dict:
+    """Sampling-time conditioning shared by every mode so the policy family
+    never shifts between propose and learn. structure_mode resolves to an
+    ss8 template AT EACH CALL'S ACTUAL peptide length."""
+    mode = req.get("structure_mode")
+    return {
+        "structure_mode": normalize_mode(mode) if mode else None,
+        "ss_profile": req.get("ss_profile") or None,
+        "peptide_first": bool(req.get("peptide_first", False)),
+    }
+
+
+def _ss_profile_for(cond: dict, n: int):
+    return resolve_ss_profile(cond.get("structure_mode"),
+                              cond.get("ss_profile"), n)
+
+
+def _propose(req: dict) -> dict:
+    import math
+    from collections import Counter
+    receptor = req["receptor_sequence"]
+    pep_len = int(req.get("peptide_length", 14))
+    n = int(req.get("n_samples", 48))
+    keep = int(req.get("n_keep", 16))
+    cond = _conditioning(req)
+    CHUNK = 8
+    all_trajs = []
+    with torch.no_grad():
+        remaining = n
+        while remaining > 0:
+            batch = min(CHUNK, remaining)
+            trajs = policy.sample_batch(
+                receptor=receptor, pep_len=pep_len, n=batch,
+                keep=batch,
+                temperature=float(req.get("temperature", 0.9)),
+                num_steps=8, strategy="entropy",
+                ss_profile=_ss_profile_for(cond, pep_len),
+                peptide_first=cond["peptide_first"])
+            all_trajs.extend(trajs)
+            remaining -= batch
+            if remaining > 0:
+                torch.cuda.empty_cache()
+    seqs = []
+    for t in all_trajs:
+        s = policy.decode_tokens(t.peptide_tokens)
+        if not s or len(s) != pep_len:
+            continue
+        freq = Counter(s)
+        h = -sum((c / pep_len) * math.log2(c / pep_len) for c in freq.values())
+        if h < 1.5:
+            continue
+        seqs.append({"sequence": s, "logprob": t.mean_logprob})
+    seqs.sort(key=lambda x: -x["logprob"])
+    return {"sequences": seqs[:keep]}
+
+
+def _refill(req: dict) -> dict:
+    """Resample only the specified positions of a parent sequence."""
+    parent = req.get("parent_sequence", "")
+    positions = req.get("remask_positions", [])
+    receptor = req.get("receptor_sequence", "")
+    temperature = float(req.get("temperature", 0.7))
+    cond = _conditioning(req)
+    if not parent or not positions:
+        return {"error": "parent_sequence and remask_positions required"}
+
+    parent_tokens = policy.encode_peptide(parent, len(parent))
+    if parent_tokens is None:
+        return {"error": "failed to tokenize parent"}
+
+    with torch.no_grad():
+        traj = policy.refill(
+            receptor=receptor,
+            parent_tokens=parent_tokens,
+            remask_positions=[int(p) for p in positions],
+            temperature=temperature,
+            ss_profile=_ss_profile_for(cond, len(parent)),
+            peptide_first=cond["peptide_first"],
+        )
+    if traj is None:
+        return {"sequence": None, "reason": "no change"}
+
+    seq = policy.decode_tokens(traj.peptide_tokens)
+    return {"sequence": seq if seq else None}
+
+
+def _perplexity(req: dict) -> dict:
+    seq = req.get("peptide_sequence", "")
+    score = policy.score_sequence(
+        req.get("receptor_sequence", ""),
+        seq,
+        ss_profile=_ss_profile_for(_conditioning(req), len(seq)),
+        peptide_first=bool(req.get("peptide_first", False)))
+    return {"perplexity": float(-score) if score is not None else 10.0}
+
+
+def _learn(req: dict) -> dict:
+    """Sequence-level policy gradient: score each peptide's tokens
+    under the current policy, apply the group-mean advantage as a
+    scalar reward, and take one gradient step. This avoids the full
+    MaskGIT trajectory recording that Rollout requires — the HTTP
+    boundary carries sequences and rewards, not per-step states."""
+    data = req.get("rollouts", [])
+    cond = _conditioning(req)
+    groups: dict[str, list] = {}
+    for rd in data:
+        groups.setdefault(rd.get("group", "default"), []).append(rd)
+    valid = {g: r for g, r in groups.items() if len(r) >= 2}
+    if not valid:
+        return {"skipped": "no group with >= 2 members"}
+
+    import torch.nn.functional as Fn
+    updates = []
+    for g, rows in valid.items():
+        rewards = [r["reward"] for r in rows]
+        m = sum(rewards) / len(rewards)
+        sd = max(max(rewards) - m, m - min(rewards), 1e-6)
+        for r in rows:
+            # each rollout trains at ITS OWN length: mutation children
+            # keep their parent's length and a padded-to-pep_len row
+            # would misalign a length-dependent ss8 template
+            n = len(r.get("sequence") or "")
+            if n < 4:
+                continue
+            tokens = policy.encode_peptide(r["sequence"], n)
+            if tokens:
+                adv = (r["reward"] - m) / sd
+                # Per-residue credit: positions with low pLDDT get
+                # higher gradient weight (BindCraft2-style — the model
+                # learns to change what is broken, not what works)
+                plddts = r.get("plddts") or []
+                if plddts and len(plddts) == n:
+                    credit = [max(1.0 - float(p), 0.05) for p in plddts]
+                    csum = sum(credit) or 1.0
+                    credit = [c / csum * n for c in credit]
+                else:
+                    credit = [1.0] * n
+                updates.append((tokens, adv, credit))
+
+    if len(updates) < 2:
+        return {"skipped": "tokenization failed"}
+
+    # One gradient pass over all (tokens, advantage) pairs; the optimizer
+    # is persistent per adapter key so momentum state accumulates.
+    key = str(req.get("adapter_key") or "default")
+    _ensure_adapter_loaded(key)
+    opt = _optimizer_for(key)
+    opt.zero_grad()
+    total_loss = torch.tensor(0.0, device=policy.device)
+    rec_seq = req.get("receptor_sequence", "")
+    ctx_cache: dict[int, tuple] = {}
+    for tokens, adv, credit in updates:
+        n = len(tokens)
+        if n not in ctx_cache:
+            # context + per-length ss8: hairpin turns sit mid-chain,
+            # so each length needs its own template
+            ss8_n = _ss_profile_for(cond, n)
+            ctx_cache[n] = (
+                policy.encode_context(rec_seq, n,
+                                      peptide_first=cond["peptide_first"]),
+                policy.peptide_start(rec_seq, n,
+                                     peptide_first=cond["peptide_first"]),
+                policy.encode_ss8(rec_seq, n, ss8_n,
+                                  peptide_first=cond["peptide_first"])
+                if ss8_n else None,
+            )
+        ctx, pep_start, ss8 = ctx_cache[n]
+        toks = ctx.clone()
+        for i, tid in enumerate(tokens):
+            toks[0, pep_start + i] = tid
+        logits = policy._forward_sequence_logits(toks, ss8)
+        lp = Fn.log_softmax(
+            logits[0, pep_start:pep_start + n, :], dim=-1)
+        tok_tensor = torch.tensor(tokens, device=policy.device)
+        scores = lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
+        # Per-residue weighted REINFORCE: each token's logprob is
+        # weighted by its credit (low pLDDT -> high weight)
+        credit_t = torch.tensor(credit, device=policy.device,
+                                 dtype=scores.dtype)
+        weighted = (scores * credit_t).sum() / credit_t.sum()
+        total_loss = total_loss - adv * weighted
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(
+        [p for p in policy.model.parameters() if p.requires_grad], 1.0)
+    opt.step()
+
+    save_dir = Path(req.get("new_adapter_dir") or (_ADAPTERS_ROOT / key))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    policy.save_adapter(save_dir)
+    _loaded_adapter_key = key
+    return {
+        "adapter_dir": str(save_dir),
+        "n_updates": len(updates),
+        "loss": float(total_loss.detach()),
+    }
+
+
+HANDLERS = {
+    "propose": _propose,
+    "refill": _refill,
+    "perplexity": _perplexity,
+    "learn": _learn,
+}
+
+
+def main() -> None:
+    global policy
+    # The parent pins CUDA_VISIBLE_DEVICES to the leased card, so the only
+    # visible device here is logical cuda:0 — indexing by the physical id
+    # would raise "invalid device ordinal".
+    device = "cuda:0"
+    policy = ESM3Policy(
+        checkpoint=PEPLM_ROOT / "models/external/esm3_sm_open_v1.pth",
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    _log(f"policy ready on {device} (pid {os.getpid()})")
+    print(json.dumps({"event": "ready", "device": device}), flush=True)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _emit({"ok": False, "error": f"bad request: {exc}"})
+            continue
+        mode = req.get("mode", "")
+        try:
+            if mode in ("propose", "refill") and req.get("adapter_key"):
+                _ensure_adapter_loaded(str(req["adapter_key"]))
+            handler = HANDLERS.get(mode)
+            if handler is None:
+                resp = {"ok": False, "error": f"unknown mode: {mode}"}
+            else:
+                resp = handler(req)
+                resp["ok"] = True
+        except Exception as exc:
+            resp = {"ok": False, "error": str(exc)}
+        _emit(resp)
+
+
+def _emit(resp: dict) -> None:
+    sys.stdout.write(json.dumps(resp) + "\n")
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
