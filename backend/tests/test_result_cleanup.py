@@ -134,6 +134,25 @@ class ResultCleanupTest(unittest.TestCase):
         self.assertTrue(runtime_tmp.exists(), "_runtime_tmp 容器目录自身应保留")
         self.assertEqual(stats.deleted_dirs, 1)
 
+    def test_runtime_tmp_keep_dirs_get_long_grace(self) -> None:
+        """*_keep_* 导出回退目录：标准保留期内不清理，仅在 KEEP_GRACE_DAYS
+        之外才回收（删掉它们会让断点续跑后的归档退回"无结构"）。"""
+        runtime_tmp = self.root / "_runtime_tmp"
+        keep_within_grace = runtime_tmp / f"lpeptide_keep_{_make_task_uuid()}"
+        keep_beyond_grace = runtime_tmp / f"dpeptide_keep_{_make_task_uuid()}_cand_003"
+        keep_within_grace.mkdir(parents=True)
+        keep_beyond_grace.mkdir(parents=True)
+        _set_mtime(keep_within_grace, 100)   # 超过 90 天保留期,但在 30 天宽限内
+        _set_mtime(keep_beyond_grace, 200)   # 远超保留期+宽限,应回收
+
+        stats = purge_stale_task_results(retention_days=90, results_base_dir=self.root,
+                                         lead_opt_output_dir=self.root / "nonexistent",
+                                         active_task_ids=set(), dry_run=False)
+
+        self.assertTrue(keep_within_grace.exists(), "宽限内的 keep 目录应受保护")
+        self.assertFalse(keep_beyond_grace.exists(), "远超宽限的 keep 目录应被回收")
+        self.assertEqual(stats.deleted_dirs, 1)
+
     def test_lead_opt_output_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as lead_tmp:
             lead_root = Path(lead_tmp) / "lead_opt"

@@ -40,6 +40,9 @@ from backend.core.config import (
 
 LOGGER = logging.getLogger(__name__)
 
+# *_keep_* 导出回退目录在标准保留期之外的额外宽限天数。
+KEEP_GRACE_DAYS = 30
+
 # backend 结果根目录下的保留名目录：exports 已有自身的文件 TTL 清理，_runtime_tmp
 # 作为容器目录跳过（其子目录仍会单独按 mtime 清理）。
 _RESERVED_ROOT_DIRS = frozenset({"exports", "_runtime_tmp"})
@@ -159,7 +162,11 @@ def _path_collector(results_base: Path, lead_opt_root: Optional[Path], min_mtime
             LOGGER.exception("扫描结果根目录失败: %s", results_base)
 
     # _runtime_tmp 泄漏的临时任务目录（不再要求 UUID 目录名，按 mtime 整体清理）
+    # *_keep_* 目录（dpeptide_keep_/lpeptide_keep_）是导出回退的恢复产物，删掉
+    # 它们会让断点续跑后的归档重新退回"无结构"，因此给予远超任务生命周期的
+    # 额外宽限（KEEP_GRACE_DAYS），仅在彻底陈旧后才回收，避免无限累积。
     runtime_tmp = results_base / "_runtime_tmp"
+    keep_min_mtime = min_mtime - KEEP_GRACE_DAYS * 86400.0
     if runtime_tmp.is_dir():
         try:
             with os.scandir(runtime_tmp) as it:
@@ -167,12 +174,15 @@ def _path_collector(results_base: Path, lead_opt_root: Optional[Path], min_mtime
                     if not entry.is_dir(follow_symlinks=False):
                         continue
                     try:
-                        if entry.stat().st_mtime <= min_mtime:
-                            task_id = _looks_like_task_id(entry.name)
-                            if task_id is None or task_id not in active:
-                                yield Path(entry.path), True, task_id
+                        mtime = entry.stat().st_mtime
                     except OSError:
                         continue
+                    if '_keep_' in entry.name and mtime > keep_min_mtime:
+                        continue
+                    if mtime <= min_mtime:
+                        task_id = _looks_like_task_id(entry.name)
+                        if task_id is None or task_id not in active:
+                            yield Path(entry.path), True, task_id
         except OSError:
             LOGGER.exception("扫描运行时临时目录失败: %s", runtime_tmp)
 
