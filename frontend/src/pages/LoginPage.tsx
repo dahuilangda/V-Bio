@@ -58,7 +58,7 @@ export function LoginPage() {
                 value={password}
                 type="password"
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="At least 6 characters"
+                placeholder="Your password"
                 autoComplete="current-password"
                 required
               />

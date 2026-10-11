@@ -664,3 +664,28 @@
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 }
+
+/* 3D card wall: show a non-blank placeholder while Molstar boots its canvas
+   (~1-2s on cold open). The canvas paints over this once ready. */
+.peptide-results-structure-panel {
+  position: relative;
+}
+
+.peptide-results-structure-panel::before {
+  content: "Preparing 3D view...";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #55695f;
+  font-size: var(--text-sm);
+  background: #f7faf8;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.peptide-results-structure-panel > * {
+  position: relative;
+  z-index: 1;
+}

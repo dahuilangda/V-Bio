@@ -1,3 +1,28 @@
 @import './project-tasks-table-base.css';
 @import './project-tasks-ligand.css';
 @import './project-tasks-meta.css';
+
+.task-run-note details,
+details.task-run-note {
+  max-width: 460px;
+}
+
+details.task-run-note summary {
+  cursor: pointer;
+  color: inherit;
+  font-size: var(--text-xs);
+}
+
+details.task-run-note .task-run-note-log {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  line-height: 1.5;
+  background: #fff5f2;
+  border: 1px solid #efc7ba;
+  border-radius: 6px;
+}

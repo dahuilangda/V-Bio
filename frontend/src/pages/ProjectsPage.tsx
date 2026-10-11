@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useOverlayHost } from '../components/ui/OverlayContext';
 import { useModalDialog } from '../components/ui/useModalDialog';
@@ -24,8 +24,12 @@ import {
   Square,
   Trash2
 } from 'lucide-react';
-import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/ProjectCopilotModal';
-import { SharingModal } from '../components/project/SharingModal';
+import { readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/copilotSessionState';
+
+// The modal drags in the whole Copilot chat UI; only its open state is read
+// during first render, so the component itself loads on first open.
+const ProjectCopilotModal = lazy(() => import('../components/copilot/ProjectCopilotModal').then((m) => ({ default: m.ProjectCopilotModal })));
+const SharingModal = lazy(() => import('../components/project/SharingModal').then((m) => ({ default: m.SharingModal })));
 import { useAuth } from '../hooks/useAuth';
 import { useCopilotAvailability } from '../hooks/useCopilotAvailability';
 import { useProjects } from '../hooks/useProjects';
@@ -239,7 +243,7 @@ export function ProjectsPage() {
     pageSize
   ]);
 
-  const countText = useMemo(() => `${projects.length} projects`, [projects.length]);
+  const countText = useMemo(() => `${projects.length} ${projects.length === 1 ? 'project' : 'projects'}`, [projects.length]);
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLowerCase();
     const updatedWindowMs = updatedWithinDays === 'all' ? null : Number(updatedWithinDays) * 24 * 60 * 60 * 1000;
@@ -675,7 +679,7 @@ export function ProjectsPage() {
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search name/summary/type/status..."
+                  placeholder="Search projects..."
                 />
               </div>
             </div>
@@ -1222,6 +1226,7 @@ export function ProjectsPage() {
       )}
 
       {session?.userId && sharedProject ? (
+        <Suspense fallback={null}>
         <SharingModal
           open
           mode="project"
@@ -1230,13 +1235,15 @@ export function ProjectsPage() {
           currentUserId={session.userId}
           onClose={() => setSharedProject(null)}
         />
+        </Suspense>
       ) : null}
 
       {copilotAvailable && session?.userId ? (
+        <Suspense fallback={null}>
         <ProjectCopilotModal
           isOpen={copilotOpen}
           title="Copilot"
-          subtitle={`${filteredProjects.length} matched / ${projects.length} total`}
+          subtitle={`Project list assistant · ${projects.length} project${projects.length === 1 ? "" : "s"} in view`}
           contextType="project_list"
           currentUserId={session.userId}
           currentUsername={session.username}
@@ -1272,6 +1279,7 @@ export function ProjectsPage() {
           onOpen={() => setCopilotOpen(true)}
           onClose={() => setCopilotOpen(false)}
         />
+        </Suspense>
       ) : null}
 
     </div>

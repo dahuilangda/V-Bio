@@ -64,7 +64,7 @@ export function looksLikeAminoAcidBackboneSmiles(smiles: string): boolean {
 }
 
 const PRINTABLE_ASCII_REGEX = /^[\x20-\x7E]+$/;
-const PROTEIN_REGEX = /^[ACDEFGHIKLMNPQRSTVWY]+$/i;
+export const PROTEIN_REGEX = /^[ACDEFGHIKLMNPQRSTVWY]+$/i;
 const DNA_REGEX = /^[ATGC]+$/i;
 const RNA_REGEX = /^[AUGC]+$/i;
 

@@ -30,6 +30,7 @@ export function WorkspaceStepper({
       <button
         type="button"
         className={`workspace-step ${workspaceTab === 'basics' ? 'active' : ''}`}
+          aria-current={workspaceTab === 'basics' ? 'step' : undefined}
         onClick={() => onWorkspaceTabChange('basics')}
         aria-label="Edit basics"
         data-label="Basics"
@@ -43,6 +44,7 @@ export function WorkspaceStepper({
         <button
           type="button"
           className={`workspace-step ${workspaceTab === 'components' ? 'active' : ''}`}
+          aria-current={workspaceTab === 'components' ? 'step' : undefined}
           onClick={() => onWorkspaceTabChange('components')}
           aria-label={`Edit ${componentsLabel.toLowerCase()}`}
           data-label={componentsLabel}
@@ -57,6 +59,7 @@ export function WorkspaceStepper({
         <button
           type="button"
           className={`workspace-step ${workspaceTab === 'constraints' ? 'active' : ''}`}
+          aria-current={workspaceTab === 'constraints' ? 'step' : undefined}
           onClick={() => onWorkspaceTabChange('constraints')}
           aria-label={`Edit ${constraintsLabel.toLowerCase()}`}
           data-label={constraintsLabel}
@@ -70,6 +73,7 @@ export function WorkspaceStepper({
       <button
         type="button"
         className={`workspace-step ${workspaceTab === 'results' ? 'active' : ''}`}
+          aria-current={workspaceTab === 'results' ? 'step' : undefined}
         onClick={() => onWorkspaceTabChange('results')}
         aria-label="View current result"
           data-label="Results"

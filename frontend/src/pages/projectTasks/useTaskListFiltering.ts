@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { ProjectTask } from '../../types/models';
 import { loadRDKitModule } from '../../utils/rdkit';
@@ -629,15 +629,23 @@ export function useTaskListFiltering(
     setSortDirection(defaultSortDirection(key));
   }, []);
 
+  // Read-through-refs: the click handler must always act on the LATEST
+  // sort state. A closure-captured sortKey here was observed to go stale in
+  // the peptide workspace (metric-column clicks became no-ops while
+  // `submitted` kept working), so the handler reads refs and stays stable.
+  const sortKeyRef = useRef(sortKey);
+  sortKeyRef.current = sortKey;
+  const sortDirectionRef = useRef(sortDirection);
+  sortDirectionRef.current = sortDirection;
   const handleSort = useCallback((key: SortKey) => {
     setPage(1);
-    if (sortKey === key) {
+    if (sortKeyRef.current === key) {
       setSortDirection((prev) => nextSortDirection(prev));
       return;
     }
     setSortKey(key);
     setSortDirection(defaultSortDirection(key));
-  }, [sortKey]);
+  }, []);
 
   const sortMark = useCallback(
     (key: SortKey) => {

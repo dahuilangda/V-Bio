@@ -2,7 +2,6 @@ import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import {
   downloadResultBlob,
   getTaskStatus,
-  parseResultBundle,
 } from '../../api/backendApi';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
@@ -461,14 +460,21 @@ export async function pullResultForViewerTask(params: {
   const resultMode = options?.resultMode || 'view';
   setResultError(null);
   try {
+    // Parser chunk (with jszip) loads in parallel with the archive download —
+    // on a cold cache the two round-trips overlap instead of serializing.
+    const parserReady = import('../../api/resultParser/resultBundleParser');
+    // Pre-attach a no-op catch: if download AND import both fail, the awaited
+    // rejection is handled below, but an un-awaited early rejection would
+    // otherwise surface as console noise.
+    parserReady.catch(() => {});
     const blob = await downloadResultBlob(taskId, {
       mode: resultMode,
       preferredStructureName: options?.preferredStructureName
     });
-    const parsed = await parseResultBundle(blob, {
+    const parsed = await parserReady.then((m) => m.parseResultBundle(blob, {
       preservePeptideCandidateStructureText: false,
       preferredStructureName: options?.preferredStructureName
-    });
+    }));
     if (!parsed) {
       throw new Error('No structure file was found in the result archive.');
     }
