@@ -44,13 +44,12 @@ BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
 sys.path.append(str(PROJECT_ROOT))
 from backend.runtime.design_constants import (  # noqa: E402
     BACKBONE_CA_CA_MIN_A,
-    DPEPTIDE_PLDDT_GATE_DEFAULT,
     PRODUCT_BOUND_MAX_DISTANCE_A,
     REFINE_ABSOLUTE_PAIR_MIN_A,
     REFINE_INTERPENETRATION_MIN_A,
     REFINE_PACKING_BAND_A,
     SEZ_RING_BOND_CUTOFF_A,
-    plddt_gate_from_env,
+    plddt_gate_for_chirality,
 )
 from backend.core.config import (
     MSA_SERVER_URL,
