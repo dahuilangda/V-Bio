@@ -579,8 +579,16 @@ textarea {
 input:focus,
 textarea:focus,
 select:focus {
-  outline: 2px solid #c5d8cb;
+  outline: 2px solid var(--primary, #1f4f3f);
+  outline-offset: 1px;
   border-color: #93b79f;
+}
+
+/* WCAG 2.4.7/1.4.11: the wrapper carries the border, so give IT the focus ring
+   when the inner borderless input is focused. */
+.input-wrap:focus-within {
+  border-color: var(--primary, #1f4f3f);
+  box-shadow: 0 0 0 2px rgba(31, 79, 63, 0.35);
 }
 
 .input-wrap {
@@ -1599,4 +1607,16 @@ button.peptide-residue-config-head .peptide-residue-selection-summary {
 .peptide-preset-chip:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+
+/* WCAG 2.3.3: respect reduced-motion globally (status pulses, transitions). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

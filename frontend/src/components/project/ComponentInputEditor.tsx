@@ -8,7 +8,7 @@ import { JSMEEditor } from './JSMEEditor';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { loadRDKitModule } from '../../utils/rdkit';
 import { Ligand2DPreview } from './Ligand2DPreview';
-import { rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
+import { rdkitMolHasAminoAcidBackbone, PROTEIN_REGEX } from '../../utils/inputValidation';
 import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
@@ -1038,6 +1038,11 @@ export function ComponentInputEditor({
                           disabled={isDisabled}
                           onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                         />
+                        {comp.type === 'protein' && comp.sequence.trim() && !PROTEIN_REGEX.test(comp.sequence) ? (
+                          <div className="alert error" role="alert" style={{ marginTop: 6 }}>
+                            Invalid characters — standard amino acids only (ACDEFGHIKLMNPQRSTVWY). Non-natural residues go through Residue Modifications.
+                          </div>
+                        ) : null}
                       </Field>
                     ) : null}
 

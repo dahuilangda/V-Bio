@@ -903,6 +903,16 @@ export function resolvePeptideFocusChainId(
   return longest.chainId;
 }
 
+function normalizeResiduePlddtSeries(series: number[]): number[] {
+  // Design backends emit per-residue pLDDT either on the 0-100 scale or as
+  // 0-1 confidences. A mean of 94 must not render as "low confidence" orange
+  // just because its series arrived as 0.94 — rescale fractional series.
+  if (series.length === 0) return series;
+  const max = Math.max(...series);
+  if (max > 0 && max <= 1.5) return series.map((value) => Math.round(value * 1000) / 10);
+  return series;
+}
+
 export function parseCandidateResiduePlddts(
   row: Record<string, unknown>,
   sequenceLength: number,
@@ -951,19 +961,19 @@ export function parseCandidateResiduePlddts(
     for (const key of directKeys) {
       const parsed = alignResidueSeriesToSequence(parseNumberList(source[key]), sequenceLength);
       if (parsed.length > 0) {
-        return parsed;
+        return normalizeResiduePlddtSeries(parsed);
       }
     }
     for (const path of pathKeys) {
       const parsed = alignResidueSeriesToSequence(parseNumberList(readObjectPath(source, path)), sequenceLength);
       if (parsed.length > 0) {
-        return parsed;
+        return normalizeResiduePlddtSeries(parsed);
       }
     }
   }
 
   const byChainSeries = readResiduePlddtByChainSeries(nested, sequenceLength, preferredChainId);
-  if (byChainSeries.length > 0) return byChainSeries;
+  if (byChainSeries.length > 0) return normalizeResiduePlddtSeries(byChainSeries);
 
 
   return [];
@@ -1309,13 +1319,23 @@ export function parseCandidateRows(
         preferredTargetChainId,
         preferredLigandChainId
       );
+      // The backend's composite is the ranking truth (it may include pocket
+      // and liability terms the client cannot see). Recompute only for rows
+      // that predate a stored composite (live progress rows).
+      const storedScore = firstFiniteMetric(row, [
+        'composite_score',
+        'compositeScore',
+        'score',
+        'fitness',
+        'objective'
+      ]);
       // ipSAE is read independently so the card shows pLDDT / ipTM / ipSAE side by side.
       const ipsaeRaw = firstFiniteMetric(row, ['ligand_ipsae_max', 'ligandIpsaeMax', 'ipsae_dom', 'ipsaeDom']);
       const ipsae = normalizeIptm(
         ipsaeRaw ?? (interfaceMetric.source === 'ipsae' ? interfaceMetric.value : null)
       );
       const iptm = normalizeIptm(firstFiniteMetric(row, ['pair_iptm', 'iptm', 'ligand_iptm', 'protein_iptm']));
-      const score = computePeptideCompositeScore(row, plddt, interfaceMetric.value);
+      const score = storedScore ?? computePeptideCompositeScore(row, plddt, interfaceMetric.value);
       const generation = firstFiniteMetric(row, ['generation', 'iteration', 'iter']);
       const rankRaw = firstFiniteMetric(row, ['rank', 'ranking', 'order']);
       const structure = parseCandidateStructure(row);
