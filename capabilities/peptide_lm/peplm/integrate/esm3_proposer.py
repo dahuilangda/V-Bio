@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import random
 import time
 import urllib.error
@@ -113,6 +114,7 @@ class ESM3Proposer:
         cyclic: bool = False,
         seed: int = 42,
         structure_mode: str = "env",
+        chirality: str = "l",
         log=print,
         **_unused: Any,
     ):
@@ -122,6 +124,16 @@ class ESM3Proposer:
         self._log = log
         self._generation = 0
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
+        # GRPO updates a per-chirality LoRA adapter: L/D design tasks must not
+        # cross-write the same weights, and the adapter persists on disk so
+        # learned structure survives service restarts (it used to live only
+        # in the ESM3 service process — one restart wiped every generation).
+        self.adapter_key = f"peptide-{str(chirality or 'l').strip().lower()}"
+        adapter_root = Path(os.environ.get(
+            "ESM3_ADAPTER_ROOT",
+            str(Path(__file__).resolve().parents[2] / "adapters"),
+        ))
+        self.adapter_dir = adapter_root / self.adapter_key
         # structure_mode travels with every request; the service builds
         # the ss8 template at each call's actual peptide length (hairpin
         # turns must sit mid-chain, so a length-mismatched static string
@@ -208,6 +220,7 @@ class ESM3Proposer:
                 "n_samples": max(n * 3, 48),
                 "n_keep": n,
                 "temperature": temperature,
+                "adapter_key": self.adapter_key,
                 **self._cond,
             })
             if result.get("ok") is False:
@@ -283,6 +296,7 @@ class ESM3Proposer:
                     "parent_sequence": seq,
                     "remask_positions": positions,
                     "temperature": 0.7 + 0.1 * random.random(),
+                    "adapter_key": self.adapter_key,
                     **self._cond,
                 })
                 if result.get("ok"):
@@ -360,6 +374,10 @@ class ESM3Proposer:
                 "mode": "learn",
                 "receptor_sequence": self.receptor_sequence,
                 "rollouts": rollouts,
+                "adapter_key": self.adapter_key,
+                # the service saves the LoRA here after applying the update;
+                # it also lazy-loads this path before the next propose/learn
+                "new_adapter_dir": str(self.adapter_dir),
                 **self._cond,
             })
             if result.get("ok"):

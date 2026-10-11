@@ -7750,6 +7750,15 @@ def _dpeptide_dispatch_refine(
             "linker_ccd": linker_ccd,
             "pocket_res": pocket_res or "",
             "seed": int(seed),
+            # Optional fast-screen: the worker passes --sampling_steps /
+            # --diffusion_samples through to protenix2dock; unset → engine
+            # default (200 steps). Operators can halve refine cost on
+            # screening runs via PROTENIX2DOCK_REFINE_SAMPLING_STEPS.
+            **(
+                {"sampling_steps": int(os.environ["PROTENIX2DOCK_REFINE_SAMPLING_STEPS"])}
+                if os.environ.get("PROTENIX2DOCK_REFINE_SAMPLING_STEPS", "").strip().isdigit()
+                else {}
+            ),
             # blind inpainting route flag — the worker appends --blind_peptide
             # and echoes it back; the collector's expect_blind contract check
             # incident guard) fails the candidate if it's missing.
@@ -8960,6 +8969,78 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
     }
 
 
+def _lpeptide_keep_dir(parent_task_id: str) -> Path:
+    return Path(RESULTS_BASE_DIR) / "_runtime_tmp" / f"lpeptide_keep_{parent_task_id}"
+
+
+def _persist_lpeptide_structure_keep(
+    parent_task_id: str,
+    generation: int,
+    sequence: str,
+    structure_file,
+) -> str:
+    """Persist an L candidate's native product under the shared keep root.
+
+    The D route recovers refined samples from dpeptide_keep_* at zip time
+    because its per-candidate structures only live in the run's tmp dir; an
+    L candidate's structure has the same lifetime problem, and a checkpoint
+    resume + tmp cleanup used to leave its archive rows permanently
+    structureless. Returns the keep file name, '' when the copy failed.
+    """
+    if structure_file is None or not Path(structure_file).is_file():
+        return ""
+    keep_name = f"gen{generation:03d}_{sequence}.pdb"
+    try:
+        keep_dir = _lpeptide_keep_dir(parent_task_id)
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(structure_file, keep_dir / keep_name)
+        return keep_name
+    except OSError as keep_exc:
+        print(
+            f"[peptide] WARNING: could not persist L candidate structure "
+            f"for rank fallback: {keep_exc}",
+            file=sys.stderr)
+        return ""
+
+
+def _lpeptide_keep_structure(parent_task_id: str, keep_file_name: str, sequence: str) -> str:
+    """Recover a persisted L product, guarding against generation collisions
+    (a cand index recurs every generation — accept the keep only when its
+    peptide matches the row's sequence)."""
+    if not keep_file_name:
+        return ""
+    keep_path = _lpeptide_keep_dir(parent_task_id) / keep_file_name
+    if keep_path.is_file() and _pdb_peptide_sequence(keep_path) == \
+            str(sequence or "").strip().upper():
+        return str(keep_path)
+    return ""
+
+
+def _count_dpeptide_chirality_violations(structure_path) -> Optional[int]:
+    """CA-chirality violation count of a shipped D display structure.
+
+    Telemetry only: the hard gate covers the rank-1 product, and the
+    diffusion refine can leave minority CA inversions on lower ranks
+    (observed 3/15 on a shipped rank 2). None = unmeasurable.
+    """
+    try:
+        peplm_root = str(_resolve_capability_dir("peptide_lm"))
+        if peplm_root not in sys.path:
+            sys.path.insert(0, peplm_root)
+        from peplm.dpeptide import chirality_violations
+        st = gemmi.read_structure(str(structure_path))
+        st.setup_entities()
+        protein_chains = [
+            ch for ch in st[0]
+            if sum(1 for r in ch if r.het_flag != "H") >= 3]
+        if len(protein_chains) < 2:
+            return None
+        protein_chains.sort(key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+        return len(chirality_violations(st, protein_chains[-1].name, "D"))
+    except Exception:
+        return None
+
+
 def _assert_product_chirality(
     product_pdb: Path,
     reference_structure_path: Optional[Path] = None,
@@ -9480,6 +9561,7 @@ def run_peptide_design_backend(
 
     _esm3_gpu = os.environ.get("ESM3_GPU_ID", "0")
     proposer = ESM3Proposer(
+        chirality=peptide_chirality,
         receptor_sequence=(
             _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
             if peptide_chirality in ("d", "l") else ""),
@@ -9897,6 +9979,11 @@ def run_peptide_design_backend(
 
             generation_jobs.append(
                 {
+
+                    # GRPO cohort key (de novo pool / per-parent cohort) — without it
+                    # every row lands in "ungrouped" and the group-relative advantage
+                    # degenerates to batch-relative.
+                    "proposal_group": candidate.get("proposal_group") or "ungrouped",
                     "generation": generation,
                     "candidate_index": idx,
                     "sequence": candidate_sequence,
@@ -9967,8 +10054,8 @@ def run_peptide_design_backend(
         # GPU idled for the whole generation. The loop is now a two-stage
         # pipeline: the prepare pass below stages/dispatches, and
         # _run_dpeptide_refine_stage finalizes each candidate as its refine
-        # completes. Finalization order is completion order; all_results gets
-        # sorted on every append either way.)
+        # completes. Finalization order is completion order; all_results is
+        # re-sorted by rank score on every append.)
         def _finalize_candidate(ctx: Dict[str, Any]) -> None:
             nonlocal completed_tasks, generation_done, elite_population
             if ctx.get("reject"):
@@ -9980,6 +10067,7 @@ def run_peptide_design_backend(
                                        or (ctx.get("job") or {}).get("proposal_group")
                                        or "ungrouped"),
                     "gate_rejected": True,
+                    "composite_score": 0.0,
                     "reject_reason": str(ctx["reject"])[:200],
                 })
                 return
@@ -10102,6 +10190,7 @@ def run_peptide_design_backend(
                                 "generation": generation,
                                 "proposal_group": job.get("proposal_group") or "ungrouped",
                                 "gate_rejected": True,
+                    "composite_score": 0.0,
                                 "reject_reason": "cyclic_ring_open",
                             })
                             return
@@ -10126,6 +10215,7 @@ def run_peptide_design_backend(
                         "generation": generation,
                         "proposal_group": job.get("proposal_group") or "ungrouped",
                         "gate_rejected": True,
+                    "composite_score": 0.0,
                         "reject_reason": str(d_exc)[:200],
                     })
                     return
@@ -10268,6 +10358,13 @@ def run_peptide_design_backend(
                 metrics["ipsae_dom"] = d_space_metrics.get("ipsae_dom")
                 metrics["ligand_ipsae_max"] = d_space_metrics.get("ligand_ipsae_max")
 
+            # L route: persist the native product next to the D keep dirs so a
+            # checkpoint resume + tmp cleanup cannot leave the archive rows
+            # structureless (see _persist_lpeptide_structure_keep).
+            lpeptide_keep_file = ""
+            if peptide_chirality != 'd':
+                lpeptide_keep_file = _persist_lpeptide_structure_keep(
+                    parent_task_id, generation, candidate_sequence, structure_file)
             result_row = {
                 "sequence": candidate_sequence,
                 "modifications": candidate_modifications,
@@ -10312,6 +10409,7 @@ def run_peptide_design_backend(
                 "binder_chain_id": binder_chain_id,
                 "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
                 "structure_source_path": str(structure_file) if structure_file else "",
+                "lpeptide_keep_file": lpeptide_keep_file,
                 "d_space_staged": str(staged_path),
                 "d_space_refined": d_space_refined,
                 "pocket_min_distance": (
@@ -10333,6 +10431,14 @@ def run_peptide_design_backend(
                 if structure_file else [],
             }
             all_results.append(result_row)
+            # Keep the pool rank-sorted on every append: progress reporting
+            # publishes all_results[0] as best_score and all_results[:10] as
+            # current_best_sequences, and design_results.json serializes this
+            # list verbatim. In completion order those described the
+            # first-evaluated (generation-1) candidates for the entire run —
+            # the "best" the UI showed never improved no matter what later
+            # generations found.
+            all_results.sort(key=_peptide_rank_score, reverse=True)
             completed_tasks += 1
             generation_done += 1
 
@@ -10341,7 +10447,7 @@ def run_peptide_design_backend(
             # see foldable candidates. Without this the composite's ipSAE
             # dominance reinforces contact-maximizing junk (H/G-rich
             # sequences with no fold) as parents for mutation.
-            _PLDDT_GATE = plddt_gate_from_env()
+            _PLDDT_GATE = plddt_gate_for_chirality(peptide_chirality)
 
             # pLDDT hard gate for this generation's elite pool: only
             # foldable candidates become parents for mutation and GRPO.
@@ -10362,15 +10468,27 @@ def run_peptide_design_backend(
             # death before the next generation's save would otherwise lose it
             _save_generation_checkpoint(generation)
             # PeptideLM: GRPO update on this generation's scored rows so the
-            # proposal policy improves round over round
-            try:
-                proposer.learn(
-                    elite_population,
-                    [row for row in all_results if row.get("generation") == generation]
-                    + generation_rejected_rows,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"PeptideLM learn 失败（generation {generation}）：{exc}") from exc
+            # proposal policy improves round over round. The update fires ONCE,
+            # on the COMPLETE cohort (successes + rejects): per-candidate calls
+            # trained on a partial queue whose advantage baseline drifted with
+            # completion order, and early finishers were trained repeatedly
+            # while late ones were never trained.
+            rejects_this_generation = sum(
+                1 for row in generation_rejected_rows
+                if row.get("generation") == generation
+            )
+            pending_generation_finalizations = (
+                len(generation_jobs) - generation_done - rejects_this_generation
+            )
+            if pending_generation_finalizations <= 0:
+                try:
+                    proposer.learn(
+                        elite_population,
+                        [row for row in all_results if row.get("generation") == generation]
+                        + generation_rejected_rows,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"PeptideLM learn 失败（generation {generation}）：{exc}") from exc
 
             progress_payload = {
                 "peptide_design": {
@@ -10548,8 +10666,16 @@ def run_peptide_design_backend(
                 # task only fails when NO candidate survives.
                 try:
                     _job_seed = job.get("predict_args") if isinstance(job.get("predict_args"), dict) else {}
-                    _seed_v = _job_seed.get("seed")
-                    _seed_v = int(_seed_v) if isinstance(_seed_v, int) else random_seed
+                    # Deterministic refine seed: (task, generation, sequence).
+                    # The resume-dependent counters seed+generation_completed_base+idx
+                    # made the same sequence re-evaluate with a different seed after
+                    # a checkpoint resume — unreproducible rewards are GRPO noise.
+                    _seed_v = int.from_bytes(
+                        hashlib.sha256(
+                            f"{parent_task_id}|d|{generation}|{candidate_sequence}".encode()
+                        ).digest()[:4],
+                        "little",
+                    )
                     staged_path = _dpeptide_stage_conformer_in_pocket(
                         d_target_staged,
                         Path(structure_file),
@@ -10783,7 +10909,7 @@ def run_peptide_design_backend(
     # Without this, GRPO reinforces contact-maximizing junk — histidine/
     # glycine-rich "peptides" that score ipSAE but have no fold (measured
     # H 19%, G 16%, hydrophobic 8% after 7 auto-mode generations).
-    _PLDDT_GATE = plddt_gate_from_env()
+    _PLDDT_GATE = plddt_gate_for_chirality(peptide_chirality)
 
     # Hard gate BEFORE NSGA-II: below-gate candidates are excluded from
     # the pool entirely, not just sorted lower. NSGA-II ignores list
@@ -10866,6 +10992,13 @@ def run_peptide_design_backend(
                         print(f"[d-peptide] display rank {rank} aligned to the user "
                               f"frame (receptor RMSD {rmsd:.3f} A)", file=sys.stderr)
                     structure_source_for_rank = str(display_path)
+            keep_file_name = str(next_row.pop("lpeptide_keep_file", "") or "")
+            if peptide_chirality != 'd' \
+                    and not (structure_source_for_rank and os.path.isfile(structure_source_for_rank)):
+                # L mirror of the dpeptide_keep fallback: recover the product
+                # persisted at finalize time (sequence-guarded).
+                structure_source_for_rank = _lpeptide_keep_structure(
+                    parent_task_id, keep_file_name, next_row.get("sequence"))
             if structure_source_for_rank and os.path.isfile(structure_source_for_rank):
                 suffix = Path(structure_source_for_rank).suffix.lower()
                 ext = ".pdb" if suffix == ".pdb" else ".cif"
@@ -10876,6 +11009,18 @@ def run_peptide_design_backend(
                 _assert_product_bound(
                     Path(structure_source_for_rank), binder_chain_id,
                     rank=rank, sequence=str(next_row.get("sequence") or ""))
+                if peptide_chirality == 'd':
+                    # Per-rank chirality telemetry (hard gate covers rank 1
+                    # only); recorded on the row, the <30% scoring policy stands.
+                    violations = _count_dpeptide_chirality_violations(structure_source_for_rank)
+                    if violations is not None:
+                        next_row["peptide_chirality_violations"] = violations
+                        row["peptide_chirality_violations"] = violations
+                        if violations:
+                            print(
+                                f"[d-peptide] rank {rank}: {violations} CA "
+                                "chirality artifacts",
+                                file=sys.stderr)
                 zipf.write(structure_source_for_rank, structure_arcname)
                 # rank_cif_source stays on the MIRROR-SPACE source: the
                 # product block flips it exactly once. Overwriting it with the

@@ -44,6 +44,11 @@ SEZ_RING_BOND_CUTOFF_A = 2.5
 # elite pool / final ranking. Contact-maximizing junk (H/G-rich no-fold)
 # otherwise dominates GRPO (measured H 19%, G 16% after 7 auto gens).
 DPEPTIDE_PLDDT_GATE_DEFAULT = 55.0
+# D-peptide pLDDT comes from the refined complex's peptide chain, whose
+# distribution sits below L-side co-folding binder pLDDT (v11: D elites rode
+# the 55 gate with 36-55% pass rates → elite pools collapsed to 4-7 rows).
+# A per-chirality floor keeps both pools populated.
+DPEPTIDE_PLDDT_GATE_D_DEFAULT = 50.0
 
 
 def plddt_gate_from_env() -> float:
@@ -51,5 +56,24 @@ def plddt_gate_from_env() -> float:
     raw = os.environ.get("DPEPTIDE_PLDDT_GATE", "").strip()
     try:
         return float(raw) if raw else DPEPTIDE_PLDDT_GATE_DEFAULT
+    except ValueError:
+        return DPEPTIDE_PLDDT_GATE_DEFAULT
+
+
+def plddt_gate_for_chirality(chirality: str) -> float:
+    """Gate for a chirality ('l'/'d'), with operator overrides per side."""
+    key = "DPEPTIDE_PLDDT_GATE_D" if str(chirality or "").strip().lower() == "d" else "DPEPTIDE_PLDDT_GATE"
+    raw = os.environ.get(key, "").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    try:
+        raw_default = os.environ.get("DPEPTIDE_PLDDT_GATE", "").strip()
+        return float(raw_default) if raw_default else (
+            DPEPTIDE_PLDDT_GATE_D_DEFAULT
+            if key.endswith("_D")
+            else DPEPTIDE_PLDDT_GATE_DEFAULT
+        )
     except ValueError:
         return DPEPTIDE_PLDDT_GATE_DEFAULT

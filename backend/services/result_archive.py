@@ -91,7 +91,7 @@ class ResultArchiveService:
         # Primary path: resolve by files on disk first, so result reads do not depend on Celery/Redis health.
         archive_name = self.find_result_archive(task_id)
         if archive_name:
-            self.logger.info('Resolved result archive for task %s directly from disk: %s', task_id, archive_name)
+            self.logger.debug('Resolved result archive for task %s directly from disk: %s', task_id, archive_name)
             filename = secure_filename(archive_name)
             filepath = os.path.join(directory, filename)
 

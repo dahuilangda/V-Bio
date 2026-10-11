@@ -14,7 +14,9 @@ from pathlib import Path
 PEPLM_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PEPLM_ROOT))
 
+import os
 import torch
+from pathlib import Path
 
 from peplm.integrate.ss_modes import normalize_mode, resolve_ss_profile
 from peplm.models.esm3_policy import ESM3Policy
@@ -26,6 +28,41 @@ policy = ESM3Policy(
 )
 print("[esm3-http] model loaded", flush=True)
 
+# GRPO training state, keyed by adapter key ("peptide-l"/"peptide-d"/...):
+# - _adapter_optimizers: PERSISTENT AdamW state. The old code built a fresh
+#   AdamW per learn call, so every "update" was a single 1e-5 step from a
+#   zeroed optimizer — effectively a no-op that reset each generation.
+# - _loaded_adapter_key: which adapter currently weights the live policy.
+#   L/D design tasks request different keys; the service hot-swaps via
+#   policy.load_adapter instead of cross-contaminating one weight set.
+_ADAPTERS_ROOT = Path(os.environ.get(
+    "ESM3_ADAPTER_ROOT", str(PEPLM_ROOT / "adapters")))
+_adapter_optimizers: dict = {}
+_loaded_adapter_key: str | None = None
+
+
+
+def _ensure_adapter_loaded(key: str) -> None:
+    """Hot-swap the LoRA weights for `key` if a saved adapter exists."""
+    global _loaded_adapter_key
+    if _loaded_adapter_key == key:
+        return
+    adapter_path = _ADAPTERS_ROOT / key
+    if adapter_path.exists():
+        policy.load_adapter(adapter_path)
+    _loaded_adapter_key = key
+
+
+def _optimizer_for(key: str) -> torch.optim.AdamW:
+    """Persistent AdamW per adapter key: optimizer state (exp_avg/...) must
+    survive between learn calls or every step restarts from zero."""
+    opt = _adapter_optimizers.get(key)
+    if opt is None:
+        opt = torch.optim.AdamW(
+            [p for p in policy.model.parameters() if p.requires_grad],
+            lr=1e-5)
+        _adapter_optimizers[key] = opt
+    return opt
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -42,6 +79,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         mode = req.get("mode", "")
         try:
+            # Propose/refill also run under the adapter's weights: hot-swap
+            # first so generation and GRPO always share one policy lineage.
+            if mode in ("propose", "refill") and req.get("adapter_key"):
+                _ensure_adapter_loaded(str(req["adapter_key"]))
             if mode == "propose":
                 resp = self._propose(req)
             elif mode == "refill":
@@ -217,10 +258,11 @@ class Handler(BaseHTTPRequestHandler):
         if len(updates) < 2:
             return {"skipped": "tokenization failed"}
 
-        # One gradient step over all (tokens, advantage) pairs
-        opt = torch.optim.AdamW(
-            [p for p in policy.model.parameters() if p.requires_grad],
-            lr=1e-5)
+        # One gradient pass over all (tokens, advantage) pairs; the optimizer
+        # is persistent per adapter key so momentum state accumulates.
+        key = str(req.get("adapter_key") or "default")
+        _ensure_adapter_loaded(key)
+        opt = _optimizer_for(key)
         opt.zero_grad()
         total_loss = torch.tensor(0.0, device=policy.device)
         rec_seq = req.get("receptor_sequence", "")
@@ -260,12 +302,12 @@ class Handler(BaseHTTPRequestHandler):
             [p for p in policy.model.parameters() if p.requires_grad], 1.0)
         opt.step()
 
-        adapter = req.get("new_adapter_dir")
-        if adapter:
-            Path(adapter).mkdir(parents=True, exist_ok=True)
-            policy.save_adapter(Path(adapter))
+        save_dir = Path(req.get("new_adapter_dir") or (_ADAPTERS_ROOT / key))
+        save_dir.mkdir(parents=True, exist_ok=True)
+        policy.save_adapter(save_dir)
+        _loaded_adapter_key = key
         return {
-            "adapter_dir": adapter,
+            "adapter_dir": str(save_dir),
             "n_updates": len(updates),
             "loss": float(total_loss.detach()),
         }

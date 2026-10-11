@@ -923,6 +923,51 @@ def parse_confidence_metrics(
                 if complex_plddt is not None:
                     metrics['complex_plddt'] = complex_plddt
 
+        # Unified interface metric: when neither summary_confidences nor any
+        # other engine json carried ipSAE (the plain L co-fold route historically
+        # shipped ligand_ipsae_max=None), compute ligand-ipSAE directly from the
+        # fold's full_data (token_pair_pae) + structure (token coords). This puts
+        # L/D co-folds and mirror-refined samples on ONE metric.
+        if metrics.get('ligand_ipsae_max') is None and metrics.get('ipsae_dom') is None:
+            try:
+                import sys as _sys
+                import tempfile as _tempfile
+                import numpy as _np
+                _b2s_root = str(Path(__file__).resolve().parents[1] / "boltz2score")
+                if _b2s_root not in _sys.path:
+                    _sys.path.insert(0, _b2s_root)
+                from metrics.ligand_ipsae import (  # noqa: E402
+                    compute_ligand_ipsae_from_files as _clif,
+                )
+                full_data_files = sorted(output_root.glob("**/*full_data_sample_*.json"))
+                structure_files = list(output_root.glob("**/*.cif")) + list(output_root.glob("**/*.pdb"))
+                structure_for_ipsae = _prefer_aggregate_file(structure_files) if structure_files else None
+                if full_data_files and structure_for_ipsae:
+                    full_data_payload = json.loads(full_data_files[0].read_text())
+                    pae_matrix = full_data_payload.get("token_pair_pae")
+                    if isinstance(pae_matrix, list) and pae_matrix:
+                        confidence_payload = dict(full_data_payload)
+                        confidence_payload["model_ligand_chain_id"] = binder_chain_id
+                        with _tempfile.TemporaryDirectory() as _td:
+                            confidence_file = Path(_td) / "confidence.json"
+                            confidence_file.write_text(json.dumps(confidence_payload))
+                            pae_file = Path(_td) / "pae.npz"
+                            np.savez(pae_file, pae=np.asarray(pae_matrix, dtype=np.float32))
+                            ipsae_payload = _clif(
+                                confidence_path=confidence_file,
+                                cif_path=Path(structure_for_ipsae),
+                                pae_path=pae_file,
+                                pae_cutoff=10.0,
+                                dist_cutoff=5.0,
+                            )
+                        if ipsae_payload.get("ligand_ipsae_max") is not None:
+                            metrics['ligand_ipsae_max'] = float(ipsae_payload["ligand_ipsae_max"])
+                        if ipsae_payload.get("ipsae_dom") is not None:
+                            metrics['ipsae_dom'] = float(ipsae_payload["ipsae_dom"])
+            except Exception as exc:
+                logger.warning(f"ligand-ipSAE fallback computation failed: {exc}")
+
+        structure_candidates = list(output_root.glob("**/*.cif")) + list(output_root.glob("**/*.pdb"))
         structure_candidates = list(output_root.glob("**/*.cif")) + list(output_root.glob("**/*.pdb"))
         model_path = _prefer_aggregate_file(structure_candidates)
         if model_path and model_path.exists():
