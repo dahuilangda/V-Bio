@@ -6,7 +6,7 @@ import {
   type LeadOptHaloRoundEvent
 } from '../../../../api/backendLeadOptimizationApi';
 import { downloadResultBlob } from '../../../../api/backendTaskApi';
-import { parseResultBundle } from '../../../../api/resultParser/resultBundleParser';
+import { parseResultBundle } from '../../../../api/backendResultParserApi';
 
 export interface LeadOptHaloCandidate {
   smiles: string;

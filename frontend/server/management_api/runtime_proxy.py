@@ -258,11 +258,22 @@ class RuntimeProxy:
         request_id = self._enter_request("GET", upstream_path)
         status_code = 0
         error_text = ""
+        # Conditional-request headers pass through so cacheable downloads
+        # (result view archives) can answer 304 instead of a full re-download.
+        headers = {"X-API-Token": self.runtime_api_token, "Accept": "application/json"}
+        try:
+            from flask import request as flask_request
+            for header in ("If-None-Match", "If-Modified-Since"):
+                value = flask_request.headers.get(header)
+                if value:
+                    headers[header] = value
+        except RuntimeError:
+            pass  # called outside a request context (tests/scripts)
         try:
             response = self.session.get(
                 f"{self.runtime_api_base_url}{upstream_path}",
                 params=passthrough_query,
-                headers={"X-API-Token": self.runtime_api_token, "Accept": "application/json"},
+                headers=headers,
                 timeout=self.runtime_timeout_seconds,
             )
             status_code = int(response.status_code or 0)
@@ -299,11 +310,28 @@ class RuntimeProxy:
 
     @staticmethod
     def build_flask_response(upstream: requests.Response) -> Tuple[Response, int]:
+        status_code = int(upstream.status_code or 0)
+        if status_code == 304:
+            # Not Modified: no body, no content-type — just let the client's
+            # cached copy stand.
+            response = Response(status=304)
+            for header in ("ETag", "Cache-Control", "Last-Modified", "Expires"):
+                value = upstream.headers.get(header)
+                if value:
+                    response.headers[header] = value
+            return response, 304
         content_type = upstream.headers.get("Content-Type", "application/json")
-        response = Response(upstream.content, status=upstream.status_code, content_type=content_type)
+        response = Response(upstream.content, status=status_code, content_type=content_type)
         # File downloads (e.g. the excel export) carry the filename here — dropping it made
         # the client fall back to a generic name.
         disposition = upstream.headers.get("Content-Disposition")
         if disposition:
             response.headers["Content-Disposition"] = disposition
-        return response, upstream.status_code
+        # Caching headers pass through so repeat downloads of unchanged result
+        # view archives hit the client's cache / upstream 304 instead of a
+        # full transfer.
+        for header in ("ETag", "Cache-Control", "Last-Modified", "Expires"):
+            value = upstream.headers.get(header)
+            if value:
+                response.headers[header] = value
+        return response, status_code

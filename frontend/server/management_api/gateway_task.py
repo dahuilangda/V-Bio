@@ -34,7 +34,7 @@ def forward_task_read(
         passthrough_query = {key: value for key, value in request.args.items() if key != "project_id"}
         upstream = gateway._proxy_get(f"{upstream_prefix}/{quote(task_id, safe='')}{upstream_suffix}", passthrough_query)
         response, status_code = gateway._build_flask_response(upstream)
-        succeeded = 200 <= status_code < 300
+        succeeded = 200 <= status_code < 400
 
         gateway._record_usage(
             token,
@@ -110,7 +110,7 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
 
         upstream = gateway._proxy_post_json("/status/batch", {"task_ids": task_ids})
         response, status_code = gateway._build_flask_response(upstream)
-        succeeded = 200 <= status_code < 300
+        succeeded = 200 <= status_code < 400
         gateway._record_usage(
             token,
             action="read_status_batch",

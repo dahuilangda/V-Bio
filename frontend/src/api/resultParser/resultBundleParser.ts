@@ -1,35 +1,34 @@
 import type JSZip from 'jszip';
 import type { ParsedResultBundle } from '../../types/models';
-import { downloadResultBlob } from '../backendTaskApi';
-import {
-  ensureCifHasMaQaMetricLocal,
-  ensureStructureConfidenceColoringData,
-  stripStructureConfidenceColoringData
-} from './cifConfidenceColoring';
+import { ensureCifHasMaQaMetricLocal, ensureStructureConfidenceColoringData } from './cifConfidenceColoring';
 import {
   POLYMER_COMP_IDS,
   WATER_COMP_IDS,
   hasNonEmptyResiduePlddtByChain,
-  hasStorageValue,
   isHydrogenLikeElement,
   isLikelyLigandAtomRow,
-  isPlainRecord,
   normalizeChainToken,
   parseJsonObject,
   selectByChainHints,
   tokenizeCifRow
 } from './resultBundleHelpers';
 import {
-  asRecordArray,
   asString,
   toFiniteNumber
 } from '../../pages/projectTasks/recordReaders';
 import { stripCifTokenQuotes } from '../../utils/structureParser';
-
-function getBaseName(path: string): string {
-  const parts = path.split('/');
-  return parts[parts.length - 1] || path;
-}
+import {
+  firstNonEmptyTextByKeys,
+  getBaseName,
+  readFirstObjectArrayPath,
+  readFiniteNumberLoose,
+  readObjectPathLoose
+} from './parserPrimitives';
+import {
+  compactConfidenceForStorage,
+  PEPTIDE_CANDIDATE_MODIFICATION_KEYS,
+  PEPTIDE_CANDIDATE_RESIDUE_PATH_ALIASES
+} from './peptideCandidateStorage';
 
 function normalizeProbability(value: number | null): number | null {
   if (value === null || !Number.isFinite(value)) return null;
@@ -1366,61 +1365,6 @@ function extractResiduePlddtsByChainFromStructure(
 
 const DESIGN_RANK_RE = /(?:^|\/)rank_(\d+)(?:_|\.|$)/i;
 
-function readFirstObjectArrayPath(payload: Record<string, unknown>, paths: string[]): Array<Record<string, unknown>> {
-  for (const path of paths) {
-    let current: unknown = payload;
-    let matched = true;
-    for (const token of path.split('.')) {
-      if (!current || typeof current !== 'object' || Array.isArray(current)) {
-        matched = false;
-        break;
-      }
-      current = (current as Record<string, unknown>)[token];
-    }
-    if (!matched) continue;
-    const rows = asRecordArray(current);
-    if (rows.length > 0) return rows;
-  }
-  return [];
-}
-
-function readFiniteNumberLoose(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function firstNonEmptyTextByKeys(row: Record<string, unknown>, keys: string[]): string {
-  for (const key of keys) {
-    const text = asString(row[key]).trim();
-    if (text) return text;
-  }
-  return '';
-}
-
-function readObjectPathLoose(payload: Record<string, unknown>, path: string): unknown {
-  let current: unknown = payload;
-  for (const token of path.split('.')) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[token];
-  }
-  return current;
-}
-
-const PEPTIDE_CANDIDATE_MODIFICATION_KEYS = [
-  'modifications',
-  'protein_modifications',
-  'residue_modifications',
-  'residueMods',
-  'residue_mods',
-  'mods'
-];
-
 const PEPTIDE_CANDIDATE_RESIDUE_KEYS = [
   'residue_plddt',
   'residue_plddts',
@@ -1447,27 +1391,6 @@ const PEPTIDE_CANDIDATE_RESIDUE_KEYS = [
   'chain_residue_plddt',
   'chain_plddt',
   'chain_plddts'
-];
-
-const PEPTIDE_CANDIDATE_RESIDUE_PATH_ALIASES: Array<{ path: string; asKey: string }> = [
-  { path: 'confidence.residue_plddt', asKey: 'residue_plddt' },
-  { path: 'confidence.residue_plddts', asKey: 'residue_plddts' },
-  { path: 'confidence.plddts', asKey: 'plddts' },
-  { path: 'confidence.per_residue_plddt', asKey: 'per_residue_plddt' },
-  { path: 'confidence.binder_residue_plddt', asKey: 'binder_residue_plddt' },
-  { path: 'confidence.token_plddt', asKey: 'token_plddt' },
-  { path: 'confidence.token_plddts', asKey: 'token_plddts' },
-  { path: 'metrics.residue_plddt', asKey: 'residue_plddt' },
-  { path: 'metrics.per_residue_plddt', asKey: 'per_residue_plddt' },
-  { path: 'scores.plddts', asKey: 'plddts' },
-  { path: 'scores.residue_plddt', asKey: 'residue_plddt' },
-  { path: 'scores.per_residue_plddt', asKey: 'per_residue_plddt' },
-  { path: 'confidence.residue_plddt_by_chain', asKey: 'residue_plddt_by_chain' },
-  { path: 'confidence.residuePlddtByChain', asKey: 'residuePlddtByChain' },
-  { path: 'confidence.residue_plddts_by_chain', asKey: 'residue_plddts_by_chain' },
-  { path: 'confidence.chain_residue_plddt', asKey: 'chain_residue_plddt' },
-  { path: 'confidence.chain_plddt', asKey: 'chain_plddt' },
-  { path: 'confidence.chain_plddts', asKey: 'chain_plddts' }
 ];
 
 
@@ -1552,14 +1475,35 @@ function resolveDesignStructurePathFromRow(
   return '';
 }
 
-async function parsePeptideDesignCandidatesFromBundle(
-  zip: JSZip,
-  names: string[],
-  options?: { preservePeptideCandidateStructureText?: boolean }
-): Promise<Array<Record<string, unknown>>> {
-  const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
-  const candidatePathsForSummary = (summaryPath: string): string[] => {
-    const base = getBaseName(summaryPath).toLowerCase();
+export interface PeptideCandidateSummarySource {
+  path: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Pick the candidate rows a peptide-design archive should display.
+ *
+ * `top_results` is the run's CURATED deliverable: rank-sorted, one row per
+ * shipped structure. `design_results.json` instead serializes every evaluated
+ * candidate in COMPLETION order (early-generation junk first, no rank on
+ * non-elite rows). Comparing arrays by length alone preferred the raw dump, so
+ * the candidate list opened on generation-1 rows with fabricated ranks and the
+ * promoted task-level iptm/plddt described the first-evaluated candidate
+ * instead of the best one. A canonical top_results array therefore wins
+ * outright; the length/priority comparison only orders the legacy fallbacks.
+ */
+export function selectPeptideCandidateRowsFromSummaries(
+  sources: PeptideCandidateSummarySource[]
+): Array<Record<string, unknown>> {
+  const summarySourcePriority = (path: string): number => {
+    const base = getBaseName(path).toLowerCase();
+    if (base.includes('design_results')) return 0;
+    if (base.includes('best_sequences')) return 1;
+    if (base === 'results_summary.json') return 2;
+    return 3;
+  };
+  const candidatePathsForSummary = (path: string): string[] => {
+    const base = getBaseName(path).toLowerCase();
     if (base.includes('design_results')) {
       return [
         'design_results',
@@ -1572,7 +1516,7 @@ async function parsePeptideDesignCandidatesFromBundle(
         'best_sequences',
         'results.best_sequences',
         'peptide_design.best_sequences',
-        'peptide_results',
+        'peptide_results'
       ];
     }
     return [
@@ -1586,10 +1530,40 @@ async function parsePeptideDesignCandidatesFromBundle(
       'candidates',
       'design_results',
       'results.design_results',
-      'peptide_design.design_results',
+      'peptide_design.design_results'
     ];
   };
 
+  let rows: Array<Record<string, unknown>> = [];
+  let rowsSourcePriority = Number.POSITIVE_INFINITY;
+  let rowsFromCanonicalTopResults = false;
+  for (const source of sources) {
+    const canonicalRows = readFirstObjectArrayPath(source.payload, ['top_results']);
+    const nextRows = canonicalRows.length > 0
+      ? canonicalRows
+      : readFirstObjectArrayPath(source.payload, candidatePathsForSummary(source.path));
+    if (nextRows.length === 0) continue;
+    const nextFromCanonicalTopResults = canonicalRows.length > 0;
+    const sourcePriority = summarySourcePriority(source.path);
+    const beatsCurrent = nextFromCanonicalTopResults !== rowsFromCanonicalTopResults
+      ? nextFromCanonicalTopResults
+      : nextRows.length > rows.length ||
+        (nextRows.length === rows.length && sourcePriority < rowsSourcePriority);
+    if (beatsCurrent) {
+      rows = nextRows;
+      rowsSourcePriority = sourcePriority;
+      rowsFromCanonicalTopResults = nextFromCanonicalTopResults;
+    }
+  }
+  return rows;
+}
+
+async function parsePeptideDesignCandidatesFromBundle(
+  zip: JSZip,
+  names: string[],
+  options?: { preservePeptideCandidateStructureText?: boolean }
+): Promise<Array<Record<string, unknown>>> {
+  const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
   const summarySourcePriority = (path: string): number => {
     const base = getBaseName(path).toLowerCase();
     if (base.includes('design_results')) return 0;
@@ -1611,22 +1585,14 @@ async function parsePeptideDesignCandidatesFromBundle(
     });
   if (summaryCandidates.length === 0) return [];
 
-  let rows: Array<Record<string, unknown>> = [];
-  let rowsSourcePriority = Number.POSITIVE_INFINITY;
+  const sources: PeptideCandidateSummarySource[] = [];
   for (const summaryPath of summaryCandidates) {
     const payload = await readZipJson(zip, summaryPath);
-    if (!payload) continue;
-    const nextRows = readFirstObjectArrayPath(payload, candidatePathsForSummary(summaryPath));
-    if (nextRows.length === 0) continue;
-    const sourcePriority = summarySourcePriority(summaryPath);
-    if (
-      nextRows.length > rows.length ||
-      (nextRows.length === rows.length && sourcePriority < rowsSourcePriority)
-    ) {
-      rows = nextRows;
-      rowsSourcePriority = sourcePriority;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      sources.push({ path: summaryPath, payload: payload as Record<string, unknown> });
     }
   }
+  const rows = selectPeptideCandidateRowsFromSummaries(sources);
   if (rows.length === 0) return [];
 
   const structureFiles = names
@@ -1760,255 +1726,6 @@ async function parsePeptideDesignCandidatesFromBundle(
     const structureName = asString(item.structure_name).trim();
     return Boolean(sequence || structureName);
   });
-}
-
-const PEPTIDE_CANDIDATE_ARRAY_PATHS = [
-  'peptide_design.best_sequences',
-  'peptide_design.current_best_sequences',
-  'peptide_design.candidates',
-  'peptide_design.progress.best_sequences',
-  'peptide_design.progress.current_best_sequences',
-  'peptide_design.progress.candidates',
-  'best_sequences',
-  'current_best_sequences',
-  'progress.best_sequences',
-  'progress.current_best_sequences',
-  'progress.candidates',
-  'candidates'
-] as const;
-
-const PEPTIDE_CANDIDATE_ARRAY_KEYS = ['best_sequences', 'current_best_sequences', 'candidates'] as const;
-const PEPTIDE_CANDIDATE_STRUCTURE_TEXT_KEYS = [
-  'structure_text',
-  'structureText',
-  'cif_text',
-  'pdb_text',
-  'content'
-] as const;
-
-function stripPeptideCandidateArrayKeys(payload: Record<string, unknown>): void {
-  for (const key of PEPTIDE_CANDIDATE_ARRAY_KEYS) {
-    delete payload[key];
-  }
-}
-
-function stripCandidateStructureTextFields(row: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...row };
-  for (const key of PEPTIDE_CANDIDATE_STRUCTURE_TEXT_KEYS) {
-    delete next[key];
-  }
-  for (const nestedKey of ['result', 'prediction', 'structure_payload', 'structure'] as const) {
-    const nested = next[nestedKey];
-    if (!isPlainRecord(nested)) continue;
-    const compactNested = { ...nested };
-    for (const key of PEPTIDE_CANDIDATE_STRUCTURE_TEXT_KEYS) {
-      delete compactNested[key];
-    }
-    next[nestedKey] = compactNested;
-  }
-  return next;
-}
-
-function peptideCandidateStorageIdentity(row: Record<string, unknown>, index: number): string {
-  const sequence = firstNonEmptyTextByKeys(row, [
-    'peptide_sequence',
-    'binder_sequence',
-    'candidate_sequence',
-    'designed_sequence',
-    'sequence'
-  ]).replace(/\s+/g, '').trim().toUpperCase();
-  const generation = readFiniteNumberLoose(row.generation) ?? readFiniteNumberLoose(row.iteration) ?? readFiniteNumberLoose(row.iter);
-  const rank = readFiniteNumberLoose(row.rank) ?? readFiniteNumberLoose(row.ranking) ?? readFiniteNumberLoose(row.order);
-  if (sequence) {
-    return `seq:${sequence}|gen:${generation ?? ''}|rank:${rank ?? ''}`;
-  }
-  const structureName = firstNonEmptyTextByKeys(row, ['structure_name', 'structureName', 'structure_file', 'structure_path', 'name']);
-  if (structureName) return `structure:${structureName}|rank:${rank ?? ''}`;
-  const rowId = asString(row.id).trim();
-  return rowId ? `id:${rowId}` : `row:${index}`;
-}
-
-function countCandidateStorageNumbers(value: unknown): number {
-  if (Array.isArray(value)) {
-    return value.reduce<number>((sum, item) => sum + countCandidateStorageNumbers(item), 0);
-  }
-  if (value && typeof value === 'object') {
-    return Object.values(value as Record<string, unknown>).reduce<number>(
-      (sum, item) => sum + countCandidateStorageNumbers(item),
-      0
-    );
-  }
-  return typeof value === 'number' && Number.isFinite(value) ? 1 : 0;
-}
-
-function peptideCandidateHasModifications(row: Record<string, unknown>): boolean {
-  if (PEPTIDE_CANDIDATE_MODIFICATION_KEYS.some((key) => Array.isArray(row[key]) && (row[key] as unknown[]).length > 0)) return true;
-  return ['result.modifications', 'prediction.modifications', 'metadata.modifications', 'structure_payload.modifications'].some((path) => {
-    const value = readObjectPathLoose(row, path);
-    return Array.isArray(value) && value.length > 0;
-  });
-}
-
-function peptideCandidateStorageRichness(row: Record<string, unknown>): number {
-  let score = 0;
-  if (firstNonEmptyTextByKeys(row, ['structure_name', 'structureName', 'structure_file', 'structure_path', 'name'])) score += 8;
-  if (peptideCandidateHasModifications(row)) score += 10;
-  if (readFiniteNumberLoose(row.pair_iptm_target_binder) !== null || readFiniteNumberLoose(row.pair_iptm) !== null) score += 8;
-  if (readFiniteNumberLoose(row.binder_avg_plddt) !== null || readFiniteNumberLoose(row.plddt) !== null) score += 6;
-  if (readFiniteNumberLoose(row.score) !== null || readFiniteNumberLoose(row.composite_score) !== null) score += 4;
-  score += countCandidateStorageNumbers(row.residue_plddt_by_chain) > 0 ? 4 : 0;
-  score += countCandidateStorageNumbers(row.residue_plddt) > 0 ? 3 : 0;
-  score += Object.keys(row).length / 100;
-  return score;
-}
-
-function hasMeaningfulCandidateValue(value: unknown): boolean {
-  if (value === null || value === undefined) return false;
-  if (typeof value === 'string') return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
-  return true;
-}
-
-/**
- * Merge persisted candidate rows into freshly parsed rows, field by field.
- *
- * Preferred-structure archives carry only the requested structure file, so a
- * fresh parse legitimately knows FEWER structure names than the rows already
- * persisted from a full parse. Replacing the persisted collection wholesale
- * (the old copyMissingFields behavior — a non-empty parsed list always wins)
- * erased those names and broke every subsequent candidate switch. The merged
- * row is the incoming row with empty slots backfilled from its persisted twin;
- * persisted rows with no incoming counterpart are kept.
- */
-export function mergePeptideCandidateRowsPreferRicher(
-  incomingRows: Array<Record<string, unknown>>,
-  existingRows: Array<Record<string, unknown>>
-): Array<Record<string, unknown>> {
-  if (existingRows.length === 0) return incomingRows;
-  if (incomingRows.length === 0) return existingRows;
-  const existingByIdentity = new Map<string, Record<string, unknown>>();
-  existingRows.forEach((row, index) => {
-    existingByIdentity.set(peptideCandidateStorageIdentity(row, index), row);
-  });
-  const merged: Array<Record<string, unknown>> = [];
-  const consumed = new Set<string>();
-  incomingRows.forEach((row, index) => {
-    const identity = peptideCandidateStorageIdentity(row, index);
-    const existing = existingByIdentity.get(identity);
-    consumed.add(identity);
-    if (!existing) {
-      merged.push(row);
-      return;
-    }
-    const next = { ...existing };
-    for (const [key, value] of Object.entries(row)) {
-      if (hasMeaningfulCandidateValue(value) || !hasMeaningfulCandidateValue(next[key])) {
-        next[key] = value;
-      }
-    }
-    merged.push(next);
-  });
-  for (const [identity, row] of existingByIdentity) {
-    if (!consumed.has(identity)) merged.push(row);
-  }
-  return merged;
-}
-
-function collectPeptideCandidateRows(input: Record<string, unknown>): Array<Record<string, unknown>> {
-  const byIdentity = new Map<string, { row: Record<string, unknown>; score: number; index: number }>();
-  let index = 0;
-  for (const path of PEPTIDE_CANDIDATE_ARRAY_PATHS) {
-    for (const row of asRecordArray(readObjectPathLoose(input, path))) {
-      const key = peptideCandidateStorageIdentity(row, index);
-      const score = peptideCandidateStorageRichness(row);
-      const existing = byIdentity.get(key);
-      if (!existing || score > existing.score) {
-        byIdentity.set(key, { row, score, index: existing?.index ?? index });
-      }
-      index += 1;
-    }
-  }
-  return Array.from(byIdentity.values())
-    .sort((a, b) => a.index - b.index)
-    .map((entry) => entry.row);
-}
-
-function compactPeptideCandidateRows(
-  rows: Array<Record<string, unknown>>,
-  preservePeptideCandidateStructureText: boolean
-): Array<Record<string, unknown>> {
-  return rows.map((row) => {
-    const compact = preservePeptideCandidateStructureText ? { ...row } : stripCandidateStructureTextFields(row);
-    return compact;
-  });
-}
-
-function compactConfidenceForStorage(
-  input: Record<string, unknown>,
-  options?: { preservePeptideCandidateStructureText?: boolean }
-): Record<string, unknown> {
-  const next = { ...input };
-  const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
-  const pae = next.pae;
-  // Full PAE matrices dominate payload size; scalar summaries remain in confidence.
-  if (Array.isArray(pae) || (pae && typeof pae === 'object')) {
-    delete next.pae;
-  }
-
-  const compactCandidateRows = compactPeptideCandidateRows(
-    collectPeptideCandidateRows(input),
-    preservePeptideCandidateStructureText
-  );
-
-  stripPeptideCandidateArrayKeys(next);
-
-  const topProgressRaw = next.progress;
-  if (isPlainRecord(topProgressRaw)) {
-    const topProgress = { ...topProgressRaw };
-    stripPeptideCandidateArrayKeys(topProgress);
-    if (Object.keys(topProgress).length > 0) {
-      next.progress = topProgress;
-    } else {
-      delete next.progress;
-    }
-  }
-
-  const peptideDesignRaw = next.peptide_design;
-  const peptideDesign = isPlainRecord(peptideDesignRaw) ? { ...peptideDesignRaw } : {};
-  stripPeptideCandidateArrayKeys(peptideDesign);
-  const peptideProgressRaw = peptideDesign.progress;
-  if (isPlainRecord(peptideProgressRaw)) {
-    const peptideProgress = { ...peptideProgressRaw };
-    stripPeptideCandidateArrayKeys(peptideProgress);
-    if (Object.keys(peptideProgress).length > 0) {
-      peptideDesign.progress = peptideProgress;
-    } else {
-      delete peptideDesign.progress;
-    }
-  }
-
-  if (compactCandidateRows.length > 0) {
-    peptideDesign.best_sequences = compactCandidateRows;
-    if (!Number.isFinite(Number(peptideDesign.candidate_count))) {
-      peptideDesign.candidate_count = compactCandidateRows.length;
-    }
-  }
-
-  if (Object.keys(peptideDesign).some((key) => hasStorageValue(peptideDesign[key]))) {
-    next.peptide_design = peptideDesign;
-  } else {
-    delete next.peptide_design;
-  }
-
-  return next;
-}
-
-export function compactResultConfidenceForStorage(
-  input: Record<string, unknown>,
-  options?: { preservePeptideCandidateStructureText?: boolean }
-): Record<string, unknown> {
-  return compactConfidenceForStorage(input, options);
 }
 
 interface ParseResultBundleOptions {
@@ -2430,14 +2147,4 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
   };
 }
 
-export async function downloadResultFile(taskId: string): Promise<void> {
-  const blob = await downloadResultBlob(taskId, { mode: 'full' });
-  const href = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = href;
-  anchor.download = `${taskId}_results.zip`;
-  anchor.click();
-  URL.revokeObjectURL(href);
-}
 
-export { ensureStructureConfidenceColoringData, stripStructureConfidenceColoringData };
