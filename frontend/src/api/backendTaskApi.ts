@@ -255,7 +255,11 @@ export async function downloadResultBlob(
   }
   const url = apiUrl(params.size > 0 ? `${path}?${params.toString()}` : path);
   const res = await fetchWithTimeout(url, {
-    cache: 'no-store',
+    // Result archives are content-addressed by the server's ETag: repeat
+    // downloads of an unchanged archive revalidate (304, no transfer). A
+    // changed archive gets a new stat and therefore a new ETag — no stale
+    // window beyond the server's 60s max_age.
+    cache: 'default',
     // The runtime gateway authorizes task reads by X-API-Token (platform token) or an
     // explicit project_id query — every other gateway call spreads API_HEADERS; a bare
     // fetch here 403'd result downloads with "project_id query is required".

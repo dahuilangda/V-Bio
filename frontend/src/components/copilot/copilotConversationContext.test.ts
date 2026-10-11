@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectCopilotMessage } from '../../types/models';
-import { buildCopilotConversationContext } from './ProjectCopilotModal';
+import { buildCopilotConversationContext } from './copilotConversationContext';
 
 function message(partial: Partial<ProjectCopilotMessage> & { role: ProjectCopilotMessage['role'] }): ProjectCopilotMessage {
   return {

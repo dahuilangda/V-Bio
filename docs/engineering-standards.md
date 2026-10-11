@@ -76,6 +76,10 @@ SEZ_RING_BOND_CUTOFF_A = 2.5          # SEZ 三锚点成键判定
 4. `test_keep_fallback_requires_sequence_match` — keep 的 staged 肽序列与行不一致 → 不采用（事故：跨代覆盖风险）。
 5. `test_d_target_trim_drops_incomplete_terminal_residues` — 1HL3（THR332 仅 1 个 N）→ staged 链尾为 LEU331、pocket 编号不受影响。
 6. `test_checkpoint_resume_caps_generation` — checkpoint.generation=6, iterations=6 → _start_generation 收敛到 ≤iterations，不越界。
+7. `test_peptide_archive_layout.py`（2026-10-10）— 展示结构三级回退（rank1 → 首个存在结构的行 → 最低 rank 文件）；事故：断点续跑后 /status 指向已清理的 rank_01.pdb，用户看到"无结构"。
+8. `peptidePreferredArchive.test.ts`（前端，2026-10-10）— canonical top_results 优先于 design_results 完成序 dump；事故：任务卡分数冻结在 gen1 首个完成候选（0.13-0.44 vs 真实 0.59-0.97）。
+9. `projectRuntimeRowHelpers.test.ts`（前端，2026-10-10）— 运行时合并不回退终端态；事故：已完成任务被陈旧载荷拉回 PENDING。
+10. `parseHelpers.residue.test.ts`（前端，2026-10-10）— 逐残基 pLDDT 0-1/0-100 双刻度归一化；事故：高置信候选的氨基酸气泡全橙。
 
 ## 9. 评审检查单（PR 自查 + reviewer 必查）
 
@@ -94,3 +98,6 @@ SEZ_RING_BOND_CUTOFF_A = 2.5          # SEZ 三锚点成键判定
 2. `peptide_candidate_worker_task` 的 acks_late=True 依赖"候选 <24h"假设——候选超时上限应显式 clamp（软超时 kills 长尾）。
 3. checkpoint JSON 非原子写（`write_text`）：进程死在写入中 → JSON 截断 → resume 失败回退 gen1。改为 temp+`os.replace`。
 4. 监控表 `monitor_tasks_current` 对 acks_late=False 任务被杀后停留 RUNNING（靠 lease 过期），UI 需要显示 STALE 而非 RUNNING。
+5. 父任务级单跑锁缺位（2026-10-10 实证）：候选任务已有 redis NX 锁，但父设计任务被 >24h 重投递后仍可双跑——D_NFKBIZ 归档曾被两次上传互相污染（product 与 rank_01 来自不同构建）。建议沿用候选锁机制扩展到父任务，或归档上传按 content-hash 去重。
+6. `/status/batch` 的并行化、`_compact` 裁剪与归档快照缓存仍是 `register_task_routes` 闭包内逻辑，无路由级测试骨架；拆分建议见 docs/incremental-review-20261010.md 第五节第 1 条。
+7. L 路线断点续跑曾丢失全部候选结构（tmp 清理 + 无持久回退）——lpeptide_keep 回退已补（2026-10-10），但已丢失的 v11-L 批次结构需重跑补齐。

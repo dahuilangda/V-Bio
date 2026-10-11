@@ -108,3 +108,27 @@ colabfold server 以 `mode=env` 提交（启用宏基因组库搜索），客户
 `msa_<md5>`，预测、af3、boltz2score、protenix2dock 共用。同一晶体位姿 score
 校准：**0.703 → 0.960**（仅 UniRef vs 合并；手工富库 0.966）。注意：设计肽为
 de novo 序列，其界面置信度天然低于共晶姿态（肽侧无共进化信号）。
+
+## 非天然氨基酸（UNAA）
+
+非天然残基**不能直接打进序列框**（序列只接受标准 20 字母），通过两条通道表达：
+
+### 设计肽侧（Residues used for design）
+
+任务设计器 → "Residues used for design"（展开）：
+
+1. **内置非天然库**（点卡片选用）：D-alanine (DAL)、beta-alanine (BALA)、selenocysteine (SEC)、hydroxyproline (HYP)、pyroglutamate (PCA)、磷酸化 SEP/TPO/PTR、N6-methyllysine (MLY)、S-hydroxycysteine (CSO)、糖基化 O-Man/O-GlcNAc/O-Gal/O-Fuc/O-Glc/O-Xyl 系列。
+2. **Custom library → Add**：更冷的 UNAA 用 JSME 画 SMILES（必须含氨基酸骨架 N-CA-C(=O)-O；可选手工指定 N/CA/C/O/Oxt 五原子槽位、C 端酰胺化）。保存进项目 residue pool 后出现在 Custom library 区，点选即可。
+3. **Non-natural residue count**（At least / At most）约束设计里非天然残基的数量；未选非天然时为 0/0，此时设计不使用任何 UNAA。
+4. 汇总徽标 `X natural / Y non-natural selected` 实时反映选择。
+
+提交后链路：选中的自定义残基 → `custom_ccd_molecules` → 后端 `custom_ccd_builder` 生成 CCD（原子命名/骨架拓扑/可选酰胺化）→ 注入引擎 CCD overlay；设计候选以 `modifications=[{position, ccd, baseResidue}]` 表达。
+
+### 参考蛋白侧（目标组件）
+
+序列框同样只收标准字母。目标蛋白上的非天然残基用 **Residue Modifications**（组件编辑器内）：
+
+- ＋Add → 选 CCD（内置/预置库）或 JSME 画结构 → 在序列预览上点击放置位置（支持 N/C 端修饰）。
+- 提交后写入 YAML `protein.modifications`；预置 CCD 库自动按引用合并（`_merge_referenced_preset_modification_molecules`）。
+
+> 常见误解：直接在序列框输入非常规字母会被校验拒绝（"only standard amino acids are allowed"）——这是设计行为，UNAA 一律走位置修饰/残基池，而不是序列字母。

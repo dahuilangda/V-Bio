@@ -192,7 +192,7 @@ def forward_quick_get(gateway: Any, upstream_path: str, action: str) -> Tuple[Re
         passthrough_query = {key: value for key, value in request.args.items() if key != "project_id"}
         upstream = gateway._proxy_get(upstream_path, passthrough_query)
         response, status_code = gateway._build_flask_response(upstream)
-        succeeded = 200 <= status_code < 300
+        succeeded = 200 <= status_code < 400
 
         gateway._record_usage(
             token,

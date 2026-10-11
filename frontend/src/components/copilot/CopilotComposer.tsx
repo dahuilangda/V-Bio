@@ -32,14 +32,6 @@ import type { CopilotDraftStore } from './copilotDraftStore';
 import { useCopilotDraft } from './copilotDraftStore';
 import './CopilotComposer.css';
 
-/** Active @-mention query derived from draft + caret. */
-export interface CopilotAttachmentMentionState {
-  start: number;
-  end: number;
-  query: string;
-  options: CopilotUploadedAttachment[];
-}
-
 export interface CopilotComposerDraftProps {
   /** Single source of truth for the draft text (typed + programmatic edits). */
   store: CopilotDraftStore;

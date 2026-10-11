@@ -101,3 +101,68 @@ describe('peptide preferred-structure archive keeps persisted candidate names', 
     expect(String(mergedRows.find((r) => Number(r.rank) === 2)?.structure_name)).toBe('rank_02.pdb');
   });
 });
+
+/**
+ * Regression (v11 L/D bicyclic runs): the archive carries BOTH the curated
+ * `results_summary.json` top_results (rank-sorted, structure-linked) and a
+ * LONGER `design_results.json` dump of every evaluated candidate in completion
+ * order. Length-based selection preferred the dump, so the candidate list
+ * opened on generation-1 rows with fabricated ranks and the promoted task
+ * iptm/plddt described the first-evaluated candidate instead of the best one.
+ */
+describe('curated top_results outrank the longer design_results dump', () => {
+  const completionOrderDump = {
+    candidates: [
+      // First-evaluated generation-1 candidate: worst score, no rank, no structure.
+      { generation: 1, sequence: 'GEN1WORSTAA', score: 0.31, iptm: 0.31, plddt: 61.2 },
+      { generation: 1, sequence: 'GEN1SECONDAA', score: 0.44, iptm: 0.44, plddt: 66 },
+      // Curated elites appear mid-dump without the mirror fields.
+      { generation: 6, sequence: 'BESTCANDIDATE', score: 0.96, iptm: 0.96, plddt: 96 },
+      { generation: 5, sequence: 'RUNNERUPAAAAA', score: 0.91, iptm: 0.91, plddt: 93 }
+    ]
+  };
+  const curatedSummary = {
+    summary: { best_score: 0.96, backend: 'protenix', iterations: 6 },
+    peptide_design: { candidate_count: 2 },
+    top_results: [
+      {
+        rank: 1,
+        generation: 6,
+        sequence: 'BESTCANDIDATE',
+        score: 0.96,
+        iptm: 0.96,
+        plddt: 96,
+        structure_file: 'structures/rank_01.pdb',
+        structure_name: 'rank_01.pdb'
+      },
+      {
+        rank: 2,
+        generation: 5,
+        sequence: 'RUNNERUPAAAAA',
+        score: 0.91,
+        iptm: 0.91,
+        plddt: 93,
+        structure_file: 'structures/rank_02.pdb',
+        structure_name: 'rank_02.pdb'
+      }
+    ]
+  };
+
+  it('uses top_results rows and promotes the real best metrics', async () => {
+    const zip = await buildZip({
+      'design_results.json': JSON.stringify(completionOrderDump),
+      'results_summary.json': JSON.stringify(curatedSummary),
+      'structures/rank_01.pdb': pdbText(),
+      'structures/rank_02.pdb': pdbText()
+    });
+    const parsed = await parseResultBundle(zip, { preservePeptideCandidateStructureText: false });
+    const confidence = (parsed?.confidence ?? {}) as Record<string, unknown>;
+    const rows = ((confidence.peptide_design as Record<string, unknown>)?.best_sequences ?? []) as Array<Record<string, unknown>>;
+    expect(rows.map((r) => String(r.sequence))).toEqual(['BESTCANDIDATE', 'RUNNERUPAAAAA']);
+    expect(rows.map((r) => Number(r.rank))).toEqual([1, 2]);
+    expect(rows.map((r) => String(r.structure_name))).toEqual(['rank_01.pdb', 'rank_02.pdb']);
+    // Task-level metrics promote the rank-1 candidate, not the dump's head.
+    expect(confidence.iptm).toBeCloseTo(0.96, 5);
+    expect(confidence.plddt).toBeCloseTo(96, 5);
+  });
+});
