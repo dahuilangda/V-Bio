@@ -5311,6 +5311,49 @@ def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     return "".join(seq_chars)
 
 
+def _stamp_bicyclic_cysteines(
+    sequence: str,
+    *,
+    explicit_positions: List[int],
+    cys_layout: Optional[Dict[str, Any]],
+    sequence_mask: str,
+    allow_extra_cys: bool,
+    resolve_anchors: Callable[[int, Optional[dict], tuple, Optional[dict]], Optional[tuple]],
+) -> Tuple[str, List[int]]:
+    """Force exactly the bicyclic anchor cysteines into a proposed sequence.
+
+    The ESM3 HTTP proposer samples raw sequences and knows nothing about the
+    bicyclic topology — without this stamp every de-novo proposal fails the
+    exactly-3-Cys check in _build_peptide_candidate_yaml (gen-1 crash of the
+    2026-10-11 v15 batch; the constraint used to live in the retired local
+    PepLM post-edit). Mirrors peplm.loop.constraints.apply_post_edit:
+    anchors get C, stray Cys outside anchors demote to A.
+    """
+    chars = list(sequence)
+    length = len(chars)
+    if length < 5:
+        return sequence, []
+    fixed = {
+        idx: ch for idx, ch in enumerate(sequence_mask or "")
+        if ch not in ("", "X")
+    } if sequence_mask else {}
+    resolved = resolve_anchors(length, fixed, tuple(explicit_positions or ()), cys_layout)
+    anchors = sorted({
+        int(pos) for pos in (resolved or ())
+        if pos is not None and 0 <= int(pos) < length
+    })
+    if len(anchors) != 3:
+        return sequence, []
+    for pos in anchors:
+        chars[pos] = "C"
+    if not allow_extra_cys:
+        anchor_set = set(anchors)
+        for idx, ch in enumerate(chars):
+            if ch == "C" and idx not in anchor_set and idx not in fixed:
+                chars[idx] = "A"
+    return "".join(chars), anchors
+
+
 PEPTIDE_NATURAL_THREE_TO_ONE = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
     "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
@@ -9556,6 +9599,7 @@ def run_peptide_design_backend(
     sys.path.insert(0, _esm3_sys_path)
     try:
         from peplm.integrate.esm3_proposer import ESM3Proposer
+        from peplm.loop.constraints import resolve_bicyclic_anchors as _resolve_bicyclic_anchors
     finally:
         sys.path.remove(_esm3_sys_path)
 
@@ -9809,6 +9853,18 @@ def run_peptide_design_backend(
                 population_size * 2,
             ):
                 lm_sequence = _apply_sequence_mask(str(lm_base or "").upper(), sequence_mask)
+                if design_mode == "bicyclic":
+                    # The proposer samples raw sequences with no notion of the
+                    # bicyclic topology; anchor stamping must happen here or the
+                    # candidate YAML builder rejects every de-novo proposal.
+                    lm_sequence, lm_anchors = _stamp_bicyclic_cysteines(
+                        lm_sequence,
+                        explicit_positions=list(design_params.get("cys_positions") or []),
+                        cys_layout=design_params.get("cys_layout"),
+                        sequence_mask=sequence_mask,
+                        allow_extra_cys=allow_extra_cys,
+                        resolve_anchors=_resolve_bicyclic_anchors,
+                    )
                 lm_mods = [m for m in (lm_mods or []) if isinstance(m, dict)]
                 lm_key = _peptide_candidate_key(lm_sequence, lm_mods)
                 if lm_key in evaluated_sequences:
