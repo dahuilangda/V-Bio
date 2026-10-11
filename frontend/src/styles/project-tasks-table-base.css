@@ -43,8 +43,9 @@
 
 .task-th-sort {
   width: 100%;
+  min-height: 24px;
   border: 0;
-  padding: 0;
+  padding: 4px 0;
   background: transparent;
   color: inherit;
   font: inherit;
