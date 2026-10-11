@@ -1,11 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { terminateTask as terminateBackendTask } from '../api/backendApi';
 import { rcsbCifUrl } from '../utils/structureParser';
-import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/ProjectCopilotModal';
-import { SharingModal } from '../components/project/SharingModal';
-import { ApiAccessPage } from './ApiAccessPage';
+import { readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/copilotSessionState';
+
+// Both render only on user action (API-access sub-view, share dialog); keep
+// their bundles out of the first paint of the task list.
+const ApiAccessPage = lazy(() => import('./ApiAccessPage').then((m) => ({ default: m.ApiAccessPage })));
+const SharingModal = lazy(() => import('../components/project/SharingModal').then((m) => ({ default: m.SharingModal })));
+
+// The modal drags in the whole Copilot chat UI; only its open state is read
+// during first render, so the component itself loads on first open.
+const ProjectCopilotModal = lazy(() => import('../components/copilot/ProjectCopilotModal').then((m) => ({ default: m.ProjectCopilotModal })));
 import { useAuth } from '../hooks/useAuth';
 import { useCopilotAvailability } from '../hooks/useCopilotAvailability';
 import { ProjectTasksHeader, type ExportProgressInfo } from './projectTasks/ProjectTasksHeader';
@@ -13,6 +20,7 @@ import { ProjectTasksWorkspace } from './projectTasks/ProjectTasksWorkspace';
 import { exportTaskRowsToExcel } from './projectTasks/exportTaskRowsToExcel';
 import { cancelTasksExcelExport } from '../api/backendExportApi';
 import { countProjectTasks } from '../api/supabaseLite';
+import { RouteSkeleton } from '../components/ui/RouteSkeleton';
 import type { TaskListRow } from './projectTasks/taskListTypes';
 import { useProjectTaskRowActions } from './projectTasks/useProjectTaskRowActions';
 import { useProjectTasksDataLoader } from './projectTasks/useProjectTasksDataLoader';
@@ -704,7 +712,9 @@ export function ProjectTasksPage() {
       {error && workspaceView === 'tasks' && <div className="alert error">{error}</div>}
 
       {workspaceView === 'api' && supportsApiAccess ? (
-        <ApiAccessPage />
+        <Suspense fallback={<RouteSkeleton />}>
+          <ApiAccessPage />
+        </Suspense>
       ) : (
         <ProjectTasksWorkspace
           filtersProps={{
@@ -781,22 +791,25 @@ export function ProjectTasksPage() {
         />
       )}
       {project && session?.userId && sharedTaskRow && canManageShares ? (
-        <SharingModal
-          open={Boolean(sharedTaskRow)}
-          mode="task"
-          projectId={project.id}
-          projectName={project.name}
-          projectTaskId={sharedTaskRow.id}
-          taskLabel={String(sharedTaskRow.name || '').trim() || `Task ${String(sharedTaskRow.task_id || sharedTaskRow.id).slice(0, 8)}`}
-          currentUserId={session.userId}
-          onClose={() => setSharedTaskRow(null)}
-        />
+        <Suspense fallback={null}>
+          <SharingModal
+            open={Boolean(sharedTaskRow)}
+            mode="task"
+            projectId={project.id}
+            projectName={project.name}
+            projectTaskId={sharedTaskRow.id}
+            taskLabel={String(sharedTaskRow.name || '').trim() || `Task ${String(sharedTaskRow.task_id || sharedTaskRow.id).slice(0, 8)}`}
+            currentUserId={session.userId}
+            onClose={() => setSharedTaskRow(null)}
+          />
+        </Suspense>
       ) : null}
       {project && copilotAvailable && session?.userId ? (
+        <Suspense fallback={null}>
         <ProjectCopilotModal
           isOpen={copilotOpen}
           title="Copilot"
-          subtitle={`${filteredRows.length} matched / ${taskRows.length} total`}
+          subtitle={`Task list assistant · ${taskRows.length} task${taskRows.length === 1 ? "" : "s"} in this project`}
           contextType="task_list"
           projectId={project.id}
           currentUserId={session.userId}
@@ -858,6 +871,7 @@ export function ProjectTasksPage() {
           onOpen={() => setCopilotOpen(true)}
           onClose={() => setCopilotOpen(false)}
         />
+        </Suspense>
       ) : null}
     </div>
   );

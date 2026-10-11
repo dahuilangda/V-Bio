@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   InputComponent,
@@ -50,12 +50,15 @@ import { computeAutoPocketBox } from '../../utils/pocketBox';
 import { peptidePocketSummaryLabel } from '../../utils/peptidePocket';
 import { useCopilotAvailability } from '../../hooks/useCopilotAvailability';
 import {
-  ProjectCopilotModal,
   clearStoredCopilotTaskPrefill,
   readStoredCopilotOpen,
   readStoredCopilotTaskPrefill,
   writeStoredCopilotOpen
-} from '../../components/copilot/ProjectCopilotModal';
+} from '../../components/copilot/copilotSessionState';
+
+// The modal drags in the whole Copilot chat UI; only its open state is read
+// during first render, so the component itself loads on first open.
+const ProjectCopilotModal = lazy(() => import('../../components/copilot/ProjectCopilotModal').then((m) => ({ default: m.ProjectCopilotModal })));
 import type { CopilotUploadedAttachment, CopilotAttachmentApplication } from '../../components/copilot/ProjectCopilotModal';
 
 import {
@@ -79,6 +82,19 @@ type WorkspaceRuntimeReady = WorkspaceRuntime & {
 };
 
 export function useProjectDetailWorkspaceView() {
+  // Designer draft guard: warn before an accidental full-page exit (refresh /
+  // close) while a draft design exists. SPA navigation is intentionally not
+  // intercepted — in-app draft persistence handles that path.
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!window.location.search.includes('new_task=1')) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
+
   const runtime = useProjectDetailRuntimeContext();
   const { locationSearch, entryRoutingResolved, loading, error, project, draft } = runtime;
 
@@ -2201,6 +2217,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       }}
     />
     {copilotAvailable && session?.userId ? (
+      <Suspense fallback={null}>
       <ProjectCopilotModal
         isOpen={copilotOpen}
         title="Copilot"
@@ -2216,6 +2233,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         onOpen={() => setCopilotOpen(true)}
         onClose={() => setCopilotOpen(false)}
       />
+      </Suspense>
     ) : null}
     {peptideSubmitSummary !== null ? (
       <PeptideSubmitConfirmDialog

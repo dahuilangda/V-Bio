@@ -1,12 +1,26 @@
-import type { FormEvent } from 'react';
+import { Suspense, lazy, type FormEvent, type ReactNode } from 'react';
 import { ProjectBasicsMetadataForm } from '../../components/project/ProjectBasicsMetadataForm';
-import { ProjectResultsSection, type ProjectResultsSectionProps } from '../../components/project/ProjectResultsSection';
-import { AffinityWorkflowSection, type AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
-import { LeadOptimizationWorkflowSection, type LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWorkflowSection';
-import { PredictionWorkflowSection, type PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
-import { VirtualScreeningWorkflowSection, type VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
-import { WorkflowRuntimeSettingsSection, type WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
+import type { ProjectResultsSectionProps } from '../../components/project/ProjectResultsSection';
+import type { AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
+import type { LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWorkflowSection';
+import type { PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
+import type { VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
+import type { WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
 import type { WorkspaceTab } from './workspaceTypes';
+
+// A project renders exactly ONE workflow section, and the results section only
+// mounts on the results tab — so each of these heavy subtrees loads on first
+// render instead of weighing down the detail-page bundle for every project.
+const ProjectResultsSection = lazy(() => import('../../components/project/ProjectResultsSection').then((m) => ({ default: m.ProjectResultsSection })));
+const AffinityWorkflowSection = lazy(() => import('./AffinityWorkflowSection').then((m) => ({ default: m.AffinityWorkflowSection })));
+const LeadOptimizationWorkflowSection = lazy(() => import('./LeadOptimizationWorkflowSection').then((m) => ({ default: m.LeadOptimizationWorkflowSection })));
+const PredictionWorkflowSection = lazy(() => import('./PredictionWorkflowSection').then((m) => ({ default: m.PredictionWorkflowSection })));
+const VirtualScreeningWorkflowSection = lazy(() => import('./VirtualScreeningWorkflowSection').then((m) => ({ default: m.VirtualScreeningWorkflowSection })));
+const WorkflowRuntimeSettingsSection = lazy(() => import('./WorkflowRuntimeSettingsSection').then((m) => ({ default: m.WorkflowRuntimeSettingsSection })));
+
+function SectionSuspense({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<div className="workflow-note" role="status" aria-live="polite">Loading workspace...</div>}>{children}</Suspense>;
+}
 
 export interface ProjectWorkspaceContentProps {
   workspaceTab: WorkspaceTab;
@@ -69,10 +83,12 @@ export function ProjectWorkspaceContent({
   if (showLeadOptWorkspace) {
     return (
       <div className="workspace-content workspace-content--lead-opt">
-        <LeadOptimizationWorkflowSection
-          isVisible
-          {...leadOptimizationSectionProps}
-        />
+        <SectionSuspense>
+          <LeadOptimizationWorkflowSection
+            isVisible
+            {...leadOptimizationSectionProps}
+          />
+        </SectionSuspense>
       </div>
     );
   }
@@ -87,15 +103,19 @@ export function ProjectWorkspaceContent({
 
   return (
     <div className="workspace-content">
-      {showNativeResults && <ProjectResultsSection {...projectResultsSectionProps} />}
+      {showNativeResults && (
+        <SectionSuspense>
+          <ProjectResultsSection {...projectResultsSectionProps} />
+        </SectionSuspense>
+      )}
 
       {showFlatWorkspace && (
         <form className="form-grid" onSubmit={saveDraftAction}>
-          {showFlatPredictionWorkspace && <PredictionWorkflowSection isVisible {...predictionSectionProps} />}
-          {showFlatVirtualScreeningWorkspace && <VirtualScreeningWorkflowSection isVisible {...virtualScreeningSectionProps} />}
-          {showFlatAffinityWorkspace && <AffinityWorkflowSection isVisible {...affinitySectionProps} />}
+          {showFlatPredictionWorkspace && <SectionSuspense><PredictionWorkflowSection isVisible {...predictionSectionProps} /></SectionSuspense>}
+          {showFlatVirtualScreeningWorkspace && <SectionSuspense><VirtualScreeningWorkflowSection isVisible {...virtualScreeningSectionProps} /></SectionSuspense>}
+          {showFlatAffinityWorkspace && <SectionSuspense><AffinityWorkflowSection isVisible {...affinitySectionProps} /></SectionSuspense>}
           {showFlatPredictionWorkspace && showRuntimeSettingsInComponents ? (
-            <WorkflowRuntimeSettingsSection isVisible {...runtimeSettingsProps} />
+            <SectionSuspense><WorkflowRuntimeSettingsSection isVisible {...runtimeSettingsProps} /></SectionSuspense>
           ) : null}
         </form>
       )}
@@ -115,17 +135,17 @@ export function ProjectWorkspaceContent({
               />
             )}
 
-            {showAffinitySection ? <AffinityWorkflowSection isVisible {...affinitySectionProps} /> : null}
+            {showAffinitySection ? <SectionSuspense><AffinityWorkflowSection isVisible {...affinitySectionProps} /></SectionSuspense> : null}
 
             {showPredictionSection ? (
-              <PredictionWorkflowSection isVisible {...predictionSectionProps} />
+              <SectionSuspense><PredictionWorkflowSection isVisible {...predictionSectionProps} /></SectionSuspense>
             ) : isVirtualScreeningWorkflow && workspaceTab === 'components' ? (
-              <VirtualScreeningWorkflowSection isVisible {...virtualScreeningSectionProps} />
+              <SectionSuspense><VirtualScreeningWorkflowSection isVisible {...virtualScreeningSectionProps} /></SectionSuspense>
             ) : isAffinityWorkflow || isLeadOptimizationWorkflow ? null : (
               <div className="workflow-note">{workflowDescription}</div>
             )}
 
-            {showRuntimeSettingsInComponents ? <WorkflowRuntimeSettingsSection isVisible {...runtimeSettingsProps} /> : null}
+            {showRuntimeSettingsInComponents ? <SectionSuspense><WorkflowRuntimeSettingsSection isVisible {...runtimeSettingsProps} /></SectionSuspense> : null}
           </form>
         </section>
       )}

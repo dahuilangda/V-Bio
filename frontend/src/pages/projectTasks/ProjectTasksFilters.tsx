@@ -97,7 +97,7 @@ export function ProjectTasksFilters({
     tableMode === 'lead_opt'
       ? 'Search status/MMP/fragments...'
       : tableMode === 'peptide'
-        ? 'Search status/sequence/design...'
+        ? 'Search tasks...'
         : 'Search status/backend/metrics...';
 
   return (

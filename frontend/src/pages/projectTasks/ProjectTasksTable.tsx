@@ -133,7 +133,10 @@ export function ProjectTasksTable({
                     <th>
                       <span className="project-th">Design Setup</span>
                     </th>
-                    <th className="task-th-metric task-th-metric-plddt">
+                    <th
+                      className="task-th-metric task-th-metric-plddt"
+                      aria-sort={sortKey === 'plddt' ? (sortMark('plddt') === '↑' ? 'ascending' : 'descending') : undefined}
+                    >
                       <button
                         type="button"
                         className={`task-th-sort ${sortKey === 'plddt' ? 'active' : ''}`}
@@ -144,7 +147,10 @@ export function ProjectTasksTable({
                         </span>
                       </button>
                     </th>
-                    <th className="task-th-metric task-th-metric-ipsae">
+                    <th
+                      className="task-th-metric task-th-metric-ipsae"
+                      aria-sort={sortKey === 'ipsae' ? (sortMark('ipsae') === '↑' ? 'ascending' : 'descending') : undefined}
+                    >
                       <button
                         type="button"
                         className={`task-th-sort ${sortKey === 'ipsae' ? 'active' : ''}`}

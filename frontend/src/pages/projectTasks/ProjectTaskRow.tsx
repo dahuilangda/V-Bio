@@ -104,6 +104,15 @@ function ProjectTaskRowImpl({
   const terminatingThisTask = terminatingTaskId === task.id;
   const actionTitle = hasRuntimeTaskId ? 'Open this task result' : 'Open this draft snapshot for editing';
   const stateTone = taskStateTone(task.task_state);
+
+  // Raw engine tracebacks (celery UUIDs, file paths) are unreadable inline —
+  // collapse them behind a summary + expandable log instead.
+  const isVerboseRunNote =
+    stateTone === 'failure' &&
+    (runNote.length > 220 || /Traceback|at \w+\(|\.py\(|exit code/i.test(runNote));
+  const runNoteHeadline = isVerboseRunNote
+    ? (runNote.split('\n').find((line) => line.trim() && !line.includes('Traceback')) || 'Task failed').trim().slice(0, 200)
+    : '';
   const workflowClass = row.workflowKey.replace(/_/g, '-');
   const isLeadOptMode = mode === 'lead_opt';
   const isPeptideMode = mode === 'peptide';
@@ -302,7 +311,16 @@ function ProjectTaskRowImpl({
             <span className={`task-workflow-chip workflow-${workflowClass}`}>{row.workflowLabel}</span>
             <span className="task-submitted-time">{formatDateTime(submittedTs)}</span>
           </div>
-          {showRunNote ? <div className={`task-run-note is-${stateTone}`}>{runNote}</div> : null}
+          {showRunNote ? (
+            isVerboseRunNote ? (
+              <details className="task-run-note is-failure">
+                <summary>{runNoteHeadline} — view full log</summary>
+                <pre className="task-run-note-log">{runNote}</pre>
+              </details>
+            ) : (
+              <div className={`task-run-note is-${stateTone}`}>{runNote}</div>
+            )
+          ) : null}
         </div>
       </td>
       {mode === 'default' ? (
