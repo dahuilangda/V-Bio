@@ -26,12 +26,21 @@ def progress(task_id):
 
 rows = q("SELECT name, task_state, task_id FROM project_tasks "
          "WHERE project_id='3bf7199e-0e4e-483b-b896-c7dd07b157e4' "
-         "AND name LIKE '降解剂v15-%' ORDER BY name")
+         "AND name LIKE '降解剂v15%' ORDER BY name")
 print(f"{'task':38} {'state':10} {'gen':6} {'done':8} best     metric")
 for name, state, tid in rows:
     p = progress(tid)
     gen = f"{p.get('current_generation', '-')}/{p.get('total_generations', '-')}"
     done = p.get("status_message", "").split(":")[-1].strip()[:14] or "-"
+    if not p and name.split("-")[1].startswith("D"):
+        # D route: the target-prediction stage precedes the design loop, so
+        # peptide_progress.json only appears at gen1 — show the prep state
+        # instead of a bare dash.
+        out = subprocess.run(
+            ["docker", "exec", "vbio-cpu-worker", "sh", "-c",
+             f"ls -d /data/boltz_central_results/_runtime_tmp/boltz_task_{tid}*/d_target_prep 2>/dev/null | head -1"],
+            capture_output=True, text=True)
+        done = "target-prep" if out.stdout.strip() else "starting"
     best = p.get("best_score")
     best = f"{best:.4f}" if isinstance(best, (int, float)) else "-"
     seqs = p.get("current_best_sequences") or []
