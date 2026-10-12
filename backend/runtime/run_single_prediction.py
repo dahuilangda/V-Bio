@@ -6628,7 +6628,12 @@ def _dpeptide_predict_target_structure(
         results_base / engine_cap / str(async_result.id),
     ]
 
-    deadline = time.time() + 3600
+    # The target prediction rides the shared GPU queue BEHIND bulk candidate
+    # work: a 250-deep backlog drains in ~5h, so a fixed 1h deadline failed
+    # every D parent under load (2026-10-12). The bound must cover queue wait
+    # plus runtime; env-tunable for deployments that run a dedicated lane.
+    deadline = time.time() + int(
+        os.environ.get("DPEPTIDE_TARGET_PREDICT_TIMEOUT_SECONDS", "21600"))
     cif_pat = re.compile(r".*model.*\.cif$|.*_sample_.*\.cif$", re.IGNORECASE)
 
     def _extract_first_cif(zip_path: Path) -> Optional[Path]:
@@ -7946,12 +7951,15 @@ def _dpeptide_collect_refine(
         f"dpeptide_task_{async_result.id}"
     conf_path = task_tmp / "out" / "confidence.json"
     # Poll no longer than the dispatched GPU task itself is allowed to run
-    # (SUBPROCESS_TIMEOUT) plus a small grace for result writes.
+    # (SUBPROCESS_TIMEOUT) plus a small grace for result writes — plus a
+    # QUEUE grace: refines dispatch into the shared GPU queue behind bulk
+    # candidate work, and a 250-deep backlog alone waits longer than the
+    # runtime cap, revoking healthy refines (2026-10-12). Env-tunable.
     from backend.worker import tasks as _worker_tasks
 
     refine_deadline = time.time() + int(
         getattr(_worker_tasks, "SUBPROCESS_TIMEOUT", 3 * 60 * 60)
-    ) + 120
+    ) + int(os.environ.get("PEPTIDE_REFINE_QUEUE_GRACE_SECONDS", "21600")) + 120
     while True:
         if conf_path.is_file():
             break
