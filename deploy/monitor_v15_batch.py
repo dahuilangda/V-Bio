@@ -47,8 +47,10 @@ for name, state, tid in rows:
     metric = ""
     if seqs:
         b = seqs[0]
+        # progress rows carry "score" (not composite_score)
+        val = b.get("score") or b.get("composite_score") or 0
         metric = (f"{b.get('interface_metric_label')}:"
-                  f"{(b.get('interface_metric') or 0):.3f}")
+                  f"{(b.get('interface_metric') or 0):.3f} best={val:.3f}")
     print(f"{name:38} {state:10} {gen:6} {done:8} {best:8} {metric}")
 
 print()
