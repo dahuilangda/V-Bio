@@ -826,9 +826,14 @@ export function WorkflowRuntimeSettingsSection({
                   ]
                 : isPeptideDesignWorkflow
                   ? (peptideDesignMode !== 'linear'
-                      ? [
-                          { value: 'protenix2dock', label: 'Protenix2Dock' }
-                        ]
+                      ? (peptideChirality === 'l'
+                          ? [
+                              { value: 'protenix2dock', label: 'Protenix2Dock' },
+                              { value: 'protenix', label: 'Protenix (native)' }
+                            ]
+                          : [
+                              { value: 'protenix2dock', label: 'Protenix2Dock' }
+                            ])
                       : [
                           { value: 'protenix2dock', label: 'Protenix2Dock' },
                           { value: 'boltz2dock', label: 'Boltz2Dock' },
