@@ -4876,6 +4876,19 @@ def run_protenix_backend(
     )
     if seed is not None:
         docker_command.extend(["--seeds", str(int(seed))])
+    if linker_codes and os.environ.get("PROTENIX_DISABLE_TFG", "") != "1":
+        # Protenix ships Training-Free Guidance DISABLED by default
+        # (configs_base: sample_diffusion.guidance.enable=False). Without it
+        # the diffusion sampler places CCD-ligand atoms with zero chemistry
+        # restraint and the bicyclic linker's mesitylene core comes back
+        # warped (v15 batch: ring angles 48°-169°, out-of-plane up to
+        # 0.31 Å). The RDKit-restraint suite (PairwiseDistance bond bounds,
+        # PlanarImproper, ExperimentalTorsion, InterchainBond, ...) ships
+        # with weights in the very same config — only `enable` gates it.
+        # Scoped to linker-containing runs so plain protein predictions
+        # keep their sampling behavior; PROTENIX_DISABLE_TFG=1 is the
+        # fallback kill-switch.
+        docker_command.extend(["--sample_diffusion.guidance.enable", "True"])
     docker_command.extend(infer_extra_args)
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
@@ -7180,6 +7193,266 @@ def _relax_staged_bicyclic_strain(
             "cb_renormalized": fixed_cb}
 
 
+_SEZ_RING_ATOMS = ("CE", "CZ1", "CT1", "CH", "CT2", "CZ2")
+_SEZ_ARM_ATOMS = ("CD", "C1", "C2")
+_SEZ_CCD_CACHE: Dict[str, Any] = {}
+
+
+def _load_sez_ccd_conformer() -> Optional[Dict[str, Any]]:
+    """Ideal SEZ (mesitylene core) coordinates from the linker CCD template.
+
+    Primary source: backend/runtime/linker_ccd/linker_mols.pkl (the pipeline's
+    own linker-geometry template, available on every worker). Fallback: the
+    Boltz CCD cache. Returns {"arms": [xyz×3], "ring": [xyz×6]} with atom
+    identity resolved by graph topology (3 SINGLE-bonded arm carbons off an
+    aromatic 6-ring), matched to the structure's atom names by best Kabsch
+    fit over the 3! arm assignments.
+    """
+    if "mol" in _SEZ_CCD_CACHE:
+        return _SEZ_CCD_CACHE["mol"]
+    import pickle as _pickle
+
+    module_dir = Path(__file__).resolve().parent
+    candidates = [
+        module_dir / "linker_ccd" / "linker_mols.pkl",
+        Path(os.environ.get("BOLTZ_CCD_CACHE", "") or "")
+        if os.environ.get("BOLTZ_CCD_CACHE") else None,
+        Path("/data/boltz_weight/ccd.pkl"),
+    ]
+    mol = None
+    for path in candidates:
+        if path and path.exists():
+            try:
+                with open(path, "rb") as fh:
+                    payload = _pickle.load(fh)
+                mol = (payload.get("SEZ") if isinstance(payload, dict) else None) or None
+                if mol is not None:
+                    break
+            except Exception:
+                continue
+    if mol is None:
+        return None
+    conf = mol.GetConformer()
+    pos = {a.GetIdx(): np.array([conf.GetAtomPosition(a.GetIdx()).x,
+                                 conf.GetAtomPosition(a.GetIdx()).y,
+                                 conf.GetAtomPosition(a.GetIdx()).z])
+           for a in mol.GetAtoms()}
+    ring_idx: set = set()
+    arm_idx: set = set()
+    for b in mol.GetBonds():
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        if str(b.GetBondType()) == "AROMATIC":
+            ring_idx.add(i)
+            ring_idx.add(j)
+    for b in mol.GetBonds():
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        if str(b.GetBondType()) != "AROMATIC":
+            # ring↔arm single bond: the non-ring endpoint is an arm carbon
+            arm_idx.add(j if i in ring_idx else i)
+    if len(ring_idx) != 6 or len(arm_idx) != 3:
+        return None
+    ring_list = sorted(ring_idx)
+    arm_list = sorted(arm_idx)
+    ring_rank = {atom_idx: i for i, atom_idx in enumerate(ring_list)}
+    arm_rank = {atom_idx: k for k, atom_idx in enumerate(arm_list)}
+    # attachment connectivity: attach[k] = index into `ring` of the ring
+    # carbon bonded to arm k (defines the ring-arm bond the repair must keep)
+    attach = [None] * 3
+    for b in mol.GetBonds():
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        if str(b.GetBondType()) == "AROMATIC":
+            continue
+        ring_end = i if i in ring_idx else j
+        arm_end = j if i in ring_idx else i
+        attach[arm_rank[arm_end]] = ring_rank[ring_end]
+    if any(a is None for a in attach):
+        return None
+    result = {
+        "ring": [pos[i] for i in ring_list],
+        "arms": [pos[i] for i in arm_list],
+        "attach": attach,
+    }
+    _SEZ_CCD_CACHE["mol"] = result
+    return result
+
+
+def _kabsch_fit(mobile: "np.ndarray", target: "np.ndarray") -> "np.ndarray":
+    """Rotation+translation mapping mobile onto target (both [N,3])."""
+    mc, tc = mobile.mean(0), target.mean(0)
+    H = (mobile - mc).T @ (target - tc)
+    U, _, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    return R, tc - R @ mc
+
+
+def _regularize_sez_ring_geometry(structure_path: Path) -> bool:
+    """Rebuild the bicyclic linker's aromatic core from ideal CCD geometry.
+
+    The diffusion refine clamps the Cys-SG↔anchor bonds but nothing protects
+    the SEZ mesitylene core's INTERNAL geometry: the aromatic ring comes back
+    warped (v15 batch, 2026-10-13 — all 9 L-route rank_01 structures showed
+    ring angles 48°-169° and out-of-plane up to 0.31 Å; the D route is clean
+    because mirror staging writes the linker from the ideal CCD template).
+    The three arm carbons are chemically correct (ring-arm 1.50-1.55 Å, SG
+    bonds intact), so the ring is rebuilt as the ideal rigid body best-fitted
+    through them — arm coordinates, and therefore every Cys-SG bond, are
+    untouched. No-op when the ring is already near-ideal. Idempotent.
+    """
+    try:
+        import gemmi
+        ideal = _load_sez_ccd_conformer()
+        if ideal is None:
+            return False
+        st = gemmi.read_structure(str(structure_path))
+        st.setup_entities()
+        target = None
+        for model in st:
+            for chain in model:
+                for res in chain:
+                    if res.name == "SEZ":
+                        target = res
+                        break
+            if target is not None:
+                break
+        if target is None:
+            return False
+        obs = {}
+        for atom in target:
+            if atom.element.name == "C" and atom.name in (
+                    _SEZ_RING_ATOMS + _SEZ_ARM_ATOMS):
+                obs[atom.name] = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
+        if not all(n in obs for n in _SEZ_RING_ATOMS + _SEZ_ARM_ATOMS):
+            return False
+
+        ccd_arms = np.array(ideal["arms"])
+        ccd_ring = np.array(ideal["ring"])
+        attach = list(ideal["attach"])  # arm k bonds to ring[attach[k]]
+        obs_arms = np.array([obs[n] for n in _SEZ_ARM_ATOMS])
+        obs_ring = np.array([obs[n] for n in _SEZ_RING_ATOMS])
+        # each observed arm's ring partner (the CIF ring atom it bonds to),
+        # as an index into _SEZ_RING_ATOMS
+        obs_partner = []
+        for k, arm_name in enumerate(_SEZ_ARM_ATOMS):
+            dists = [float(np.linalg.norm(obs[arm_name] - obs[r]))
+                     for r in _SEZ_RING_ATOMS]
+            obs_partner.append(int(np.argmin(dists)))
+
+        def assign_from_transform(R, t):
+            """Map transformed template ring positions onto CIF ring names.
+
+            Anchored: template ring[attach[perm[k]]] -> the ring partner of
+            CIF arm k. Remaining atoms: greedy nearest-neighbor among the
+            rest (bond connectivity stays intact because the three anchors
+            fix the substitution pattern of the 1,3,5-trisubstituted ring).
+            """
+            new_ring = ccd_ring @ R.T + t
+            names: Dict[int, str] = {}
+            used: set = set()
+            for k in range(3):
+                names[attach[perm[k]]] = _SEZ_RING_ATOMS[obs_partner[k]]
+                used.add(obs_partner[k])
+            for j in range(6):
+                if j in attach:
+                    continue
+                free = [i for i in range(6) if i not in used]
+                d, best_i = min(
+                    (float(np.linalg.norm(new_ring[j] - obs[_SEZ_RING_ATOMS[i]])), i)
+                    for i in free)
+                names[j] = _SEZ_RING_ATOMS[best_i]
+                used.add(best_i)
+            rmsd = float(np.sqrt(np.mean(np.sum(
+                (np.array([new_ring[j] for j in range(6)]) -
+                 np.array([obs[names[j]] for j in range(6)])) ** 2, axis=1))))
+            return rmsd, new_ring, names
+
+        # resolve the 3! arm correspondence by best anchored fit
+        best = None
+        for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
+            R, t = _kabsch_fit(ccd_arms[list(perm)], obs_arms)
+            rmsd, new_ring, names = assign_from_transform(R, t)
+            if best is None or rmsd < best[0]:
+                best = (rmsd, new_ring, names, R, t, perm)
+        rmsd, new_ring, names, best_R, best_t, perm = best
+        if rmsd < 0.05:
+            return False  # ring already ideal — idempotent no-op
+
+        # Ring atoms take the ideal template positions. The ARM carbons move
+        # too — they inherit the ring's warp (the whole template body is
+        # fitted through them, so post-fit arm deltas run ~0.5 Å when the
+        # input ring was badly warped) and keeping them pinned would leave
+        # the repaired ring's arm bonds at 0.8-1.7 Å. Each arm's bonded Cys
+        # SG translates by the SAME delta, so every Cys-SG↔arm bond length
+        # is preserved exactly; the SG moves ≤0.5 Å within the interface.
+        arm_delta: Dict[str, "np.ndarray"] = {}
+        for k, arm_name in enumerate(_SEZ_ARM_ATOMS):
+            j = attach[perm[k]]
+            partner_obs = obs[arm_name]
+            partner_new = ccd_arms[perm[k]] @ best_R.T + best_t
+            arm_delta[arm_name] = partner_new - partner_obs
+
+        changed = 0
+        for j in range(6):
+            atom = target.find_atom(names[j], "*")
+            if atom is None:
+                continue
+            atom.pos.x, atom.pos.y, atom.pos.z = (float(new_ring[j][0]),
+                                                  float(new_ring[j][1]),
+                                                  float(new_ring[j][2]))
+            changed += 1
+        for k, arm_name in enumerate(_SEZ_ARM_ATOMS):
+            d = arm_delta[arm_name]
+            atom = target.find_atom(arm_name, "*")
+            if atom is not None:
+                atom.pos.x += float(d[0])
+                atom.pos.y += float(d[1])
+                atom.pos.z += float(d[2])
+                changed += 1
+        # Cys SG atoms ride with their bonded arm (same delta)
+        for k, arm_name in enumerate(_SEZ_ARM_ATOMS):
+            d = arm_delta[arm_name]
+            arm_pos_new = obs[arm_name] + d
+            for other in target:
+                if other.name == "CYS":
+                    sg = other.find_atom("SG", "*")
+                    if sg is None:
+                        continue
+                    sg_pos = np.array([sg.pos.x, sg.pos.y, sg.pos.z])
+                    # the SG bonded to THIS arm: the nearest SG to the arm's
+                    # ORIGINAL position (the linker has exactly 3 arms)
+                    if float(np.linalg.norm(sg_pos - obs[arm_name])) < 2.5:
+                        sg.pos.x += float(d[0])
+                        sg.pos.y += float(d[1])
+                        sg.pos.z += float(d[2])
+                        changed += 1
+        if changed:
+            st.setup_entities()
+            if str(structure_path).endswith(".pdb"):
+                st.write_pdb(str(structure_path))
+            else:
+                st.make_mmcif_document().write_file(str(structure_path))
+        return changed > 0
+    except Exception as exc:  # noqa: BLE001 — cosmetic repair must not kill a run
+        print(f"[linker-regularize] WARNING: {structure_path.name}: {exc}",
+              file=sys.stderr)
+        return False
+
+
+def _match_ring_rmsd(obs_ring: "np.ndarray", new_ring: "np.ndarray") -> Optional[float]:
+    """Best permutation RMSD between two 6-rings (same connectivity)."""
+    best = None
+    for perm in (
+        (0, 1, 2, 3, 4, 5), (1, 2, 3, 4, 5, 0), (2, 3, 4, 5, 0, 1),
+        (3, 4, 5, 0, 1, 2), (4, 5, 0, 1, 2, 3), (5, 0, 1, 2, 3, 4),
+        (0, 5, 4, 3, 2, 1), (1, 0, 5, 4, 3, 2), (2, 1, 0, 5, 4, 3),
+        (3, 2, 1, 0, 5, 4), (4, 3, 2, 1, 0, 5), (5, 4, 3, 2, 1, 0),
+    ):
+        rmsd = float(np.sqrt(np.mean(np.sum((obs_ring - new_ring[list(perm)]) ** 2, axis=1))))
+        if best is None or rmsd < best:
+            best = rmsd
+    return best
+
+
 def _dpeptide_prepare_reference_peptide(
     predict_args: Dict[str, Any],
     out_dir: Path,
@@ -9006,7 +9279,10 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
             "anchor": anchor_name,
             "cys_resnum": best[0],
             "distance": round(dist, 3),
-            "bonded": bool(dist <= 2.5),
+            # covalent C-S is ~1.82 A; below ~1.2 A the "bond" is an atom
+            # overlap (a v15 refine shipped an SG-anchor pair at 0.31 A as
+            # rank_01), which must not count as bonded
+            "bonded": bool(1.2 <= dist <= 2.5),
         })
     distinct = len({b["cys_resnum"] for b in bonds if b["cys_resnum"] is not None})
     return {
@@ -10329,6 +10605,18 @@ def run_peptide_design_backend(
                     )
                     d_space_refined = str(ctx["refined_cif"])
                     structure_file = Path(d_space_refined)
+                    if design_mode == "bicyclic":
+                        # Same covalent-integrity guarantee the pocket route
+                        # enforces via require_bonds: a refine sample whose
+                        # linker anchors tore (3-4 A gaps) or overlap
+                        # (0.31 A — v15 L-TLE rank_01) must be rejected,
+                        # not shipped as the top rank.
+                        bond_report = _dpeptide_linker_bond_report(
+                            Path(d_space_refined))
+                        if not bond_report.get("all_bonded"):
+                            raise ValueError(
+                                "linker covalent integrity gate: "
+                                f"{bond_report.get('bonds')}")
                 except (RuntimeError, ValueError) as plain_exc:
                     print(
                         f"[l-peptide] candidate {candidate_sequence[:12]}… "
@@ -10888,6 +11176,20 @@ def run_peptide_design_backend(
                     st_native.setup_entities()
                     st_native.write_pdb(staged_path)
                     if design_mode == "bicyclic":
+                        # Root fix for the warped-linker symptom (v15: all 9
+                        # L-route rank_01 rings came back with 48°-169°
+                        # angles): the native co-folding prediction is an
+                        # UNCONSTRAINED diffusion sample — nothing in the
+                        # sampler holds a CCD ligand's internal geometry, so
+                        # the SEZ core enters the refine already warped and
+                        # the refine preserves its input. The D route is
+                        # clean for exactly the opposite reason: its staging
+                        # writes the linker from the ideal CCD template.
+                        # Do the same here — rebuild the core from the ideal
+                        # template fitted through the (chemically correct)
+                        # arm carbons, so both routes feed the refine the
+                        # same ideal geometry.
+                        _regularize_sez_ring_geometry(Path(staged_path))
                         _append_staged_bicyclic_links(
                             Path(staged_path),
                             job.get("cys_positions")
