@@ -773,6 +773,63 @@ def compute_ccd_bond_bands(
         nm = atom_names[row].lstrip("0123456789")
         name_by_res.setdefault(
             (int(asym[row]), int(res_ids[row])), {})[nm] = row
+    # Template-graph bond detection for STANDARD residues: the distance
+    # heuristic above keys on the assembled INITIAL coordinates, which for a
+    # blind refine are pure noise — under noise almost no backbone pair lands
+    # inside the cutoff, and the peptide samples with no backbone bands at
+    # all (v16 D-TLE: N-CA 0.94 A, C-N 0.77-2.43 A in the shipped rank_01).
+    # Standard-residue bonds instead come from the CCD template graph, which
+    # is position-independent; non-standard residues keep the heuristic.
+    _std_backbone_bonds = {
+        ("N", "CA"), ("CA", "C"), ("C", "O"),
+        ("CA", "CB"), ("CB", "SG"),
+    }
+    for (asym_id, res_num), names in name_by_res.items():
+        comp = None
+        for row in names.values():
+            comp = str(comp_ids[row]).upper()
+            break
+        if comp in _aro_side or comp in ("PRO",):
+            continue
+        if not (3 <= len(names) <= 30):
+            continue
+        try:
+            tpl = _load_ccd_template(comp)
+        except Exception:
+            tpl = None
+        if not tpl:
+            continue
+        for (ni, nj) in _std_backbone_bonds | {
+            ("CB", "OG"), ("CB", "OG1"), ("CB", "CG2"), ("CB", "CG"),
+            ("CG", "CD1"), ("CG", "OD1"), ("CG", "ND2"), ("CB", "S "),
+        }:
+            if ni in names and nj in names:
+                i, j = names[ni], names[nj]
+                key = (min(i, j), max(i, j))
+                if key in bonded:
+                    continue
+                if ni in tpl and nj in tpl:
+                    rest = float(np.linalg.norm(tpl[ni] - tpl[nj]))
+                else:
+                    rest = float(np.linalg.norm(coords[i] - coords[j]))
+                bonded.add(key)
+                pairs.append([i, j])
+                rest.append(rest)
+    # inter-residue peptide bonds C(i)-N(i+1) within each free chain: same
+    # template-independent detection gap under blind noise
+    for rows in rows_by_asym.values():
+        ordered = sorted(rows, key=lambda r: (int(res_ids[r]), int(asym[r])))
+        for a, b in zip(ordered, ordered[1:]):
+            na = atom_names[a].lstrip("0123456789")
+            nb = atom_names[b].lstrip("0123456789")
+            if na == "C" and nb == "N" and (
+                    int(res_ids[b]) - int(res_ids[a]) == 1):
+                key = (min(a, b), max(a, b))
+                if key in bonded:
+                    continue
+                bonded.add(key)
+                pairs.append([a, b])
+                rest.append(1.33)
     rigid_rows: list[list[int]] = []
     rigid_coords: list[np.ndarray] = []
     rigid_bb_rows: list[list[int]] = []

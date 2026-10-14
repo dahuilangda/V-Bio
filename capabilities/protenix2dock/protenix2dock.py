@@ -778,12 +778,35 @@ def _run_peptide_engine(
     except Exception as _band_exc:
         _ccd_bands = None
         log.warning("CCD bond bands unavailable: %s", _band_exc)
+    staged_to_auto = {
+        name: chr(ord("A") + i)
+        for i, name in enumerate(entity_chain_names)
+    }
     if _ccd_bands is not None:
         (_chem_idx, _chem_up, _chem_lo, _clash_idx, _clash_lo,
          _rigid, _aro_dof) = _ccd_bands
         _band_npz = work_dir / "ccd_bond_bands.npz"
         _band_payload: dict[str, Any] = {
             "pair_index": _chem_idx, "upper": _chem_up, "lower": _chem_lo}
+        # Inter-entity covalent bonds (Cys-SG <-> linker anchors) ride the
+        # same two-sided bands: the TFG contact channel carries only an upper
+        # bound, which prevents tears but not collapses — a sample whose SG
+        # slid onto its anchor at 0.78 A satisfies it (v16 L-TLE rank_01).
+        # Rest = thioether C-S ~1.81 A, band +/-0.35.
+        _sg_pairs = [p_ for p_, is_ht in zip(staged_bond_pairs, headtail_refs)
+                     if not is_ht]
+        if _sg_pairs:
+            _resolved = compute_bond_contact_pairs(
+                info, _sg_pairs, 2.16, staged_to_auto=staged_to_auto)
+            if _resolved is not None:
+                _n = len(_resolved[0])
+                _band_payload["pair_index"] = np.concatenate(
+                    [_chem_idx, _resolved[0]], axis=0)
+                _band_payload["upper"] = np.concatenate(
+                    [_chem_up, np.full(_n, 2.16, dtype=np.float32)])
+                _band_payload["lower"] = np.concatenate(
+                    [_chem_lo, np.full(_n, 1.46, dtype=np.float32)])
+                log.info("SG-anchor covalent bands: %d two-sided pairs", _n)
         if _rigid is not None:
             _band_payload["ring_rows"] = _rigid[0]
             _band_payload["ring_coords"] = _rigid[1]
@@ -843,10 +866,6 @@ def _run_peptide_engine(
 
         # staged chain names -> input.json auto chain letters (the assembled
         # atom table keys on the latter)
-        staged_to_auto = {
-            name: chr(ord("A") + i)
-            for i, name in enumerate(entity_chain_names)
-        }
         contact_arrays: list[np.ndarray] = []
         contact_uppers: list[np.ndarray] = []
         n_bond_pairs = 0
