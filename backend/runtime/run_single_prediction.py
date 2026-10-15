@@ -10336,7 +10336,7 @@ def run_peptide_design_backend(
                         ctx["async_result"],
                         Path(ctx["staged_path"]),
                         Path(ctx["refined_cif"]),
-                        expect_blind=False,
+                        expect_blind=True,
                     )
                     d_space_refined = str(ctx["refined_cif"])
                     structure_file = Path(d_space_refined)
@@ -10934,9 +10934,14 @@ def run_peptide_design_backend(
                                  if sum(1 for r in ch if r.het_flag != "H") >= 3]
                         _pep_letter = _poly[-1] if _poly else "B"
                         _rec_letters = ",".join(_poly[:-1]) if len(_poly) > 1 else "A"
+                        # Blind inpainting (aligned with the D route): the
+                        # peptide denoises from pure noise so the constraint
+                        # bands converge from scratch — refining the staged
+                        # native pose instead leaves residual strain (v19
+                        # L-TLE: SG-SG 1.31 A survived the full band set).
                         return _dpeptide_dispatch_refine(
                             _staged, _seed, build_capability_queue("protenix", "default"),
-                            blind=False,
+                            blind=True,
                             cyclic_headtail=(design_mode == "cyclic"),
                             peptide_chain_letter=_pep_letter,
                             receptor_chain_letters=_rec_letters)
