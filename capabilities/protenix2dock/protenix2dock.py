@@ -790,23 +790,28 @@ def _run_peptide_engine(
             "pair_index": _chem_idx, "upper": _chem_up, "lower": _chem_lo}
         # Inter-entity covalent bonds (Cys-SG <-> linker anchors) ride the
         # same two-sided bands: the TFG contact channel carries only an upper
-        # bound, which prevents tears but not collapses — a sample whose SG
-        # slid onto its anchor at 0.78 A satisfies it (v16 L-TLE rank_01).
-        # Rest = thioether C-S ~1.81 A, band +/-0.35.
+        # bound, which prevents tears but not collapses. Rest length follows
+        # the anchor chemistry: thioether C-S ~1.81 A (SEZ/29N), Bi-S
+        # coordination ~2.55 A (BS3 — the CCD entry is a bare Bi ion, so the
+        # rest length is coordination chemistry, not a template value).
         _sg_pairs = [p_ for p_, is_ht in zip(staged_bond_pairs, headtail_refs)
                      if not is_ht]
         if _sg_pairs:
+            _is_bi = any(ref[2] == "BI" for pair in _sg_pairs for ref in pair)
+            _rest, _half = (2.55, 0.35) if _is_bi else (1.81, 0.35)
             _resolved = compute_bond_contact_pairs(
-                info, _sg_pairs, 2.16, staged_to_auto=staged_to_auto)
+                info, _sg_pairs, _rest + _half, staged_to_auto=staged_to_auto)
             if _resolved is not None:
                 _n = len(_resolved[0])
                 _band_payload["pair_index"] = np.concatenate(
                     [_chem_idx, _resolved[0]], axis=0)
                 _band_payload["upper"] = np.concatenate(
-                    [_chem_up, np.full(_n, 2.16, dtype=np.float32)])
+                    [_chem_up, np.full(_n, _rest + _half, dtype=np.float32)])
                 _band_payload["lower"] = np.concatenate(
-                    [_chem_lo, np.full(_n, 1.46, dtype=np.float32)])
-                log.info("SG-anchor covalent bands: %d two-sided pairs", _n)
+                    [_chem_lo, np.full(_n, max(_rest - _half, 0.5),
+                                       dtype=np.float32)])
+                log.info("SG-anchor covalent bands: %d two-sided pairs "
+                         "(rest=%.2f A)", _n, _rest)
         if _rigid is not None:
             _band_payload["ring_rows"] = _rigid[0]
             _band_payload["ring_coords"] = _rigid[1]
