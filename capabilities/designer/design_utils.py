@@ -35,6 +35,12 @@ BICYCLIC_LINKERS = {
         'eng_name': '1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one',
         'attachment_atoms': ['C16', 'C19', 'C25']  # 连接到Cys的SG原子的配体原子
     },
+    'BS3': {
+        'ccd': 'BS3',
+        'name': 'Bi(III)离子',
+        'eng_name': 'bismuth(III) ion',
+        'attachment_atoms': ['BI', 'BI', 'BI']  # 三个Cys的SG配位到同一Bi
+    },
 }
 
 # 糖化学常量
