@@ -39,17 +39,24 @@ def _load_ccd_template(res_name: str) -> dict[str, np.ndarray] | None:
         _CCD_CACHE[res_name] = {}
         return {}
 
+    # Prefer the ideal conformer (the refinement target); fall back to the
+    # experimental model coordinates when the entry lacks them.
     coords: dict[str, np.ndarray] = {}
     table = block.find("_chem_comp_atom.",
-                       ["atom_id", "model_Cartn_x", "model_Cartn_y",
-                        "model_Cartn_z"])
+                       ["atom_id", "pdbx_model_Cartn_x_ideal",
+                        "pdbx_model_Cartn_y_ideal", "pdbx_model_Cartn_z_ideal",
+                        "model_Cartn_x", "model_Cartn_y", "model_Cartn_z"])
     for row in table:
         name = str(row[0]).strip()
         try:
             coords[name] = np.array([float(row[1]), float(row[2]),
                                      float(row[3])])
         except (ValueError, IndexError):
-            continue
+            try:
+                coords[name] = np.array([float(row[4]), float(row[5]),
+                                         float(row[6])])
+            except (ValueError, IndexError):
+                continue
 
     _CCD_CACHE[res_name] = coords
     return coords

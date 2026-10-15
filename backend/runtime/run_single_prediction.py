@@ -7831,7 +7831,7 @@ def _dpeptide_dispatch_refine(
     )
 
 
-def _dpeptide_refined_chirality_gate(refined_path: Path) -> None:
+def _dpeptide_refined_chirality_gate(refined_path: Path) -> float:
     """Chirality gate on a REFINED mirror-space complex; returns score penalty.
 
     Returns 0.0 for a clean complex, or a composite-score penalty
@@ -10328,6 +10328,16 @@ def run_peptide_design_backend(
                         f"rejected: {pocket_exc}",
                         file=sys.stderr,
                     )
+                    generation_rejected_rows.append({
+                        "sequence": candidate_sequence,
+                        "generation": generation,
+                        "proposal_group": (ctx.get("proposal_group")
+                                           or (ctx.get("job") or {}).get("proposal_group")
+                                           or "ungrouped"),
+                        "gate_rejected": True,
+                        "composite_score": 0.0,
+                        "reject_reason": str(pocket_exc)[:200],
+                    })
                     return
 
             # L chirality WITHOUT pocket: collect the dispatched fixed-receptor
@@ -10363,6 +10373,14 @@ def run_peptide_design_backend(
                         f"rejected: {plain_exc}",
                         file=sys.stderr,
                     )
+                    generation_rejected_rows.append({
+                        "sequence": candidate_sequence,
+                        "generation": generation,
+                        "proposal_group": job.get("proposal_group") or "ungrouped",
+                        "gate_rejected": True,
+                        "composite_score": 0.0,
+                        "reject_reason": str(plain_exc)[:200],
+                    })
                     return
 
             if peptide_chirality == 'd' and isinstance(d_space_metrics, dict):
@@ -10471,7 +10489,7 @@ def run_peptide_design_backend(
                 # pocket-route rows carry the soft off-pocket flag; the
                 # plain/blind routes have no pocket gate result at all
                 "off_pocket": bool(gate_result.get("off_pocket"))
-                if isinstance(locals().get("gate_result"), dict) else False,
+                if isinstance(gate_result, dict) else False,
                 "iptm": pair_iptm,
                 "pair_iptm": pair_iptm,
                 "pair_iptm_target_binder": pair_iptm_target_binder,
@@ -10731,6 +10749,7 @@ def run_peptide_design_backend(
             d_space_refined = ""
             d_space_metrics: Optional[Dict[str, Any]] = None
             pocket_report_row: Optional[Dict[str, Any]] = None
+            gate_result: Optional[Dict[str, Any]] = None
             route: Optional[str] = None
             dispatch = None
             refined_cif = ""

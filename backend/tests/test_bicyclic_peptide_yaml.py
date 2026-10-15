@@ -90,9 +90,12 @@ class RunnerGateImportTests(unittest.TestCase):
 
     def test_plddt_gate_for_chirality_reachable_in_runner(self):
         from backend.runtime import run_single_prediction as runner
+        from backend.runtime import design_constants
         self.assertTrue(callable(runner.plddt_gate_for_chirality))
-        self.assertEqual(runner.plddt_gate_for_chirality("l") >= 0, True)
-        self.assertEqual(runner.plddt_gate_for_chirality("d") >= 0, True)
+        self.assertEqual(design_constants.DPEPTIDE_PLDDT_GATE_DEFAULT, 55.0)
+        self.assertEqual(design_constants.DPEPTIDE_PLDDT_GATE_D_DEFAULT, 50.0)
+        self.assertEqual(runner.plddt_gate_for_chirality("l"), 55.0)
+        self.assertEqual(runner.plddt_gate_for_chirality("d"), 50.0)
 
 
 class StampBicyclicCysteinesTests(unittest.TestCase):
