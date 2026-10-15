@@ -15,7 +15,8 @@ import os
 # --- Export gates ---------------------------------------------------------
 # A shipped product must be a BOUND complex. Real docks pass at 1.5-8 A min
 # heavy-atom distance; the staged pre-docking frame sits 50-100 A off-target.
-# 12 A separates them with margin (2026-10-08 dissociated-product incident).
+# 12 A guarantees the peptide is docked against the receptor, not floating
+# or buried (dissociated-product guard).
 PRODUCT_BOUND_MAX_DISTANCE_A = 12.0
 
 # --- Refine collect gates (D-space samples) -------------------------------

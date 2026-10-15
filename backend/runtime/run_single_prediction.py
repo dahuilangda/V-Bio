@@ -5325,14 +5325,12 @@ def _stamp_bicyclic_cysteines(
     allow_extra_cys: bool,
     resolve_anchors: Callable[[int, Optional[dict], tuple, Optional[dict]], Optional[tuple]],
 ) -> Tuple[str, List[int]]:
-    """Force exactly the bicyclic anchor cysteines into a proposed sequence.
+    """Stamp the bicyclic anchor cysteines onto a proposed sequence.
 
-    The ESM3 HTTP proposer samples raw sequences and knows nothing about the
-    bicyclic topology — without this stamp every de-novo proposal fails the
-    exactly-3-Cys check in _build_peptide_candidate_yaml (gen-1 crash of the
-    2026-10-11 v15 batch; the constraint used to live in the retired local
-    PepLM post-edit). Mirrors peplm.loop.constraints.apply_post_edit:
-    anchors get C, stray Cys outside anchors demote to A.
+    The ESM3 proposer samples raw sequences with no notion of bicyclic
+    topology, while the candidate YAML builder accepts exactly 3 Cys at the
+    anchor positions. Anchors are stamped C; stray Cys outside anchors
+    demote to A (mirrors peplm.loop.constraints.apply_post_edit).
     """
     chars = list(sequence)
     length = len(chars)
@@ -6628,16 +6626,15 @@ def _dpeptide_predict_target_structure(
     # which keys on the runtime task id == the celery id), and the worker uploads its
     # archive flat to <results_base>/<CELERY task id>_results.zip (upload_result saves
     # under UPLOAD_FOLDER, no engine subfolder). Poll exactly those two layouts — the
-    # historical sub_task_id-keyed root never existed, so a sequence-only D-peptide
-    # target prediction spun here until the 1-hour deadline and failed the task.
+    # poll exactly the two layouts predict_task writes; no speculative layouts.
     result_roots = [
         results_base / engine_cap / str(async_result.id),
     ]
 
     # The target prediction rides the shared GPU queue BEHIND bulk candidate
-    # work: a 250-deep backlog drains in ~5h, so a fixed 1h deadline failed
-    # every D parent under load (2026-10-12). The bound must cover queue wait
-    # plus runtime; env-tunable for deployments that run a dedicated lane.
+    # work, so the bound must cover queue wait plus runtime, not just runtime
+    # (a fixed runtime-only deadline fails the parent whenever a backlog
+    # exists). Env-tunable for deployments that run a dedicated lane.
     deadline = time.time() + int(
         os.environ.get("DPEPTIDE_TARGET_PREDICT_TIMEOUT_SECONDS", "21600"))
     cif_pat = re.compile(r".*model.*\.cif$|.*_sample_.*\.cif$", re.IGNORECASE)
@@ -7002,12 +6999,16 @@ def _relax_staged_bicyclic_strain(
     *,
     bond_specs: List[Tuple[int, str]],
     linker_code: str,
-    bond_lo: float = 1.75,
-    bond_hi: float = 2.05,
     cb_lo: float = 1.35,
     cb_hi: float = 1.75,
     sweeps: int = 120,
 ) -> Dict[str, Any]:
+    """Bond window follows anchor chemistry: C-S (SEZ/29N) ~1.82 A,
+    Bi-S coordination (BS3) ~2.55 A."""
+    if any(anchor == "BI" for _, anchor in bond_specs):
+        bond_lo, bond_hi = 2.20, 2.90
+    else:
+        bond_lo, bond_hi = 1.75, 2.05
     """In-place strain relief of a staged bicyclic complex (host, numpy).
 
     Damped-Jacobi projection of every Cys-SG <-> linker-anchor pair into
@@ -7575,7 +7576,8 @@ def _dpeptide_stage_conformer_in_pocket(
                        key=lambda row: float(np.linalg.norm(row[1] - av)))
             remaining.remove(best)
             link_rows.append(_pdb_link_line(
-                "SG", "CYS", "B", best[0], anchor, linker_name, "L", 1))
+                "SG", "CYS", pep_chain_letter, best[0], anchor,
+                linker_name, "L", 1))
 
     out_path.write_text("\n".join(link_rows + lines) + "\nEND\n",
                         encoding="utf-8")
@@ -7657,13 +7659,16 @@ def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
             break
     if linker_chain is None:
         return None
-    polymer = sorted(
-        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
-        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
-    )
-    if not polymer:
+    polymer = [
+        c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3
+    ]
+    if len(polymer) < 2:
         return None
-    receptor, peptide = polymer[0], polymer[1]
+    # the peptide is the SHORTEST polymer chain; polymer[1] would pick a
+    # second receptor copy on multimer targets (same bug fixed at
+    # _cyclic_headtail_bond_report and _dpeptide_refined_chirality_gate)
+    peptide = min(polymer, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+    receptor = next(c for c in polymer if c is not peptide)
     anchors = BICYCLIC_LINKER_ATOM_MAP[linker_chain[0].name]
     sg_atoms = []
     for residue in peptide:
@@ -7958,9 +7963,9 @@ def _dpeptide_collect_refine(
     conf_path = task_tmp / "out" / "confidence.json"
     # Poll no longer than the dispatched GPU task itself is allowed to run
     # (SUBPROCESS_TIMEOUT) plus a small grace for result writes — plus a
-    # QUEUE grace: refines dispatch into the shared GPU queue behind bulk
-    # candidate work, and a 250-deep backlog alone waits longer than the
-    # runtime cap, revoking healthy refines (2026-10-12). Env-tunable.
+    # queue grace: refines dispatch into the shared GPU queue behind bulk
+    # candidate work, so a deep backlog alone can outlast the runtime cap.
+    # Env-tunable.
     from backend.worker import tasks as _worker_tasks
 
     refine_deadline = time.time() + int(
@@ -8309,10 +8314,9 @@ def _select_dspace_samples(scored):
     """Rank D-space diffusion samples for shipping.
 
     Sort key (descending): covalent integrity, interface ENGAGEMENT, clash
-    count, ipTM, name. Engagement outranks clash-freedom because a detached
-    peptide has zero clashes and would otherwise outrank every bound
-    (necessarily touching) sample — a MDM-2 failure shipped
-    ranks 3.9-20 A off the receptor under a bound sample's ipSAE 0.92.
+    count, ipTM, name. Engagement must outrank clash-freedom (a detached
+    peptide has zero clashes and would outrank every bound sample) and
+    outrank ipSAE (detached poses can carry deceptively high values).
 
     Tuple layout: (intact, engaged, -clashes, iptm, cif.name, cif,
     detached, contacts).
@@ -8868,30 +8872,24 @@ def _append_staged_bicyclic_links(
         return 0
     st = gemmi.read_structure(str(staged_path))
     st.setup_entities()
-    chains = sorted(
-        (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 1),
-        key=lambda c: -sum(1 for r in c if r.het_flag != "H"),
-    )
-    if not chains:
+    polymers = [
+        c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3
+    ]
+    if not polymers:
         return 0
-    receptor_name = chains[0].name
-    peptide_chain = None
-    linker_chain_name = linker_resnum = None
+    # the peptide is the SHORTEST polymer chain (multimer targets have
+    # receptor copies that carry Cys and would win a first-CYS scan)
+    peptide_chain = min(polymers,
+                        key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+    receptor_name = next(c.name for c in polymers if c is not peptide_chain)
+    linker_chain_name = None
     for chain in st[0]:
         if chain.name == receptor_name:
             continue
-        if linker_chain_name is None and any(
-                r.name == linker_ccd for r in chain):
-            for residue in chain:
-                if residue.name == linker_ccd:
-                    linker_chain_name = chain.name
-                    linker_resnum = int(residue.seqid.num)
-                    break
-        elif peptide_chain is None and any(r.name == "CYS" for r in chain):
-            peptide_chain = chain
-        if peptide_chain is not None and linker_chain_name is not None:
+        if any(r.name == linker_ccd for r in chain):
+            linker_chain_name = chain.name
             break
-    if peptide_chain is None or linker_chain_name is None:
+    if linker_chain_name is None:
         return 0
     anchors = BICYCLIC_LINKER_ATOM_MAP.get(str(linker_ccd).upper()) or []
     if cys_positions is not None:
@@ -8910,7 +8908,7 @@ def _append_staged_bicyclic_links(
     for sg_resnum, anchor in zip(sg_resnums, anchors):
         link_lines.append(_pdb_link_line(
             "SG", "CYS", peptide_chain.name, sg_resnum,
-            anchor, linker_ccd, linker_chain_name, linker_resnum,
+            anchor, linker_ccd, linker_chain_name, 1,
         ))
     # insert before the trailing END record — PDB parsers stop at END
     lines = [line for line in text.splitlines() if line.strip()]
@@ -8982,8 +8980,23 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
         return {"linker": None, "all_bonded": None, "bonds": []}
 
     anchors = BICYCLIC_LINKER_ATOM_MAP[linker_code]
+    # SG pool: peptide-side chains only. The receptor carries its own Cys;
+    # letting a receptor SG into the pool lets the one-to-one greedy match
+    # a receptor Cys to an anchor and mis-judge the design linkage.
+    polymer_lens = {
+        c.name: sum(1 for r in c if r.het_flag != "H") for c in st[0]
+    }
+    linker_chain_name = next(
+        (c.name for c in st[0]
+         if any(r.name in BICYCLIC_LINKER_ATOM_MAP for r in c)), None)
+    peptide_chain_name = min(
+        (c for c, n in polymer_lens.items()
+         if n >= 3 and c != linker_chain_name),
+        key=lambda c: polymer_lens[c], default=None)
     sg_atoms = []
     for chain in st[0]:
+        if peptide_chain_name is not None and chain.name != peptide_chain_name:
+            continue
         for residue in chain:
             sg = residue.find_atom("SG", "*")
             if sg is not None and residue.name == "CYS":
@@ -9524,11 +9537,6 @@ def run_peptide_design_backend(
         except (ValueError, json.JSONDecodeError):
             _start_generation = 1
 
-    def _torch_cuda_available() -> bool:
-        try:
-            import torch
-
-            return torch.cuda.is_available()
         except ImportError:
             return False
 
@@ -10936,9 +10944,9 @@ def run_peptide_design_backend(
                         _rec_letters = ",".join(_poly[:-1]) if len(_poly) > 1 else "A"
                         # Blind inpainting (aligned with the D route): the
                         # peptide denoises from pure noise so the constraint
-                        # bands converge from scratch — refining the staged
-                        # native pose instead leaves residual strain (v19
-                        # L-TLE: SG-SG 1.31 A survived the full band set).
+                        # bands converge from scratch. Refining the staged
+                        # native pose instead leaves residual covalent
+                        # strain that survives the full band set.
                         return _dpeptide_dispatch_refine(
                             _staged, _seed, build_capability_queue("protenix", "default"),
                             blind=True,
@@ -11006,8 +11014,8 @@ def run_peptide_design_backend(
     _PLDDT_GATE = plddt_gate_for_chirality(peptide_chirality)
 
     # Hard gate BEFORE NSGA-II: below-gate candidates are excluded from
-    # the pool entirely, not just sorted lower. NSGA-II ignores list
-    # order, so sorting alone was a no-op (audit P1-1).
+    # the pool entirely — NSGA-II ignores list order, so sorting alone
+    # would not keep them out of the elite set.
     gated = [r for r in all_results
              if isinstance(r.get("binder_avg_plddt"), (int, float))
              and r["binder_avg_plddt"] >= _PLDDT_GATE]

@@ -1,9 +1,8 @@
 """Regression tests for the linker covalent-integrity gate.
 
-The v15 L-TLE rank_01 shipped an SG-anchor pair at 0.31 A (overlap) with the
-other two anchors torn (3.6/4.4 A) — the plain-route collect only rejected
-fully-detached atoms. The report's bonded window (1.2-2.5 A) flags both
-failure modes."""
+For every linker anchor the nearest Cys-SG distance must fall in the
+per-chemistry bonded window (C-S 1.2-2.5 A, Bi-S 1.6-3.2 A): both overlap
+(below the window) and tear (above it) are flagged."""
 from __future__ import annotations
 
 import pickle
@@ -150,9 +149,9 @@ class LinkerBondGateTests(unittest.TestCase):
             self.assertTrue(report["all_bonded"])
 
     def test_gate_bi_window(self):
-        """BS3's anchor is a Bi ion: Bi-S coordination lives at ~2.4-2.7 A —
-        the C-S window would call a perfect 2.55 A bond "torn" and a 1.3 A
-        crash "bonded" (v17 L-TLE shipped both failure modes)."""
+        """BS3's anchor is a Bi(III) ion: Bi-S coordination lives at
+        ~2.4-2.7 A. Reusing the C-S window would call a perfect 2.55 A
+        bond "torn" and a 1.3 A crash "bonded"."""
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             good = Path(td) / "bi_good.cif"
