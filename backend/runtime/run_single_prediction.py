@@ -6448,7 +6448,9 @@ def _dpeptide_target_sequence(base_yaml_data: Dict[str, Any], target_chain_id: s
             continue
         protein = block.get("protein")
         if isinstance(protein, dict) and protein.get("sequence"):
-            if target and block.get("id") != target:
+            chain_ids = protein.get("id") if isinstance(protein, dict) else None
+            if target and chain_ids != target and (
+                    not isinstance(chain_ids, list) or target not in chain_ids):
                 fallback = fallback or str(protein["sequence"])
                 continue
             return str(protein["sequence"])
@@ -8169,7 +8171,7 @@ def _dpeptide_collect_refine(
     return metrics
 
 
-def _celery_revoke_quiet(async_result: Any, *, terminate: bool = True) -> None:
+def _celery_revoke_quiet(async_result: Any, *, terminate: bool = True) -> float:
     """Best-effort revoke; a control-bus hiccup must not mask the real error."""
     try:
         from backend.core.celery_app import celery_app as _celery
@@ -9294,7 +9296,6 @@ def _assert_product_chirality(
 
 
 def run_peptide_design_backend(
-    docking_requested: bool,
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
@@ -9651,9 +9652,9 @@ def run_peptide_design_backend(
                 acid_seed = acid_seed[:n_acid]
                 rest = [ _seed_rng.choice("AFIKLMQVWY")
                          for _ in range(seed_len - n_acid) ]
-                seed = acid_seed + rest
-                _seed_rng.shuffle(seed)
-                seed_sequences.append("".join(seed[:seed_len]))
+                seed_letters = acid_seed + rest
+                _seed_rng.shuffle(seed_letters)
+                seed_sequences.append("".join(seed_letters[:seed_len]))
                 print(
                     f"[d-peptide] pocket chemistry seed: {seed_sequences[0]} "
                     f"(pocket {pocket_res}, basic={n_basic} aromatic={n_aromatic} "
@@ -10220,6 +10221,7 @@ def run_peptide_design_backend(
         # re-sorted by rank score on every append.)
         def _finalize_candidate(ctx: Dict[str, Any]) -> None:
             nonlocal completed_tasks, generation_done, elite_population
+            gate_result = None
             if ctx.get("reject"):
                 print(ctx["reject"], file=sys.stderr)
                 generation_rejected_rows.append({
@@ -11009,7 +11011,7 @@ def run_peptide_design_backend(
             # protenix option) the co-folding prediction IS the deliverable:
             # stage_contexts with dispatch=None finalize immediately from
             # the native metrics parsed above.
-            if (peptide_chirality == 'l' and docking_requested
+            if (peptide_chirality == 'l'
                     and not pocket_sequence_contacts
                     and structure_file is not None):
                 try:
@@ -12486,7 +12488,6 @@ def main():
         runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
-        _raw_dock_token = backend in {"protenix2dock", "boltz2dock"}
         if backend in {"nesso1", "nesso-1"}:
             backend = "nesso"
         if (str(predict_args.get("workflow") or "").strip().lower()
@@ -12577,7 +12578,6 @@ def main():
                 peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
                 try:
                     run_peptide_design_backend(
-                        docking_requested=_raw_dock_token,
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
