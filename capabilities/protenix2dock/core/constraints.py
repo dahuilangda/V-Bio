@@ -801,7 +801,7 @@ def compute_ccd_bond_bands(
             continue
         for (ni, nj) in _std_backbone_bonds | {
             ("CB", "OG"), ("CB", "OG1"), ("CB", "CG2"), ("CB", "CG"),
-            ("CG", "CD1"), ("CG", "OD1"), ("CG", "ND2"), ("CB", "S "),
+            ("CG", "CD1"), ("CG", "OD1"), ("CG", "ND2"),
         }:
             if ni in names and nj in names:
                 i, j = names[ni], names[nj]
@@ -809,12 +809,12 @@ def compute_ccd_bond_bands(
                 if key in bonded:
                     continue
                 if ni in tpl and nj in tpl:
-                    rest = float(np.linalg.norm(tpl[ni] - tpl[nj]))
+                    bond_rest = float(np.linalg.norm(tpl[ni] - tpl[nj]))
                 else:
-                    rest = float(np.linalg.norm(coords[i] - coords[j]))
+                    bond_rest = float(np.linalg.norm(coords[i] - coords[j]))
                 bonded.add(key)
                 pairs.append([i, j])
-                rest.append(rest)
+                rest.append(bond_rest)
     # inter-residue peptide bonds C(i)-N(i+1) within each free chain: same
     # template-independent detection gap under blind noise
     for rows in rows_by_asym.values():
