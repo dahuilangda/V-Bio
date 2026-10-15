@@ -1058,7 +1058,8 @@ def main(argv=None):
                          "the whole surface")
             log.info("dock mode: native blind inpainting — pinned %d/%d "
                      "protein atoms, %d ligand atoms from noise",
-                     int(pin.sum()), len(pin), int((mask[lig_rows] > 0).sum()))
+                     int(dock_ref_mask.sum()), len(dock_ref_mask),
+                     int((mask[lig_rows] > 0).sum()))
     else:
         # peptide mode: engine setup happened in _run_peptide_engine above
         pass

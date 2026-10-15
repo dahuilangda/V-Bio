@@ -44,52 +44,6 @@ _RING_ATOM_SETS: dict[str, tuple[tuple[str, ...], ...]] = {
 _RESIDUE_PAIR_BAND = 0.12
 
 
-def backbone_shape_pairs(
-    info: dict[str, Any],
-    mask: np.ndarray,
-    free_entities: set[int] | None = None,
-) -> list[tuple[list[int], float, float]]:
-    """CA-CA distance pairs that preserve local backbone shape.
-
-    Returns (rows, lower, upper) tuples. Three families:
-    - i,i+1: virtual bond [3.5, 4.2] — omega dihedral reporter
-    - i,i+2: [4.8, 7.2] — helix ~5.4, extended ~6.8, turn 5-6.5;
-      prevents extreme compression without locking secondary structure
-    - i,i+3: [4.5, 10.2] — helix ~5.0, extended ~9.8; same rationale
-
-    The clash guard pushes individual atoms along pair axes; without
-    these shape pairs the 200-step accumulation gradually unwinds helices
- spread 1.7-9.4 A vs crystal
-    4.8-5.8). Wide bands allow both helix and strand but block the
-    degenerate compressions/overextensions the min-norm solver finds
-    when it only sees bonds+angles.
-    """
-    asym = np.asarray(info["asym"])
-    res_id = np.asarray(info["res_id"])
-    atom_names = [str(a) for a in np.asarray(info["atom_names"]).astype(str)]
-    asym_to_entity = info["asym_to_entity"]
-    rows_by_res: dict[tuple[int, int], int] = {}
-    for i in range(len(asym)):
-        if mask[i] <= 0 or atom_names[i] != "CA":
-            continue
-        if free_entities is not None and asym_to_entity[int(asym[i])] not in free_entities:
-            continue
-        rows_by_res.setdefault((int(asym[i]), int(res_id[i])), i)
-    by_chain: dict[int, list[tuple[int, int]]] = {}
-    for (a, r), row in rows_by_res.items():
-        by_chain.setdefault(a, []).append((r, row))
-    result: list[tuple[list[int], float, float]] = []
-    for rows in by_chain.values():
-        rows.sort()
-        cas = [row for _, row in rows]
-        for i in range(len(cas)):
-            if i + 1 < len(cas):
-                result.append(([cas[i], cas[i + 1]], 3.50, 4.20))
-            if i + 2 < len(cas):
-                result.append(([cas[i], cas[i + 2]], 4.80, 7.20))
-            if i + 3 < len(cas):
-                result.append(([cas[i], cas[i + 3]], 4.50, 10.20))
-    return result
 
 
 def compute_free_chain_tfg_constraints(
@@ -407,34 +361,6 @@ def compute_ligand_covalent_bands(
 
 
 
-def _sasa_per_atom(coords: np.ndarray, elements: np.ndarray,
-                   probe: float = 1.4) -> np.ndarray:
-    """Shrake-Rupley SASA (A^2) per atom, heavy atoms only (H excluded by
-    the caller). Neighbours via KD-tree; 92-point sphere."""
-    from collections import defaultdict
-
-    from scipy.spatial import cKDTree
-
-    pts = _sasa_sphere_points(_SASA_POINTS)
-    radii = np.array([_VDW_RADII_A.get(str(e).upper(), 1.70) + probe
-                      for e in elements], dtype=np.float64)
-    out = np.zeros(len(coords), dtype=np.float64)
-    tree = cKDTree(coords)
-    pairs = tree.query_pairs(2.0 * radii.max(), output_type="ndarray")
-    nb: dict[int, list[int]] = defaultdict(list)
-    for a, b in pairs:
-        nb[a].append(b)
-        nb[b].append(a)
-    for i in range(len(coords)):
-        surf = pts * radii[i] + coords[i]
-        if not nb[i]:
-            out[i] = 4.0 * np.pi * radii[i] ** 2
-            continue
-        nbr, rnb = coords[nb[i]], radii[nb[i]]
-        d = np.linalg.norm(surf[:, None, :] - nbr[None, :, :], axis=-1)
-        out[i] = (~(d < rnb[None, :]).any(axis=1)).sum() / _SASA_POINTS \
-            * 4.0 * np.pi * radii[i] ** 2
-    return out
 
 
 def _sasa_sphere_points(n: int) -> np.ndarray:
@@ -508,7 +434,11 @@ def compute_bond_contact_pairs(
     upper_arr = np.empty(len(pairs), dtype=np.float32)
     for k, (i, j) in enumerate(pairs):
         pair_elems = {elements[i], elements[j]}
-        if "S" in pair_elems or "SE" in pair_elems:
+        if "BI" in pair_elems:
+            # Bi-S coordination ~2.55 A: the generic upper would fight the
+            # two-sided chemistry band (rest 2.55) every guided step
+            upper_arr[k] = max(float(upper), 2.9)
+        elif "S" in pair_elems or "SE" in pair_elems:
             # thioether/selenoether C-S ~1.81, C-Se ~1.96: the flat
             # upper over-compresses these by ~0.3 A every guided step
             upper_arr[k] = max(float(upper), 2.1)
@@ -609,6 +539,59 @@ def compute_vdw_shell_constraints(
         "pairwise_distance_is_angle": np.zeros(n, dtype=np.int64),
     }
 
+
+
+_CCD_BOND_GRAPH_CACHE: dict = {}
+
+
+def _ccd_bond_graph(res_name: str):
+    """Atom coordinates (ideal where available) and bond name pairs for one
+    CCD component, read from the protenix components.cif. Returns
+    (coords_by_name, [(name1, name2), ...]) or None when the component has
+    no block (the distance heuristic keeps covering it)."""
+    if res_name in _CCD_BOND_GRAPH_CACHE:
+        return _CCD_BOND_GRAPH_CACHE[res_name]
+
+    import gemmi
+
+    result = None
+    ccd_path = Path(os.environ.get("PROTENIX_ROOT_DIR", "/cache")
+                    + "/common/components.cif")
+    if not ccd_path.exists():
+        ccd_path = Path("/data/protenix/common_cache/components.cif")
+    if ccd_path.exists():
+        try:
+            doc = gemmi.cif.read(str(ccd_path))
+            block = doc.find_block(res_name.upper())
+            if block is not None:
+                coords = {}
+                atom_table = block.find(
+                    "_chem_comp_atom.",
+                    ["atom_id", "pdbx_model_Cartn_x_ideal",
+                     "pdbx_model_Cartn_y_ideal", "pdbx_model_Cartn_z_ideal",
+                     "model_Cartn_x", "model_Cartn_y", "model_Cartn_z"])
+                for row in atom_table:
+                    name = str(row[0]).strip()
+                    try:
+                        coords[name] = np.array([float(row[1]), float(row[2]),
+                                                 float(row[3])])
+                    except (ValueError, IndexError):
+                        try:
+                            coords[name] = np.array([float(row[4]),
+                                                     float(row[5]),
+                                                     float(row[6])])
+                        except (ValueError, IndexError):
+                            continue
+                bonds = []
+                bond_table = block.find("_chem_comp_bond.",
+                                        ["atom_id_1", "atom_id_2"])
+                for row in bond_table:
+                    bonds.append((str(row[0]).strip(), str(row[1]).strip()))
+                result = (coords, bonds)
+        except Exception:
+            result = None
+    _CCD_BOND_GRAPH_CACHE[res_name] = result
+    return result
 
 
 def compute_ccd_bond_bands(
@@ -733,28 +716,15 @@ def compute_ccd_bond_bands(
             rest.append(ideal if ideal is not None
                         else float(np.linalg.norm(coords[i] - coords[j])))
 
-    # Aromatic side-chain geometry. Distance bands (any width) CANNOT
-    # enforce ring planarity: a buckled six-ring satisfies every pairwise
-    # distance within the +-0.12 band while its atoms sit ~0.95 A off the
-    # ring plane. Aromatic rings are therefore
-    # carried as RIGID TEMPLATES: the sampler Kabsch-fits the CCD-ideal
-    # ring onto the network's current ring each step and replaces the
-    # internal coordinates -- placement and orientation stay the
-    # network's decision, only the internal shape + planarity are pinned.
-    # TRP's fused indole (both rings + the shared edge) is ONE rigid body;
-    # TYR's phenol OH lies in the ring plane by sp2 chemistry and rides
-    # the same body; PRO's pyrrolidine puckers physically and stays a
-    # distance band.
-    # Aromatic side-chain geometry. The sampler rebuilds each aromatic
+    # Aromatic side-chain geometry: the sampler rebuilds each aromatic
     # side chain ANALYTICALLY every step (CCD template placed on the
-    # network's N/CA/C frame, rotated to the network's chi1/chi2) -- the
-    # AF3/protenix construction principle: side-chain internal geometry
-    # comes from the CCD component template, never from pairwise
-    # distances. A rebuilt side chain satisfies every bond AND angle
-    # band exactly (the intersection point itself -- no Jacobi
-    # negotiation, which permits boat-shaped rings).
-    # chi1/chi2 stay fully network-owned; PRO's pyrrolidine puckers
-    # physically and stays a distance band.
+    # network's N/CA/C frame, rotated to the network's chi1/chi2) --
+    # the AF3/protenix construction principle: side-chain internal
+    # geometry comes from the CCD component template, never from
+    # pairwise distances (distance bands cannot enforce planarity:
+    # a buckled six-ring satisfies every pair band). chi1/chi2 stay
+    # fully network-owned; PRO's pyrrolidine puckers physically and
+    # keeps a distance band.
     _rigid_rings = {
         "PHE": (("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"),),
         "TYR": (("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"),),
@@ -773,48 +743,43 @@ def compute_ccd_bond_bands(
         nm = atom_names[row].lstrip("0123456789")
         name_by_res.setdefault(
             (int(asym[row]), int(res_ids[row])), {})[nm] = row
-    # Template-graph bond detection for STANDARD residues: the distance
+    # CCD bond-graph detection for free-chain residues: the distance
     # heuristic above keys on the assembled INITIAL coordinates, which for a
-    # blind refine are pure noise — under noise almost no backbone pair lands
-    # inside the cutoff, and the peptide samples with no backbone bands at
-    # all (v16 D-TLE: N-CA 0.94 A, C-N 0.77-2.43 A in the shipped rank_01).
-    # Standard-residue bonds instead come from the CCD template graph, which
-    # is position-independent; non-standard residues keep the heuristic.
-    _std_backbone_bonds = {
-        ("N", "CA"), ("CA", "C"), ("C", "O"),
-        ("CA", "CB"), ("CB", "SG"),
-    }
+    # blind refine are dispersed well beyond any cutoff — under noise almost
+    # no covalent pair lands inside it, and the peptide would sample with no
+    # backbone bands at all. Bonds instead come from the CCD component bond
+    # table (complete for every standard residue, position-independent);
+    # residues without a CCD block keep the distance heuristic.
     for (asym_id, res_num), names in name_by_res.items():
         comp = None
         for row in names.values():
             comp = str(comp_ids[row]).upper()
             break
-        if comp in _aro_side or comp in ("PRO",):
+        if comp in _aro_side:
             continue
-        if not (3 <= len(names) <= 30):
+        if not (1 <= len(names) <= 40):
             continue
-        try:
-            tpl = _load_ccd_template(comp)
-        except Exception:
-            tpl = None
-        if not tpl:
+        graph = _ccd_bond_graph(comp)
+        if graph is None:
+            log.debug("ccd bond bands: no template for %s; "
+                      "distance heuristic only", comp)
             continue
-        for (ni, nj) in _std_backbone_bonds | {
-            ("CB", "OG"), ("CB", "OG1"), ("CB", "CG2"), ("CB", "CG"),
-            ("CG", "CD1"), ("CG", "OD1"), ("CG", "ND2"),
-        }:
-            if ni in names and nj in names:
-                i, j = names[ni], names[nj]
-                key = (min(i, j), max(i, j))
-                if key in bonded:
-                    continue
-                if ni in tpl and nj in tpl:
-                    bond_rest = float(np.linalg.norm(tpl[ni] - tpl[nj]))
-                else:
-                    bond_rest = float(np.linalg.norm(coords[i] - coords[j]))
-                bonded.add(key)
-                pairs.append([i, j])
-                rest.append(bond_rest)
+        coords_by_name, bond_pairs = graph
+        for ni, nj in bond_pairs:
+            if ni not in names or nj not in names:
+                continue
+            i, j = names[ni], names[nj]
+            key = (min(i, j), max(i, j))
+            if key in bonded:
+                continue
+            bonded.add(key)
+            pairs.append([i, j])
+            if ni in coords_by_name and nj in coords_by_name:
+                rest.append(float(np.linalg.norm(
+                    coords_by_name[ni] - coords_by_name[nj])))
+            else:
+                rest.append(float(np.linalg.norm(coords[i] - coords[j])))
+
     # inter-residue peptide bonds C(i)-N(i+1) within each free chain: same
     # template-independent detection gap under blind noise
     for rows in rows_by_asym.values():

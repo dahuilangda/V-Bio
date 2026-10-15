@@ -85,8 +85,8 @@ def _identity_resolve(length, fixed, cys_positions, cys_layout):
 
 class RunnerGateImportTests(unittest.TestCase):
     """The finalize path calls plddt_gate_for_chirality at runtime; a missing
-    import survived the test suite until 18 live tasks crashed at the gate
-    (v15, 2026-10-11). Import-time reachability is the cheap guard."""
+    import only surfaces in live tasks. Import-time reachability is the
+    cheap guard."""
 
     def test_plddt_gate_for_chirality_reachable_in_runner(self):
         from backend.runtime import run_single_prediction as runner
@@ -97,7 +97,7 @@ class RunnerGateImportTests(unittest.TestCase):
 
 class StampBicyclicCysteinesTests(unittest.TestCase):
     """ESM3 proposals carry no topology: the stamp must produce a sequence
-    the exactly-3-Cys YAML builder accepts (v15 gen-1 crash regression)."""
+    the exactly-3-Cys YAML builder accepts."""
 
     def _stamp(self, sequence, **overrides):
         from backend.runtime.run_single_prediction import _stamp_bicyclic_cysteines
