@@ -42,8 +42,10 @@ def _load_sez_template() -> dict:
 
 
 def _write_complex(path: Path, template: dict, sg_cd_distance: float) -> None:
-    """Linker chain (ideal template) + one Cys per arm, SG at the chosen
-    distance along a per-arm outward direction."""
+    """SEZ-shaped complex: three arm carbons with one Cys-SG each at the
+    chosen distance (gate windows are keyed on the anchor atom name, so this
+    also exercises the C-S path; Bi is covered by LinkerBondGateTests' ion
+    fixture below)."""
     import gemmi
     st = gemmi.Structure()
     model = gemmi.Model("1")
@@ -87,6 +89,45 @@ def _write_complex(path: Path, template: dict, sg_cd_distance: float) -> None:
     st.make_mmcif_document().write_file(str(path))
 
 
+def _write_bi_complex(path: Path, sg_bi_distance: float) -> None:
+    """BS3-shaped complex: a bare Bi ion with three Cys-SG around it at the
+    chosen distance (the CCD entry is the bare ion — coordination chemistry,
+    no organic template)."""
+    import gemmi
+    st = gemmi.Structure()
+    model = gemmi.Model("1")
+    lchain = gemmi.Chain("L")
+    res = gemmi.Residue()
+    res.name = "BS3"
+    res.seqid = gemmi.SeqId(1, " ")
+    res.het_flag = "H"
+    bi = gemmi.Atom()
+    bi.name = "BI"
+    bi.element = gemmi.Element("Bi")
+    bi.pos = gemmi.Position(0.0, 0.0, 0.0)
+    res.add_atom(bi)
+    lchain.add_residue(res)
+    model.add_chain(lchain)
+    pchain = gemmi.Chain("B")
+    directions = [np.array([1.0, 0.0, 0.0]),
+                  np.array([0.0, 1.0, 0.0]),
+                  np.array([0.0, 0.0, 1.0])]
+    for k in range(3):
+        cres = gemmi.Residue()
+        cres.name = "CYS"
+        cres.seqid = gemmi.SeqId(k + 1, " ")
+        sg = gemmi.Atom()
+        sg.name = "SG"
+        sg.element = gemmi.Element("S")
+        sg.pos = gemmi.Position(*(directions[k] * sg_bi_distance))
+        cres.add_atom(sg)
+        pchain.add_residue(cres)
+    model.add_chain(pchain)
+    st.add_model(model)
+    st.setup_entities()
+    st.make_mmcif_document().write_file(str(path))
+
+
 class LinkerBondGateTests(unittest.TestCase):
     def setUp(self):
         self.template = _load_sez_template()
@@ -107,6 +148,21 @@ class LinkerBondGateTests(unittest.TestCase):
             _write_complex(bonded, self.template, sg_cd_distance=1.82)
             report = _dpeptide_linker_bond_report(bonded)
             self.assertTrue(report["all_bonded"])
+
+    def test_gate_bi_window(self):
+        """BS3's anchor is a Bi ion: Bi-S coordination lives at ~2.4-2.7 A —
+        the C-S window would call a perfect 2.55 A bond "torn" and a 1.3 A
+        crash "bonded" (v17 L-TLE shipped both failure modes)."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            good = Path(td) / "bi_good.cif"
+            _write_bi_complex(good, sg_bi_distance=2.55)
+            report = _dpeptide_linker_bond_report(good)
+            self.assertTrue(report["all_bonded"])
+            crash = Path(td) / "bi_crash.cif"
+            _write_bi_complex(crash, sg_bi_distance=1.30)
+            report = _dpeptide_linker_bond_report(crash)
+            self.assertFalse(report["all_bonded"])
 
 
 if __name__ == "__main__":

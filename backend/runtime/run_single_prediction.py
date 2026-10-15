@@ -9008,14 +9008,15 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
             (best[1].pos.x - anchor_atom.pos.x) ** 2
             + (best[1].pos.y - anchor_atom.pos.y) ** 2
             + (best[1].pos.z - anchor_atom.pos.z) ** 2)
+        # Bonded window per anchor chemistry: C-S (SEZ/29N) ~1.82 A,
+        # Bi-S coordination (BS3) ~2.4-2.7 A. Below ~1.2 A (C-S) or
+        # ~1.6 A (Bi-S) the pair is an overlap, not a bond.
+        lo, hi = (1.6, 3.2) if anchor_name == "BI" else (1.2, 2.5)
         bonds.append({
             "anchor": anchor_name,
             "cys_resnum": best[0],
             "distance": round(dist, 3),
-            # covalent C-S is ~1.82 A; below ~1.2 A the "bond" is an atom
-            # overlap (a v15 refine shipped an SG-anchor pair at 0.31 A as
-            # rank_01), which must not count as bonded
-            "bonded": bool(1.2 <= dist <= 2.5),
+            "bonded": bool(lo <= dist <= hi),
         })
     distinct = len({b["cys_resnum"] for b in bonds if b["cys_resnum"] is not None})
     return {
@@ -9215,6 +9216,7 @@ def _assert_product_chirality(
 
 
 def run_peptide_design_backend(
+    docking_requested: bool,
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
@@ -9255,10 +9257,6 @@ def run_peptide_design_backend(
     peptide_chirality = str(options.get("peptideChirality") or options.get("peptide_chirality") or "l").strip().lower()
     if peptide_chirality not in ("l", "d"):
         raise ValueError(f"Invalid peptide chirality '{peptide_chirality}'. Must be 'l' or 'd'.")
-    if peptide_chirality == "d" and backend != "protenix2dock":
-        raise ValueError(
-            "D-peptide design runs the mirror/refine workflow and requires the "
-            "protenix2dock backend; use protenix only for L designs.")
     # Secondary-structure mode for the ESM3 proposal engine: auto leaves
     # the ss8 track off (model decides), helix/hairpin/strand_loop shape
     # the proposal composition. Absent key falls back to the
@@ -10899,11 +10897,12 @@ def run_peptide_design_backend(
             # same fixed-receptor refine the pocket route uses -- minus the
             # pocket conditioning. The state guard, constraint bands, and
             # the collector's engagement/clash/backbone gates then apply.
-            # backend=protenix (原版): the co-folding prediction IS the
-            # deliverable — no protenix2dock refine stage. stage_contexts
-            # with dispatch=None are finalized immediately from the native
-            # metrics parsed above.
-            if (peptide_chirality == 'l' and backend != "protenix"
+            # With the docking engine the native pose goes through the
+            # fixed-receptor refine + covalent gate. Without it (原版
+            # protenix option) the co-folding prediction IS the deliverable:
+            # stage_contexts with dispatch=None finalize immediately from
+            # the native metrics parsed above.
+            if (peptide_chirality == 'l' and docking_requested
                     and not pocket_sequence_contacts
                     and structure_file is not None):
                 try:
@@ -12375,8 +12374,19 @@ def main():
         runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
+        _raw_dock_token = backend in {"protenix2dock", "boltz2dock"}
         if backend in {"nesso1", "nesso-1"}:
             backend = "nesso"
+        if (str(predict_args.get("workflow") or "").strip().lower()
+                in {"peptide_design", "peptide", "peptide_designer", "designer"}
+                and backend == "protenix"
+                and str((predict_args.get("peptide_design_options") or {}).get(
+                    "peptideChirality",
+                    (predict_args.get("peptide_design_options") or {}).get(
+                        "peptide_chirality", "l"))).strip().lower() == "d"):
+            raise ValueError(
+                "D-peptide design runs the mirror/refine workflow and requires "
+                "the protenix2dock backend; use protenix only for L designs.")
         if backend == "protenix2dock":
             backend = "protenix"
         elif backend == "boltz2dock":
@@ -12455,6 +12465,7 @@ def main():
                 peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
                 try:
                     run_peptide_design_backend(
+                        docking_requested=_raw_dock_token,
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
