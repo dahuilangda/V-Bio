@@ -812,6 +812,26 @@ def _run_peptide_engine(
                                        dtype=np.float32)])
                 log.info("SG-anchor covalent bands: %d two-sided pairs "
                          "(rest=%.2f A)", _n, _rest)
+                if _is_bi and _n >= 2:
+                    # Mutual SG-SG separation: a single-ion anchor can draw
+                    # all three thiolates into one cramped fan (SG-Bi-SG
+                    # down to 13 degrees, SG-SG 1.2 A). Bi(III) thiolate is
+                    # trigonal-pyramidal: S-S ~3.6 A at ~90-100 degrees.
+                    _sg_rows = sorted(int(r[0]) for r in _resolved[0])
+                    for i in range(len(_sg_rows)):
+                        for j in range(i + 1, len(_sg_rows)):
+                            _band_payload["pair_index"] = np.concatenate([
+                                _band_payload["pair_index"],
+                                np.array([[_sg_rows[i], _sg_rows[j]]],
+                                         dtype=np.int64)])
+                            _band_payload["upper"] = np.concatenate(
+                                [_band_payload["upper"], np.array([6.0],
+                                dtype=np.float32)])
+                            _band_payload["lower"] = np.concatenate(
+                                [_band_payload["lower"], np.array([3.0],
+                                dtype=np.float32)])
+                    log.info("Bi SG-SG separation bands: %d pairs",
+                             len(_sg_rows) * (len(_sg_rows) - 1) // 2)
         if _rigid is not None:
             _band_payload["ring_rows"] = _rigid[0]
             _band_payload["ring_coords"] = _rigid[1]
