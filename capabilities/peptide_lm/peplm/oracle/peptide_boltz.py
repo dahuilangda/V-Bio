@@ -30,6 +30,7 @@ BOLTZ_PY = str(Path(__file__).resolve().parents[3]
 BICYCLIC_LINKER_ATOM_MAP = {
     "SEZ": ["CD", "C1", "C2"],
     "29N": ["C16", "C19", "C25"],
+    "BS3": ["BI", "BI", "BI"],
 }
 
 
