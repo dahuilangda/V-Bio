@@ -34,7 +34,7 @@ REFINE_PACKING_BAND_A = 2.8
 
 # --- Backbone / geometry integrity ---------------------------------------
 # Consecutive CA-CA virtual bonds below this mean a post-processing step
-# crushed the backbone (the omega-band polish incident).
+# crushed the backbone (post-polish backbone compression).
 BACKBONE_CA_CA_MIN_A = 2.80
 # SEZ tris(bromomethyl)benzene linker: anchor-to-Cys SG bond is considered
 # formed below this distance (export ring-closure check).
@@ -43,7 +43,7 @@ SEZ_RING_BOND_CUTOFF_A = 2.5
 # --- Design loop ----------------------------------------------------------
 # Hard gate: only candidates whose binder mean pLDDT reaches this enter the
 # elite pool / final ranking. Contact-maximizing junk (H/G-rich no-fold)
-# otherwise dominates GRPO (measured H 19%, G 16% after 7 auto gens).
+# otherwise dominates GRPO (empirically measured on unconstrained generations).
 DPEPTIDE_PLDDT_GATE_DEFAULT = 55.0
 # D-peptide pLDDT comes from the refined complex's peptide chain, whose
 # distribution sits below L-side co-folding binder pLDDT (v11: D elites rode

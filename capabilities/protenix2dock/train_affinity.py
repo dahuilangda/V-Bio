@@ -154,7 +154,9 @@ def train(args: argparse.Namespace) -> Path:
     c_s = c_z = None  # resolved lazily on first batch
     head_kwargs = dict(num_blocks=args.num_blocks, dropout=args.dropout,
                        mc_samples=args.mc_samples,
-                       **({"pocket_cond": True} if getattr(args, "pocket_cond", False) else {}))
+                       **({"pocket_cond": True} if getattr(args, "pocket_cond", False) else {}),
+                       **({"full_dist_cond": True} if getattr(args, "full_dist_cond", False) else {}),
+                       **({"pae_aux": True} if getattr(args, "pae_aux", False) else {}))
 
     samples = []
     if args.index_csv:
@@ -208,34 +210,69 @@ def train(args: argparse.Namespace) -> Path:
     # Resume support (V-Bio task sharding): restore head + optimizer + step.
     start_epoch = 0
     _auto_ckpt = work_dir / "protenix_affinity_head.pt"
-    if not args.resume_ckpt and _auto_ckpt.exists():
-        # docker on-failure restarts re-run the command verbatim; without this
-        # a mid-run crash restarted training FROM SCRATCH while the checkpoint
-        # sat right there (the 13-restart loop of run_mix).
+    if _auto_ckpt.exists():
+        # Own-progress ckpt always wins over the upstream --resume_ckpt:
+        # without this, a docker on-failure restart re-warmed from the
+        # upstream shard and silently discarded everything since (observed
+        # 2026-10-07: three crash-looped lives, each redoing the epoch from
+        # the rebal warm start).
         args.resume_ckpt = str(_auto_ckpt)
         print(f"[auto-resume] {args.resume_ckpt}")
+    best_gate = float("-inf")
+    _bg = work_dir / "best_gate.pt"
+    if _bg.exists():
+        # keep the all-time best across crash-restart lives: each new process
+        # re-initialises best_gate, which let diverged weights overwrite a
+        # good best_gate.pt with negative-gate garbage (2026-10-09)
+        try:
+            _bb = torch.load(_bg, map_location="cpu", weights_only=False)
+            best_gate = float((_bb.get("extra") or {}).get("gate_spearman")
+                              or float("-inf"))
+            print(f"[gate] resume baseline best_gate={best_gate:+.4f}")
+        except Exception:  # noqa: BLE001
+            pass
     if args.resume_ckpt and Path(args.resume_ckpt).exists():
         blob = torch.load(args.resume_ckpt, map_location=device, weights_only=False)
         history = blob.get("history") or []
         global_step = int(blob.get("global_step") or 0)
         start_epoch = int(blob.get("epoch") or 0) + 1
         head_cfg_saved = dict(blob.get("config") or {})
+        # Deliberate upgrades: --pae_aux / --full_dist_cond on a checkpoint
+        # saved WITHOUT the flag must inject it into the rebuild, else the
+        # warm start silently trains an inert head (fresh params only:
+        # pae_aux adds a zero-init linear, full_dist_cond reuses the
+        # existing distance embedding).
+        for _up in ("pae_aux", "full_dist_cond"):
+            if getattr(args, _up, False) and _up not in head_cfg_saved:
+                head_cfg_saved[_up] = True
+                print(f"[resume] upgrading warm start with {_up}=True")
         # Rebuild the head from the checkpoint's own config: num_blocks,
         # dropout, mc_samples and dims are architectural, and must match the
         # saved weights rather than the current CLI defaults.
         head = ProtenixAffinityHead(**head_cfg_saved).to(device)
-        try:
-            head.load_state_dict(blob["state_dict"])
-        except RuntimeError as exc:
-            # Architecture changed (head rework): state_dict keys no longer
-            # match. Fail loudly instead of silently retraining from scratch —
-            # the caller decides whether to drop the stale checkpoint.
+        # Warm start into a pae_aux=True head from a pre-v7 checkpoint: the
+        # only tolerated mismatch is the fresh aux head (zero weight + PAE
+        # prior bias). Anything else is a real architecture conflict.
+        _incompat = head.load_state_dict(blob["state_dict"], strict=False)
+        _missing = [k for k in _incompat.missing_keys
+                    if not k.startswith("pae_aux_head.")]
+        if _missing or _incompat.unexpected_keys:
             raise RuntimeError(
                 f"checkpoint {args.resume_ckpt} is not compatible with the "
-                f"current head architecture (state_dict key mismatch: {exc}). "
-                "Retrain from scratch or rebuild the checkpoint with the "
-                "current ProtenixAffinityHead."
-            ) from exc
+                f"current head architecture (missing: {_missing}, "
+                f"unexpected: {list(_incompat.unexpected_keys)}). "
+                "Retrain from scratch or rebuild the checkpoint."
+            )
+        if _incompat.missing_keys:
+            print(f"[resume] non-strict load: initialised fresh "
+                  f"{sorted(_incompat.missing_keys)}")
+            # The head gained parameters (e.g. pae_aux_head): the ckpt's
+            # optimizer state no longer matches the param-group size — skip
+            # it rather than crash-looping (observed 2026-10-10: 1400+
+            # restarts). Fresh weights keep their warm start; Adam moments
+            # re-accumulate under the warmup restart.
+            blob["optimizer"] = None
+            print("[resume] skipping ckpt optimizer state (param set grew)")
         # Architectural keys (pocket_cond, num_blocks, ...) must survive the
         # round-trip: the resume rebuilds the head from the SAVED config, but
         # _save_checkpoint regenerates config from CLI args — merge so a
@@ -244,9 +281,26 @@ def train(args: argparse.Namespace) -> Path:
         for _k, _v in head_cfg_saved.items():
             if _k not in ("c_s", "c_z"):
                 head_kwargs[_k] = _v
-        opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
+        # Inverse merge: a CLI-injected head flag absent from the saved
+        # config must not creep into later checkpoints — the resumed head is
+        # rebuilt WITHOUT it, but a stale head_kwargs would describe and then
+        # save the flag, and a subsequent resume would start feeding the
+        # channel (e.g. full_dist) to weights never trained with it
+        # (audit 2026-10-07).
+        for _k in ("full_dist_cond", "pocket_cond", "ipsae_pool_v3"):
+            if _k in head_kwargs and _k not in head_cfg_saved:
+                del head_kwargs[_k]
+        opt = torch.optim.AdamW(head.parameters(), lr=args.lr,
+                                  eps=1e-6)
         if blob.get("optimizer"):
             opt.load_state_dict(blob["optimizer"])
+            # load_state_dict restores the OLD run's lr AND initial_lr; the
+            # new run's --lr must win or LambdaLR inherits a stale base
+            # (observed: v5 warm-start silently trained at the ckpt's 1e-4
+            # instead of --lr 2e-5, 2026-10-06).
+            for _g in opt.param_groups:
+                _g["lr"] = args.lr
+                _g["initial_lr"] = args.lr
         sched, accum_counter = None, 0
         opt.zero_grad(set_to_none=True)
         c_s, c_z = head_cfg_saved.get("c_s"), head_cfg_saved.get("c_z")
@@ -322,7 +376,8 @@ def train(args: argparse.Namespace) -> Path:
                 else:
                     ema_state[k] = v.detach().clone()
 
-    best_gate = -2.0
+    # best_gate baseline restored from work_dir best_gate.pt above (crash-
+    # restart safety); do NOT re-initialise here.
 
     def _run_gate(epoch_now):
         nonlocal best_gate
@@ -366,12 +421,20 @@ def train(args: argparse.Namespace) -> Path:
 
     # Resume semantics: --epochs is the number of ADDITIONAL epochs to run
     # after a resumed checkpoint (shard1: 0..1, shard2 resume: 1..2).
+    # Bound by STEPS, not the epoch counter: every crash-restart bumps
+    # start_epoch (ckpt epoch+1) which lifted end_epoch, so an OOM-looping
+    # run re-armed its own budget forever (v5b ran 21 epoch-equivalents,
+    # 2026-10-10). _start_step anchors the step-based budget.
     end_epoch = start_epoch + max(1, args.epochs)
+    _start_step = global_step
     # Warmup + cosine decay over the PLANNED step budget. Constant LR was the
     # audit's #1 cause of the 0.35-0.50 oscillation: batch-1 gradients at a
     # never-annealing 1e-4 kicked the weights around the basin forever.
     import math
-    _planned = max(1, max(1, args.epochs) * len(samples))
+    # sched.step() fires once per OPTIMIZER step (every --accum samples), so
+    # the plan must be counted in optimizer steps or the cosine never
+    # completes (a 42360-sample plan ran ~5.3k steps and held lr near peak).
+    _planned = max(1, math.ceil(max(1, args.epochs) * len(samples) / max(1, args.accum)))
     _warm = max(1, args.warmup)
 
     def _lr_lambda(step):
@@ -400,6 +463,13 @@ def train(args: argparse.Namespace) -> Path:
         for row in samples:
             by_assay[row.get("assay_id") or (row.get("target_id") or "unknown")].append(row)
         for si, row in enumerate(samples):
+            # Mid-epoch budget: the epoch-head check never fires for a
+            # single-epoch run, and crash-restarts inflate the epoch counter
+            # — bound by global_step here (sample units).
+            if (global_step - _start_step) >= max(1, args.epochs) * len(samples):
+                print(f"[budget] reached planned {args.epochs}*{len(samples)} "
+                      f"samples (global_step={global_step}); stopping", flush=True)
+                break
             _name = row.get("name") or f"idx{si}"
             if poison.get(_name, 0) >= 2:
                 continue
@@ -409,7 +479,7 @@ def train(args: argparse.Namespace) -> Path:
                 if trunk is None:
                     trunk = _FrozenTrunk(runner.model, dataset)
                 partner = None
-                if args.rel_weight > 0 and head is not None and random.random() < 0.5:
+                if args.rel_weight > 0 and head is not None and random.random() < args.partner_prob:
                     pool = by_assay[row.get("assay_id") or (row.get("target_id") or "unknown")]
                     if len(pool) > 1:
                         partner_row = random.choice([p for p in pool if p is not row])
@@ -437,7 +507,8 @@ def train(args: argparse.Namespace) -> Path:
                 if head is None:
                     c_s, c_z = s_inputs.shape[-1], z.shape[-1]  # s_inputs carries the input-embedder width the head consumes
                     head = ProtenixAffinityHead(c_s=c_s, c_z=c_z, **head_kwargs).to(device)
-                    opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
+                    opt = torch.optim.AdamW(head.parameters(), lr=args.lr,
+                                  eps=1e-6)
                     opt.zero_grad(set_to_none=True)
                     accum_counter = 0
                     if sched is None:
@@ -462,7 +533,7 @@ def train(args: argparse.Namespace) -> Path:
                 # binder score, and (when a same-assay partner was drawn) the
                 # relative-difference term that Nesso-1 up-weights to optimise
                 # intra-assay ranking over inter-assay offsets.
-                abs_loss = nn.functional.huber_loss(value, label_pic50)
+                abs_loss = args.abs_weight * nn.functional.huber_loss(value, label_pic50)
                 p = torch.sigmoid(logit)
                 p_t = p * active + (1 - p) * (1 - active)
                 focal = (-((1 - p_t) ** args.focal_gamma) * torch.log(p_t + 1e-7)).reshape(())
@@ -472,10 +543,23 @@ def train(args: argparse.Namespace) -> Path:
                     dy = label_pic50 - partner["label"]
                     rel = nn.functional.huber_loss((value - v2).reshape(1), dy.reshape(1))
                     loss = loss + args.rel_weight * rel
+                if "pae_aux_loss_t" in entry:
+                    loss = loss + args.pae_aux_weight * entry["pae_aux_loss_t"]
                 # Gradient accumulation: each sample is its own graph; scale by
                 # the window size and step every --accum samples. Together with
                 # clip_grad_norm this converts batch-1 gradient noise into an
                 # effective-batch average.
+                # Loss-spike guard: a diverging value head (Adam second-
+                # moment spike) first shows as an isolated huge loss; skip
+                # the backward so garbage doesn't reinforce itself, and
+                # remember the offender.
+                if loss.item() > 50.0:
+                    errors += 1
+                    _nm = row.get("name", "unknown")
+                    poison[_nm] = int(poison.get(_nm, 0)) + 1  # count semantics
+                    opt.zero_grad(set_to_none=True)
+                    accum_counter = 0
+                    continue
                 (loss / args.accum).backward()
                 accum_counter += 1
                 if accum_counter >= args.accum:
@@ -604,6 +688,61 @@ def _crystal_coords(job: dict, chains, ligand_path: Path) -> torch.Tensor:
 
 
 
+# Frozen z-probe PAE projection (benchmark-suite compatibility). The suite's
+# gated-head paths call T._expected_pae_from_z; for plain checkpoints the
+# projection stays None and the score path is a passive no-op (the REAL
+# confidence PAE comes from ipsae_metrics.enrich's run_confidence_head).
+_PAE_PROJ = {"w": None, "b": None, "centers": None}
+
+
+def _install_pae_projection(runner) -> None:
+    """Cache the confidence head's raw-z PAE projection (z-probe channel).
+
+    This is the training-time approximation documented in the research audit
+    (confidence projection applied directly to trunk z, skipping the 4
+    pose-conditioned blocks). Never used for plain checkpoints."""
+    try:
+        conf = runner.model.confidence_head
+        _PAE_PROJ["w"] = conf.linear_no_bias_pae.weight.detach().clone()
+        _PAE_PROJ["b"] = getattr(conf.linear_no_bias_pae, "bias", None)
+        if _PAE_PROJ["b"] is not None:
+            _PAE_PROJ["b"] = _PAE_PROJ["b"].detach().clone()
+        # replicate pae_ln (elementwise-affine LayerNorm on raw z)
+        _ln = conf.pae_ln
+        _PAE_PROJ["ln_w"] = _ln.weight.detach().clone()
+        _PAE_PROJ["ln_b"] = _ln.bias.detach().clone()
+        _PAE_PROJ["eps"] = float(getattr(_ln, "eps", 1e-5))
+        _PAE_PROJ["shape"] = tuple(_ln.normalized_shape)
+        pcfg = runner.model.configs.loss.pae
+        from protenix.model.sample_confidence import get_bin_centers
+        _PAE_PROJ["centers"] = get_bin_centers(
+            float(pcfg.min_bin), float(pcfg.max_bin), int(pcfg.no_bins))
+        print(f"[pae-proj] installed z-probe PAE projection "
+              f"({tuple(_PAE_PROJ['w'].shape)})", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        _PAE_PROJ["w"] = None
+        print(f"[pae-proj] unavailable ({exc}) — gated heads disabled", flush=True)
+
+
+def _expected_pae_from_z(z: torch.Tensor, device) -> Optional[torch.Tensor]:
+    """z-probe expected PAE (Angstroem) from the cached projection, [N, N].
+
+    Replicates the confidence readout's pae_ln -> linear_no_bias_pae applied
+    directly to trunk z (skips the pose-conditioned blocks — documented
+    approximation; the real PAE comes from the full confidence readout)."""
+    import torch.nn.functional as _F
+    if _PAE_PROJ["w"] is None:
+        return None
+    with torch.no_grad():
+        h = _F.layer_norm(z.to(device).float(), _PAE_PROJ["shape"],
+                          _PAE_PROJ["ln_w"].to(device),
+                          _PAE_PROJ["ln_b"].to(device), _PAE_PROJ["eps"])
+        logits = _F.linear(h, _PAE_PROJ["w"].to(device),
+                           _PAE_PROJ["b"].to(device) if _PAE_PROJ["b"] is not None else None)
+        probs = torch.softmax(logits, dim=-1)
+        return (probs * _PAE_PROJ["centers"].to(device)).sum(-1)
+
+
 def _cached_or_repr(trunk, row, args, work_dir, device, use_msa, msa_dataset_fn=None, job_ctx=None):
     """Feature-cache path: load precomputed trunk representations when present.
 
@@ -629,6 +768,12 @@ def _cached_or_repr(trunk, row, args, work_dir, device, use_msa, msa_dataset_fn=
                     "atom_to_token_idx": torch.from_numpy(d["atom_to_token_idx"].astype(np.int64)),
                     "is_ligand": torch.from_numpy(d["is_ligand"].astype(bool)),
                 }
+                if getattr(args, "pae_aux", False):
+                    _tp = Path(getattr(args, "true_pae_dir", "")) / f"{name}.npz"
+                    if _tp.exists():
+                        _t = np.load(_tp, allow_pickle=False)
+                        feats["true_pae"] = torch.from_numpy(
+                            _t["expected_pae"].astype(np.float32))
                 ed = torch.from_numpy(d["expected_dist"].astype(np.float32))
                 ed = ed if ed.numel() else None
                 _c = torch.from_numpy(d["coords"].astype(np.float32))
@@ -690,7 +835,20 @@ def _forward_row(trunk, head, row, work_dir, device, args, msa_dataset_fn,
 
 def _save_checkpoint(head, opt, c_s, c_z, head_kwargs, history, final_epoch,
                   global_step, errors, contradictions, ckpt_path, extra=None):
+    import shutil
+
     import torch
+
+    # Rotate the rolling checkpoint: keep the previous generation so a
+    # mid-divergence overwrite can't destroy the last known-good weights
+    # (2026-10-09: the only live ckpt was overwritten by diverged weights
+    # and the 220k-step gate-best was unrecoverable).
+    ckpt_path = Path(ckpt_path)
+    if ckpt_path.name == "protenix_affinity_head.pt" and ckpt_path.exists():
+        try:
+            shutil.copy2(ckpt_path, ckpt_path.with_suffix(".pt.prev"))
+        except OSError:
+            pass
 
     blob = {
         "state_dict": head.state_dict(),
@@ -765,7 +923,9 @@ def _embed_ligand_sdf(smiles: str, work_dir: Path, seed: int = 42) -> Path:
     return out
 
 
-def _grad_entry(head, s_inputs, s, z, coords, feature_dict, device, expected_dist=None):
+def _grad_entry(head, s_inputs, s, z, coords, feature_dict, device,
+                expected_dist=None, expected_pae=None, contact_stats=None,
+                plddt_lig=None):
     """Differentiable single-sample head pass (training).
 
     Runs the SAME code path as inference: head.forward with return_tensors
@@ -782,6 +942,11 @@ def _grad_entry(head, s_inputs, s, z, coords, feature_dict, device, expected_dis
         atom_is_ligand=feature_dict["is_ligand"].to(device),
         mc_samples=1,
         expected_dist=None if coords is not None else expected_dist,
+        expected_pae=expected_pae,
+        contact_stats=contact_stats,
+        plddt_lig=plddt_lig,
+        full_dist=expected_dist if getattr(head, "full_dist_cond", False) else None,
+        true_pae=feature_dict.get("true_pae") if getattr(head, "pae_aux", False) else None,
         return_tensors=True,
     )[0]
     return {
@@ -824,6 +989,16 @@ def main() -> None:
     parser.add_argument("--model_name", default="protenix-v2")
     parser.add_argument("--checkpoint_dir", default="/workspace/model")
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--pae_aux", action="store_true",
+                        help="per-pair PAE auxiliary supervision from the "
+                             "precomputed true_pae_feats cache")
+    parser.add_argument("--pae_aux_weight", type=float, default=0.05,
+                        help="weight of the PAE auxiliary Huber term")
+    parser.add_argument("--true_pae_dir", default="/data/affinity_training/true_pae_feats",
+                        help="dir of precomputed <name>.npz expected-PAE targets")
+    parser.add_argument("--full_dist_cond", action="store_true",
+                        help="embed the trunk distogram on ALL pair cells, "
+                             "not just the interface (zero new params)")
     parser.add_argument("--pocket_cond", action="store_true",
                         help="pocket-conditioned readout (pooled ligand+rec context)")
     parser.add_argument("--num_blocks", type=int, default=2)
@@ -868,7 +1043,27 @@ def main() -> None:
     parser.add_argument("--rel_weight", type=float, default=2.0,
                         help="weight of the intra-assay relative-difference loss "
                              "(Nesso-1 up-weights this to optimise ranking)")
+    parser.add_argument("--abs_weight", type=float, default=1.0,
+                        help="weight for absolute Huber loss")
+    parser.add_argument("--partner_prob", type=float, default=0.5,
+                        help="probability of sampling same-assay partner")
     args = parser.parse_args()
+
+    # Ops override: the docker Cmd is frozen at container creation, so a
+    # work_dir sentinel is the only way to retune a run without recreating
+    # the container (2026-10-07: cap max_seq_len 600->520 to cut the ~21GB
+    # transient peak of the largest samples that was OOM-crash-looping the
+    # run against the 23.5GB GPU).
+    _ov_path = Path(args.work_dir) / "train_config_override.json"
+    if _ov_path.exists():
+        for _k, _v in json.loads(_ov_path.read_text()).items():
+            if not hasattr(args, _k):
+                # A typo'd key would otherwise be set as a dead attribute and
+                # silently never applied.
+                raise SystemExit(f"[override] unknown key {_k!r} in {_ov_path}")
+            _cur = getattr(args, _k)
+            setattr(args, _k, type(_cur)(_v) if _cur is not None else _v)
+            print(f"[override] {_k} = {getattr(args, _k)}", flush=True)
 
     import random as _random
     _random.seed(args.seed)
