@@ -350,17 +350,15 @@ class ESM3Proposer:
                 score = r.get("ipsae_dom")
             if r.get("sequence") and isinstance(score, (int, float)):
                 plddts = r.get("plddts") or []
-                # missing plddts = below gate (no foldability evidence);
-                # only apply damping when we have actual per-residue data
-                mean_plddt = (
-                    sum(plddts) / len(plddts) * 100 if plddts else 0.0)
-                if mean_plddt < PLDDT_GATE:
-                    # dampen below-gate rewards toward zero: within a GRPO
-                    # group they still provide negative contrast, but the
-                    # advantage magnitude shrinks with distance from the
-                    # gate so a floppy high-ipSAE candidate cannot dominate
-                    # a foldable one
-                    score = float(score) * (0.1 + 0.9 * mean_plddt / PLDDT_GATE)
+                # pLDDT-gated damping: only apply when we have per-residue
+                # data. Empty plddts means no foldability evidence either
+                # way — damping to 0.1× would crush the learning signal
+                # for every candidate lacking confidence output.
+                if plddts:
+                    mean_plddt = sum(plddts) / len(plddts) * 100
+                    if mean_plddt < PLDDT_GATE:
+                        score = float(score) * (
+                            0.1 + 0.9 * mean_plddt / PLDDT_GATE)
                 rollouts.append({
                     "sequence": r["sequence"],
                     "reward": float(score),
