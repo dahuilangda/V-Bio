@@ -5316,6 +5316,71 @@ def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     return "".join(seq_chars)
 
 
+def _substitute_ncaa_residues(
+    sequence: str,
+    modifications: List[Dict[str, Any]],
+    unnatural_pool: List[Dict[str, Any]],
+    nonnatural_min: int,
+    nonnatural_max: int,
+    cys_positions: List[int],
+    rng: random.Random,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Overlay user-selected non-natural residues onto the proposer's
+    standard-20 backbone. The sequence keeps standard base letters; the
+    modifications list tells protenix which positions carry a CCD
+    substitution. Protenix's CCD coverage provides the generalization;
+    the LoRA adapter learns which substitutions improve binding from
+    the GRPO reward."""
+    if not unnatural_pool or nonnatural_max <= 0:
+        return sequence, modifications
+    protected = {int(p) for p in cys_positions}
+    protected |= {i for i, ch in enumerate(sequence) if ch == "C"}
+    available = [i for i in range(len(sequence)) if i not in protected]
+    rng.shuffle(available)
+
+    # placement rules: "n_term" locks to the first residue, "c_term" to the
+    # last; "any" takes the remaining slots
+    n_term = [e for e in unnatural_pool if e.get("placement") == "n_term"]
+    c_term = [e for e in unnatural_pool if e.get("placement") == "c_term"]
+    any_pool = [e for e in unnatural_pool
+                if e.get("placement") not in ("n_term", "c_term")]
+    if not any_pool and not n_term and not c_term:
+        return sequence, modifications
+
+    count = min(rng.randint(nonnatural_min, nonnatural_max), len(available))
+    if count <= 0:
+        return sequence, modifications
+    mods = list(modifications)
+    used = set()
+
+    for entry in n_term + c_term:
+        if count <= 0 or not available:
+            break
+        pos = len(sequence) - 1 if entry.get("placement") == "c_term" else 0
+        if pos in protected or pos in used:
+            continue
+        base = entry.get("base", "A")
+        mods.append({"position": pos + 1, "ccd": entry["ccd"],
+                     "baseResidue": base})
+        used.add(pos)
+        count -= 1
+
+    rng.shuffle(any_pool)
+    for entry in any_pool * max(1, count // max(1, len(any_pool))):
+        if count <= 0 or not available:
+            break
+        pos = available.pop(0)
+        if pos in used:
+            continue
+        base = entry.get("base", "A")
+        mods.append({"position": pos + 1, "ccd": entry["ccd"],
+                     "baseResidue": base})
+        used.add(pos)
+        count -= 1
+
+    return sequence, mods
+
+
 def _stamp_bicyclic_cysteines(
     sequence: str,
     *,
@@ -9890,6 +9955,21 @@ def run_peptide_design_backend(
                         sequence_mask=sequence_mask,
                         allow_extra_cys=allow_extra_cys,
                         resolve_anchors=_resolve_bicyclic_anchors,
+                    )
+                # NCAA overlay: replace user-selected positions with
+                # non-natural residues from the pool. The backbone stays in
+                # ESM3's known space; the modifications list tells protenix
+                # which positions carry a CCD substitution.
+                if unnatural_pool and nonnatural_max > 0:
+                    lm_sequence, lm_mods = _substitute_ncaa_residues(
+                        lm_sequence,
+                        lm_mods,
+                        unnatural_pool,
+                        nonnatural_min,
+                        nonnatural_max,
+                        list(design_params.get("cys_positions") or []),
+                        random.Random(random_seed + generation * 1000
+                                      + len(lm_sequence)),
                     )
                 lm_mods = [m for m in (lm_mods or []) if isinstance(m, dict)]
                 lm_key = _peptide_candidate_key(lm_sequence, lm_mods)

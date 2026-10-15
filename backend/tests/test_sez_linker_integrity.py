@@ -164,5 +164,46 @@ class LinkerBondGateTests(unittest.TestCase):
             self.assertFalse(report["all_bonded"])
 
 
+class NcaaSubstitutionTests(unittest.TestCase):
+    """NCAA overlay must place the user-selected non-natural residues at
+    valid positions while preserving the Cys anchor set."""
+
+    def _sub(self, seq, pool, lo, hi, cys):
+        from backend.runtime.run_single_prediction import _substitute_ncaa_residues
+        mods = []
+        rng = __import__("random").Random(42)
+        return _substitute_ncaa_residues(seq, mods, pool, lo, hi, cys, rng)
+
+    def test_basic_substitution(self):
+        pool = [{"ccd": "NLE", "base": "L", "placement": "any"}]
+        seq = "ACDEFGHIKLMNPQRSTVWYCDE"
+        cys = [0, 21]
+        result, mods = self._sub(seq, pool, 1, 3, cys)
+        self.assertTrue(1 <= len(mods) <= 3)
+        for m in mods:
+            self.assertNotIn(m["position"] - 1, cys)
+            self.assertEqual(m["ccd"], "NLE")
+
+    def test_zero_ncaa_is_noop(self):
+        pool = [{"ccd": "NLE", "base": "L", "placement": "any"}]
+        seq = "ACDEFGHIKLMNPQRST"
+        result, mods = self._sub(seq, pool, 0, 0, [])
+        self.assertEqual(result, seq)
+        self.assertEqual(mods, [])
+
+    def test_cys_protected(self):
+        pool = [{"ccd": "NLE", "base": "L", "placement": "any"}]
+        seq = "CCCCCCCCCCCCCCCC"
+        result, mods = self._sub(seq, pool, 1, 3, [0, 1, 2])
+        for m in mods:
+            self.assertNotIn(m["position"] - 1, [0, 1, 2])
+
+    def test_empty_pool_is_noop(self):
+        seq = "ACDEFGHIKLMNPQRST"
+        result, mods = self._sub(seq, [], 2, 5, [])
+        self.assertEqual(result, seq)
+        self.assertEqual(mods, [])
+
+
 if __name__ == "__main__":
     unittest.main()
