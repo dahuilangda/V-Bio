@@ -9216,7 +9216,6 @@ def _assert_product_chirality(
 
 
 def run_peptide_design_backend(
-    docking_requested: bool,
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
@@ -10327,35 +10326,6 @@ def run_peptide_design_backend(
             # floor, backbone integrity, ipSAE consistency). Before this
             # block the L-blind candidate shipped the raw native prediction
             # with no geometric gate at all.
-            if (peptide_chirality == 'l' and not pocket_sequence_contacts
-                    and ctx.get("route") == "plain"):
-                try:
-                    if ctx.get("refine_error") is not None:
-                        raise ctx["refine_error"]
-                    d_space_metrics = _dpeptide_collect_refine(
-                        ctx["async_result"],
-                        Path(ctx["staged_path"]),
-                        Path(ctx["refined_cif"]),
-                        expect_blind=True,
-                    )
-                    d_space_refined = str(ctx["refined_cif"])
-                    structure_file = Path(d_space_refined)
-                    if design_mode == "bicyclic":
-                        # Same require_bonds guarantee the pocket route and
-                        # the D route enforce on their collects.
-                        bond_report = _dpeptide_linker_bond_report(
-                            Path(d_space_refined))
-                        if not bond_report.get("all_bonded"):
-                            raise ValueError(
-                                "linker covalent integrity gate: "
-                                f"{bond_report.get('bonds')}")
-                except (RuntimeError, ValueError) as plain_exc:
-                    print(
-                        f"[l-peptide] candidate {candidate_sequence[:12]}… "
-                        f"rejected: {plain_exc}",
-                        file=sys.stderr,
-                    )
-                    return
 
             if peptide_chirality == 'd' and isinstance(d_space_metrics, dict):
                 # The refined D-space complex is the ONLY interface readout for
@@ -10713,6 +10683,23 @@ def run_peptide_design_backend(
             else:
                 composite_score = None
             structure_file = _select_primary_structure_file(result_dir)
+            if peptide_chirality == 'l' and design_mode == "bicyclic":
+                # Shipping gate on the co-folding deliverable itself: all
+                # linker anchors must hold their Cys-SG within the bonded
+                # window (per-anchor chemistry: C-S vs Bi-S). A torn or
+                # collapsed linker is a floor-negative sample, not a rank.
+                bond_report = _dpeptide_linker_bond_report(Path(structure_file))
+                if not bond_report.get("all_bonded"):
+                    stage_contexts.append({
+                        "reject": (
+                            f"[l-peptide] candidate {candidate_sequence[:12]}… "
+                            f"rejected: linker covalent integrity gate "
+                            f"{bond_report.get('bonds')}"
+                        ),
+                        "candidate_sequence": candidate_sequence,
+                        "proposal_group": job.get("proposal_group") or "ungrouped",
+                    })
+                    continue
 
             # D-route (chirality=d): stage the candidate's isolated conformer
             # against the prepared D-target at the user pocket, then dispatch
@@ -10890,71 +10877,6 @@ def run_peptide_design_backend(
                     })
                     continue
 
-            # L chirality WITHOUT pocket: the native prediction carries a
-            # model-generated pose that has bypassed every geometric gate
-            # 12/24 shipped ranks with interface
-            # min 1.66-2.23 A). Stage the native complex and dispatch the
-            # same fixed-receptor refine the pocket route uses -- minus the
-            # pocket conditioning. The state guard, constraint bands, and
-            # the collector's engagement/clash/backbone gates then apply.
-            # With the docking engine the native pose goes through the
-            # fixed-receptor refine + covalent gate. Without it (原版
-            # protenix option) the co-folding prediction IS the deliverable:
-            # stage_contexts with dispatch=None finalize immediately from
-            # the native metrics parsed above.
-            if (peptide_chirality == 'l' and docking_requested
-                    and not pocket_sequence_contacts
-                    and structure_file is not None):
-                try:
-                    _job_seed = job.get("predict_args") if isinstance(job.get("predict_args"), dict) else {}
-                    _seed_v = _job_seed.get("seed")
-                    _seed_v = int(_seed_v) if isinstance(_seed_v, int) else random_seed
-                    staged_path = str(Path(candidate_dir) / "plain_staged.pdb")
-                    st_native = gemmi.read_structure(str(structure_file))
-                    st_native.setup_entities()
-                    st_native.write_pdb(staged_path)
-                    if design_mode == "bicyclic":
-                        _append_staged_bicyclic_links(
-                            Path(staged_path),
-                            job.get("cys_positions")
-                            if isinstance(job.get("cys_positions"), list) else None,
-                            linker_ccd,
-                        )
-                    route = "plain"
-                    refined_cif = str(Path(candidate_dir) / "plain_refined.cif")
-                    _staged_for_dispatch = Path(staged_path)
-                    _seed_for_dispatch = _seed_v
-
-                    def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch):  # noqa: E301
-                        # detect the staged complex's chain layout (same as
-                        # the D plain route)
-                        _st = gemmi.read_structure(str(_staged))
-                        _st.setup_entities()
-                        _poly = [ch.name for ch in _st[0]
-                                 if sum(1 for r in ch if r.het_flag != "H") >= 3]
-                        _pep_letter = _poly[-1] if _poly else "B"
-                        _rec_letters = ",".join(_poly[:-1]) if len(_poly) > 1 else "A"
-                        # Blind inpainting (aligned with the D route): the
-                        # peptide denoises from pure noise so the constraint
-                        # bands converge from scratch — refining the staged
-                        # native pose instead leaves residual strain (v19
-                        # L-TLE: SG-SG 1.31 A survived the full band set).
-                        return _dpeptide_dispatch_refine(
-                            _staged, _seed, build_capability_queue("protenix", "default"),
-                            blind=True,
-                            cyclic_headtail=(design_mode == "cyclic"),
-                            peptide_chain_letter=_pep_letter,
-                            receptor_chain_letters=_rec_letters)
-                except (RuntimeError, ValueError) as stage_exc:
-                    stage_contexts.append({
-                        "reject": (
-                            f"[l-peptide] candidate {candidate_sequence[:12]}… "
-                            f"rejected: {stage_exc}"
-                        ),
-                        "candidate_sequence": candidate_sequence,
-                        "proposal_group": job.get("proposal_group") or "ungrouped",
-                    })
-                    continue
 
             stage_contexts.append({
                 "job": job,
@@ -12379,7 +12301,6 @@ def main():
         runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
-        _raw_dock_token = backend in {"protenix2dock", "boltz2dock"}
         if backend in {"nesso1", "nesso-1"}:
             backend = "nesso"
         if (str(predict_args.get("workflow") or "").strip().lower()
@@ -12470,7 +12391,6 @@ def main():
                 peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
                 try:
                     run_peptide_design_backend(
-                        docking_requested=_raw_dock_token,
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
