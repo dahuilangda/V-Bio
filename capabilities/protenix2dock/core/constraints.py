@@ -14,6 +14,10 @@ from typing import Any
 import os
 import numpy as np
 
+import logging
+
+log = logging.getLogger("protenix2dock.core.constraints")
+
 from core.geometry_tables import (
     STD_AA_BONDS,
     ideal_bond_length,
@@ -358,23 +362,6 @@ def compute_ligand_covalent_bands(
     upper = np.asarray(rest, dtype=np.float32) + float(band)
     lower = np.maximum(np.asarray(rest, dtype=np.float32) - float(band), 0.5)
     return index, upper, lower
-
-
-
-
-
-def _sasa_sphere_points(n: int) -> np.ndarray:
-    """Fibonacci sphere: near-uniform n points on S^2."""
-    i = np.arange(n, dtype=np.float64) + 0.5
-    phi = np.arccos(1.0 - 2.0 * i / n)
-    theta = np.pi * (1.0 + 5.0 ** 0.5) * i
-    return np.stack([np.cos(theta) * np.sin(phi),
-                     np.sin(theta) * np.sin(phi),
-                     np.cos(phi)], axis=1)
-
-
-
-
 
 
 
@@ -738,6 +725,8 @@ def compute_ccd_bond_bands(
     bonded = {(min(i, j), max(i, j)) for i, j in pairs}
     name_by_res: dict[tuple[int, int], dict[str, int]] = {}
     for row in range(len(asym)):
+        if mask[row] <= 0:
+            continue
         if free_entities is not None and asym_to_entity[int(asym[row])] not in free_entities:
             continue
         nm = atom_names[row].lstrip("0123456789")

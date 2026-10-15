@@ -817,7 +817,9 @@ def _run_peptide_engine(
                     # all three thiolates into one cramped fan (SG-Bi-SG
                     # down to 13 degrees, SG-SG 1.2 A). Bi(III) thiolate is
                     # trigonal-pyramidal: S-S ~3.6 A at ~90-100 degrees.
-                    _sg_rows = sorted(int(r[0]) for r in _resolved[0])
+                    _elements = np.char.upper(np.asarray(info["elements"]).astype(str))
+                    _sg_rows = sorted({int(r[0]) if _elements[int(r[0])] == "S"
+                                       else int(r[1]) for r in _resolved[0]})
                     for i in range(len(_sg_rows)):
                         for j in range(i + 1, len(_sg_rows)):
                             _band_payload["pair_index"] = np.concatenate([
