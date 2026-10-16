@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v15 batch health monitor: run any time to see all 18 design tasks."""
+"""design batch health monitor: run any time to see all 18 design tasks."""
 import json
 import subprocess
 import sys
@@ -26,7 +26,7 @@ def progress(task_id):
 
 rows = q("SELECT name, task_state, task_id FROM project_tasks "
          "WHERE project_id='3bf7199e-0e4e-483b-b896-c7dd07b157e4' "
-         "AND name LIKE '降解剂v15%' ORDER BY name")
+         "AND name LIKE '降解剂%' ORDER BY name")
 print(f"{'task':38} {'state':10} {'gen':6} {'done':8} best     metric")
 for name, state, tid in rows:
     p = progress(tid)
