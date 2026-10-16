@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Resubmit v15 peptide-design tasks, reusing the existing project_tasks rows.
+"""Resubmit peptide-design tasks, reusing the existing project_tasks rows.
 
 DANGER: submit ONLY the tasks that actually need it. Resubmitting healthy
 tasks double-dispatches them (the old celery task keeps running as an orphan
-burning GPU — the 2026-10-12 incident: 14 orphans starved the D route's
-target predictions into their 1-hour timeout).
+burning GPU and starving the D route's target predictions).
 
 Filter examples:
-  python3 deploy/resubmit_v15_tasks.py --chirality d        # all D tasks
-  python3 deploy/resubmit_v15_tasks.py --name-substr CtBP1  # by name
-  python3 deploy/resubmit_v15_tasks.py --list               # dry run
+  python3 deploy/resubmit_design_batch.py --chirality d        # all D tasks
+  python3 deploy/resubmit_design_batch.py --name-substr CtBP1  # by name
+  python3 deploy/resubmit_design_batch.py --list               # dry run
 """
 from __future__ import annotations
 
@@ -47,7 +46,7 @@ def main() -> None:
         for chirality, base in (("l", 442000), ("d", 443000)):
             if args.chirality and chirality != args.chirality:
                 continue
-            name = f"降解剂v15-{chirality.upper()}-{target}({pdb})"
+            name = f"降解剂-{chirality.upper()}-{target}({pdb})"
             if args.name_substr and args.name_substr not in name:
                 continue
             row_id = find_row_id(name)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Block until the v15 milestone: L-AR-V7 (task 10ad04e6) finishes gen1
+"""Block until the design batch gen1 milestone: the first L route task finishes gen1
 finalization — best_score becomes a number in peptide_progress.json — or the
 task fails, or 8 hours elapse. Exit 0 on milestone, 2 on timeout."""
 import json
@@ -7,7 +7,11 @@ import subprocess
 import sys
 import time
 
-TASK = "10ad04e6-c7b8-4660-a291-3543c382c336"
+import os
+TASK = os.environ.get("WATCH_TASK_ID", "")
+if not TASK:
+    print("Usage: WATCH_TASK_ID=<task_id> python3 deploy/watch_design_gate.py")
+    sys.exit(1)
 DEADLINE = time.time() + 8 * 3600
 
 
@@ -29,7 +33,7 @@ def failures() -> int:
         ["docker", "exec", "frontend2_supabase_db", "psql", "-U", "postgres",
          "-d", "postgres", "-t", "-A", "-c",
          "SELECT count(*) FROM project_tasks WHERE project_id='3bf7199e-0e4e-483b-b896-c7dd07b157e4' "
-         "AND name LIKE '降解剂v15%' AND task_state IN ('FAILURE','REVOKED');"],
+         "AND name LIKE '降解剂%' AND task_state IN ('FAILURE','REVOKED');"],
         capture_output=True, text=True).stdout
     try:
         return int(out.strip() or 0)

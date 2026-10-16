@@ -1052,7 +1052,7 @@ def main(argv=None):
                 log.info("dock mode: %d ligand covalent bond bands", len(lig_cov[1]))
             # Pocket-guided docking (the same PocketPotential the peptide
             # path uses, applied to the ligand's free atoms): the user's
-            # pocket guidance removed (user decision):
+            # pocket guidance is handled separately:
             # the            # ligand always samples the whole surface; the model's own
             # docking prior locates the binding site
             else:
