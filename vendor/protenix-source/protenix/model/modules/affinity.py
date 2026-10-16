@@ -116,6 +116,9 @@ class ProtenixAffinityHead(nn.Module):
         dropout: float = 0.1,
         mc_samples: int = 4,
         pocket_cond: bool = False,
+        ipsae_pool_v3: bool = False,
+        full_dist_cond: bool = False,
+        pae_aux: bool = False,
     ):
         super().__init__()
         self.num_dist_bins = num_dist_bins
@@ -145,6 +148,35 @@ class ProtenixAffinityHead(nn.Module):
         # the pocket (between-pocket variance is ~36% of label variance).
         self.pocket_cond = pocket_cond
         in_dim = c_z + (2 * c_s if pocket_cond else 0)
+        # Full-token distogram conditioning: embed the trunk's expected
+        # distance map on ALL pair cells, not just the lig×rec interface.
+        # Interface-only embeddings leave the blocks without a non-interface
+        # reference — they cannot represent "globally correct fold, wrong
+        # ligand placement" (audit 2026-10-06; ConfidenceHead conditions every
+        # cell this way). Reuses dist_bin_pairwise_embed: zero new parameters,
+        # warm-start compatible with existing checkpoints.
+        self.full_dist_cond = full_dist_cond
+        # Per-pair PAE auxiliary head (v7): the blocks have only ever seen a
+        # pooled scalar gradient; a per-interface-cell regression onto the
+        # frozen confidence head's expected PAE gives them pair-level
+        # supervision (the research audit's root-cause fix). Bias starts at
+        # the trunk's global mean PAE so the aux term is small at step 0.
+        self.pae_aux = pae_aux
+        if self.pae_aux:
+            self.pae_aux_head = nn.Linear(c_z, 1)
+            nn.init.zeros_(self.pae_aux_head.weight)
+            with torch.no_grad():
+                self.pae_aux_head.bias.fill_(20.0)
+        self.ipsae_pool_v3 = ipsae_pool_v3
+        if self.ipsae_pool_v3:
+            self.log_sigma_dist = nn.Parameter(torch.zeros(1))
+            self.log_T_anchor = nn.Parameter(torch.zeros(1))
+            self.gate_mlp_v3 = nn.Sequential(
+                nn.Linear(c_z + 1, 32), nn.GELU(), nn.Linear(32, 1),
+            )
+            nn.init.zeros_(self.gate_mlp_v3[-1].weight)
+            nn.init.zeros_(self.gate_mlp_v3[-1].bias)
+            in_dim = in_dim + c_z
         self.out_mlp = nn.Sequential(
             nn.Linear(in_dim, c_z), nn.GELU(), nn.Dropout(dropout),
             nn.Linear(c_z, c_s), nn.GELU(),
@@ -237,11 +269,16 @@ class ProtenixAffinityHead(nn.Module):
         lig: torch.Tensor,
         pair_mask: torch.Tensor,
         mc_samples: int,
+        expected_pae=None,
+        contact_stats=None,
         return_tensors: bool = False,
+        full_dist=None,
+        true_pae=None,
     ) -> dict[str, Any]:
         return self._forward_single_impl(
             s_inputs, z_trunk, dmin, lt_u, rt_u, rec, lig,
-            pair_mask, mc_samples, return_tensors,
+            pair_mask, mc_samples, expected_pae, contact_stats, return_tensors,
+            full_dist, true_pae,
         )
 
     def _forward_single_impl(
@@ -255,7 +292,11 @@ class ProtenixAffinityHead(nn.Module):
         lig: torch.Tensor,
         pair_mask: torch.Tensor,
         mc_samples: int,
+        expected_pae=None,
+        contact_stats=None,
         return_tensors: bool = False,
+        full_dist=None,
+        true_pae=None,
     ) -> dict[str, Any]:
         B, N = z_trunk.shape[:2]
         if B != 1:
@@ -272,6 +313,18 @@ class ProtenixAffinityHead(nn.Module):
         )
         z = z + sz
 
+        z0 = z[0].reshape(N * N, -1)
+        # Full-token trunk-distogram embedding (trunk geometric belief on
+        # every cell); the interface pose embedding below adds on top, so an
+        # interface cell sees belief + realized pose distance.
+        if self.full_dist_cond and full_dist is not None:
+            fd = full_dist.to(z0.device)
+            if fd.dim() == 2 and fd.shape[0] == N and fd.shape[1] == N:
+                db_f = (fd.float().reshape(-1).unsqueeze(-1)
+                        > self.boundaries).sum(-1).long()
+                db_f = db_f.clamp(0, self.num_dist_bins - 1)
+                z0 = z0 + self.dist_bin_pairwise_embed(db_f)
+
         # Distances come prepared per sample: crystal pose, diffusion sample,
         # or trunk distogram expected distances — one interface matrix.
         rows, cols = torch.meshgrid(
@@ -284,7 +337,6 @@ class ProtenixAffinityHead(nn.Module):
         emb = self.dist_bin_pairwise_embed(db)
         flat_rows = lt_u[rows.reshape(-1)]
         flat_cols = rt_u[cols.reshape(-1)]
-        z0 = z[0].reshape(N * N, -1)
         z0 = z0.index_add(0, (flat_rows * N + flat_cols), emb)
         z0 = z0.index_add(0, (flat_cols * N + flat_rows), emb)
         z = z0.view(N, N, -1).unsqueeze(0)
@@ -295,8 +347,10 @@ class ProtenixAffinityHead(nn.Module):
         # mechanism as the trunk's pairformer. The old `N > 640` guard never
         # fired for max_seq_len<=600 training sets, leaving N~550 triangle
         # attention unchunked at ~20-25GB. Training mode now ALWAYS chunks +
-        # checkpoints; inference keeps the size-based rule.
-        chunk_size = 32 if (self.training or N > 640) else None
+        # checkpoints; inference keeps the size-based rule. Training chunks
+        # at 16: the largest samples transiently peaked ~21GB at chunk 32
+        # against a 23.5GB GPU (OOM crash-loop, 2026-10-07).
+        chunk_size = 16 if (self.training or N > 640) else None
         blocks = [
             partial(block, pair_mask=pm, chunk_size=chunk_size)
             for block in self.blocks
@@ -308,6 +362,56 @@ class ProtenixAffinityHead(nn.Module):
 
         pmf = pm.unsqueeze(-1).to(z.dtype)
         g = (z * pmf).sum(dim=(1, 2)) / (pmf.sum(dim=(1, 2)) + 1e-7)
+
+        # Per-pair PAE auxiliary supervision (v7): regress the frozen
+        # confidence head's expected PAE on the interface grid from the
+        # post-block pair representation. This is the pair-level gradient
+        # the blocks never had (scalar readout made per-pair structure
+        # unidentifiable). true_pae arrives as the full [N, N] matrix or
+        # pre-indexed [n_lt, n_rt] (same convention as expected_pae).
+        pae_aux_loss = None
+        if self.pae_aux and true_pae is not None:
+            tp = true_pae.to(z.device, z.dtype)
+            if tp.dim() == 2 and tp.shape[0] == N and tp.shape[1] == N:
+                tgt = tp[lt_u][:, rt_u]
+            else:
+                tgt = tp
+            pred = self.pae_aux_head(z[0][lt_u][:, rt_u]).squeeze(-1)
+            pae_aux_loss = F.huber_loss(pred, tgt)
+
+        # v3: IPSAE-kernel weighted pooling. Three audit fixes (2026-10-06):
+        #   1. d0 follows ipSAE convention — receptor token count, not
+        #      interface cell mass (cell mass made the ptm decay nearly flat).
+        #   2. expected_pae arrives either as the full [N, N] matrix or
+        #      pre-indexed to the interface grid; index once, before the
+        #      kernel, so shapes never broadcast against [N, N].
+        #   3. The kernel is scattered into an [n_lt, N] matrix so pooling
+        #      reads z rows over all tokens with off-interface mass zero.
+        if self.ipsae_pool_v3 and expected_pae is not None:
+            n_rec = int(rec.sum().item())
+            d0_conf = max(1.0, 1.24 * (n_rec - 15) ** (1 / 3) - 1.8) if n_rec > 15 else 1.0
+            if expected_pae.dim() == 2 and expected_pae.shape[0] == N \
+                    and expected_pae.shape[1] == N:
+                pae_pair = expected_pae[lt_u][:, rt_u]
+            else:
+                pae_pair = expected_pae
+            ptm_pae = 1.0 / (1.0 + (pae_pair.to(z.dtype) / d0_conf) ** 2)
+            sigma = torch.exp(self.log_sigma_dist.clamp(-3, 3))
+            dist_gate = torch.exp(-dmin ** 2 / (2 * sigma ** 2))
+            K = z.new_zeros(len(lt_u), N)
+            K.index_copy_(1, rt_u, ptm_pae * dist_gate)
+            K = K * pm[0][lt_u].to(z.dtype)
+            Ksum_l = K.sum(dim=1).clamp(min=1e-7).unsqueeze(-1)
+            e_l = (K.unsqueeze(-1) * z[0][lt_u]).sum(dim=1) / Ksum_l
+            k_mass = (K.sum(dim=1) / N).unsqueeze(-1)
+            gate_in = torch.cat([e_l, k_mass], dim=-1)
+            gate_w = torch.sigmoid(self.gate_mlp_v3(gate_in))
+            s_l = e_l * gate_w
+            T_a = torch.exp(self.log_T_anchor.clamp(-3, 3))
+            s_scaled = s_l / T_a
+            s_max = s_scaled.max(dim=0).values
+            g_anchor = s_max + torch.log(torch.exp(s_scaled - s_max).sum(dim=0))
+            g = torch.cat([g, g_anchor.unsqueeze(0)], dim=-1)
         if self.pocket_cond:
             s_flat = s_inputs[0].float()  # [N, c_s]
             n_rec = rec.sum().clamp(min=1)
@@ -336,6 +440,8 @@ class ProtenixAffinityHead(nn.Module):
             "affinity_logits_binary_t": logit,
             "affinity_probability_binary_t": torch.sigmoid(logit),
         }
+        if pae_aux_loss is not None:
+            entry["pae_aux_loss_t"] = pae_aux_loss
         if not return_tensors:
             entry = {
                 "affinity_pred_value": value.item(),
@@ -359,7 +465,12 @@ class ProtenixAffinityHead(nn.Module):
         token_pad_mask: Optional[torch.Tensor] = None,
         mc_samples: Optional[int] = None,
         expected_dist: Optional[torch.Tensor] = None,
+        expected_pae: Optional[torch.Tensor] = None,
+        contact_stats: Optional[torch.Tensor] = None,
+        plddt_lig: Optional[torch.Tensor] = None,
         return_tensors: bool = False,
+        full_dist: Optional[torch.Tensor] = None,
+        true_pae: Optional[torch.Tensor] = None,
     ) -> list[dict[str, Any]]:
         """x_pred path (inference, structure supervision) or expected_dist path.
 
@@ -410,7 +521,8 @@ class ProtenixAffinityHead(nn.Module):
                 results.append(
                     self._forward_single(
                         s_inputs, z_trunk, grid, lt_u, rt_u, rec, lig,
-                        pair_mask, n_mc, return_tensors,
+                        pair_mask, n_mc, expected_pae, contact_stats,
+                        return_tensors, full_dist=ed, true_pae=true_pae,
                     )
                 )
             else:
@@ -422,7 +534,9 @@ class ProtenixAffinityHead(nn.Module):
                     results.append(
                         self._forward_single(
                             s_inputs, z_trunk, dmin, lt_u, rt_u, rec, lig,
-                            pair_mask, n_mc, return_tensors,
+                            pair_mask, n_mc, expected_pae, contact_stats,
+                            return_tensors, full_dist=full_dist,
+                            true_pae=true_pae,
                         )
                     )
         return results
