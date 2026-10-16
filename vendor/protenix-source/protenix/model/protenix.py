@@ -1101,14 +1101,57 @@ class Protenix(nn.Module):
                 )
         if getattr(self, "affinity_heads", None):
             try:
+                # Derive expected PAE from the real confidence output (not
+                # the z-only linear probe) and select the ipTM-best sample
+                # (Boltz-2 pattern: confidence→affinity at sample level).
+                _pae_logits = pred_dict.get("pae")          # [N_sample, N_tok, N_tok, 64]
+                _iptm_per_sample = []
+                for sc in pred_dict.get("summary_confidence", []):
+                    _iptm_per_sample.append(float(sc.get("iptm", 0)))
+                _best_sample = int(np.argmax(_iptm_per_sample)) if _iptm_per_sample else 0
+
+                from protenix.model.sample_confidence import get_bin_centers
+
+                # expected PAE (Å) from binned logits
+                _pae_exp = None
+                if _pae_logits is not None:
+                    dcfg = self.configs.loss.pae if hasattr(self.configs, 'loss') and hasattr(self.configs.loss, 'pae') else None
+                    if dcfg is not None:
+                        _centers = get_bin_centers(
+                            float(dcfg.min_bin), float(dcfg.max_bin), int(dcfg.no_bins)
+                        ).to(_pae_logits.device)
+                        _probs = torch.softmax(_pae_logits[_best_sample].float(), dim=-1)
+                        _pae_exp = (_probs * _centers).sum(-1)  # [N_tok, N_tok]
+
+                # Full-token distogram conditioning channel — parity with
+                # training and the benchmark eval path (_grad_entry); heads
+                # without full_dist_cond stay unconditioned.
+                _full_dist = None
+                if any(getattr(h, "full_dist_cond", False) for h in self.affinity_heads):
+                    try:
+                        dcfg_d = self.configs.loss.distogram
+                        _dprobs = torch.softmax(self.distogram_head(z.float()), dim=-1)
+                        _dcenters = get_bin_centers(
+                            float(dcfg_d.min_bin), float(dcfg_d.max_bin), int(dcfg_d.no_bins)
+                        ).to(z.device)
+                        _full_dist = (_dprobs * _dcenters).sum(-1)  # [N_tok, N_tok] Å
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"protenix2dock affinity: full_dist unavailable ({exc})")
+
                 all_entries = []
                 for head in self.affinity_heads:
                     all_entries.append(head(
                         s_inputs=s_inputs,
                         z_trunk=z,
-                        x_pred=pred_dict["coordinate"],
+                        # head contract: dim 0 of x_pred is the SAMPLE dim —
+                        # a bare [_best_sample] view passed [N_atom, 3] and
+                        # the head looped over atoms (silent affinity loss
+                        # under the broad except, audited 2026-10-07).
+                        x_pred=pred_dict["coordinate"][_best_sample:_best_sample + 1],
                         atom_to_token_idx=input_feature_dict["atom_to_token_idx"],
                         atom_is_ligand=input_feature_dict["is_ligand"],
+                        expected_pae=_pae_exp,
+                        full_dist=_full_dist if getattr(head, "full_dist_cond", False) else None,
                     ))
                 # Ensemble across heads: mean value, cross-head std.
                 aff_entries = []
@@ -1124,14 +1167,17 @@ class Protenix(nn.Module):
                                 / len(vals)
                             ) ** 0.5
                     aff_entries.append(merged)
-                for entry, summary in zip(aff_entries, pred_dict["summary_confidence"]):
-                    if entry:
-                        summary.update(entry)
+                # The head scored only the selected sample: attach to THAT
+                # sample's summary (zip-from-0 mislabeled sample 0 whenever
+                # the ipTM-best sample was not sample 0).
+                if (aff_entries and aff_entries[0]
+                        and _best_sample < len(pred_dict["summary_confidence"])):
+                    pred_dict["summary_confidence"][_best_sample].update(aff_entries[0])
                 logger.info(
                     "protenix2dock affinity: "
                     + "; ".join(
-                        f"sample{i}={e.get('affinity_pred_value', float('nan')):.3f}"
-                        for i, e in enumerate(aff_entries)
+                        f"sample{_best_sample}={e.get('affinity_pred_value', float('nan')):.3f}"
+                        for e in aff_entries
                         if e
                     )
                 )

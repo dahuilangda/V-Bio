@@ -816,6 +816,9 @@ def chunk_layer(
 
 
 def get_checkpoint_fn():
+    # torch.utils.checkpoint is a lazy submodule: bare `import torch` does not
+    # bind it (observed on CPU-only eval paths, 2026-10-06).
+    import torch.utils.checkpoint  # noqa: F401
     return partial(torch.utils.checkpoint.checkpoint, use_reentrant=False)
 
 
