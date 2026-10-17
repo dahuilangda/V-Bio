@@ -422,6 +422,8 @@ function normalizePeptideResiduePool(value: unknown): NonNullable<PredictionOpti
         const label = String(raw.label || '').trim().slice(0, 80);
         if (label) entry.label = label;
         if (raw.cTerminalAmidated) entry.cTerminalAmidated = true;
+        const backbone = normalizeBackboneOverride(raw.backbone);
+        if (backbone) entry.backbone = backbone;
       }
     }
     pool.push(entry);
