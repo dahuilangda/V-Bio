@@ -10807,10 +10807,23 @@ def run_peptide_design_backend(
                         + 0.32 * pocket_satisfaction
                     )
                 else:
+                    # Interface engagement (BindCraft2's highest-weight signal):
+                    # clean cross-chain heavy-atom contacts at 4.5 A, saturated
+                    # at 40 pairs. ipSAE is a saturating confidence — contacts
+                    # provide the per-candidate discrimination that GRPO needs
+                    # for credit assignment.
+                    try:
+                        _iface_count = _interchain_contact_count(
+                            Path(structure_file))
+                    except Exception:
+                        _iface_count = 0
+                    _ic = min(1.0, _iface_count / 40.0)
                     composite_score = (
-                        0.58 * pair_iptm_confidence
-                        + 0.30 * binder_confidence
-                        + 0.12 * developability_score
+                        0.45 * interface_confidence
+                        + 0.20 * binder_confidence
+                        + 0.09 * pair_iptm_confidence
+                        + 0.09 * developability_score
+                        + 0.18 * _ic
                     )
                 if pair_iptm is None:
                     pair_iptm_formula = "binder_avg_plddt_developability_only"
