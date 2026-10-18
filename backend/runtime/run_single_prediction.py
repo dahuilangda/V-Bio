@@ -8259,7 +8259,13 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
     chains = sorted(st[0], key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
     if len(chains) < 2:
         return (0.0, {})
-    pep = chains[-1]  # shortest chain = the peptide (multi-chain receptors)
+    # peptide = shortest polymer chain with >= 8 residues (excludes the
+    # single-residue linker chain that bicyclic complexes carry)
+    _pep_candidates = [c for c in chains
+                       if sum(1 for r in c if r.het_flag != "H") >= 8]
+    if not _pep_candidates:
+        return 0.0, {}
+    pep = _pep_candidates[-1]
     ca = np.array([
         [a.pos.x, a.pos.y, a.pos.z]
         for r in pep for a in r if a.name == "CA"
@@ -8846,6 +8852,9 @@ def _pocket_collect_refine(
 
     if require_bonds:
         bond_report = _dpeptide_linker_bond_report(Path(refined_path))
+        if not bond_report.get("all_bonded"):
+            raise ValueError(
+                f"linker covalent integrity gate: {bond_report.get('bonds')}")
     else:
         bond_report = None
 
@@ -9600,8 +9609,7 @@ def run_peptide_design_backend(
         except (ValueError, json.JSONDecodeError):
             _start_generation = 1
 
-        except ImportError:
-            return False
+
 
     # PeptideLM proposal engine — the ONLY peptide design algorithm in
     # V-Bio (two-tier language-model design; see capabilities/peptide_lm).
@@ -10992,11 +11000,19 @@ def run_peptide_design_backend(
                         f"{c}:{n}" for c, n in pocket_sequence_contacts)
 
                     def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch, _pk: Optional[str] = _pocket_res_for_dispatch):  # noqa: E731
+                        _st = gemmi.read_structure(str(_staged))
+                        _st.setup_entities()
+                        _poly = [ch.name for ch in _st[0]
+                                 if sum(1 for r in ch if r.het_flag != "H") >= 3]
+                        _pep_letter = _poly[-1] if _poly else "B"
+                        _rec_letters = ",".join(_poly[:-1]) if len(_poly) > 1 else "A"
                         return _dpeptide_dispatch_refine(
                             _staged, _seed, build_capability_queue("protenix", "default"),
                             blind=False,
                             cyclic_headtail=(design_mode == "cyclic"),
-                            pocket_res=_pk)
+                            pocket_res=_pk,
+                            peptide_chain_letter=_pep_letter,
+                            receptor_chain_letters=_rec_letters)
                 except (RuntimeError, ValueError) as pocket_exc:
                     stage_contexts.append({
                         "reject": (
