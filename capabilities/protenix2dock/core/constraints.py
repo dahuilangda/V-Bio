@@ -25,8 +25,7 @@ from core.geometry_tables import (
     ideal_bond_angle,
 )
 
-# pre-split private aliases: the constraint body predates the
-# geometry_tables extraction and keeps its original call names
+
 _STD_AA_BONDS = STD_AA_BONDS
 _ideal_bond_length_residue = ideal_bond_length_residue
 _ideal_bond_angle = ideal_bond_angle
