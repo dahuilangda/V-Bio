@@ -52,24 +52,24 @@ MAX_CONTEXT_DICT_KEYS = 80
 # every list is cut to 40. The budgeted sanitizer tightens the per-item caps in tiers until the
 # serialized payload fits, so an oversized contract degrades to a bounded, marker-annotated view
 # instead of crashing the turn at model-call time.
-MAX_CONTEXT_TOTAL_CHARS = 24000
-MAX_MODEL_MESSAGE_CHARS = 64000
+MAX_CONTEXT_TOTAL_CHARS = 120_000
+MAX_MODEL_MESSAGE_CHARS = 800_000
 # Soft budget for the planner conversation. Above it, older harness feedback rounds are elided
 # before the request (their data is preserved in the observation ledger carried on every feedback
 # round), so a long multi-step plan cannot exhaust the hard cap and crash the turn.
-CONTEXT_SOFT_LIMIT_CHARS = 48000
+CONTEXT_SOFT_LIMIT_CHARS = 600_000
 # Authoritative long fields (sequence, SMILES) fed back to the planner must be passed in full —
 # the model can only quote verbatim what it actually receives. A 50-char preview would make a
 # "give me the sequence" answer impossible. The cap only guards against pathological sizes.
-MAX_OBSERVATION_LONG_CHARS = 4000
+MAX_OBSERVATION_LONG_CHARS = 16_000
 # The ledger is the compact carry-forward view of every retrieved record; long fields are capped
 # tighter there because the full values were already shown in that round's detailed summary.
-MAX_LEDGER_LONG_CHARS = 60
+MAX_LEDGER_LONG_CHARS = 4_000
 # Aggregate token ceiling for ONE planner turn (all model calls summed). Round and wall-clock
 # budgets bound TIME; this bounds COST/SIZE — a many-round outline turn otherwise had no spend
 # ceiling beyond MAX_TURN_SECONDS. Enforced right after each model call via the same graceful
 # pressure exit as the other budgets (salvage accumulated work, no extra model call).
-MAX_TURN_TOTAL_TOKENS = 200_000
+MAX_TURN_TOTAL_TOKENS = 500_000
 
 # Record keys that are pure plumbing — the source DB name, the echoed search term, result counts,
 # and harness bookkeeping. Never useful in the model's answer, so skipped when rendering a record.
@@ -209,7 +209,7 @@ WORKER_STATUS_SKILL = "platform.worker_status"
 
 # Cap on how many prior-turn records are carried forward as copilot_memory — enough for continuity
 # on a follow-up, small enough to stay well under the context budget.
-MAX_MEMORY_RECORDS = 20
+MAX_MEMORY_RECORDS = 100
 
 
 def _compact_memory_records(observations: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -817,7 +817,7 @@ class CopilotAssistant:
     # Wall-clock ceiling for ONE turn (seconds). Round budgets alone allow pathological
     # multi-hour turns (47 rounds x 90s model calls + read waves); the deadline ends them
     # with the same honest failed terminal instead of burning worker threads and tokens.
-    MAX_TURN_SECONDS = 170
+    MAX_TURN_SECONDS = 600
 
     # Guards the (url, key, model) triple against runtime-settings swaps: readers snapshot
     # all three under the lock; the hot-reload writer assigns all three under it too.
@@ -1128,7 +1128,7 @@ class CopilotAssistant:
         body: Dict[str, Any] = {
             "model": chat_model,
             "messages": messages,
-            "max_tokens": 4096 if self.enable_thinking else 3072,
+            "max_tokens": 16384 if self.enable_thinking else 8192,
             "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
             # Simple grammar (skill:enum, permissive arguments). This ensures the model outputs

@@ -550,7 +550,7 @@ export function ProjectCopilotModal({
 
   // Render only the newest slice; older messages load in chunks (markdown re-parse
   // on remount is expensive on a long session).
-  const MESSAGE_WINDOW = 40;
+  const MESSAGE_WINDOW = 200;
   const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_WINDOW);
   useEffect(() => {
     setVisibleMessageCount(MESSAGE_WINDOW);
