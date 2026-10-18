@@ -5,8 +5,8 @@
 import type { ProjectCopilotMessage } from '../../types/models';
 import { readActionResolutions, type CopilotActionResolution } from './copilotTraceUi';
 
-const COPILOT_RECENT_CONTEXT_MESSAGES = 6;
-const COPILOT_SUMMARY_SOURCE_MESSAGES = 12;
+const COPILOT_RECENT_CONTEXT_MESSAGES = 40;
+const COPILOT_SUMMARY_SOURCE_MESSAGES = 200;
 const COPILOT_CONTEXT_MESSAGE_CHARS = 700;
 const COPILOT_CONTEXT_SUMMARY_CHARS = 1800;
 
