@@ -305,6 +305,21 @@ def register_task_routes(
                 if isinstance(info, Exception)
                 else (info if isinstance(info, dict) else {'message': str(info)})
             )
+            # Celery stores exc_message as a single-element list when the FAILURE
+            # meta comes from update_state(). Left as a list, clients that surface
+            # info.status/info.message fall through to the state name and the real
+            # cause never reaches project_tasks.error_text (rows showing just
+            # "FAILURE"). Flatten it and mirror it into message for those readers.
+            info_payload = response['info']
+            if isinstance(info_payload, dict):
+                exc_message = info_payload.get('exc_message')
+                if isinstance(exc_message, (list, tuple)):
+                    info_payload['exc_message'] = '\n'.join(str(part) for part in exc_message)
+                # message 缺失时用 exc_message 兜底(status 只是状态名, 无详情)
+                if not str(info_payload.get('message') or '').strip():
+                    exc_text = str(info_payload.get('exc_message') or '').strip()
+                    if exc_text:
+                        info_payload['message'] = exc_text
             logger.error('Task %s is in FAILURE state. Info: %s', task_id, response['info'])
         elif task_result.state == 'REVOKED':
             runtime_processes = task_monitor._find_task_processes(task_id)
