@@ -52,9 +52,11 @@ def _ensure_adapter_loaded(key: str) -> None:
 def _optimizer_for(key: str) -> torch.optim.AdamW:
     opt = _adapter_optimizers.get(key)
     if opt is None:
+        # weight_decay=0: 整组奖励相同的代际 adv 全 0、grads 全 0, 而 AdamW 的
+        # 解耦衰减与梯度无关——默认 0.01 会在零信号步仍腐蚀 adapter 权重。
         opt = torch.optim.AdamW(
             [p for p in policy.model.parameters() if p.requires_grad],
-            lr=1e-5)
+            lr=1e-5, weight_decay=0.0)
         _adapter_optimizers[key] = opt
     return opt
 
