@@ -1390,13 +1390,17 @@ else
   echo "TASK_ID=$TASK_ID"
 fi
 `;
+  const peptideDesignCurlFlags = selectedWorkflow.key === 'peptide_design'
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true"`
+    : '';
+
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectivePredictionBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
-  -F "priority=high"${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
+  -F "priority=high"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinity = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
