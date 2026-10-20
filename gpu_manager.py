@@ -2,10 +2,13 @@ import redis
 from backend.core import config
 import logging
 import math
+import re
+import threading
 import time
 import os
 import shutil
 import subprocess
+from datetime import datetime
 from typing import Any
 
 # 使用标准日志记录模块
@@ -125,25 +128,35 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-def _collect_live_celery_task_ids() -> set[str]:
+def _collect_live_celery_task_ids() -> set[str] | None:
     """
     Collect currently live Celery task ids from active/reserved/scheduled slots.
+
+    Returns None when celery is unreachable (import/inspect failure) — callers
+    MUST treat None as "unknown" and skip reclamation/kill decisions, because an
+    empty set would misread running tasks as orphans.
     """
     live: set[str] = set()
     try:
         from backend.core.celery_app import celery_app
     except Exception as exc:
-        logger.warning("无法导入 celery_app 以检查活跃任务，将跳过 live-task 检查: %s", exc)
-        return live
+        logger.warning("无法导入 celery_app 以检查活跃任务: %s", exc)
+        return None
 
     try:
         inspector = celery_app.control.inspect(timeout=2)
-        active = inspector.active() or {}
-        reserved = inspector.reserved() or {}
-        scheduled = inspector.scheduled() or {}
+        active = inspector.active()
+        reserved = inspector.reserved()
+        scheduled = inspector.scheduled()
+        if active is None and reserved is None and scheduled is None:
+            logger.warning("celery inspect 无应答（worker 全部离线或广播超时），活跃任务状态未知")
+            return None
+        active = active or {}
+        reserved = reserved or {}
+        scheduled = scheduled or {}
     except Exception as exc:
-        logger.warning("检查 Celery 活跃任务失败，将跳过 live-task 检查: %s", exc)
-        return live
+        logger.warning("检查 Celery 活跃任务失败: %s", exc)
+        return None
 
     def _append_from_rows(rows: Any) -> None:
         if not isinstance(rows, list):
@@ -178,6 +191,114 @@ def _read_task_state(task_id: str) -> str:
         return str(AsyncResult(normalized, app=celery_app).state or "").strip().upper()
     except Exception:
         return ""
+
+
+# MSA 租约 owner 形如 colabfold_msa:<pid>:<租约起始 epoch>（mmseqs_wrapper 生成）。
+_MSA_OWNER_RE = re.compile(r"^colabfold_msa:\d+:(\d+)$")
+# 租约建立到首次心跳之间存在无心跳窗口，此期间 AsyncResult 对非 celery owner 恒为
+# PENDING，回收会造出双租约。与 wrapper 的 LEASE_MIN_AGE_SECONDS 保持一致。
+GPU_LEASE_MIN_AGE_SECONDS = 120
+
+
+def _msa_owner_lease_age_seconds(owner: str) -> float | None:
+    """MSA owner 的租约年龄；非 MSA 格式返回 None。"""
+    match = _MSA_OWNER_RE.match(str(owner or "").strip())
+    if not match:
+        return None
+    try:
+        return max(0.0, time.time() - int(match.group(1)))
+    except ValueError:
+        return None
+
+
+def count_long_task_lease_holders(client: Any) -> int:
+    """in_use 中非 MSA owner 的租约数（celery 任务 / ESM3 服务等长任务持有者）。"""
+    try:
+        in_use = client.hgetall(config.GPU_IN_USE_HASH_KEY) or {}
+    except Exception:
+        return 0
+    holders = 0
+    for owner in in_use.values():
+        owner_id = owner.decode() if isinstance(owner, bytes) else str(owner)
+        if _MSA_OWNER_RE.match(owner_id.strip()):
+            continue
+        holders += 1
+    return holders
+
+
+def _prune_stale_waiters(client: Any, key: str) -> None:
+    """物理清理停止刷新的死条目（只在维护周期执行，避免读路径写放大）。"""
+    cutoff = time.time() - max(30, config.GPU_WAITER_STALE_SECONDS)
+    client.zremrangebyscore(key, "-inf", cutoff)
+
+
+def count_live_msa_waiters(client: Any) -> int:
+    """存活的 MSA 等待方数量（只读：score 晚于 staleness 阈值的成员数）。
+
+    wrapper 等卡期间每轮（≤30s）ZADD 刷新 score；死亡条目的物理清理由
+    维护周期的 _prune_stale_waiters 承担。
+    """
+    try:
+        cutoff = time.time() - max(30, config.GPU_WAITER_STALE_SECONDS)
+        return int(client.zcount(config.GPU_MSA_WAITING_ZSET_KEY, cutoff, "+inf") or 0)
+    except Exception:
+        return 0
+
+
+def msa_reservation_blocks(client: Any, task_id: str) -> tuple[bool, str]:
+    """MSA 软保留判定：有存活等待方且长任务持卡达上限时，新的长任务让位。
+
+    只限制新增占用（无抢占）：MSA 无等待方时零开销，4 卡照常全供长任务。
+    """
+    if not config.GPU_MSA_RESERVE_ENABLED:
+        return False, ""
+    live_waiters = count_live_msa_waiters(client)
+    if live_waiters <= 0:
+        return False, ""
+    holders = count_long_task_lease_holders(client)
+    if holders < max(1, config.GPU_MSA_RESERVE_HOLDER_LIMIT):
+        return False, ""
+    return True, f"msa_waiters={live_waiters} long_holders={holders} (limit={config.GPU_MSA_RESERVE_HOLDER_LIMIT})"
+
+
+def register_priority_waiter(client: Any, task_id: str) -> None:
+    """高优先级任务开始等卡时登记；score=epoch 供死亡自愈。"""
+    try:
+        client.zadd(config.GPU_PRIORITY_WAITING_ZSET_KEY, {str(task_id): time.time()})
+    except Exception as exc:
+        logger.warning("高优等待登记失败 task=%s: %s（default 任务将不再为其让位）", task_id, exc)
+
+
+def unregister_priority_waiter(client: Any, task_id: str) -> None:
+    try:
+        client.zrem(config.GPU_PRIORITY_WAITING_ZSET_KEY, str(task_id))
+    except Exception:
+        pass
+
+
+def count_live_priority_waiters(client: Any) -> int:
+    """存活的高优等待方数量（只读，语义同 count_live_msa_waiters）。"""
+    try:
+        cutoff = time.time() - max(30, config.GPU_WAITER_STALE_SECONDS)
+        return int(client.zcount(config.GPU_PRIORITY_WAITING_ZSET_KEY, cutoff, "+inf") or 0)
+    except Exception:
+        return 0
+
+
+def _yield_reason(client: Any, task_id: str, priority: str) -> str:
+    """acquire 让位判定：返回让位原因，空串表示可取卡。
+
+    两层让位（均只限制新增占用，不触碰已持卡）：
+    - MSA 软保留：所有 python 任务都是长任务，为短促的 MSA search 让位；
+    - 优先级让位：default 任务在有存活高优等待方时让位（高优自身不让）。
+    """
+    blocked, detail = msa_reservation_blocks(client, task_id)
+    if blocked:
+        return f"msa_reserve: {detail}"
+    if priority != "high" and config.GPU_PRIORITY_RESERVE_ENABLED:
+        if count_live_priority_waiters(client) > 0:
+            return "priority_waiters>0"
+    return ""
 
 
 def _rebuild_available_gpu_queue(client: redis.Redis, valid: set[int], in_use_raw: dict[str, str]) -> tuple[list[int], list[int]]:
@@ -223,6 +344,9 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
         return {"released": [], "kept": {}, "held_dirty": [], "live_tasks": 0}
 
     live_task_ids = _collect_live_celery_task_ids()
+    if live_task_ids is None:
+        return {"released": [], "kept": {}, "held_dirty": [], "live_tasks": 0,
+                "skipped": "celery_unreachable"}
     released: list[tuple[int, str, str]] = []
     held_dirty: list[tuple[int, str, str]] = []
     kept: dict[str, str] = {}
@@ -268,6 +392,13 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
             kept[str(gpu_id)] = task_id
             continue
 
+        # 最短租龄保护：无心跳的新 MSA 租约不得回收（双租约窗口），见
+        # GPU_LEASE_MIN_AGE_SECONDS。
+        msa_lease_age = _msa_owner_lease_age_seconds(task_id)
+        if msa_lease_age is not None and msa_lease_age < GPU_LEASE_MIN_AGE_SECONDS:
+            kept[str(gpu_id)] = task_id
+            continue
+
         state = _read_task_state(task_id)
         if state in {"SUCCESS", "FAILURE", "REVOKED"}:
             _reclaim_if_memory_reclaimed(gpu_id, task_id, f"terminal_{state.lower()}")
@@ -289,8 +420,9 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
 RECONCILE_LOCK_KEY = "boltz_gpu_pool:reconcile_lock"  # 不加 namespace：全局单写者
 # must cover the worst-case reconcile duration: N dirty GPUs × the
 # 90s memory-reclaim wait each, plus nvidia-smi subprocess latency
-RECONCILE_LOCK_TTL_SECONDS = 300
-RECONCILE_MIN_INTERVAL_SECONDS = RECONCILE_LOCK_TTL_SECONDS
+# （4 卡全脏需 360s+，300 会在 reconcile 进行中过期引发并发进入）
+RECONCILE_LOCK_TTL_SECONDS = 600
+RECONCILE_MIN_INTERVAL_SECONDS = 300
 
 
 def _try_acquire_reconcile_lock(client: Any, task_id: str) -> bool:
@@ -323,7 +455,7 @@ def _run_throttled_reconcile(client: Any, task_id: str, last_reconcile: float) -
         return time.monotonic()
     except Exception as exc:
         logger.warning(f"任务 {task_id}: reconcile 失败，继续 blpop: {exc}")
-        return last_reconcile
+        return time.monotonic()  # 失败也推进节流，避免 redis 抖动时的告警风暴
     finally:
         _release_reconcile_lock(client, task_id)
 
@@ -350,6 +482,141 @@ def reconcile_gpu_pool(client: Any = None) -> dict:
     return {"skipped": False, "valid": sorted(valid), **reconcile}
 
 
+def run_maintenance_cycle(client: Any = None) -> dict:
+    """单轮池自愈：持全局 reconcile 锁执行，避免与 acquire 驱动的 reconcile 并发重建池。"""
+    client = client or get_redis_client()
+    if not _try_acquire_reconcile_lock(client, "maintenance"):
+        return {"skipped": True}
+    try:
+        return reconcile_gpu_pool(client)
+    finally:
+        _release_reconcile_lock(client, "maintenance")
+
+
+def sweep_orphan_task_containers(policy: str | None = None) -> list[dict[str, str]]:
+    """上报与租约体系脱节的运行中任务容器（worker 容器死亡后的常见残留）。
+
+    判定条件（全部满足）：容器带 boltz.task_id label；运行时长超过
+    GPU_ORPHAN_MIN_AGE_SECONDS；不在任何 celery worker 的活跃集合中；心跳不存在。
+    policy="kill" 时追加 docker rm -f，默认仅报告。
+    """
+    policy = (policy or config.GPU_ORPHAN_POLICY or "report").lower()
+    if not shutil.which("docker"):
+        return []
+    try:
+        listing = subprocess.run(
+            ["docker", "ps", "--filter", "label=boltz.task_id", "-q"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30, check=False,
+        )
+    except Exception as exc:
+        logger.warning("孤儿容器巡检：docker ps 失败: %s", exc)
+        return []
+    container_ids = listing.stdout.split()
+    if not container_ids:
+        return []
+
+    try:
+        inspect = subprocess.run(
+            ["docker", "inspect", "-f",
+             "{{.Id}} {{index .Config.Labels \"boltz.task_id\"}} {{.State.StartedAt}}",
+             *container_ids],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30, check=False,
+        )
+    except Exception as exc:
+        logger.warning("孤儿容器巡检：docker inspect 失败: %s", exc)
+        return []
+
+    live_task_ids = _collect_live_celery_task_ids()
+    if live_task_ids is None and policy == "kill":
+        logger.warning("孤儿容器巡检: celery 不可达,无法确认任务死活,本次跳过 kill")
+        return []
+    client = get_redis_client()
+    now = time.time()
+    orphans: list[dict[str, str]] = []
+    for line in inspect.stdout.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) != 3:
+            continue
+        container_id, task_id, started_at = parts
+        try:
+            age = now - datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if age < max(60, config.GPU_ORPHAN_MIN_AGE_SECONDS):
+            continue
+        if live_task_ids is not None and task_id in live_task_ids:
+            continue
+        if client.exists(f"task_heartbeat:{task_id}"):
+            continue
+        orphans.append({"container": container_id[:12], "task_id": task_id, "age_seconds": int(age)})
+
+    for orphan in orphans:
+        logger.warning(
+            "疑似孤儿任务容器: container=%s task=%s age=%ss（租约与活跃任务均无记录）",
+            orphan["container"], orphan["task_id"], orphan["age_seconds"],
+        )
+    if policy == "kill" and orphans:
+        for orphan in orphans:
+            logger.warning("按 GPU_ORPHAN_POLICY=kill 移除孤儿容器 %s", orphan["container"])
+            subprocess.run(
+                ["docker", "rm", "-f", orphan["container"]],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False,
+            )
+    return orphans
+
+
+_MAINTENANCE_STOP = threading.Event()
+
+
+
+def _check_disk_watermark() -> None:
+    """结果盘水位守卫：85% 告警、92% 严重。只告警不阻断——磁盘不足的行为
+    由任务侧报错兜底（docker 写盘失败会以可读诊断呈现）。"""
+    target = str(getattr(config, "RESULTS_BASE_DIR", "") or "/data")
+    try:
+        usage = shutil.disk_usage(target)
+    except Exception as exc:
+        logger.warning("磁盘水位检查失败 (%s): %s", target, exc)
+        return
+    percent = usage.used / usage.total * 100 if usage.total else 0.0
+    if percent >= config.DISK_CRITICAL_PERCENT:
+        logger.critical(
+            "磁盘水位严重: %s 已用 %.1f%% (%.0fGB/%.0fGB) — docker 写盘将失败, 请立即清理",
+            target, percent, usage.used / 2**30, usage.total / 2**30,
+        )
+    elif percent >= config.DISK_WARN_PERCENT:
+        logger.warning(
+            "磁盘水位告警: %s 已用 %.1f%% (%.0fGB/%.0fGB)",
+            target, percent, usage.used / 2**30, usage.total / 2**30,
+        )
+
+
+def run_maintenance_loop() -> None:
+    """GPU worker 容器内的常驻自愈循环：周期 reconcile + 孤儿容器巡检。
+
+    独立于 celery 进程（entrypoint 以 execvpe 启动 celery，线程无法存活），
+    由 runtime_entrypoint 在 exec 前 Popen 本模块 maintain 子命令启动。
+    """
+    interval = max(30, config.GPU_MAINTENANCE_INTERVAL_SECONDS)
+    client = get_redis_client()
+    logger.info("GPU 池维护循环启动 (interval=%ss, orphan_policy=%s)", interval, config.GPU_ORPHAN_POLICY)
+    while not _MAINTENANCE_STOP.is_set():
+        try:
+            _check_disk_watermark()
+            _prune_stale_waiters(client, config.GPU_MSA_WAITING_ZSET_KEY)
+            _prune_stale_waiters(client, config.GPU_PRIORITY_WAITING_ZSET_KEY)
+            result = run_maintenance_cycle(client)
+            if not result.get("skipped"):
+                logger.info(
+                    "GPU 池周期 reconcile: released=%s held_dirty=%s",
+                    len(result.get("released") or []), len(result.get("held_dirty") or []),
+                )
+            sweep_orphan_task_containers()
+        except Exception:
+            logger.exception("GPU 池维护循环异常，等待下一周期")
+        _MAINTENANCE_STOP.wait(interval)
+
+
 def initialize_gpu_pool(devices_to_use: list[int]):
     """
     根据给定的设备列表，初始化或重置 Redis 中的 GPU 池。
@@ -358,6 +625,12 @@ def initialize_gpu_pool(devices_to_use: list[int]):
         devices_to_use (list[int]): 要放入池中的 GPU 设备 ID 列表。
     """
     client = get_redis_client()
+    if config.GPU_POOL_NAMESPACE:
+        logger.warning(
+            "GPU_POOL_NAMESPACE='%s' 已启用: colabfold 侧 mmseqs_wrapper 的池键与"
+            "等待登记键为独立默认值, 需同步设置 MSA_GPU_* 环境变量, 否则软保留"
+            "与租约回收将静默失配。", config.GPU_POOL_NAMESPACE,
+        )
     logger.info("--- GPU 池初始化 ---")
     
     pipe = client.pipeline()
@@ -489,12 +762,15 @@ return 1
 """
 
 
-def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
+def acquire_gpu(
+    task_id: str, timeout: int = 3600, priority: str = "default", cancel_check=None
+) -> int:
     """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；超时抛 TimeoutError。
 
-    拿到池成员后先做池外占用准入检查（acquire_gpu_external_occupancy）：被外部
-    计算进程（如绕过 Celery 直接 docker run 的训练任务）占用的 GPU 会被放回队尾
-    并换下一块，而不是分配出去导致 CUDA OOM。
+    注意 timeout=0 表示立即超时（不等待）；无限等待是 peptide 变体的语义。
+    priority="high" 的任务在等待期间登记进 priority_waiting，default 任务会让出
+    下一张空卡（GPU 等待阶段的插队）；高优自身不受该让位约束。
+    cancel_check 在每轮等待前调用，抛异常即中止（取消可见性）。
     """
     client = get_redis_client()
     pool_key = config.GPU_POOL_KEY
@@ -502,45 +778,66 @@ def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
     deadline = time.monotonic() + timeout_seconds
     blpop_slice = 30  # seconds to wait per blpop cycle before re-checking reconcile
 
-    logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout_seconds}s)...")
+    logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout_seconds}s, priority={priority})...")
 
     last_reconcile = 0.0
     rejected_gpu_ids: set[int] = set()
-    while True:
-        last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            hint = ""
-            if rejected_gpu_ids:
-                hint = (
-                    f"（其中 GPU {sorted(rejected_gpu_ids)} 存在池外计算型占用，"
-                    "已被跳过——请清理外部进程或释放对应 GPU）"
-                )
-            raise TimeoutError(f"任务 {task_id}: 在 {timeout_seconds}s 内未能获取 GPU。{hint}")
-        result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
-        if result is not None:
-            gpu_id = int(result[1])
-            # Claim the lease ATOMICALLY before any slow check: between the
-            # blpop above and this claim, the GPU is visible to neither the
-            # pool nor in_use, and a concurrent reconcile would rebuild the
-            # pool to include it (double lease). The Lua script only writes
-            # when no existing lease is present; on conflict the GPU is
-            # returned to the pool and we retry.
-            claimed = client.eval(
-                _CLAIM_LEASE_LUA, 2,
-                config.GPU_IN_USE_HASH_KEY, pool_key,
-                str(gpu_id), task_id)
-            if not claimed:
-                continue  # another task holds the lease; retry blpop
-            admitted, detail = _gpu_admission_check(gpu_id, task_id)
-            if not admitted:
-                rejected_gpu_ids.add(gpu_id)
-                client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
-                client.rpush(pool_key, gpu_id)
-                time.sleep(0.5)
+    last_reserve_log = 0.0
+    try:
+        while True:
+            if priority == "high":
+                register_priority_waiter(client, task_id)  # 每轮刷新 score,防被 staleness 误剪
+            if cancel_check is not None:
+                cancel_check()  # 取消可见性:等卡期间轮询取消标记,不再干等 3600s
+            last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                hint = ""
+                if rejected_gpu_ids:
+                    hint = (
+                        f"（其中 GPU {sorted(rejected_gpu_ids)} 存在池外计算型占用，"
+                        "已被跳过——请清理外部进程或释放对应 GPU）"
+                    )
+                raise TimeoutError(f"任务 {task_id}: 在 {timeout_seconds}s 内未能获取 GPU。{hint}")
+            # 让位检查（MSA 软保留 + 优先级让位）：不弹卡，把空卡留给对应等待方。
+            yield_reason = _yield_reason(client, task_id, priority)
+            if yield_reason:
+                now_mono = time.monotonic()
+                if now_mono - last_reserve_log >= 60.0:
+                    logger.info("任务 %s: 让位等待 (%s)。", task_id, yield_reason)
+                    last_reserve_log = now_mono
+                time.sleep(min(1.0, max(0.2, remaining)))
                 continue
-            logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
-            return gpu_id
+            result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
+            if result is not None:
+                gpu_id = int(result[1])
+                # 原子认领先行：弹卡与认领之间该卡对 pool 和 in_use 均不可见，
+                # 并发池重建会把它重新派发。让位复核在认领之后进行，未通过则
+                # 退租回队尾——多付一次认领/退租，换取全程无无主窗口。
+                claimed = client.eval(
+                    _CLAIM_LEASE_LUA, 2,
+                    config.GPU_IN_USE_HASH_KEY, pool_key,
+                    str(gpu_id), task_id)
+                if not claimed:
+                    continue  # another task holds the lease; retry blpop
+                still_blocked = _yield_reason(client, task_id, priority)
+                if still_blocked:
+                    client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
+                    client.rpush(pool_key, gpu_id)
+                    time.sleep(0.5)
+                    continue
+                admitted, detail = _gpu_admission_check(gpu_id, task_id)
+                if not admitted:
+                    rejected_gpu_ids.add(gpu_id)
+                    client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
+                    client.rpush(pool_key, gpu_id)
+                    time.sleep(0.5)
+                    continue
+                logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
+                return gpu_id
+    finally:
+        if priority == "high":
+            unregister_priority_waiter(client, task_id)
 
 
 def register_non_peptide_gpu_waiter(task_id: str) -> None:
@@ -569,19 +866,30 @@ def get_non_peptide_gpu_waiter_count() -> int:
         return 0
 
 
-def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval: float = 1.0) -> int:
+def acquire_gpu_for_peptide_worker(
+    task_id: str,
+    timeout: int = 0,
+    poll_interval: float = 1.0,
+    priority: str = "default",
+    cancel_check=None,
+) -> int:
     """
     Fair GPU acquire for peptide candidate workers.
     If any non-peptide tasks are waiting for GPU, peptide workers yield and retry.
+
+    cancel_check: 可选回调，每轮等待前调用；抛异常即中止等待（取消可见性——
+    候选孙进程在无限等卡时也能感知父任务取消并退出，而不是领卡把已取消的
+    候选完整跑完）。
     """
     client = get_redis_client()
     timeout_seconds = int(timeout or 0)
     deadline = None if timeout_seconds <= 0 else (time.monotonic() + max(1, timeout_seconds))
     sleep_step = max(0.2, float(poll_interval))
     logger.info(
-        "任务 %s: 多肽子任务开始公平获取 GPU (timeout=%s)。",
+        "任务 %s: 多肽子任务开始公平获取 GPU (timeout=%s, priority=%s)。",
         task_id,
         "disabled" if deadline is None else f"{timeout_seconds}s",
+        priority,
     )
 
     last_reconcile = 0.0
@@ -596,67 +904,89 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
     _YIELD_GRACE_SECONDS = 300.0
     first_yield_at: float | None = None
 
-    while True:
-        if deadline is None:
-            remaining = None
-        else:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"任务 {task_id}: 多肽子任务在 {timeout_seconds}s 内未能获取 GPU。")
-
-        try:
-            waiting_non_peptide = int(client.scard(config.GPU_WAITING_NON_PEPTIDE_SET_KEY) or 0)
-        except Exception:
-            waiting_non_peptide = 0
-        if waiting_non_peptide > 0:
-            now = time.monotonic()
-            if first_yield_at is None:
-                first_yield_at = now
-            elif now - first_yield_at > _YIELD_GRACE_SECONDS:
-                logger.warning(
-                    "任务 %s: waiting_non_peptide=%d 已持续 %d0+s（疑似幽灵条目），"
-                    "跳过礼让继续取卡。",
-                    task_id, waiting_non_peptide,
-                    int(now - first_yield_at),
-                )
-                first_yield_at = None  # re-arm only after a no-waiter cycle
+    try:
+        while True:
+            if priority == "high":
+                register_priority_waiter(client, task_id)
+            if cancel_check is not None:
+                cancel_check()
+            if deadline is None:
+                remaining = None
             else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"任务 {task_id}: 多肽子任务在 {timeout_seconds}s 内未能获取 GPU。")
+
+            try:
+                waiting_non_peptide = int(client.scard(config.GPU_WAITING_NON_PEPTIDE_SET_KEY) or 0)
+            except Exception:
+                waiting_non_peptide = 0
+            if waiting_non_peptide > 0:
+                now = time.monotonic()
+                if first_yield_at is None:
+                    first_yield_at = now
+                elif now - first_yield_at > _YIELD_GRACE_SECONDS:
+                    logger.warning(
+                        "任务 %s: waiting_non_peptide=%d 已持续 %d0+s（疑似幽灵条目），"
+                        "跳过礼让继续取卡。",
+                        task_id, waiting_non_peptide,
+                        int(now - first_yield_at),
+                    )
+                    first_yield_at = None  # re-arm only after a no-waiter cycle
+                else:
+                    if remaining is None:
+                        time.sleep(sleep_step)
+                    else:
+                        time.sleep(min(sleep_step, max(0.2, remaining)))
+                    continue
+            else:
+                first_yield_at = None
+
+            if remaining is None:
+                blpop_timeout = max(1, int(round(sleep_step)))
+            else:
+                blpop_timeout = max(1, min(int(remaining), int(round(sleep_step))))
+            # 让位检查（MSA 软保留 + 优先级让位，与 acquire_gpu 同一判定）。
+            yield_reason = _yield_reason(client, task_id, priority)
+            if yield_reason:
                 if remaining is None:
                     time.sleep(sleep_step)
                 else:
                     time.sleep(min(sleep_step, max(0.2, remaining)))
                 continue
-        else:
-            first_yield_at = None
+            result = client.blpop(config.GPU_POOL_KEY, timeout=blpop_timeout)
+            if result is None:
+                # 池空：节流 reconcile 自愈后重试。公平性检查（上方）不受影响。
+                last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
+                continue
 
-        if remaining is None:
-            blpop_timeout = max(1, int(round(sleep_step)))
-        else:
-            blpop_timeout = max(1, min(int(remaining), int(round(sleep_step))))
-        result = client.blpop(config.GPU_POOL_KEY, timeout=blpop_timeout)
-        if result is None:
-            # 池空：节流 reconcile 自愈后重试。公平性检查（上方）不受影响。
-            last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
-            continue
-
-        _, gpu_id_str = result
-        gpu_id = int(gpu_id_str)
-        # atomic lease claim (same race as acquire_gpu — see there)
-        claimed = client.eval(
-            _CLAIM_LEASE_LUA, 2,
-            config.GPU_IN_USE_HASH_KEY, config.GPU_POOL_KEY,
-            str(gpu_id), task_id)
-        if not claimed:
-            continue
-        admitted, detail = _gpu_admission_check(gpu_id, task_id)
-        if not admitted:
-            # 池外计算型占用：放回队尾换下一块，等待语义由外层循环与 deadline 保证。
-            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
-            client.rpush(config.GPU_POOL_KEY, gpu_id)
-            time.sleep(min(sleep_step, 0.5))
-            continue
-        logger.info(f"✅ 任务 {task_id}: 多肽子任务已获取 GPU {gpu_id}。")
-        return gpu_id
+            _, gpu_id_str = result
+            gpu_id = int(gpu_id_str)
+            # 原子认领先行（与 acquire_gpu 相同的窗口语义），再复核让位。
+            claimed = client.eval(
+                _CLAIM_LEASE_LUA, 2,
+                config.GPU_IN_USE_HASH_KEY, config.GPU_POOL_KEY,
+                str(gpu_id), task_id)
+            if not claimed:
+                continue
+            still_blocked = _yield_reason(client, task_id, priority)
+            if still_blocked:
+                client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
+                client.rpush(config.GPU_POOL_KEY, gpu_id)
+                time.sleep(min(sleep_step, 0.5))
+                continue
+            admitted, detail = _gpu_admission_check(gpu_id, task_id)
+            if not admitted:
+                # 池外计算型占用：放回队尾换下一块，等待语义由外层循环与 deadline 保证。
+                client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
+                client.rpush(config.GPU_POOL_KEY, gpu_id)
+                time.sleep(min(sleep_step, 0.5))
+                continue
+            logger.info(f"✅ 任务 {task_id}: 多肽子任务已获取 GPU {gpu_id}。")
+            return gpu_id
+    finally:
+        if priority == "high":
+            unregister_priority_waiter(client, task_id)
 
 def _query_gpu_used_memory_mib(gpu_id: int, *, docker_fallback: bool = False) -> int | None:
     result = _nvidia_smi_query(
@@ -894,12 +1224,24 @@ def release_gpu(gpu_id: int, task_id: str):
 
     if not _wait_gpu_memory_reclaimed(gpu_id, task_id):
         return
-        
-    pipe = client.pipeline()
-    pipe.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
-    pipe.rpush(config.GPU_POOL_KEY, gpu_id)
-    pipe.execute()
-    
+
+    # 条件删除:仅当租约仍归本任务时才解除并回池。owner 校验与删除之间隔着
+    # 最长 90s 的显存等待,期间 reconcile 可能已回收租约并把卡再分配;无条件
+    # hdel 会删掉新任务的租约、把使用中的卡放回池(三任务同卡)。
+    script = (
+        "if redis.call('hget', KEYS[1], ARGV[1]) == ARGV[2] then "
+        "redis.call('hdel', KEYS[1], ARGV[1]); "
+        "redis.call('rpush', KEYS[2], ARGV[1]); "
+        "return 1 else return 0 end"
+    )
+    removed = int(client.eval(script, 2, config.GPU_IN_USE_HASH_KEY, config.GPU_POOL_KEY,
+                              str(gpu_id), task_id) or 0)
+    if not removed:
+        logger.warning(
+            "任务 %s: GPU %s 租约已被并发回收/转移,跳过释放以防误还。", task_id, gpu_id,
+        )
+        return
+
     logger.info(f"✅ 任务 {task_id}: 已将 GPU {gpu_id} 释放回池中。")
 
 def get_gpu_status() -> dict:
@@ -917,6 +1259,10 @@ def get_gpu_status() -> dict:
         "available_count": len(available),
         "in_use_count": len(in_use),
         "waiting_non_peptide_count": get_non_peptide_gpu_waiter_count(),
+        "msa_waiting_live": count_live_msa_waiters(client),
+        "long_task_holders": count_long_task_lease_holders(client),
+        "msa_reserve_enabled": bool(config.GPU_MSA_RESERVE_ENABLED),
+        "priority_waiting_live": count_live_priority_waiters(client),
     }
 
 # --- 管理脚本入口 ---
@@ -925,10 +1271,17 @@ if __name__ == '__main__':
     import sys
     
     if len(sys.argv) < 2:
-        print("请提供一个命令: 'init' 或 'status'")
+        print("请提供一个命令: 'init', 'maintain' 或 'status'")
         sys.exit(1)
 
     command = sys.argv[1]
+
+    if command == 'maintain':
+        import signal
+        signal.signal(signal.SIGTERM, lambda *_: _MAINTENANCE_STOP.set())
+        signal.signal(signal.SIGINT, lambda *_: _MAINTENANCE_STOP.set())
+        run_maintenance_loop()
+        sys.exit(0)
     
     if command == 'init':
         # 动态检测逻辑现在位于此处，仅在作为脚本运行时执行
@@ -1051,6 +1404,11 @@ if __name__ == '__main__':
         print(f"Available ({status['available_count']}): {status['available']}")
         print(f"In Use ({status['in_use_count']}):")
         print(f"Waiting non-peptide: {status.get('waiting_non_peptide_count', 0)}")
+        print(
+            f"MSA waiting (live): {status.get('msa_waiting_live', 0)} | "
+            f"long holders: {status.get('long_task_holders', 0)} | "
+            f"reserve: {'on' if status.get('msa_reserve_enabled') else 'off'}"
+        )
         if status['in_use']:
             for gpu, task in status['in_use'].items():
                 print(f"  - GPU {gpu}: Task {task}")
@@ -1059,4 +1417,4 @@ if __name__ == '__main__':
         print("-----------------------")
         
     else:
-        print(f"未知命令: {command}。可用命令: 'init', 'status'")
+        print(f"未知命令: {command}。可用命令: 'init', 'maintain', 'status'")

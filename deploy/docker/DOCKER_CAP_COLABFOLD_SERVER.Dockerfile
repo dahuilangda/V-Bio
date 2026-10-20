@@ -174,8 +174,8 @@ RUN cd /app/mmseqs-server-build/backend && \
 # 目标库为 *_gpu 填充库时,search 先从 celery 共享 GPU 池(redis, gpu_manager 协议)
 # 租卡再以 --gpu 1 运行;纯 bash 实现,无新增镜像依赖。DB 填充/索引一次性命令:
 #   mmseqs makepaddedseqdb <seqDB> <seqDB>_gpu && mmseqs createindex <seqDB>_gpu tmp --index-subset 2
-COPY capabilities/colabfold_server/mmseqs_gpu_wrapper.sh /tmp/mmseqs_wrapper_new
-RUN mv /tmp/mmseqs_wrapper_new /app/mmseqs/bin/mmseqs && chmod +x /app/mmseqs/bin/mmseqs
+COPY capabilities/colabfold_server/mmseqs_wrapper /app/mmseqs/bin/mmseqs
+RUN chmod +x /app/mmseqs/bin/mmseqs
 
 COPY capabilities/colabfold_server/start_debug.sh /app/start.sh
 COPY capabilities/colabfold_server/prepare_databases.sh /app/prepare_databases.sh

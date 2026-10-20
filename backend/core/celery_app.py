@@ -49,6 +49,10 @@ celery_app.conf.update(
     broker_transport_options={
         # Must be larger than expected long-running prediction tasks.
         "visibility_timeout": 24 * 60 * 60,
+        # 严格优先:worker -Q 的队列顺序(high 在前)即消费顺序,high 排空才碰
+        # default——用户交互任务真正插队于候选批量任务。默认 round_robin 只会
+        # 两条队列 1:1 轮转,插队仅一个身位。
+        "queue_order_strategy": "priority",
     },
     task_track_started=True,
     worker_send_task_events=True,

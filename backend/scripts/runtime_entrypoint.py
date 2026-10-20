@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import socket
@@ -107,12 +108,62 @@ def run_monitor() -> None:
     monitor_main()
 
 
+def _preflight_docker_capabilities(logger, raw_capabilities: str) -> None:
+    """启动预检:nvidia runtime 与 capability 所需镜像的存在性。
+
+    只告警不阻断——配置退化时 worker 崩溃循环会让任务无人消费;缺失镜像的
+    任务提交后由 ensure_image 提供可读报错并快速失败。
+    """
+    try:
+        info = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30, check=False,
+        )
+        runtimes = set(json.loads(info.stdout or "{}").keys()) if info.returncode == 0 else set()
+        if "nvidia" not in runtimes:
+            logger.error(
+                "docker daemon 缺少 nvidia runtime —— GPU 容器将全部失败!"
+                " 请在 /etc/docker/daemon.json 配置 runtimes.nvidia 后重启 docker。"
+            )
+    except Exception as exc:
+        logger.warning("docker runtime 预检失败(不阻断): %s", exc)
+
+    capability_images = {
+        "boltz2": getattr(config, "BOLTZ2_DOCKER_IMAGE", ""),
+        "boltz2score": getattr(config, "BOLTZ2_DOCKER_IMAGE", ""),
+        "affinity": getattr(config, "BOLTZ2_DOCKER_IMAGE", ""),
+        "protenix": getattr(config, "PROTENIX_DOCKER_IMAGE", ""),
+        "protenix2dock": getattr(config, "PROTENIX_DOCKER_IMAGE", ""),
+        "alphafold3": getattr(config, "ALPHAFOLD3_DOCKER_IMAGE", ""),
+        "nesso": getattr(config, "NESSO_DOCKER_IMAGE", ""),
+    }
+    for cap in (s.strip() for s in raw_capabilities.split(",") if s.strip()):
+        image = str(capability_images.get(cap) or "").strip()
+        if not image:
+            continue
+        try:
+            probe = subprocess.run(
+                ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30, check=False,
+            )
+        except Exception as exc:
+            logger.warning("镜像预检失败 (capability=%s): %s", cap, exc)
+            continue
+        if probe.returncode != 0:
+            logger.error(
+                "运行时镜像缺失: capability=%s image=%s —— 该类任务提交后将快速失败,"
+                " 请构建/导入镜像(参考 docs/deployment/model-services.md)。",
+                cap, image,
+            )
+
+
 def run_gpu_worker() -> None:
     LOGGER.info("Initializing GPU pool...")
     subprocess.run([sys.executable, "-m", "gpu_manager", "init"], check=True)
 
     raw_capabilities = str(os.environ.get("GPU_WORKER_CAPABILITIES") or os.environ.get("WORKER_CAPABILITIES") or "")
     queue_list = _resolve_worker_queues("gpu", raw_capabilities, include_high_priority=True)
+    _preflight_docker_capabilities(LOGGER, raw_capabilities)
     gpu_status = get_gpu_status()
     valid_count = int(gpu_status.get("valid_count", 0) or 0)
     available_count = int(gpu_status.get("available_count", 0) or 0)
@@ -129,6 +180,12 @@ def run_gpu_worker() -> None:
         available_count,
         in_use_count,
     )
+
+    # 常驻池自愈：周期 reconcile 清理孤儿租约 + 孤儿任务容器巡检。以独立进程运行，
+    # 因为本进程随后 execvpe 为 celery，线程无法存活。放在全部校验之后——
+    # 校验失败提前退出时不能遗留无人管的维护进程。
+    LOGGER.info("Starting GPU pool maintenance process...")
+    subprocess.Popen([sys.executable, "-m", "gpu_manager", "maintain"])
 
     env = os.environ.copy()
     env["CELERY_WORKER_NAME"] = f"gpu@{socket.gethostname()}"

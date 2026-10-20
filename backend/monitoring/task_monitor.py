@@ -248,6 +248,7 @@ class TaskMonitor:
             'found': [],
             'revoked': [],
             'failed': [],
+            'msa_tickets_cancelled': [],
         }
         key = f"{config.PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{str(parent_task_id or '').strip()}"
         if not parent_task_id:
@@ -260,6 +261,9 @@ class TaskMonitor:
 
         normalized_ids = [str(item or '').strip() for item in task_ids if str(item or '').strip()]
         result['found'] = normalized_ids
+        for subtask_id in normalized_ids:
+            result['msa_tickets_cancelled'].extend(
+                self._cancel_active_msa_tickets(subtask_id))
         for subtask_id in normalized_ids:
             try:
                 if force:
@@ -274,6 +278,46 @@ class TaskMonitor:
         except Exception:
             pass
         return result
+
+    def _cancel_active_msa_tickets(self, task_id: str) -> List[str]:
+        """撤销以 task_id 登记的进行中 MSA ticket,释放 colabfold 侧 GPU search。
+
+        仅覆盖以该 task_id 经 BOLTZ_TASK_ID 登记的 ticket;肽候选的 ticket 登记
+        在候选自身 id 下,由 _revoke_peptide_subtasks 逐个调用本方法覆盖。
+        服务端 DELETE 会 SIGKILL search 进程组,其租约由 wrapper 心跳过期 +
+        gpu_manager 维护周期在分钟级自愈回收。全程 best-effort;撤销失败的
+        ticket 保留登记,便于下次 terminate 重试。
+        """
+        cancelled: List[str] = []
+        try:
+            key = f"msa_tickets:{task_id}"
+            ticket_ids = list(self.redis_client.smembers(key) or [])
+            if not ticket_ids:
+                return cancelled
+            import requests
+            msa_server = str(getattr(config, "MSA_SERVER_URL", "") or "").strip()
+            if not msa_server:
+                return cancelled
+            for ticket_id in ticket_ids:
+                try:
+                    resp = requests.delete(f"{msa_server}/ticket/{ticket_id}", timeout=10)
+                    if resp.status_code < 300:
+                        cancelled.append(str(ticket_id))
+                    else:
+                        self.logger.warning(
+                            "MSA ticket %s 撤销返回 %s,保留登记以便重试",
+                            ticket_id, resp.status_code,
+                        )
+                except Exception as exc:
+                    self.logger.warning("MSA ticket %s 撤销失败: %s", ticket_id, exc)
+            if cancelled:
+                pipe = self.redis_client.pipeline()
+                for ticket_id in cancelled:
+                    pipe.srem(key, ticket_id)
+                pipe.execute()
+        except Exception:
+            pass
+        return cancelled
 
     def terminate_task_runtime(self, task_id: str, force: bool = False) -> Dict:
         result = {
@@ -292,6 +336,7 @@ class TaskMonitor:
             'peptide_subtasks_found': [],
             'peptide_subtasks_revoked': [],
             'peptide_subtasks_failed': [],
+            'msa_tickets_cancelled': [],
             'ok': False,
             'errors': [],
         }
@@ -304,6 +349,8 @@ class TaskMonitor:
             )
         except Exception as exc:
             result['errors'].append(f'Failed to write cancellation marker: {exc}')
+
+        result['msa_tickets_cancelled'] = self._cancel_active_msa_tickets(task_id)
 
         task_processes = self._find_task_processes(task_id)
         result['processes_found'] = [proc['pid'] for proc in task_processes]
