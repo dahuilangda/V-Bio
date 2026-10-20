@@ -132,3 +132,18 @@ de novo 序列，其界面置信度天然低于共晶姿态（肽侧无共进化
 - 提交后写入 YAML `protein.modifications`；预置 CCD 库自动按引用合并（`_merge_referenced_preset_modification_molecules`）。
 
 > 常见误解：直接在序列框输入非常规字母会被校验拒绝（"only standard amino acids are allowed"）——这是设计行为，UNAA 一律走位置修饰/残基池，而不是序列字母。
+
+## 与原版 Protenix 的关系
+
+推理引擎为 vendored fork(初始导入自上游, vendor 内 MSA/template/ configs 零改动)。
+两条路径:
+
+- **盲推理(天然肽, 无固定靶点)**: 不设置任何 `PROTENIX_*` 侧信道 env, 行为与
+  上游逐字一致(默认 1 seed × 5 sample × 200 step)。
+- **固定靶点精修/双环路线**: 仅两处非原版——① 受体 pin(固定靶点 inpainting,
+  用户上传坐标即坐标事实); ② 共价键约束(双环链接器 SG↔锚原子的官方 TFG
+  键/角约束与 CCD 键带投影, 维持环拓扑)。采样数与上游对齐(5)。
+
+侧链塌陷/clash 的残余噪声由交付门禁把关(键长带、锚点自碰撞、主链完整性、
+界面深度), 不合格样本被淘汰而非发货。对照实验可用 `PROTENIX_DISABLE_TFG=1`
+与 `PROTENIX_DISABLE_CHEMISTRY=1` 关闭全部定制约束。

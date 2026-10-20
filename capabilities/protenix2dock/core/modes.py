@@ -84,7 +84,7 @@ MODE_CONFIGS: dict[str, dict[str, object]] = {
         "name": "peptide_rediffuse",
         "sigma_max": 0.75,
         "sampling_steps": 100,
-        "diffusion_samples": 8,
+        "diffusion_samples": 5,
     },
     PEPTIDE_MODE: {
         "name": "peptide_default",
@@ -93,7 +93,7 @@ MODE_CONFIGS: dict[str, dict[str, object]] = {
         # The receptor is pinned for every step (true inpainting).
         "sigma_max": 0.05,
         "sampling_steps": 12,
-        "diffusion_samples": 8,
+        "diffusion_samples": 5,
     },
 }
 
