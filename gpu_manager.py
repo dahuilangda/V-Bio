@@ -17,7 +17,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # 使用连接池以实现高效和安全的 Redis 连接
 try:
-    REDIS_CONNECTION_POOL = redis.ConnectionPool.from_url(config.REDIS_URL, decode_responses=True)
+    REDIS_CONNECTION_POOL = redis.ConnectionPool.from_url(
+        config.REDIS_URL, decode_responses=True,
+        retry_on_timeout=True, health_check_interval=30,
+        socket_keepalive=True, socket_keepalive_options={},
+        reconnect_sleep_base=1.0, reconnect_sleep_max=10.0,
+    )
 except Exception as e:
     logger.critical(f"无法创建 Redis 连接池，请检查 Redis 服务及配置: {e}")
     raise
