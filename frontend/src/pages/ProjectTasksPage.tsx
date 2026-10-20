@@ -79,6 +79,8 @@ export function ProjectTasksPage() {
   const activeExportIdRef = useRef<string | null>(null);
   useEffect(() => {
     exportCancelledRef.current = false;
+    setExportingExcel(false);
+    setExportProgress(null);
     return () => {
       exportCancelledRef.current = true;
     };

@@ -180,7 +180,7 @@ export function useProjectTaskRowActions({
   const saveTaskNameEdit = useCallback(async (task: ProjectTask, displayName: string) => {
     if (!canEditTask(task)) return;
     if (editingTaskNameId !== task.id) return;
-    if (savingTaskNameId && savingTaskNameId !== task.id) return;
+    if (savingTaskNameId) return;
     const nextName = editingTaskNameValue.trim();
     const currentName = String(task.name || '').trim();
     if (nextName === currentName || (!nextName && !currentName)) {

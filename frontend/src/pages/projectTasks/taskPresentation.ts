@@ -16,9 +16,10 @@ function includesAny(text: string, tokens: string[]): boolean {
 
 export function toneForPlddt(value: number | null): MetricTone {
   if (value === null) return 'neutral';
-  if (value >= 90) return 'excellent';
-  if (value >= 70) return 'good';
-  if (value >= 50) return 'medium';
+  const normalized = value <= 1 ? value * 100 : value;
+  if (normalized >= 90) return 'excellent';
+  if (normalized >= 70) return 'good';
+  if (normalized >= 50) return 'medium';
   return 'low';
 }
 
