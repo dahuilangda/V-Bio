@@ -211,6 +211,13 @@ def _msa_owner_lease_age_seconds(owner: str) -> float | None:
         return None
 
 
+def count_pool_gpus(client: Any) -> int:
+    try:
+        return int(client.scard(config.GPU_VALID_SET_KEY) or 0)
+    except Exception:
+        return 0
+
+
 def count_long_task_lease_holders(client: Any) -> int:
     """in_use 中非 MSA owner 的租约数（celery 任务 / ESM3 服务等长任务持有者）。"""
     try:
@@ -256,9 +263,13 @@ def msa_reservation_blocks(client: Any, task_id: str) -> tuple[bool, str]:
     if live_waiters <= 0:
         return False, ""
     holders = count_long_task_lease_holders(client)
-    if holders < max(1, config.GPU_MSA_RESERVE_HOLDER_LIMIT):
+    # 上限按池规模截断: 小池(<=3 卡)上绝对阈值 3 永远达不到, 软保留会失效——
+    # 恰是小池最需要保 MSA 的场景。至少给 MSA 留一张卡的资格。
+    effective_limit = min(config.GPU_MSA_RESERVE_HOLDER_LIMIT,
+                          max(1, count_pool_gpus(client) - 1))
+    if holders < max(1, effective_limit):
         return False, ""
-    return True, f"msa_waiters={live_waiters} long_holders={holders} (limit={config.GPU_MSA_RESERVE_HOLDER_LIMIT})"
+    return True, f"msa_waiters={live_waiters} long_holders={holders} (limit={effective_limit})"
 
 
 def register_priority_waiter(client: Any, task_id: str) -> None:

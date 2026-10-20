@@ -219,15 +219,25 @@ def test_count_live_msa_waiters_excludes_stale_entries(fake_redis):
 
 def test_reservation_blocks_only_past_holder_limit(fake_redis, monkeypatch):
     fake_redis.zadd(gpu_manager.config.GPU_MSA_WAITING_ZSET_KEY, {"colabfold_msa:1:100": time.time()})
-    monkeypatch.setattr(
-        gpu_manager, "count_long_task_lease_holders", lambda client: 3
-    )
+    monkeypatch.setattr(gpu_manager, "count_long_task_lease_holders", lambda client: 3)
+    monkeypatch.setattr(gpu_manager, "count_pool_gpus", lambda client: 4)
 
     blocked, detail = gpu_manager.msa_reservation_blocks(fake_redis, CELERY_OWNER)
     assert blocked and "msa_waiters=1" in detail
 
     monkeypatch.setattr(gpu_manager, "count_long_task_lease_holders", lambda client: 2)
     assert gpu_manager.msa_reservation_blocks(fake_redis, CELERY_OWNER) == (False, "")
+
+
+def test_reservation_limit_clamped_to_small_pools(fake_redis, monkeypatch):
+    """小池(<=上限的卡数)按 valid-1 截断: 2 卡池上限为 1, 持 2 卡即让位,
+    否则软保留在小池上永不触发——恰是最需要保 MSA 的场景。"""
+    fake_redis.zadd(gpu_manager.config.GPU_MSA_WAITING_ZSET_KEY, {"colabfold_msa:1:100": time.time()})
+    monkeypatch.setattr(gpu_manager, "count_long_task_lease_holders", lambda client: 2)
+    monkeypatch.setattr(gpu_manager, "count_pool_gpus", lambda client: 2)
+
+    blocked, detail = gpu_manager.msa_reservation_blocks(fake_redis, CELERY_OWNER)
+    assert blocked and "limit=1" in detail
 
 
 def test_reservation_disabled_yields_no_block(fake_redis, monkeypatch):
