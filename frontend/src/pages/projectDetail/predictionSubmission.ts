@@ -302,6 +302,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   // in-flight guard before any await; try/finally releases it on every early return
   if (submitInFlightRef.current) return;
   submitInFlightRef.current = true;
+  setSubmitting(true);
   try {
 
     const effectiveBackend = isVirtualScreeningWorkflow ? 'nesso' : draft.backend;
@@ -440,7 +441,6 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       return;
     }
 
-    setSubmitting(true);
     setError(null);
     if (runRedirectTimerRef.current !== null) {
       window.clearTimeout(runRedirectTimerRef.current);

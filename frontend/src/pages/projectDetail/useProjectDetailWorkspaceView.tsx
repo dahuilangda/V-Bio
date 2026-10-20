@@ -340,12 +340,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     if (runtimeLoading || runtimeSubmitting) return;
     if (!project || project.id !== runtimeProjectId) return;
     if (isLeadOptimizationWorkflow) return; // parity with the row-button gate
-    cloneHydratedRef.current = clonedTaskRowId;
     let cancelled = false;
     void (async () => {
       try {
         const row = await getProjectTaskById(clonedTaskRowId);
         if (cancelled || !isProjectTaskRow(row)) return;
+        cloneHydratedRef.current = clonedTaskRowId;
         const taskOptions = readTaskInputOptions(row);
         if (Object.keys(taskOptions).length === 0) {
           setError('This task has no stored parameters to clone.');
@@ -375,8 +375,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       }
     })();
     return () => { cancelled = true; };
+    // deps 精意排除 runtime: 它每次渲染都是新对象, 放入会使 effect 无限重跑;
+    // setRunSuccessNotice 通过 navigate 后的重渲染自行刷新, 无需依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clonedTaskRowId, runtimeLoading, runtimeSubmitting, project, runtimeProjectId,
-      isLeadOptimizationWorkflow, setDraft, setWorkspaceTab, setError, navigate, runtime]);
+      isLeadOptimizationWorkflow, setDraft, setWorkspaceTab, setError, navigate]);
 
   const handleLeadOptHaloTaskCompleted = async (payload: {
     taskId: string;

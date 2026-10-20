@@ -168,7 +168,7 @@ export function SharingModal({
           : toAppUser(
               (await searchUsersServer(normalizedUsername)).find(
                 (row) => String(row.username || '').trim().toLowerCase() === normalizedUsername
-              ) || { id: '', username: normalizedUsername, name: null, email: null, avatar_url: null }
+              )
             );
       if (!user || user.deleted_at) {
         throw new Error(`User "${normalizedUsername}" was not found.`);
