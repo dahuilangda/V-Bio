@@ -10029,6 +10029,7 @@ def run_peptide_design_backend(
     _esm3_gpu = os.environ.get("ESM3_GPU_ID", "0")
     proposer = ESM3Proposer(
         chirality=peptide_chirality,
+        project_id=str(predict_args.get("project_id") or ""),
         receptor_sequence=(
             _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
             if peptide_chirality in ("d", "l") else ""),

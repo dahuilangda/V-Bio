@@ -115,6 +115,7 @@ class ESM3Proposer:
         seed: int = 42,
         structure_mode: str = "env",
         chirality: str = "l",
+        project_id: str = "",
         log=print,
         **_unused: Any,
     ):
@@ -128,15 +129,19 @@ class ESM3Proposer:
         # 也不共享权重——共享会让多任务梯度互相拉扯, 单靶点学习信号被稀释。
         # adapter 持久化在磁盘, 学习结果跨服务重启存活。
         import hashlib
+        chir = str(chirality or "l").strip().lower()
         target_tag = hashlib.md5(
             (receptor_sequence or "").encode()).hexdigest()[:8] or "notarget"
-        self.adapter_key = (
-            f"peptide-{str(chirality or 'l').strip().lower()}-{target_tag}")
+        # adapter 按 项目/靶点 隔离存储: 不同项目、不同靶点绝不共享权重,
+        # 且持久化在结果盘(_runtime_adapters, 不进 git), 服务重启存活。
+        self.project_id = str(project_id or "").strip() or "default"
+        target_tag = f"{self.project_id}-{target_tag}"
+        self.adapter_key = f"peptide-{chir}-{target_tag}"
         adapter_root = Path(os.environ.get(
             "ESM3_ADAPTER_ROOT",
-            str(Path(__file__).resolve().parents[2] / "adapters"),
+            "/data/boltz_central_results/_runtime_adapters",
         ))
-        self.adapter_dir = adapter_root / self.adapter_key
+        self.adapter_dir = adapter_root / self.project_id / self.adapter_key
         # structure_mode travels with every request; the service builds
         # the ss8 template at each call's actual peptide length (hairpin
         # turns must sit mid-chain, so a length-mismatched static string
@@ -298,8 +303,10 @@ class ESM3Proposer:
                     "receptor_sequence": self.receptor_sequence,
                     "parent_sequence": seq,
                     "remask_positions": positions,
+                    "adapter_dir": str(self.adapter_dir),
                     "temperature": 0.7 + 0.1 * random.random(),
                     "adapter_key": self.adapter_key,
+                    "adapter_dir": str(self.adapter_dir),
                     **self._cond,
                 })
                 if result.get("ok"):

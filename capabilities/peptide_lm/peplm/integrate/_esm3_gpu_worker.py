@@ -33,6 +33,7 @@ _ADAPTERS_ROOT = Path(os.environ.get(
     "ESM3_ADAPTER_ROOT", str(PEPLM_ROOT / "adapters")))
 _adapter_optimizers: dict = {}
 _opt_last_use: dict = {}
+_adapter_dirty = False
 _MAX_LIVE_OPTIMIZERS = max(1, int(os.environ.get(
     "ESM3_MAX_LIVE_OPTIMIZERS", "4")))
 _loaded_adapter_key: str | None = None
@@ -51,6 +52,29 @@ def _ensure_adapter_loaded(key: str) -> None:
     if adapter_path.exists():
         policy.load_adapter(adapter_path)
     _loaded_adapter_key = key
+
+
+def _sync_adapter(key: str, adapter_dir: str | None = None) -> None:
+    """保证常驻 policy 的权重 == 磁盘上 key 的 adapter(加载即权威)。
+
+    - key 变化(跨任务)或 learn 刚保存过(dirty)→ 从磁盘原位重载;
+    - 重载走 set_peft_model_state_dict(原位复制, 参数对象身份不变,
+      既有 optimizer 的引用保持有效);
+    - 跨任务残留因此不可能进入计算路径: 任何请求先经过本函数。
+    """
+    global _loaded_adapter_key, _adapter_dirty
+    if _loaded_adapter_key == key and not _adapter_dirty:
+        return
+    path = Path(adapter_dir) if adapter_dir else (_ADAPTERS_ROOT / key)
+    if path.exists():
+        from peft.utils import set_peft_model_state_dict
+        weights = load_peft_weights(str(path), device=str(policy.device))
+        set_peft_model_state_dict(policy.model, weights)
+        for p_ in policy.model.parameters():
+            if p_.requires_grad:
+                p_.data = p_.data.to(policy.device)
+    _loaded_adapter_key = key
+    _adapter_dirty = False
 
 
 def _optimizer_for(key: str) -> torch.optim.AdamW:
@@ -99,6 +123,7 @@ def _propose(req: dict) -> dict:
     pep_len = int(req.get("peptide_length", 14))
     n = int(req.get("n_samples", 48))
     keep = int(req.get("n_keep", 16))
+    _sync_adapter(str(req.get("adapter_key") or "default"), req.get("adapter_dir"))
     cond = _conditioning(req)
     CHUNK = 8
     all_trajs = []
@@ -141,6 +166,7 @@ def _refill(req: dict) -> dict:
     if not parent or not positions:
         return {"error": "parent_sequence and remask_positions required"}
 
+    _sync_adapter(str(req.get("adapter_key") or "default"), req.get("adapter_dir"))
     parent_tokens = policy.encode_peptide(parent, len(parent))
     if parent_tokens is None:
         return {"error": "failed to tokenize parent"}
@@ -162,6 +188,7 @@ def _refill(req: dict) -> dict:
 
 
 def _perplexity(req: dict) -> dict:
+    _sync_adapter(str(req.get("adapter_key") or "default"), req.get("adapter_dir"))
     seq = req.get("peptide_sequence", "")
     score = policy.score_sequence(
         req.get("receptor_sequence", ""),
@@ -196,11 +223,16 @@ def _learn(req: dict) -> dict:
         return {"skipped": "no group with >= 2 members"}
 
     import torch.nn.functional as Fn
+    zero_std_groups = 0
     updates = []
     for g, rows in valid.items():
-        rewards = [r["reward"] for r in rows]
+        rewards = [float(r["reward"]) for r in rows]
         m = sum(rewards) / len(rewards)
-        sd = max(max(rewards) - m, m - min(rewards), 1e-6)
+        # TRL 式组归一化: std + 1e-4 下限(组内全同值时 advantage 恰为 0)
+        var = sum((x - m) ** 2 for x in rewards) / len(rewards)
+        sd = max(var ** 0.5, 1e-4)
+        if var ** 0.5 < 1e-9:
+            zero_std_groups += 1
         for r in rows:
             n = len(r.get("sequence") or "")
             if n < 4:
@@ -230,7 +262,7 @@ def _learn(req: dict) -> dict:
     micro_batch = max(1, int(req.get("micro_batch", 4)))
 
     key = str(req.get("adapter_key") or "default")
-    _ensure_adapter_loaded(key)
+    _sync_adapter(key, req.get("adapter_dir"))
     opt = _optimizer_for(key)
 
     rec_seq = req.get("receptor_sequence", "")
@@ -273,7 +305,7 @@ def _learn(req: dict) -> dict:
                 # KL anchor to the adapter-disabled base (k3 estimator, >= 0):
                 # the reference is the frozen base, so cross-task interference
                 # cannot drag the policy arbitrarily far from its start.
-                with policy.model.disable_adapter():
+                with policy.model.disable_adapter(), torch.no_grad():
                     ref_logits = policy._forward_sequence_logits(toks, ss8)
                 ref_lp = Fn.log_softmax(
                     ref_logits[0, pep_start:pep_start + n, :], dim=-1)
@@ -299,6 +331,7 @@ def _learn(req: dict) -> dict:
     save_dir.mkdir(parents=True, exist_ok=True)
     policy.save_adapter(save_dir)
     _loaded_adapter_key = key
+    _adapter_dirty = True   # 下一个请求先从磁盘重载, 保证在盘/在存一致
     return {
         "adapter_dir": str(save_dir),
         "n_updates": len(updates),
@@ -306,6 +339,7 @@ def _learn(req: dict) -> dict:
         "loss": last_loss,
         "beta_kl": beta_kl,
         "entropy_coef": entropy_coef,
+        "frac_reward_zero_std": (zero_std_groups / len(valid)) if valid else 0.0,
     }
 
 
@@ -343,7 +377,8 @@ def main() -> None:
         mode = req.get("mode", "")
         try:
             if mode in ("propose", "refill") and req.get("adapter_key"):
-                _ensure_adapter_loaded(str(req["adapter_key"]))
+                _sync_adapter(str(req.get("adapter_key") or "default"),
+                              req.get("adapter_dir"))
             handler = HANDLERS.get(mode)
             if handler is None:
                 resp = {"ok": False, "error": f"unknown mode: {mode}"}
