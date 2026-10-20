@@ -124,3 +124,6 @@ vbio_runs/
 
 # Node modules at root (frontend has its own)
 frontend/server/frontend/.run/
+
+# ESM3 GRPO adapter 权重(运行时产物, 不进 git)
+capabilities/peptide_lm/adapters/
