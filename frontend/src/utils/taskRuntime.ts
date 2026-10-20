@@ -59,6 +59,17 @@ export function readTaskRuntimeStatusText(status: Pick<TaskStatusResponse, 'stat
   const directMessage = info.message;
   if (typeof directStatus === 'string' && directStatus.trim()) return directStatus;
   if (typeof directMessage === 'string' && directMessage.trim()) return directMessage;
+  // Celery FAILURE meta carries the cause in exc_message (a single-element list
+  // when the meta came from update_state). Without this fallback the state name
+  // ("FAILURE") is all that reaches project_tasks.error_text, hiding the actual
+  // error from the task list.
+  const excMessage = info.exc_message;
+  if (Array.isArray(excMessage)) {
+    const joined = excMessage.map((part) => String(part)).join('\n').trim();
+    if (joined) return joined;
+  } else if (typeof excMessage === 'string' && excMessage.trim()) {
+    return excMessage;
+  }
   const tracker = asRecord(info.tracker);
   const trackerDetails = tracker.details;
   const trackerStatus = tracker.status;
