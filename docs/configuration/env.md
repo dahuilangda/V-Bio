@@ -43,8 +43,8 @@ python -m backend.monitoring.result_cleanup --run
 当前超级管理员：
 
 ```env
-VITE_SUPER_ADMIN_USERNAMES=dahuilangda
-VITE_SUPER_ADMIN_EMAILS=dahuilangda@hotmail.com
+VITE_SUPER_ADMIN_USERNAMES=<admin-username>
+VITE_SUPER_ADMIN_EMAILS=<admin@example.com>
 ```
 
 ## 外部系统登录
