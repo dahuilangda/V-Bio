@@ -4,6 +4,7 @@ Run: <protenix venv> -m pytest tests/ -q
 """
 
 from __future__ import annotations
+import inspect
 
 import json
 from pathlib import Path
@@ -450,3 +451,65 @@ def test_clash_guard_pairs_full_crossproduct_and_guard_floor():
         np.isclose(floors2[k], 2.4, atol=1e-6) for k in intra)
     inter = [k for k in range(len(floors2)) if k not in intra]
     assert all(np.isclose(floors2[k], 2.6, atol=1e-6) for k in inter)
+
+
+def test_ccd_bond_bands_carry_peptide_link_geometry():
+    """跨残基肽链接的 1-3/1-4 构象几何(Engh & Huber)必须进入硬投影族:
+    只有键长带时,碰撞推力与键投影交替会把链接角棘轮折叠,CA-CA 压到
+    2.8 A 以下而全部键长仍在带内(生产 observed 的主链压碎形态)。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import numpy as np
+    import core
+    import core.constraints as _c_mod
+    print("DEBUG core:", core.__file__)
+    print("DEBUG constraints:", _c_mod.__file__)
+    print("DEBUG res_nums pairing in file:", "res_nums = sorted" in inspect.getsource(_c_mod.compute_ccd_bond_bands))
+    from core.constraints import compute_ccd_bond_bands
+
+    # 两个相邻 GLY(残基 1→2 的肽键), 构象取标准 trans 几何:
+    # N-CA 1.46 / CA-C 1.53 / C-N 1.33, CA-CA 3.80, CA-C-N 116.2°
+    n1 = np.array([-1.19, 0.83, 0.0])
+    ca1 = np.array([0.0, 0.0, 0.0])
+    c1 = np.array([1.53, 0.0, 0.0])
+    o1 = np.array([2.25, -1.05, 0.0])
+    n2 = np.array([2.68, 1.19, 0.0])
+    ca2 = np.array([3.80, 1.86, 0.0])
+    c2 = np.array([5.33, 1.86, 0.0])
+    o2 = np.array([6.05, 2.86, 0.0])
+    info = {
+        "asym": np.array([1] * 8),
+        "res_id": np.array([1, 1, 1, 1, 2, 2, 2, 2]),
+        "atom_names": np.array(["N", "CA", "C", "O", "N", "CA", "C", "O"]),
+        "comp_ids": np.array(["GLY"] * 8),
+        "elements": np.array(["N", "C", "C", "O", "N", "C", "C", "O"]),
+        "asym_to_entity": {1: 1},
+    }
+    coords = np.stack([n1, ca1, c1, o1, n2, ca2, c2, o2]).astype(np.float64)
+    mask = np.ones(8)
+    out = compute_ccd_bond_bands(info, coords, mask, free_entities={1})
+    assert out is not None
+    idx, up, lo = out[0], out[1], out[2]
+
+    def band_for(i, j):
+        key = (min(i, j), max(i, j))
+        for k in range(idx.shape[0]):
+            a, b = int(idx[k, 0]), int(idx[k, 1])
+            if (min(a, b), max(a, b)) == key:
+                return float(lo[k]), float(up[k])
+        return None
+
+    # CA(1)-CA(2): trans 3.80 在带内; 带下沿 >= 2.85(门禁 2.8 之上, 并容纳 cis 2.90)
+    band = band_for(1, 5)
+    assert band is not None, "CA-CA link band missing"
+    lo_ca, hi_ca = band
+    assert 3.70 <= hi_ca <= 3.96 and lo_ca >= 2.80
+    # CA(1)-N(2): 1-3 锁角带存在
+    assert band_for(1, 4) is not None
+    # C(1)-CA(2): 1-3 锁角带存在
+    assert band_for(2, 5) is not None
+    # O(1)-N(2): omega 伴随带存在
+    assert band_for(3, 4) is not None
+    # C(1)-N(2) 必须是酰胺 1.33(距离启发循环不得抢先注册 1.65 的采样自证值)
+    amide = band_for(2, 4)
+    assert amide is not None and amide[0] <= 1.37 and amide[1] <= 1.45, amide

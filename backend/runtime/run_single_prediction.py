@@ -29,6 +29,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = PROJECT_ROOT / "capabilities"
 
 
+
+
 def _resolve_capability_dir(name: str) -> Path:
     return CAPABILITIES_DIR / name
 
@@ -41,6 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
 BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
 
 sys.path.append(str(PROJECT_ROOT))
+from backend.worker.docker_cmd import ensure_image, readable_docker_failure_diagnosis  # noqa: E402
 from backend.runtime.design_constants import (  # noqa: E402
     BACKBONE_CA_CA_MIN_A,
     PRODUCT_BOUND_MAX_DISTANCE_A,
@@ -1680,6 +1683,7 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
     image = str(BOLTZ2_DOCKER_IMAGE or "").strip()
     if not image:
         raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法运行 IPSAE 后处理。")
+    ensure_image(image)
 
     raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
     extra_args = sanitize_docker_extra_args(raw_extra_args)
@@ -1741,6 +1745,7 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=30,
             )
         except Exception:
             pass
@@ -2624,6 +2629,7 @@ def _run_boltz2score_affinity_postprocess(
     image = str(BOLTZ2_DOCKER_IMAGE or "").strip()
     if not image:
         raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法运行 affinity 后处理 Boltz2Score。")
+    ensure_image(image)
 
     raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
     extra_args = sanitize_docker_extra_args(raw_extra_args)
@@ -2707,6 +2713,7 @@ def _run_boltz2score_affinity_postprocess(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=30,
             )
         except Exception:
             pass
@@ -3272,6 +3279,39 @@ def _msa_search_concurrency() -> int:
     return max(1, min(8, value))
 
 
+def _register_active_msa_ticket(ticket_id: str) -> None:
+    """把进行中的 MSA ticket 归档到任务名下,任务取消时由 terminate 链路撤销。
+
+    以 SET 存储(一个任务可能并发请求多条序列的 MSA);无 BOLTZ_TASK_ID 环境
+    (非 worker 子进程上下文)时跳过登记。
+    """
+    task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    if not task_id or not str(ticket_id or "").strip():
+        return
+    try:
+        client = _get_redis_client_optional()
+        if client is None:
+            return
+        key = f"msa_tickets:{task_id}"
+        client.sadd(key, str(ticket_id))
+        client.expire(key, 7 * 24 * 3600)
+    except Exception as exc:
+        print(f"[WARN] 登记 MSA ticket 失败: {exc}", file=sys.stderr)
+
+
+def _release_active_msa_ticket(ticket_id: str) -> None:
+    task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    if not task_id or not str(ticket_id or "").strip():
+        return
+    try:
+        client = _get_redis_client_optional()
+        if client is None:
+            return
+        client.srem(f"msa_tickets:{task_id}", str(ticket_id))
+    except Exception:
+        pass
+
+
 def request_msa_from_server(
     sequence: str, timeout: Optional[int] = None, msa_mode: str = "auto",
 ) -> Optional[dict]:
@@ -3285,6 +3325,7 @@ def request_msa_from_server(
     Returns:
         包含 MSA 结果的字典，如果失败则返回 None
     """
+    ticket_id = ""
     try:
         effective_timeout = timeout if timeout and timeout > 0 else MSA_SERVER_TIMEOUT_SECONDS
         print(f"正在从 MSA 服务器请求多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
@@ -3322,13 +3363,14 @@ def request_msa_from_server(
             return None
         
         result = response.json()
-        ticket_id = result.get("id")
+        ticket_id = str(result.get("id") or "")
         if not ticket_id:
             print(f"[ERROR] 未获取到有效的任务 ID: {result}", file=sys.stderr)
             return None
         
         print(f"MSA 任务已提交，任务 ID: {ticket_id}", file=sys.stderr)
-        
+        _register_active_msa_ticket(ticket_id)
+
         # 轮询结果
         result_url = f"{MSA_SERVER_URL}/ticket/{ticket_id}"
         start_time = time.time()
@@ -3341,6 +3383,7 @@ def request_msa_from_server(
                 if response.status_code == 200:
                     result_data = response.json()
                     if result_data.get("status") == "COMPLETE":
+                        _release_active_msa_ticket(ticket_id)
                         print(f"MSA 搜索完成，获取到结果", file=sys.stderr)
                         download_url = result_data.get("result_url") or f"{MSA_SERVER_URL}/result/download/{ticket_id}"
                         print(f"下载 MSA 结果: {download_url}", file=sys.stderr)
@@ -3408,6 +3451,7 @@ def request_msa_from_server(
                             print(f"[ERROR] 解析 MSA 压缩包失败: {tar_error}", file=sys.stderr)
                             return None
                     elif result_data.get("status") == "ERROR":
+                        _release_active_msa_ticket(ticket_id)
                         print(f"[ERROR] MSA 搜索失败: {result_data.get('error', '未知错误')}", file=sys.stderr)
                         print(
                             f"   ↳ 服务器返回: {json.dumps(result_data, ensure_ascii=False)}",
@@ -3415,7 +3459,10 @@ def request_msa_from_server(
                         )
                         return None
                     else:
-                        print(f"MSA 任务状态: {result_data.get('status', 'PENDING')}", file=sys.stderr)
+                        print(
+                            f"MSA 任务状态: {result_data.get('status', 'PENDING')} (已等待 {int(time.time() - start_time)}s)",
+                            file=sys.stderr,
+                        )
                 elif response.status_code == 404:
                     print(f"任务尚未完成或不存在", file=sys.stderr)
                 else:
@@ -3427,12 +3474,18 @@ def request_msa_from_server(
             # 等待一段时间再次检查
             time.sleep(10)
         
+        _release_active_msa_ticket(ticket_id)
         print(f"MSA 搜索超时 ({effective_timeout}秒)，取消服务器任务以释放 GPU", file=sys.stderr)
         _cancel_msa_ticket(ticket_id)
         return None
         
     except Exception as e:
         print(f"[ERROR] MSA 服务器请求失败: {e}", file=sys.stderr)
+        if ticket_id:
+            # 外层异常(如结果解压/清洗抛错):ticket 已终态则注销,仍在跑则撤销,
+            # 不留"已登记但无人管"的搜索。
+            _cancel_msa_ticket(ticket_id)
+            _release_active_msa_ticket(ticket_id)
         return None
 
 def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
@@ -4617,6 +4670,7 @@ def run_protenix_backend(
     low_vram: bool = False,
     ipsae_ligand_chain_id: Optional[str] = None,
 ) -> None:
+    ensure_image(str(PROTENIX_DOCKER_IMAGE or "vbio-protenix-v2-runtime:2.0.0").strip())
     print("Using Protenix backend", file=sys.stderr)
     # Same normalization as the boltz path: pocket contacts arrive in author
     # numbering of the uploaded structure, while both engines number polymer
@@ -4889,6 +4943,7 @@ def run_protenix_backend(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=30,
             )
         except Exception:
             pass
@@ -4976,6 +5031,7 @@ def run_protenix_backend(
             traceback_suffix = f"\nTraceback:\n{traceback_text}"
         raise RuntimeError(
             f"Protenix Docker run failed with exit code {return_code}. "
+            f"{readable_docker_failure_diagnosis(return_code, tail_text)}\n"
             f"Last output:\n{tail_text}"
             f"{traceback_suffix}"
             f"{hint}\nFull log: {protenix_log_path}"
@@ -6235,6 +6291,28 @@ def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
         pass
 
 
+def _candidate_dispatch_window() -> int:
+    """Per-parent in-flight cap for the candidate dispatch loops.
+
+    A generation used to be enqueued in one burst; with several design
+    parents active, the broker FIFO let early parents' whole batches run
+    while late parents' candidates sat uncomputed for hours. A per-parent
+    window keeps every active parent circulating: dispatch W, refill
+    one-for-one as results land. Default W = GPU count — a single parent
+    still saturates the pool (candidates already wave across all GPUs),
+    multi-parent runs interleave fairly. Override with
+    PEPTIDE_CANDIDATE_DISPATCH_WINDOW.
+    """
+    raw = str(os.environ.get("PEPTIDE_CANDIDATE_DISPATCH_WINDOW", "") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    try:
+        from gpu_manager import get_gpu_status
+        return max(1, int(get_gpu_status().get("valid_count") or 1))
+    except Exception:
+        return 4
+
+
 def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, parent_task_id: str):
     from backend.core.celery_app import celery_app
 
@@ -6283,8 +6361,10 @@ def _execute_peptide_generation_jobs(
     first_error: Optional[Exception] = None
     last_progress_signature: Optional[Tuple[int, int, int, int, int]] = None
 
-    while pending or running:
-        while pending and first_error is None:
+    window = _candidate_dispatch_window()
+
+    def _fill_running() -> None:
+        while pending and first_error is None and len(running) < window:
             next_job = pending.pop(0)
             async_result = _submit_peptide_candidate_worker_job(
                 next_job,
@@ -6293,6 +6373,8 @@ def _execute_peptide_generation_jobs(
             )
             running.append((async_result, next_job))
 
+    _fill_running()
+    while pending or running:
         if not running:
             break
 
@@ -6334,6 +6416,7 @@ def _execute_peptide_generation_jobs(
                 state_counts["running"] += 1
             next_running.append((async_result, submitted_job))
         running = next_running
+        _fill_running()
 
         if callable(progress_callback):
             try:
@@ -6399,8 +6482,10 @@ def _run_dpeptide_refine_stage(
 
     pending = [ctx for ctx in stage_contexts if ctx.get("dispatch") is not None]
     running: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
-    while pending or running:
-        while pending:
+    window = _candidate_dispatch_window()
+
+    def _fill_refines() -> None:
+        while pending and len(running) < window:
             ctx = pending.pop(0)
             try:
                 async_result = ctx["dispatch"]()
@@ -6415,6 +6500,8 @@ def _run_dpeptide_refine_stage(
             ctx["async_result"] = async_result
             running[str(getattr(async_result, "id", "") or "")] = (async_result, ctx)
 
+    _fill_refines()
+    while pending or running:
         if not running:
             break
 
@@ -6434,6 +6521,7 @@ def _run_dpeptide_refine_stage(
         for task_key in finished:
             _async_result, ctx = running.pop(task_key)
             finalize_context(ctx)
+        _fill_refines()
 
 
 def _dpeptide_target_sequence(base_yaml_data: Dict[str, Any], target_chain_id: str) -> str:
@@ -7106,6 +7194,28 @@ def _relax_staged_bicyclic_strain(
             return {"relaxed": False, "reason": f"missing atom for {cys_num}:{anchor_name}"}
         pairs.append((cys_num, anchor_name))
 
+    # 单原子链接器(BS3=Bi): 先确定性重建锚点位置(SG 三角外侧), 后续投影只需微调
+    # ——原有 sweeps 只动 SG 不动锚,无法修复模型把 Bi 埋进骨架的摆放。
+    single_atom_rebuild = None
+    if sum(1 for a in linker_res if a.element != gemmi.Element("H")) == 1:
+        single_atom_rebuild = _rebuild_single_atom_linker_anchor(staged_path)
+        # 重建重写了文件, 重读以同步内存中的结构
+        st = gemmi.read_structure(str(staged_path))
+        st.setup_entities()
+        polymer = sorted(
+            (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
+            key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
+        pep = polymer[-1] if len(polymer) > 1 else None
+        linker_res = None
+        for chain in st[0]:
+            if linker_res is None and any(r.name == linker_code for r in chain):
+                for r in chain:
+                    if r.name == linker_code:
+                        linker_res = r
+                        break
+        if pep is None or linker_res is None:
+            return {"relaxed": False, "reason": "structure lost after anchor rebuild"}
+
     def _residue_atoms(residue):
         return [a for a in residue if a.element != gemmi.Element("H")]
 
@@ -7248,7 +7358,8 @@ def _relax_staged_bicyclic_strain(
             np.array([an.pos.x, an.pos.y, an.pos.z])
             - np.array([sg.pos.x, sg.pos.y, sg.pos.z]))))
     return {"relaxed": True, "final_bonds": [round(x, 3) for x in final],
-            "cb_renormalized": fixed_cb}
+            "cb_renormalized": fixed_cb,
+            "anchor_rebuild": single_atom_rebuild}
 
 
 def _dpeptide_prepare_reference_peptide(
@@ -8851,10 +8962,13 @@ def _pocket_collect_refine(
     integrity = _structure_integrity_report(Path(refined_path))
 
     if require_bonds:
+        rebuild_info = _rebuild_single_atom_linker_anchor(Path(refined_path))
         bond_report = _dpeptide_linker_bond_report(Path(refined_path))
         if not bond_report.get("all_bonded"):
+            prefix = (f"anchor rebuild {rebuild_info}; " if rebuild_info else "")
             raise ValueError(
-                f"linker covalent integrity gate: {bond_report.get('bonds')}")
+                "linker covalent integrity gate: "
+                f"{prefix}{bond_report.get('bonds')}")
     else:
         bond_report = None
 
@@ -9032,6 +9146,194 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
     }
 
 
+def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[str, Any]]:
+    """Deterministic geometry repair for single-atom bicyclic linkers (BS3=Bi).
+
+    The model has no chemical prior for a one-atom ligand and may leave the
+    ion inside the peptide backbone; the bond-band relaxers only project
+    distances and never move the anchor. Here the anchor position is REBUILT
+    from the three matched Cys-SG atoms: circumcenter placement at the Bi-S
+    rest length (2.55 A), choosing the triangle side with the larger clearance
+    to the peptide's own heavy atoms, then a capped joint micro-relaxation
+    (anchor + SGs, SG drift limited) settles all three bonds into the band
+    while repelling the anchor from self-clashes.
+
+    In-place file rewrite (cif/pdb preserved). Returns None for multi-atom
+    linkers (SEZ/29N) or when the topology is incomplete — callers proceed
+    unchanged. Diagnostics include the post-repair self-clash clearance so
+    callers/gates can reject rings that cannot host the linker at all.
+    """
+    path = Path(structure_path)
+    st = gemmi.read_structure(str(path))
+    st.setup_entities()
+    linker_res = None
+    linker_chain = None
+    for chain in st[0]:
+        for residue in chain:
+            if residue.name in BICYCLIC_LINKER_ATOM_MAP:
+                linker_res = residue
+                linker_chain = chain
+                break
+        if linker_res is not None:
+            break
+    if linker_res is None:
+        return None
+    heavy = [a for a in linker_res if a.element != gemmi.Element("H")]
+    if len(heavy) != 1:
+        return None  # multi-atom linker: CCD geometry already governs it
+    anchor = heavy[0]
+    rest = 2.55 if anchor.name == "BI" else 1.82
+
+    polymer_lens = {
+        c.name: sum(1 for r in c if r.het_flag != "H") for c in st[0]}
+    peptide_chain_name = min(
+        (c for c, n in polymer_lens.items()
+         if n >= 3 and c != linker_chain.name),
+        key=lambda c: polymer_lens[c], default=None)
+    if peptide_chain_name is None:
+        return None
+    pep = st[0][peptide_chain_name]
+
+    sgs = [(r.seqid.num, r.find_atom("SG", "*"))
+           for r in pep if r.name == "CYS" and r.find_atom("SG", "*") is not None]
+    anchors_wanted = BICYCLIC_LINKER_ATOM_MAP[linker_res.name]
+    remaining = list(sgs)
+    matched: List[Tuple[int, Any]] = []
+    for _ in anchors_wanted:  # one-to-one greedy; symmetric linkers repeat
+        if not remaining:
+            break
+        best = min(remaining, key=lambda item: float(
+            np.linalg.norm(np.array([item[1].pos.x, item[1].pos.y, item[1].pos.z])
+                           - np.array([anchor.pos.x, anchor.pos.y, anchor.pos.z]))))
+        remaining.remove(best)
+        matched.append(best)
+    if len(matched) != 3:
+        return None
+
+    pep_pts = np.array([
+        [a.pos.x, a.pos.y, a.pos.z]
+        for r in pep for a in r
+        if a.element != gemmi.Element("H")
+        and not (r.name == "CYS" and a.name == "SG")])
+    matched_ids = {num for num, _ in matched}
+
+    def _self_clearance(point: np.ndarray) -> float:
+        if len(pep_pts) == 0:
+            return float("inf")
+        d = np.linalg.norm(pep_pts - point, axis=1)
+        return float(d.min())
+
+    p1 = np.array([matched[0][1].pos.x, matched[0][1].pos.y, matched[0][1].pos.z])
+    p2 = np.array([matched[1][1].pos.x, matched[1][1].pos.y, matched[1][1].pos.z])
+    p3 = np.array([matched[2][1].pos.x, matched[2][1].pos.y, matched[2][1].pos.z])
+    centroid = (p1 + p2 + p3) / 3.0
+    normal = np.cross(p2 - p1, p3 - p1)
+    n_len = float(np.linalg.norm(normal))
+    normal = normal / n_len if n_len > 1e-8 else np.array([0.0, 0.0, 1.0])
+    # Circumcenter of the SG triangle (equidistant from all three vertices):
+    # solve |O-p1| = |O-p2| = |O-p3| with O in the triangle plane. Placing at
+    # circumcenter + normal*h puts the anchor exactly `rest` from every SG
+    # before relaxation. h collapses to 0 once R >= rest (ring too small to
+    # host the anchor at the ideal length — the gate judges the outcome).
+    b_len = float(np.linalg.norm(p2 - p3))
+    c_len = float(np.linalg.norm(p1 - p3))
+    a_len = float(np.linalg.norm(p1 - p2))
+    s = (a_len + b_len + c_len) / 2.0
+    area2 = max(s * (s - a_len) * (s - b_len) * (s - c_len), 0.0)
+    area = float(np.sqrt(area2))
+    circum_r = (a_len * b_len * c_len) / (4.0 * area) if area > 1e-6 else 0.0
+    h = float(np.sqrt(max(rest * rest - circum_r * circum_r, 0.0)))
+    # in-plane offset from centroid to circumcenter: barycentric weights
+    # sin(2A):sin(2B):sin(2C) computed from edge lengths
+    w1 = a_len * a_len * (b_len * b_len + c_len * c_len - a_len * a_len)
+    w2 = b_len * b_len * (c_len * c_len + a_len * a_len - b_len * b_len)
+    w3 = c_len * c_len * (a_len * a_len + b_len * b_len - c_len * c_len)
+    w_sum = w1 + w2 + w3
+    if abs(w_sum) > 1e-9:
+        circumcenter = (w1 * p1 + w2 * p2 + w3 * p3) / w_sum
+    else:
+        circumcenter = centroid
+    # numerical guard: keep the offset in-plane (component along the normal
+    # would tilt the placement) and within the triangle's scale
+    in_plane = circumcenter - centroid
+    in_plane = in_plane - normal * float(np.dot(in_plane, normal))
+
+    candidates = []
+    for sign in (1.0, -1.0):
+        point = circumcenter + normal * (h * sign)
+        candidates.append((_self_clearance(point), sign, point))
+    candidates.sort(key=lambda row: row[0], reverse=True)
+    clearance0, chosen_sign, point = candidates[0]
+    anchor.pos = gemmi.Position(*(point.tolist()))
+
+    # capped joint micro-relaxation: anchor carries most of the correction,
+    # SGs may drift at most ~1.5 A total (their residues stay untouched —
+    # moving a cysteine's SG without its residue would tear the backbone)
+    sg_positions = {num: np.array([a.pos.x, a.pos.y, a.pos.z]) for num, a in matched}
+    sg_start = {num: v.copy() for num, v in sg_positions.items()}
+    bond_lo, bond_hi = (2.20, 2.90) if anchor.name == "BI" else (1.75, 2.05)
+    for _ in range(60):
+        max_v = 0.0
+        p_an = np.array([anchor.pos.x, anchor.pos.y, anchor.pos.z])
+        for num, _sg in matched:
+            p_sg = sg_positions[num]
+            d = float(np.linalg.norm(p_an - p_sg))
+            target = float(np.clip(d, rest, rest))  # pull toward rest length
+            viol = d - target
+            max_v = max(max_v, abs(viol))
+            if abs(viol) < 1e-3:
+                continue
+            u = (p_an - p_sg) / max(d, 1e-8)
+            # d > rest (viol>0): 锚沿 -u 向 SG 收拢, SG 沿 +u 向锚收拢;
+            # d < rest (viol<0): 双方反向分开——符号与距离变化量对应
+            anchor_step = np.clip(-0.7 * viol * u, -0.3, 0.3)
+            new_an = p_an + anchor_step
+            sg_step = np.clip(0.3 * viol * u, -0.15, 0.15)
+            new_sg = p_sg + sg_step
+            drift = np.linalg.norm(new_sg - sg_start[num])
+            if drift <= 1.5:
+                sg_positions[num] = new_sg
+            anchor.pos = gemmi.Position(*(new_an.tolist()))
+            p_an = new_an
+        # self-clash repulsion for the anchor
+        p_an = np.array([anchor.pos.x, anchor.pos.y, anchor.pos.z])
+        if len(pep_pts):
+            d = np.linalg.norm(pep_pts - p_an, axis=1)
+            j = int(np.argmin(d))
+            if d[j] < 2.2:
+                u = p_an - pep_pts[j]
+                n = float(np.linalg.norm(u))
+                u = u / n if n > 1e-8 else np.array([0.0, 0.0, 1.0])
+                p_an = pep_pts[j] + 2.2 * u
+                anchor.pos = gemmi.Position(*p_an.tolist())
+                max_v = max(max_v, 2.2 - float(d[j]))
+        for num, atom in matched:
+            atom.pos = gemmi.Position(*sg_positions[num].tolist())
+        if max_v < 5e-3:
+            break
+
+    if path.suffix.lower() in {".cif", ".mmcif"}:
+        st.make_mmcif_document().write_file(str(path))
+    else:
+        st.write_pdb(str(path))
+
+    final_sgs = [float(np.linalg.norm(
+        np.array([a.pos.x, a.pos.y, a.pos.z])
+        - np.array([anchor.pos.x, anchor.pos.y, anchor.pos.z])))
+        for _, a in matched]
+    return {
+        "linker": linker_res.name,
+        "side": "+" if chosen_sign > 0 else "-",
+        "circumradius_a": round(circum_r, 2),
+        "self_clash_min_a": round(_self_clearance(np.array(
+            [anchor.pos.x, anchor.pos.y, anchor.pos.z])), 3),
+        "anchor_sg_a": [round(x, 2) for x in final_sgs],
+        "sg_drift_a": {str(num): round(float(np.linalg.norm(
+            sg_positions[num] - sg_start[num])), 2) for num, _ in matched},
+        "initial_clearance_a": round(clearance0, 3),
+    }
+
+
 def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
     """Measure whether the bicyclic linker is actually bonded in a shipped
     structure: for every linker anchor atom, the distance to the nearest
@@ -9105,11 +9407,35 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
             "bonded": bool(lo <= dist <= hi),
         })
     distinct = len({b["cys_resnum"] for b in bonds if b["cys_resnum"] is not None})
+    # 锚点自碰撞门禁:链接器锚(如 BS3 的 Bi)压进自身肽骨架(键长合格但物理
+    # 重叠)在化学上不可用, 与键长一同判失败。
+    self_clash_min = None
+    if linker_res is not None:
+        anchor_atoms = [a for a in linker_res if a.element != gemmi.Element("H")]
+        other_heavy = [
+            a for chain in st[0] if chain.name != linker_chain_name
+            for r in chain for a in r
+            if a.element != gemmi.Element("H")
+            and not (chain.name == peptide_chain_name
+                     and r.name == "CYS" and a.name == "SG")]
+        if anchor_atoms and other_heavy:
+            import numpy as _np_clash
+            pts = _np_clash.array([[a.pos.x, a.pos.y, a.pos.z] for a in other_heavy])
+            for a in anchor_atoms:
+                d = _np_clash.linalg.norm(
+                    pts - _np_clash.array([a.pos.x, a.pos.y, a.pos.z]), axis=1)
+                m = float(d.min())
+                self_clash_min = m if self_clash_min is None else min(self_clash_min, m)
+    self_clash = self_clash_min is not None and self_clash_min < 2.0
     return {
         "linker": linker_code,
         "all_bonded": bool(all(b["bonded"] for b in bonds)
-                           and distinct == len(bonds)),
+                           and distinct == len(bonds)
+                           and not self_clash),
         "distinct_cys": distinct,
+        "anchor_self_clash_min_a": (round(self_clash_min, 3)
+                                    if self_clash_min is not None else None),
+        "self_clash": self_clash,
         "bonds": bonds,
         "cutoff_a": SEZ_RING_BOND_CUTOFF_A,
     }
@@ -10261,6 +10587,18 @@ def run_peptide_design_backend(
             composite_score = ctx["composite_score"]
             structure_file = ctx["structure_file"]
             staged_path = ctx["staged_path"]
+            # 兜底锚点重建: 任何直接出原生预测的路径(未过 refine)也拿到
+            # 几何正确的单原子链接器;refine 路线在各自门禁前已重建。
+            if structure_file is not None and Path(structure_file).is_file():
+                try:
+                    native_rebuild = _rebuild_single_atom_linker_anchor(
+                        Path(structure_file))
+                    if native_rebuild:
+                        metrics.setdefault(
+                            "linker_anchor_rebuild", native_rebuild)
+                except Exception as rebuild_exc:
+                    print(f"[peptide] anchor rebuild failed: {rebuild_exc}",
+                          file=sys.stderr)
             d_space_refined = ctx["d_space_refined"]
             d_space_metrics = ctx["d_space_metrics"]
             pocket_report_row = ctx["pocket_report_row"]
@@ -10328,6 +10666,15 @@ def run_peptide_design_backend(
                         )
                         d_space_refined = str(ctx["refined_cif"])
                         if design_mode == "bicyclic":
+                            try:
+                                d_rebuild = _rebuild_single_atom_linker_anchor(
+                                    Path(d_space_refined))
+                                if d_rebuild:
+                                    metrics.setdefault(
+                                        "linker_anchor_rebuild", d_rebuild)
+                            except Exception as rebuild_exc:
+                                print(f"[d-peptide] anchor rebuild failed: "
+                                      f"{rebuild_exc}", file=sys.stderr)
                             bond_report = _dpeptide_linker_bond_report(Path(d_space_refined))
                             if not (bond_report and bond_report.get("all_bonded")):
                                 print(
@@ -10445,6 +10792,14 @@ def run_peptide_design_backend(
                     d_space_refined = str(ctx["refined_cif"])
                     structure_file = Path(d_space_refined)
                     if design_mode == "bicyclic":
+                        # Single-atom anchor rebuild BEFORE the gate: the
+                        # refine can leave the ion inside the peptide; the
+                        # deterministic circumcenter placement decides the
+                        # chemistry-feasible side, the gate then judges.
+                        rebuild_info = _rebuild_single_atom_linker_anchor(
+                            Path(d_space_refined))
+                        if rebuild_info:
+                            metrics["linker_anchor_rebuild"] = rebuild_info
                         # Same require_bonds guarantee the pocket route and
                         # the D route enforce on their collects.
                         bond_report = _dpeptide_linker_bond_report(
@@ -11601,6 +11956,7 @@ def run_boltz_backend(
     low_vram: bool = False,
     ipsae_ligand_chain_id: Optional[str] = None,
 ) -> None:
+    ensure_image(str(BOLTZ2_DOCKER_IMAGE or "").strip())
     normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
     _validate_unique_sequence_chain_ids(normalized_yaml)
     normalized_yaml = _remap_constraints_by_template_alignment(normalized_yaml)
@@ -11813,6 +12169,7 @@ def run_boltz_backend(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=30,
             )
         except Exception:
             pass
@@ -11846,6 +12203,7 @@ def run_boltz_backend(
         tail_text = "".join(output_tail[-200:])
         raise RuntimeError(
             f"Boltz2 Docker run failed with exit code {return_code}. "
+            f"{readable_docker_failure_diagnosis(return_code, tail_text)}\n"
             f"Last output:\n{tail_text}\n"
             f"Full log: {boltz_log_path}"
         )
@@ -11900,6 +12258,7 @@ def run_alphafold3_backend(
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
     low_vram: bool = False,
 ) -> None:
+    ensure_image(str(ALPHAFOLD3_DOCKER_IMAGE or "jurgjn/alphafold3:v3.0.2").strip())
     print("Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
     if low_vram:
         raise ValueError(
@@ -12322,7 +12681,8 @@ except Exception:
                 ["docker", "rm", "-f", task_container_name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                check=False
+                check=False,
+                timeout=30,
             )
         except Exception:
             pass
@@ -12354,6 +12714,7 @@ except Exception:
         print(f"[ERROR] AlphaFold3 Docker 运行失败: {tail_text}", file=sys.stderr)
         raise RuntimeError(
             f"AlphaFold3 Docker run failed with exit code {return_code}. "
+            f"{readable_docker_failure_diagnosis(return_code, tail_text)}\n"
             f"Last output:\n{tail_text}\n"
             f"Full log: {af3_log_path}"
         )
@@ -12439,9 +12800,27 @@ def main():
                         release_gpu as worker_release_gpu_fn,
                     )
                     worker_release_gpu = worker_release_gpu_fn
+                    def _raise_if_cancelled() -> None:
+                        try:
+                            client = _get_redis_client_optional()
+                            if client is None:
+                                return
+                            own = os.environ.get("BOLTZ_PEPTIDE_WORKER_TASK_ID", "")
+                            parent = os.environ.get("BOLTZ_PARENT_TASK_ID", "")
+                            for marker_task_id in (own, parent):
+                                if marker_task_id and client.exists(f"task_cancelled:{marker_task_id}"):
+                                    raise RuntimeError(
+                                        f"任务已取消 (task_cancelled:{marker_task_id[:8]}), 中止 GPU 等待"
+                                    )
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            return  # 取消检查 best-effort:redis 故障不打断等卡
+
                     worker_gpu_id = worker_acquire_gpu_fn(
                         task_id=worker_task_id,
                         timeout=PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
+                        cancel_check=_raise_if_cancelled,
                     )
                     os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_gpu_id)
 

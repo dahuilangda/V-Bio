@@ -676,6 +676,60 @@ def compute_ccd_bond_bands(
             continue
         rows_by_asym.setdefault(int(asym[i]), []).append(i)
 
+
+    bonded: set[tuple[int, int]] = set()
+    # inter-residue peptide bonds + link conformational geometry, keyed by
+    # RESIDUE (not row adjacency): the atom array orders O(i) between C(i)
+    # and N(i+1), so an adjacent-row C→N check never fires and the amide
+    # band silently degrades to the distance heuristic (rest = whatever the
+    # sample currently sits at — self-fulfilling, no chemistry).
+    #
+    # Amide: C(i)-N(i+1) at the Engh & Huber 1.33 A (the generic C-N 1.47
+    # leaves the denoiser room to fill to 1.5-1.6).
+    #
+    # Link conformational 1-3/1-4 distances: the bonds above pin every link
+    # BOND length, but the link angles (CA-C-N, C-N-CA, omega) are soft in
+    # this family — steric pushes alternating with the bond-only Jacobi can
+    # ratchet them until CA(i) folds onto CA(i+1) (observed: shipped samples
+    # at CA-CA < 2.8 A with every bond in band). These distances pin the
+    # link conformation in the same hard family; bands admit a cis omega
+    # (CA-CA 2.90) so genuine cis links are not fought.
+    link_bounds: dict[tuple[int, int], tuple[float, float]] = {}
+    for rows in rows_by_asym.values():
+        by_key: dict[tuple[int, str], int] = {}
+        for r in rows:
+            by_key[(int(res_ids[r]),
+                    atom_names[r].lstrip("0123456789"))] = r
+        res_nums = sorted({k[0] for k in by_key})
+        for ra, rb in zip(res_nums, res_nums[1:]):
+            if rb - ra != 1:
+                continue
+            c_atom = by_key.get((ra, "C"))
+            n_atom = by_key.get((rb, "N"))
+            if c_atom is None or n_atom is None:
+                continue
+            key = (min(c_atom, n_atom), max(c_atom, n_atom))
+            if key not in bonded:
+                bonded.add(key)
+                pairs.append([c_atom, n_atom])
+                rest.append(1.33)
+            link_pairs = (
+                (by_key.get((ra, "CA")), by_key.get((rb, "CA")), 2.85, 3.95),
+                (by_key.get((ra, "CA")), n_atom, 2.15, 2.62),
+                (c_atom, by_key.get((rb, "CA")), 2.15, 2.66),
+                (by_key.get((ra, "O")), n_atom, 2.20, 3.00),
+            )
+            for x, y, lo, up in link_pairs:
+                if x is None or y is None:
+                    continue
+                key = (min(x, y), max(x, y))
+                if key in bonded:
+                    continue
+                bonded.add(key)
+                pairs.append([x, y])
+                rest.append((lo + up) / 2.0)
+                link_bounds[key] = (lo, up)
+
     for rows in rows_by_asym.values():
         pts = np.asarray(coords[rows], dtype=np.float64)
         elem = elements[rows]
@@ -690,6 +744,10 @@ def compute_ccd_bond_bands(
         keep = (d2[iu] <= cutoff2[iu]) & ok[iu]
         for a, b in zip(iu[0][keep], iu[1][keep]):
             i, j = rows[a], rows[b]
+            key = (min(i, j), max(i, j))
+            if key in bonded:
+                continue  # 酰胺/链接构象带已注册, 距离启发不得覆盖
+            bonded.add(key)
             ideal = None
             if res_ids[i] == res_ids[j] and asym[i] == asym[j]:
                 tpl = _load_ccd_template(str(comp_ids[i]).upper())
@@ -721,7 +779,6 @@ def compute_ccd_bond_bands(
     _ring_sets = {
         "PRO": (("N", "CA", "CB", "CG", "CD"),),
     }
-    bonded = {(min(i, j), max(i, j)) for i, j in pairs}
     name_by_res: dict[tuple[int, int], dict[str, int]] = {}
     for row in range(len(asym)):
         if mask[row] <= 0:
@@ -768,21 +825,6 @@ def compute_ccd_bond_bands(
             else:
                 rest.append(float(np.linalg.norm(coords[i] - coords[j])))
 
-    # inter-residue peptide bonds C(i)-N(i+1) within each free chain: same
-    # template-independent detection gap under blind noise
-    for rows in rows_by_asym.values():
-        ordered = sorted(rows, key=lambda r: (int(res_ids[r]), int(asym[r])))
-        for a, b in zip(ordered, ordered[1:]):
-            na = atom_names[a].lstrip("0123456789")
-            nb = atom_names[b].lstrip("0123456789")
-            if na == "C" and nb == "N" and (
-                    int(res_ids[b]) - int(res_ids[a]) == 1):
-                key = (min(a, b), max(a, b))
-                if key in bonded:
-                    continue
-                bonded.add(key)
-                pairs.append([a, b])
-                rest.append(1.33)
     rigid_rows: list[list[int]] = []
     rigid_coords: list[np.ndarray] = []
     rigid_bb_rows: list[list[int]] = []
@@ -889,15 +931,9 @@ def compute_ccd_bond_bands(
                 clash_pairs.append([int(a), int(b)])
                 clash_floors.append(2.6)
 
-    # Intra-chain deep-burial guard: the inter-chain shell above and the
-    # CCD bond bands cover everything EXCEPT non-bonded pairs inside the
-    # free chain — observed as an LYS NZ jammed 1.5 A into an i+2 LEU
-    # side chain. Real geometry keeps |i-j|>=2 heavy-atom pairs above
-    # ~2.4 A (adjacent-residue pairs are valence-close and belong to the
-    # bond bands; SG-SG can be a 2.05 A disulfide and is excluded).
-    _res_id_arr = np.asarray(info["res_id"])
-    _asym_arr = np.asarray(info["asym"])
-    _elem_arr = np.char.upper(np.asarray(info["elements"]).astype(str))
+    # Intra-chain deep-burial guard: non-bonded heavy pairs |i-j|>=2 within a
+    # free chain stay above ~2.4 A (adjacent residues are valence-close and
+    # belong to the bond bands; SG-SG may bond and is excluded).
     for _ia, a in enumerate(free_rows):
         for _ib, b in enumerate(free_rows):
             if _ib <= _ia:
@@ -943,6 +979,13 @@ def compute_ccd_bond_bands(
     rest_arr = np.abs(rest_arr)
     upper = rest_arr + widths
     lower = np.maximum(rest_arr - widths, 0.5)
+    # link-conformation pairs carry their own asymmetric bounds (cis/trans
+    # both admissible) — override the symmetric default widths for them
+    for pi in range(index.shape[0]):
+        a, b = int(index[pi, 0]), int(index[pi, 1])
+        key = (min(a, b), max(a, b))
+        if key in link_bounds:
+            lower[pi], upper[pi] = link_bounds[key]
     clash_index = (np.asarray(clash_pairs, dtype=np.int64)
                    if clash_pairs else None)
     # Guard floor, not a packing shell: 2.6 A matches the TFG projection
