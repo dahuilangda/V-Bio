@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 PEPLM_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +32,9 @@ from peplm.models.esm3_policy import ESM3Policy
 _ADAPTERS_ROOT = Path(os.environ.get(
     "ESM3_ADAPTER_ROOT", str(PEPLM_ROOT / "adapters")))
 _adapter_optimizers: dict = {}
+_opt_last_use: dict = {}
+_MAX_LIVE_OPTIMIZERS = max(1, int(os.environ.get(
+    "ESM3_MAX_LIVE_OPTIMIZERS", "4")))
 _loaded_adapter_key: str | None = None
 policy: ESM3Policy | None = None
 
@@ -51,13 +55,23 @@ def _ensure_adapter_loaded(key: str) -> None:
 
 def _optimizer_for(key: str) -> torch.optim.AdamW:
     opt = _adapter_optimizers.get(key)
+    _opt_last_use[key] = time.time()
     if opt is None:
-        # weight_decay=0: 整组奖励相同的代际 adv 全 0、grads 全 0, 而 AdamW 的
-        # 解耦衰减与梯度无关——默认 0.01 会在零信号步仍腐蚀 adapter 权重。
+        # weight_decay=0: 整组奖励相同的代际产生全零优势与全零梯度, opt.step()
+        # 仍按 lr*wd 腐蚀 adapter 权重。LoRA 微调惯例置 0。
         opt = torch.optim.AdamW(
             [p for p in policy.model.parameters() if p.requires_grad],
             lr=1e-5, weight_decay=0.0)
         _adapter_optimizers[key] = opt
+    # per-target 键会随靶点数增长: 只在 GPU 上保留最近使用的优化器状态,
+    # 淘汰项下次使用时重建(动量丢失可接受, adapter 权重在磁盘)。
+    while len(_adapter_optimizers) > _MAX_LIVE_OPTIMIZERS:
+        oldest = min(_opt_last_use, key=lambda k: _opt_last_use.get(k, 0.0))
+        if oldest == key:
+            break
+        del _adapter_optimizers[oldest]
+        del _opt_last_use[oldest]
+        torch.cuda.empty_cache()
     return opt
 
 
@@ -158,11 +172,20 @@ def _perplexity(req: dict) -> dict:
 
 
 def _learn(req: dict) -> dict:
-    """Sequence-level policy gradient: score each peptide's tokens
-    under the current policy, apply the group-mean advantage as a
-    scalar reward, and take one gradient step. This avoids the full
-    MaskGIT trajectory recording that Rollout requires — the HTTP
-    boundary carries sequences and rewards, not per-step states."""
+    """Sequence-level GRPO-REINFORCE with safety rails.
+
+    - KL anchor (k3 estimator) to the adapter-disabled base: bounds the
+      cross-task drift of the shared policy family when several design
+      tasks train the same chirality concurrently.
+    - Entropy bonus delays mode collapse over long runs.
+    - Multi-epoch micro-batched updates: one gradient step per generation
+      at lr 1e-5 barely moves the policy; epochs give the generation enough
+      gradient while the KL anchor bounds the drift.
+    - Zero-advantage rollouts (identical rewards in a group) are dropped:
+      they carry no gradient and would only trigger decay-style drift.
+    """
+    import random
+
     data = req.get("rollouts", [])
     cond = _conditioning(req)
     groups: dict[str, list] = {}
@@ -179,44 +202,42 @@ def _learn(req: dict) -> dict:
         m = sum(rewards) / len(rewards)
         sd = max(max(rewards) - m, m - min(rewards), 1e-6)
         for r in rows:
-            # each rollout trains at ITS OWN length: mutation children
-            # keep their parent's length and a padded-to-pep_len row
-            # would misalign a length-dependent ss8 template
             n = len(r.get("sequence") or "")
             if n < 4:
                 continue
             tokens = policy.encode_peptide(r["sequence"], n)
-            if tokens:
-                adv = (r["reward"] - m) / sd
-                # Per-residue credit: positions with low pLDDT get
-                # higher gradient weight (BindCraft2-style — the model
-                # learns to change what is broken, not what works)
-                plddts = r.get("plddts") or []
-                if plddts and len(plddts) == n:
-                    credit = [max(1.0 - float(p), 0.05) for p in plddts]
-                    csum = sum(credit) or 1.0
-                    credit = [c / csum * n for c in credit]
-                else:
-                    credit = [1.0] * n
-                updates.append((tokens, adv, credit))
+            if not tokens:
+                continue
+            adv = (r["reward"] - m) / sd
+            if abs(adv) < 1e-9:
+                continue  # 零优势行无梯度信号, 只会触发权重衰减式漂移
+            plddts = r.get("plddts") or []
+            if plddts and len(plddts) == n:
+                credit = [max(1.0 - float(p), 0.05) for p in plddts]
+                csum = sum(credit) or 1.0
+                credit = [c / csum * n for c in credit]
+            else:
+                credit = [1.0] * n
+            updates.append((tokens, adv, credit))
 
     if len(updates) < 2:
-        return {"skipped": "tokenization failed"}
+        return {"skipped": "tokenization failed or all-zero advantage"}
 
-    # One gradient pass over all (tokens, advantage) pairs; the optimizer
-    # is persistent per adapter key so momentum state accumulates.
+    epochs = max(1, int(req.get("epochs", 2)))
+    beta_kl = float(req.get("beta_kl", os.environ.get("PEPLM_BETA_KL", "0.04")))
+    entropy_coef = float(
+        req.get("entropy_coef", os.environ.get("PEPLM_ENTROPY_COEF", "0.003")))
+    micro_batch = max(1, int(req.get("micro_batch", 4)))
+
     key = str(req.get("adapter_key") or "default")
     _ensure_adapter_loaded(key)
     opt = _optimizer_for(key)
-    opt.zero_grad()
-    total_loss = torch.tensor(0.0, device=policy.device)
+
     rec_seq = req.get("receptor_sequence", "")
     ctx_cache: dict[int, tuple] = {}
-    for tokens, adv, credit in updates:
-        n = len(tokens)
+
+    def _context(n: int) -> tuple:
         if n not in ctx_cache:
-            # context + per-length ss8: hairpin turns sit mid-chain,
-            # so each length needs its own template
             ss8_n = _ss_profile_for(cond, n)
             ctx_cache[n] = (
                 policy.encode_context(rec_seq, n,
@@ -227,25 +248,52 @@ def _learn(req: dict) -> dict:
                                   peptide_first=cond["peptide_first"])
                 if ss8_n else None,
             )
-        ctx, pep_start, ss8 = ctx_cache[n]
-        toks = ctx.clone()
-        for i, tid in enumerate(tokens):
-            toks[0, pep_start + i] = tid
-        logits = policy._forward_sequence_logits(toks, ss8)
-        lp = Fn.log_softmax(
-            logits[0, pep_start:pep_start + n, :], dim=-1)
-        tok_tensor = torch.tensor(tokens, device=policy.device)
-        scores = lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
-        # Per-residue weighted REINFORCE: each token's logprob is
-        # weighted by its credit (low pLDDT -> high weight)
-        credit_t = torch.tensor(credit, device=policy.device,
-                                 dtype=scores.dtype)
-        weighted = (scores * credit_t).sum() / credit_t.sum()
-        total_loss = total_loss - adv * weighted
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(
-        [p for p in policy.model.parameters() if p.requires_grad], 1.0)
-    opt.step()
+        return ctx_cache[n]
+
+    steps = 0
+    last_loss = 0.0
+    for _epoch in range(epochs):
+        order = list(range(len(updates)))
+        random.shuffle(order)
+        for mb_start in range(0, len(order), micro_batch):
+            batch = [updates[i] for i in order[mb_start:mb_start + micro_batch]]
+            opt.zero_grad()
+            mb_loss = torch.tensor(0.0, device=policy.device)
+            for tokens, adv, credit in batch:
+                n = len(tokens)
+                ctx, pep_start, ss8 = _context(n)
+                toks = ctx.clone()
+                for i, tok_id in enumerate(tokens):
+                    toks[0, pep_start + i] = tok_id
+                logits = policy._forward_sequence_logits(toks, ss8)
+                lp = Fn.log_softmax(
+                    logits[0, pep_start:pep_start + n, :], dim=-1)
+                tok_tensor = torch.tensor(tokens, device=policy.device)
+                scores = lp.gather(1, tok_tensor.unsqueeze(1)).squeeze(1)
+                # KL anchor to the adapter-disabled base (k3 estimator, >= 0):
+                # the reference is the frozen base, so cross-task interference
+                # cannot drag the policy arbitrarily far from its start.
+                with policy.model.disable_adapter():
+                    ref_logits = policy._forward_sequence_logits(toks, ss8)
+                ref_lp = Fn.log_softmax(
+                    ref_logits[0, pep_start:pep_start + n, :], dim=-1)
+                ref_scores = ref_lp.gather(
+                    1, tok_tensor.unsqueeze(1)).squeeze(1)
+                delta = ref_scores - scores
+                kl = (torch.exp(delta.clamp(-20, 20)) + delta - 1.0).mean()
+                # entropy bonus over the peptide positions
+                ent = -(lp.exp() * lp).sum(-1).mean()
+                credit_t = torch.tensor(
+                    credit, device=policy.device, dtype=scores.dtype)
+                weighted = (scores * credit_t).sum() / credit_t.sum()
+                mb_loss = mb_loss - adv * weighted + beta_kl * kl \
+                    - entropy_coef * ent
+            mb_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in policy.model.parameters() if p.requires_grad], 1.0)
+            opt.step()
+            steps += 1
+            last_loss = float(mb_loss.detach())
 
     save_dir = Path(req.get("new_adapter_dir") or (_ADAPTERS_ROOT / key))
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +302,10 @@ def _learn(req: dict) -> dict:
     return {
         "adapter_dir": str(save_dir),
         "n_updates": len(updates),
-        "loss": float(total_loss.detach()),
+        "steps": steps,
+        "loss": last_loss,
+        "beta_kl": beta_kl,
+        "entropy_coef": entropy_coef,
     }
 
 

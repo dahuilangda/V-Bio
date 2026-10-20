@@ -124,11 +124,14 @@ class ESM3Proposer:
         self._log = log
         self._generation = 0
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
-        # GRPO updates a per-chirality LoRA adapter: L/D design tasks must not
-        # cross-write the same weights, and the adapter persists on disk so
-        # learned structure survives service restarts (it used to live only
-        # in the ESM3 service process — one restart wiped every generation).
-        self.adapter_key = f"peptide-{str(chirality or 'l').strip().lower()}"
+        # GRPO 更新按 手性+靶点 维度的 LoRA adapter: L/D 不交叉写入, 不同靶点
+        # 也不共享权重——共享会让多任务梯度互相拉扯, 单靶点学习信号被稀释。
+        # adapter 持久化在磁盘, 学习结果跨服务重启存活。
+        import hashlib
+        target_tag = hashlib.md5(
+            (receptor_sequence or "").encode()).hexdigest()[:8] or "notarget"
+        self.adapter_key = (
+            f"peptide-{str(chirality or 'l').strip().lower()}-{target_tag}")
         adapter_root = Path(os.environ.get(
             "ESM3_ADAPTER_ROOT",
             str(Path(__file__).resolve().parents[2] / "adapters"),
