@@ -125,6 +125,6 @@ V-Bio 完成签名、issuer、audience 和过期时间校验后：
 超级管理员配置在 `frontend/.env`：
 
 ```env
-VITE_SUPER_ADMIN_USERNAMES=dahuilangda
-VITE_SUPER_ADMIN_EMAILS=dahuilangda@hotmail.com
+VITE_SUPER_ADMIN_USERNAMES=<admin-username>
+VITE_SUPER_ADMIN_EMAILS=<admin@example.com>
 ```

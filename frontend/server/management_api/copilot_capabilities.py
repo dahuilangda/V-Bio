@@ -121,7 +121,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
 
 TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
     # Keep in sync with backend/routes/prediction.py accepted backends
-    # (single-source wiring tracked in docs/incremental-review-20261008.md §2).
+    # (single-source wiring: capabilities 同时服务 /tasks 快照与 copilot 会话).
     "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix", "nesso", "protenix2dock", "boltz2dock"]},
     "seed": {"type": "int", "min": 0, "max": 2147483647},
     "affinityMode": {

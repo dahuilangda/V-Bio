@@ -1,6 +1,6 @@
 # V-Bio 后端工程规范
 
-> 2026-10-08 制定。背景：降解剂批次连环事故（重投递双跑 → 空心 zip / 假 FAILURE / 分离结构发运 / 前端无结构卡片）。本文档把每次事故的教训固化成可执行的约束。**新增代码违反本文档视为 bug。**
+> 2026-10-08 制定。（重投递双跑 → 空心 zip / 假 FAILURE / 分离结构发运 / 前端无结构卡片）。本文档把每次事故的教训固化成可执行的约束。**新增代码违反本文档视为 bug。**
 
 ## 1. 任务投递语义（最高优先级）
 
@@ -99,5 +99,5 @@ SEZ_RING_BOND_CUTOFF_A = 2.5          # SEZ 三锚点成键判定
 3. checkpoint JSON 非原子写（`write_text`）：进程死在写入中 → JSON 截断 → resume 失败回退 gen1。改为 temp+`os.replace`。
 4. 监控表 `monitor_tasks_current` 对 acks_late=False 任务被杀后停留 RUNNING（靠 lease 过期），UI 需要显示 STALE 而非 RUNNING。
 5. 父任务级单跑锁缺位（2026-10-10 实证）：候选任务已有 redis NX 锁，但父设计任务被 >24h 重投递后仍可双跑——D_NFKBIZ 归档曾被两次上传互相污染（product 与 rank_01 来自不同构建）。建议沿用候选锁机制扩展到父任务，或归档上传按 content-hash 去重。
-6. `/status/batch` 的并行化、`_compact` 裁剪与归档快照缓存仍是 `register_task_routes` 闭包内逻辑，无路由级测试骨架；拆分建议见 docs/incremental-review-20261010.md 第五节第 1 条。
+6. `/status/batch` 的并行化、`_compact` 裁剪与归档快照缓存仍是 `register_task_routes` 闭包内逻辑，无路由级测试骨架；建议将并行化、裁剪与缓存拆出为独立路由模块并补充路由级测试。
 7. L 路线断点续跑曾丢失全部候选结构（tmp 清理 + 无持久回退）——lpeptide_keep 回退已补（2026-10-10），但已丢失的 v11-L 批次结构需重跑补齐。
