@@ -270,7 +270,15 @@ expand_targets() {
   local target
   for target in "${TARGETS[@]}"; do
     case "${target}" in
-      all) expanded+=(redis central cpu "${GPU_PROFILES[@]}") ;;
+      all)
+        # redis 不随 bulk restart 重启: redis 是基础设施, 重启会断联所有
+        # 进程的 TCP 连接(设计父任务/候选/GRPO 全部死)。仅显式
+        # `run.sh restart redis` 才触碰。首次部署用 `run.sh start all`。
+        if [[ "${ACTION}" == "restart" || "${ACTION}" == "stop" ]]; then
+          expanded+=(central cpu "${GPU_PROFILES[@]}")
+        else
+          expanded+=(redis central cpu "${GPU_PROFILES[@]}")
+        fi ;;
       gpu) expanded+=("${GPU_PROFILES[@]}") ;;
       *) expanded+=("${target}") ;;
     esac
