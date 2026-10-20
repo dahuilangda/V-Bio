@@ -188,7 +188,7 @@ class ProjectTaskStore:
                 "GET",
                 "project_tasks",
                 query={
-                    "select": "id,project_id,task_id",
+                    "select": "id,project_id,task_id,task_state",
                     "task_id": f"in.({','.join(chunk)})",
                     "project_id": f"eq.{normalized_project_id}",
                     "order": "created_at.desc",
@@ -218,6 +218,50 @@ class ProjectTaskStore:
                 }
 
         return results
+
+    def reconcile_terminal_rows(self, project_id: str, terminal_by_task_id: Dict[str, str]) -> int:
+        """把已有运行时终态的任务行同步到终态, 返回更新的行数。
+
+        行状态的 QUEUED→SUCCESS 平台上是前端轮询回写的; 页面没开着(或任务
+        经 API 直提)时行会停留在 QUEUED/RUNNING。列表/状态读取路径调用本
+        方法做服务端对账, 让陈旧行在任意一次页面打开时自愈。
+        仅推进非终态行; 已是终态的行不动。
+        """
+        if not terminal_by_task_id:
+            return 0
+        try:
+            rows = self.find_project_tasks(list(terminal_by_task_id.keys()), project_id)
+        except Exception:
+            return 0
+        patched = 0
+        for task_id, row_state in terminal_by_task_id.items():
+            row = rows.get(task_id)
+            if not row:
+                continue
+            current = str(row.get("task_state") or "").strip().upper()
+            if current == row_state or current in ("SUCCESS", "FAILURE", "REVOKED"):
+                continue
+            try:
+                self.postgrest.request(
+                    "PATCH",
+                    "project_tasks",
+                    query={"task_id": f"eq.{task_id}"},
+                    payload={
+                        "task_state": row_state,
+                        "status_text": "Task completed successfully"
+                        if row_state == "SUCCESS"
+                        else "Task failed"
+                        if row_state == "FAILURE"
+                        else "Task revoked",
+                        "completed_at": _now_iso(),
+                    },
+                    headers={"Prefer": "return=minimal"},
+                    expect_json=False,
+                )
+                patched += 1
+            except Exception:
+                continue
+        return patched
 
     def mark_task_cancelled(self, task_row_id: str) -> None:
         normalized_task_row_id = str(task_row_id or "").strip()

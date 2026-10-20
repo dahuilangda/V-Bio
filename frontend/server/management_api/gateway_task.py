@@ -111,6 +111,20 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
         upstream = gateway._proxy_post_json("/status/batch", {"task_ids": task_ids})
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 400
+        if succeeded:
+            # 服务端对账: 运行时已终态而行未推进的(页面没开着/经 API 直提),
+            # 在任意一次状态轮询时自愈。仅处理明确终态, 失败不影响读取。
+            try:
+                terminal = {
+                    str(entry.get("task_id") or ""): str(entry.get("state") or "")
+                    for entry in (upstream.json() or {}).get("statuses", [])
+                    if entry.get("state") in ("SUCCESS", "FAILURE", "REVOKED")
+                    and entry.get("task_id")
+                }
+                if terminal:
+                    gateway.task_store.reconcile_terminal_rows(project_id, terminal)
+            except Exception:
+                gateway.logger.debug("task state reconcile failed", exc_info=True)
         gateway._record_usage(
             token,
             action="read_status_batch",
