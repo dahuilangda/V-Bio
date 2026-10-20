@@ -1881,6 +1881,8 @@ class CopilotAssistant:
                 + (f" [state: {goal_state}]" if goal_state else "")
                 + "\n"
             )
+            if goal_steps_progress:
+                goal_line += f"{goal_steps_progress}\n"
         context_block = (
             active_goal_line
             + f"context_type: {normalized_context}\n"
