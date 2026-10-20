@@ -931,6 +931,9 @@ def compute_ccd_bond_bands(
                 clash_pairs.append([int(a), int(b)])
                 clash_floors.append(2.6)
 
+    _res_id_arr = np.asarray(info["res_id"])
+    _asym_arr = np.asarray(info["asym"])
+    _elem_arr = np.char.upper(np.asarray(info["elements"]).astype(str))
     # Intra-chain deep-burial guard: non-bonded heavy pairs |i-j|>=2 within a
     # free chain stay above ~2.4 A (adjacent residues are valence-close and
     # belong to the bond bands; SG-SG may bond and is excluded).
