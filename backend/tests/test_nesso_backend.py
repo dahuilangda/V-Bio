@@ -12,8 +12,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import yaml
-from flask import Flask, request
 
+from backend.worker import docker_cmd as _nesso_test_docker_cmd
+from flask import Flask, request
 FRONTEND_SERVER_ROOT = Path(__file__).resolve().parents[2] / "frontend" / "server"
 if str(FRONTEND_SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(FRONTEND_SERVER_ROOT))
@@ -76,7 +77,21 @@ def _register_test_app(
     return app, predict_task
 
 
-class BoltzMsaPolicyTests(unittest.TestCase):
+
+class _EnsureImageStubMixin:
+    """本文件只测 nesso 编排逻辑;镜像存在性预检由
+    test_docker_ensure_image.py 单独覆盖,这里统一打桩隔离真实 docker 状态。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.object(
+            _nesso_test_docker_cmd, "ensure_image", lambda image, **kwargs: None
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class BoltzMsaPolicyTests(_EnsureImageStubMixin, unittest.TestCase):
     EMPTY_MSA_INPUT = """\
 version: 1
 sequences:
@@ -161,7 +176,7 @@ sequences:
         self.assertTrue(infer_use_msa_server_from_yaml_text(self.EXTERNAL_MSA_INPUT))
 
 
-class NessoScreeningInputTests(unittest.TestCase):
+class NessoScreeningInputTests(_EnsureImageStubMixin, unittest.TestCase):
     def test_normalizes_batch_deduplicates_smiles_and_resolves_safe_ids(self) -> None:
         source = """\
 version: 1
@@ -257,7 +272,7 @@ virtual_screening:
         self.assertEqual(len(prepared["complex_entries"]), 4)
 
 
-class NessoPredictionRouteTests(unittest.TestCase):
+class NessoPredictionRouteTests(_EnsureImageStubMixin, unittest.TestCase):
     def _post(self, app: Flask, *, backend: str, workflow: str | None) -> object:
         data: dict[str, object] = {
             "backend": backend,
@@ -298,7 +313,7 @@ class NessoPredictionRouteTests(unittest.TestCase):
         self.assertFalse(submitted_args["use_msa_server"])
 
 
-class NessoTaskSnapshotTests(unittest.TestCase):
+class NessoTaskSnapshotTests(_EnsureImageStubMixin, unittest.TestCase):
     def test_preserves_screening_batch_for_direct_api_submissions(self) -> None:
         app = Flask(__name__)
         with app.test_request_context(
@@ -320,7 +335,7 @@ class NessoTaskSnapshotTests(unittest.TestCase):
         self.assertIn(">Best hit\nc1ccccc1", options["virtualScreeningInput"])
 
 
-class NessoRuntimeTests(unittest.TestCase):
+class NessoRuntimeTests(_EnsureImageStubMixin, unittest.TestCase):
     def test_uses_its_own_capability_queues(self) -> None:
         self.assertEqual(capability_from_prediction_backend("nesso-1"), "nesso")
         self.assertEqual(build_capability_queue("nesso", "high"), "cap.nesso.high")

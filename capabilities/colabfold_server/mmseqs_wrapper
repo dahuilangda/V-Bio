@@ -1,10 +1,19 @@
 #!/bin/bash
-# mmseqs GPU 租约包装器 —— 目标库为 *_gpu 填充库时,先从 celery 共享 GPU 池
-# (redis,与 backend/gpu_manager.py 完全同协议: BLPOP available → HSET in_use,
-# 心跳 task_heartbeat:<owner>,条件释放)租一块卡,再以 CUDA_VISIBLE_DEVICES 钦定
-# + --gpu 1 运行 search。redis 不可用或等待超时则 CPU 降级,绝不阻断 MSA。
-# 纯 bash + /dev/tcp,零运行时依赖;由 deploy/docker/DOCKER_CAP_COLABFOLD_SERVER.Dockerfile
-# 安装到 /app/mmseqs/bin/mmseqs(Go 后端经 config.json paths.mmseqs 调用)。
+# mmseqs GPU 租约包装器。
+#
+# 对目标库带 .is_gpu_db 标记的 search,先从共享 GPU 池租卡(redis,与 gpu_manager.py
+# 同协议:BLPOP available → HSET in_use → 心跳 task_heartbeat:<owner> → 条件释放),
+# 再以 CUDA_VISIBLE_DEVICES + --gpu 1 --prefilter-mode 1 执行。
+#
+# 失败策略:绝不做 CPU 降级。redis 故障、等待超时、NVML 坏死一律 exit 75,让
+# ticket 显式置 ERROR——CPU 路径的等价计算慢三个数量级,降级即故障转移。
+#
+# 等待登记(软保留协议的 MSA 侧):等卡期间向 boltz_gpu_pool:msa_waiting (ZSET)
+# 持续刷新 owner 的 score;gpu_manager.msa_reservation_blocks 据此让长任务为 MSA
+# 让出空卡。条目停止刷新即视为死亡,由 python 侧按 GPU_MSA_WAITER_STALE_SECONDS 清理。
+#
+# 纯 bash + /dev/tcp,零运行时依赖。以 bind-mount 安装为容器内
+# /app/mmseqs/bin/mmseqs,由 Go 服务经 config.json paths.mmseqs 调用。
 
 mode="${MMSEQS_LOAD_MODE:-}"
 if [[ -n "$mode" && ! "$mode" =~ ^[0-9]+$ ]]; then
@@ -23,6 +32,7 @@ if [[ -z "$cmd" || "$cmd" == "version" || "$cmd" == "help" || "$cmd" == "list" ]
 fi
 
 shift
+# 剥离 msa.sh 自带的 --db-load-mode,统一改用 MMSEQS_LOAD_MODE。
 sanitized_args=()
 skip_next=0
 for arg in "$@"; do
@@ -37,12 +47,8 @@ for arg in "$@"; do
   sanitized_args+=("$arg")
 done
 
-# GPU 兼容库(<X>_gpu* 带 .is_gpu_db 标记)的下游参数改写:msa.sh/ColabFold 协议把
-# 目标写成 <db>.idx,但 GPU 库的 .idx(subset 10)不含序列查询数据——官方 GPU 协议
-# (colabfold_search, sokrypton/ColabFold search.py)在无索引/IGNORE_INDEX 路径用
-# <db>_seq 序列库与 <db>_aln 对齐库。这里按官方协议透明改写,target 指向 GPU 库本体:
-#   expandaln 的 target→_seq、target2→_aln;其余模块 target→_seq。
-# search 不改写(直接扫 padded 库本体),由下方租约分支注入 --gpu 1 --prefilter-mode 1。
+# GPU 兼容库(<X>_gpu)的 .idx 只含 padded 索引,不含序列数据;下游 CPU 模块须按
+# 官方 GPU 协议改用 <X>_seq / <X>_aln。search 不改写(直接扫 padded 库本体)。
 rewrite_gpu_target_args() {
   local -n dst=$1; local cmdname=$2; shift 2
   dst=("$@")
@@ -72,10 +78,8 @@ rewrite_gpu_target_args() {
 
 rewrite_gpu_target_args rewritten_args "$cmd" "${sanitized_args[@]}"
 
-# ---- thread bound: the Go server never passes --threads and mmseqs.real
-# auto-detects all 128 host cores; with 8 in-process workers that is 1024
-# threads of oversubscription (observed pathological CPU runs). Cap every
-# heavy subcommand at MMSEQS_NUM_THREADS (default 16 => 8x16 = 128 total).
+# 限制每个重子命令的线程数:mmseqs.real 会自动占满全部核心,8 个并发 worker
+# 会叠加成百线程超订,线程上限 = MMSEQS_NUM_THREADS(默认 16)。
 if [[ "$cmd" =~ ^(search|expandaln|filterresult|result2msa|result2profile|align|convertalis|prefilter)$ ]]; then
   has_threads=0
   for a in "${rewritten_args[@]}"; do [[ "$a" == "--threads" ]] && has_threads=1; done
@@ -97,9 +101,8 @@ case "$cmd" in
     ;;
 esac
 
-# ---- 模板搜索跳过(MSA_SKIP_TEMPLATES=1):pdb100 是 CPU 高敏感度(-s 7.5)路径,
-# 是残余僵尸进程的唯一来源(实测 161-339 CPU-min);MSA 消费方(affinity 头/结构
-# 特征)不读模板。跳过 search,后续 convertalis 由 graceful_empty 落空文件。
+# 模板搜索跳过(MSA_SKIP_TEMPLATES=1):pdb100 是 CPU 高敏感度路径且消费方不读
+# 模板;跳过 search,由下方 convertalis 分支落空 pdb70.m8。
 if [[ "${MSA_SKIP_TEMPLATES:-0}" == "1" && "$cmd" == "search" ]]; then
   for a in "${rewritten_args[@]}"; do
     if [[ "$a" == *pdb100* ]]; then
@@ -109,8 +112,6 @@ if [[ "${MSA_SKIP_TEMPLATES:-0}" == "1" && "$cmd" == "search" ]]; then
   done
 fi
 
-# convertalis 配对跳过:模板 search 被跳过后,convertalis 输入(res_pdb)
-# 不存在。直接写空 pdb70.m8——这是跳过决策的正确实现,不是fallback。
 if [[ "${MSA_SKIP_TEMPLATES:-0}" == "1" && "$cmd" == "convertalis" ]]; then
   _has_pdb=0
   for a in "${rewritten_args[@]}"; do
@@ -127,12 +128,10 @@ if [[ "${MSA_SKIP_TEMPLATES:-0}" == "1" && "$cmd" == "convertalis" ]]; then
   fi
 fi
 
-# ---- GPU 租约:仅 search + 目标库为 *_gpu 填充库(独立 prefilter 不支持 --gpu;
-# 非填充库传 --gpu 会直接报 "not a valid GPU database")-----------------------
+# GPU 租约仅适用于 search + 带 .is_gpu_db 标记的填充库;其余命令直接透传
+# (独立 prefilter 不支持 --gpu,非填充库传 --gpu 会报 invalid GPU database)。
 want_gpu=0
 if [[ "${COLABFOLD_ENABLE_GPU:-0}" == "1" && "$cmd" == "search" ]]; then
-  # GPU 库判定:目标参数旁存在 <target>.is_gpu_db 标记文件(官方 GPU 兼容库
-  # 部署时 touch 生成;库本身按官方惯例可用标准命名,不依赖后缀约定)。
   for arg in "${sanitized_args[@]}"; do
     if [[ -e "${arg}.is_gpu_db" ]]; then
       want_gpu=1
@@ -149,12 +148,13 @@ MSA_GPU_REDIS_PORT="${MSA_GPU_REDIS_PORT:-6379}"
 MSA_GPU_WAIT_SECONDS="${MSA_GPU_WAIT_SECONDS:-600}"
 POOL_KEY="${MSA_GPU_POOL_KEY:-boltz_gpu_pool:available}"
 IN_USE_KEY="${MSA_GPU_IN_USE_KEY:-boltz_gpu_pool:in_use}"
+# 须与 gpu_manager 侧 GPU_MSA_WAITING_ZSET_KEY 一致(部署未启用池命名空间,裸键)。
+WAITING_KEY="${MSA_GPU_WAITING_ZSET_KEY:-boltz_gpu_pool:msa_waiting}"
 HEARTBEAT_INTERVAL=20
 HEARTBEAT_TTL=60
-# 卡死的 search(如 CUDA 死锁)会被此硬超时击杀,随后租约经下方 trap 正常归还;
-# 没有它,一次卡死 = 一张卡永久泄漏(GPU 池抽干后所有 search 睡眠等待租约)。
+# 单条 search 的硬超时:卡死的 search 被击杀后经 trap 归还租约,否则一张卡永久泄漏。
 MMSEQS_GPU_SEARCH_TIMEOUT="${MMSEQS_GPU_SEARCH_TIMEOUT:-1800}"
-# 租约年龄下限:刚租到的持有者尚未发出第一次心跳,回收逻辑必须跳过这个窗口。
+# 租约年龄下限:持有者发出首次心跳前,回收逻辑必须跳过。
 LEASE_MIN_AGE_SECONDS=120
 
 # 发送一条 RESP 命令,解析单条回复到 REPLY(+status / :int / bulk / array-of-bulk)。
@@ -198,52 +198,101 @@ _redis_read_reply() {
   esac
 }
 
-# 输出 "<gpu> <owner>";rc=1 redis 故障,rc=2 等待超时。
-# MSA_GPU_WAIT_SECONDS=0 表示无限 FIFO 等待(共享池轮转模式):BLPOP 就是公平队列,
-# 结构预测任务还卡后 MSA 立即接上,不做 CPU 降级——CPU 高敏感度路径曾有病理慢
-# (500 CPU-min 僵尸),降级只会把慢转移到 CPU。redis 故障直接失败让服务器重试。
+# 等待登记:ZSET member=owner, score=刷新 epoch。等卡期间每轮刷新;
+# 死亡条目由 python 侧按 GPU_MSA_WAITER_STALE_SECONDS 自愈清理。
+register_wait() {
+  redis_cmd ZADD "$WAITING_KEY" "$(date +%s)" "$1" >/dev/null 2>&1 || true
+}
+unregister_wait() {
+  redis_cmd ZREM "$WAITING_KEY" "$1" >/dev/null 2>&1 || true
+}
+
+# 输出 "<gpu> <owner>";rc=1 redis 故障,rc=2 等待超时,rc=3 NVML 坏死。
+# MSA_GPU_WAIT_SECONDS=0 表示无限 FIFO 等待(缺省 600s):BLPOP 即公平队列。
 lease_gpu() {
   local owner="colabfold_msa:$$:$(date +%s)"
   local deadline=$(( $(date +%s) + MSA_GPU_WAIT_SECONDS )) slice result value
+  # 连续非数字的 nvidia-smi 输出说明 NVML 本身坏死(忙卡只是数字小,可以等);
+  # 给瞬时抖动留 MSA_GPU_NVML_MAX_FAILURES 次重试,超限快速失败避免无限 requeue。
+  local nvml_fail_count=0
+  local nvml_max=${MSA_GPU_NVML_MAX_FAILURES:-6}
+  local waited=0
   while :; do
     if (( MSA_GPU_WAIT_SECONDS > 0 )) && (( $(date +%s) >= deadline )); then
+      unregister_wait "$owner"
       return 2
     fi
+    register_wait "$owner"
     reclaim_stale_leases
     slice=$(( deadline - $(date +%s) ))
     (( slice > 30 )) && slice=30
     (( slice < 1 )) && slice=1
     if ! redis_cmd BLPOP "$POOL_KEY" "$slice"; then
+      unregister_wait "$owner"
       return 1
     fi
     value=$(printf '%s\n' "$REPLY" | tail -1)
     if [[ -z "$value" ]]; then
+      waited=$((waited + slice))
+      echo "[msa-gpu] GPU pool empty; job queued waiting for a lease (${waited}s)" >&2
       continue
     fi
-    # ---- physical fitness: pool bookkeeping can drift from VRAM reality
-    # (offline containers/restarts race the agent). A GPU with <6GB free
-    # cannot host a CUDA context (observed instant "Prefilter died" when
-    # leases landed on physically-full cards). Requeue it to the TAIL and
-    # keep waiting — when its holder exits the same card passes the check.
+    # 原子认领:弹卡与登记之间该卡对池和 in_use 均不可见,并发的池重建会把它
+    # 重新派发,HSETNX 失败即说明已被其他消费者认领,本卡放弃继续等下一张。
+    if ! redis_cmd HSETNX "$IN_USE_KEY" "$value" "$owner"; then
+      unregister_wait "$owner"
+      return 1
+    fi
+    if [[ "$REPLY" != "1" ]]; then
+      echo "[msa-gpu] GPU $value claimed elsewhere; picking next" >&2
+      continue
+    fi
+    # 池记账与显存现实可能漂移;空余显存不足以承载 CUDA 上下文的卡退租回插队尾,
+    # 等其持有者退出后自然过检。
     free_mib=$(nvidia-smi --id="$value" --query-gpu=memory.free                  --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
-    if [[ ! "$free_mib" =~ ^[0-9]+$ || "$free_mib" -lt ${MSA_GPU_MIN_FREE_MIB:-8000} ]]; then
+    if [[ ! "$free_mib" =~ ^[0-9]+$ ]]; then
+      nvml_fail_count=$((nvml_fail_count + 1))
+      redis_cmd HDEL "$IN_USE_KEY" "$value" >/dev/null || true
+      redis_cmd RPUSH "$POOL_KEY" "$value" >/dev/null || true
+      if (( nvml_fail_count >= nvml_max )); then
+        echo "[msa-gpu] nvidia-smi unusable in this container (${free_mib:-empty output}); NVML broken (driver/library mismatch?) - failing job so the ticket errors out visibly instead of requeue-looping" >&2
+        unregister_wait "$owner"
+        return 3
+      fi
+      echo "[msa-gpu] GPU $value nvidia-smi failed (${free_mib:-empty output}); try $nvml_fail_count/$nvml_max" >&2
+      sleep 5
+      continue
+    fi
+    nvml_fail_count=0
+    if (( free_mib < ${MSA_GPU_MIN_FREE_MIB:-8000} )); then
+      redis_cmd HDEL "$IN_USE_KEY" "$value" >/dev/null || true
       redis_cmd RPUSH "$POOL_KEY" "$value" >/dev/null || true
       echo "[msa-gpu] GPU $value physically busy (${free_mib}MiB free); requeued" >&2
       sleep 5
       continue
     fi
-    if ! redis_cmd HSET "$IN_USE_KEY" "$value" "$owner"; then
-      return 1
-    fi
-    # TOCTOU 收口:租下后静置 3 秒复查——训练容器恰在检查与使用之间重新分配
-    # 显存(thrust_async_allocator 崩溃的实测成因)。复查不过则还卡回队尾继续等。
+    unregister_wait "$owner"
+    # TOCTOU 复查:租下后静置数秒再确认显存空闲,防止与池外容器的显存分配竞态;
+    # 复查不过则还卡回队尾继续等待。
     sleep 8
     free2=$(nvidia-smi --id="$value" --query-gpu=memory.free \
               --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
-    if [[ ! "$free2" =~ ^[0-9]+$ || "$free2" -lt ${MSA_GPU_MIN_FREE_MIB:-8000} ]]; then
+    if [[ ! "$free2" =~ ^[0-9]+$ ]]; then
+      nvml_fail_count=$((nvml_fail_count + 1))
       redis_cmd HDEL "$IN_USE_KEY" "$value" >/dev/null || true
       redis_cmd RPUSH "$POOL_KEY" "$value" >/dev/null || true
-      echo "[msa-gpu] GPU $value flaked after lease (${free2:-?}MiB); requeued" >&2
+      if (( nvml_fail_count >= nvml_max )); then
+        echo "[msa-gpu] nvidia-smi unusable after lease (${free2:-empty output}); NVML broken - failing job instead of requeue-looping" >&2
+        return 3
+      fi
+      echo "[msa-gpu] GPU $value nvidia-smi failed after lease (${free2:-empty output}); try $nvml_fail_count/$nvml_max" >&2
+      sleep 5
+      continue
+    fi
+    if (( free2 < ${MSA_GPU_MIN_FREE_MIB:-8000} )); then
+      redis_cmd HDEL "$IN_USE_KEY" "$value" >/dev/null || true
+      redis_cmd RPUSH "$POOL_KEY" "$value" >/dev/null || true
+      echo "[msa-gpu] GPU $value flaked after lease (${free2}MiB); requeued" >&2
       sleep 5
       continue
     fi
@@ -253,10 +302,9 @@ lease_gpu() {
   return 2
 }
 
-# 回收陈旧租约:持有者进程已死(心跳过期)且租约年龄超过 LEASE_MIN_AGE_SECONDS。
-# 这是 celery gpu_manager 协议在专用池命名空间缺失的兜底——没有任何周期任务清扫
-# 本池,泄漏的租约只有等待中的 search 能代为归还。HDEL 的原子返回值保证并发回收
-# 时只有一个等待方 RPUSH,不会把同一张卡入队两次。
+# 回收陈旧租约:owner 租龄超过 LEASE_MIN_AGE_SECONDS 且心跳已过期。
+# wrapper 侧唯一的清扫路径(SIGKILL 绕过 trap),与 gpu_manager reconcile 的
+# 显存门控回收互补;HDEL 原子性保证并发回收只入队一次。
 reclaim_stale_leases() {
   local now gpu owner ts
   if ! redis_cmd HGETALL "$IN_USE_KEY"; then
@@ -286,7 +334,7 @@ reclaim_stale_leases() {
   done
 }
 
-release_gpu() {  # $1=gpu $2=owner;仅当 lease 仍归本任务时释放(多余 RPUSH 由 reconcile 兜底去重)
+release_gpu() {  # $1=gpu $2=owner;仅当 lease 仍归本 owner 时释放
   local gpu="$1" owner="$2" current
   if redis_cmd HGET "$IN_USE_KEY" "$gpu"; then
     current="$REPLY"
@@ -301,8 +349,21 @@ GPU_ID=""
 OWNER=""
 HB_PID=""
 
-# 任何退出路径(SIGKILL 之外的信号/正常退出)都归还租约并停心跳;SIGKILL 场景
-# 由其他等待方的 reclaim_stale_leases 兜底回收。
+# 心跳必须跟随每一次成功租约:换卡重租会更换 owner,旧心跳已随
+# cleanup_lease_force 终止,漏启新心跳会让活租约被兄弟 wrapper 依"心跳过期"
+# 规则回收,造成双租约。
+start_heartbeat() {
+  (
+    while :; do
+      redis_cmd SETEX "task_heartbeat:$OWNER" "$HEARTBEAT_TTL" 1 >/dev/null 2>&1
+      sleep "$HEARTBEAT_INTERVAL"
+    done
+  ) &
+  HB_PID=$!
+}
+
+# SIGKILL 之外的任何退出路径都经此归还租约;SIGKILL 由其他等待方的
+# reclaim_stale_leases 兜底回收。
 cleanup_lease_force() {
   if [[ -n "$HB_PID" ]]; then kill "$HB_PID" 2>/dev/null; HB_PID=""; fi
   if [[ -n "$GPU_ID" ]]; then
@@ -330,23 +391,14 @@ trap cleanup_lease EXIT
 LEASE=$(lease_gpu)
 lease_rc=$?
 if [[ $lease_rc -ne 0 ]]; then
-  # 轮转策略:绝不 CPU 降级。redis 故障/等待超时都让本 job 失败,由服务器
-  # 的重试队列重新入队——队列本身就是背压,降级只会引入病理性慢路径。
-  echo "[msa-gpu] lease failed (rc=$lease_rc); failing job for server requeue" >&2
+  echo "[msa-gpu] lease failed (rc=$lease_rc); failing job so the ticket errors out visibly" >&2
   exit 75
 fi
 
 GPU_ID=${LEASE%% *}
 OWNER=${LEASE#* }
 echo "[msa-gpu] leased GPU $GPU_ID ($OWNER)" >&2
-
-(
-  while :; do
-    redis_cmd SETEX "task_heartbeat:$OWNER" "$HEARTBEAT_TTL" 1 >/dev/null 2>&1
-    sleep "$HEARTBEAT_INTERVAL"
-  done
-) &
-HB_PID=$!
+start_heartbeat
 
 MSA_ORIG_ARGS=("$@")   # 函数内的 "$@" 是函数参数(GPU ID),必须先保存外层命令
 run_gpu_search() {  # $1=gpu; 输出rc
@@ -360,20 +412,19 @@ run_gpu_search() {  # $1=gpu; 输出rc
   return $rc
 }
 
+# CUDA 资源类崩溃自愈:还卡重租(大概率换卡)再试;超时击杀不重试。
 attempt=0
 while :; do
   run_gpu_search "$GPU_ID"
   run_rc=$?
-  # CUDA 资源类崩溃自愈:还卡,重新租一块(大概率不同的卡)再试,最多3次。
-  # 成因实测为训练容器与租约的 TOCTOU 显存竞态(thrust_async_allocator)。
   if (( run_rc != 0 && attempt < 4 && run_rc != 124 )); then
-    # 非超时失败换卡重试(成因实测:与训练容器的显存 TOCTOU -> thrust崩溃)
     attempt=$((attempt+1))
     echo "[msa-gpu] search rc=$run_rc on GPU $GPU_ID; releasing and retrying ($attempt/4)" >&2
     cleanup_lease_force
     LEASE=$(lease_gpu) || { echo "[msa-gpu] re-lease failed" >&2; exit 75; }
     GPU_ID=${LEASE%% *}; OWNER=${LEASE#* }
     echo "[msa-gpu] retrying on GPU $GPU_ID" >&2
+    start_heartbeat
     continue
   fi
   break

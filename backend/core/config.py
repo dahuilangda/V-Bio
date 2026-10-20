@@ -154,6 +154,30 @@ GPU_IN_USE_HASH_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:in_use")
 GPU_WAITING_NON_PEPTIDE_SET_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:waiting_non_peptide")
 # GPU 设备元数据（gpu_id -> total MiB）；池初始化时写入，运行期只读
 GPU_META_HASH_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:meta")
+# 等待 GPU 租约的 MSA search 登记（ZSET：member=owner，score=最近刷新 epoch），
+# 与 mmseqs_wrapper 的 WAITING_KEY 一致；软保留判定见 gpu_manager.msa_reservation_blocks。
+GPU_MSA_WAITING_ZSET_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:msa_waiting")
+# MSA 软保留：存在存活 MSA 等待方时，长任务持卡达到上限后新的 acquire 让位等待，
+# 保证等待中的 MSA search（CPU 回退已禁用）总能拿到下一张空卡。
+GPU_MSA_RESERVE_ENABLED = _env_bool("GPU_MSA_RESERVE_ENABLED", True)
+GPU_MSA_RESERVE_HOLDER_LIMIT = int(os.environ.get("GPU_MSA_RESERVE_HOLDER_LIMIT", "3") or "3")
+# 等待条目超过该秒数未刷新即视为死条目（wrapper 刷新周期 ≤30s）。
+_WAITER_STALE_ENV = os.environ.get("GPU_WAITER_STALE_SECONDS") or os.environ.get("GPU_MSA_WAITER_STALE_SECONDS")
+GPU_WAITER_STALE_SECONDS = int(_WAITER_STALE_ENV or "180")
+# 高优先级任务等待登记（ZSET：member=task_id，score=最近刷新 epoch）。存在存活
+# 高优等待方时，default 任务让出下一张空卡——GPU 等待阶段的插队机制（broker 层
+# 的队列优先只解决 dequeue，真正的排队点在共享池 BLPOP）。
+GPU_PRIORITY_WAITING_ZSET_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:priority_waiting")
+GPU_PRIORITY_RESERVE_ENABLED = _env_bool("GPU_PRIORITY_RESERVE_ENABLED", True)
+# GPU 池常驻自愈（gpu_manager maintain）：周期 reconcile 与孤儿任务容器巡检。
+GPU_MAINTENANCE_INTERVAL_SECONDS = int(os.environ.get("GPU_MAINTENANCE_INTERVAL_SECONDS", "300") or "300")
+# 孤儿容器处置策略：report 仅告警；kill 追加 docker rm -f。
+GPU_ORPHAN_POLICY = str(os.environ.get("GPU_ORPHAN_POLICY", "report") or "report").strip().lower()
+# 容器运行超过该秒数才参与孤儿判定，避免误伤刚启动的任务。
+GPU_ORPHAN_MIN_AGE_SECONDS = int(os.environ.get("GPU_ORPHAN_MIN_AGE_SECONDS", "1800") or "1800")
+# 磁盘水位守卫（维护循环巡检结果盘）：仅告警，不阻断任务。
+DISK_WARN_PERCENT = int(os.environ.get("DISK_WARN_PERCENT", "85") or "85")
+DISK_CRITICAL_PERCENT = int(os.environ.get("DISK_CRITICAL_PERCENT", "92") or "92")
 # 多肽父任务 -> 子任务 Celery ID 注册表前缀
 PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX = "boltz_peptide_subtasks:"
 

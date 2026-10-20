@@ -547,9 +547,12 @@ def _run_docker_command(command: list[str], log_path: Path) -> None:
         return_code = process.wait()
 
     if return_code != 0:
+        from backend.worker.docker_cmd import readable_docker_failure_diagnosis
+        tail_text = "".join(output_tail[-200:])
         raise RuntimeError(
             f"Nesso Docker run failed with exit code {return_code}. "
-            f"Last output:\n{''.join(output_tail[-200:])}\nFull log: {log_path}"
+            f"{readable_docker_failure_diagnosis(return_code, tail_text)}\n"
+            f"Last output:\n{tail_text}\nFull log: {log_path}"
         )
 
 
@@ -783,6 +786,8 @@ def run_nesso_backend(
     image = str(NESSO_DOCKER_IMAGE or "").strip()
     if not image:
         raise RuntimeError("NESSO_DOCKER_IMAGE is not configured.")
+    from backend.worker.docker_cmd import ensure_image
+    ensure_image(image)
 
     host_cache_raw = str(NESSO_HOST_CACHE_DIR or "").strip()
     if not host_cache_raw:
@@ -806,6 +811,7 @@ def run_nesso_backend(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=30,
         )
     except Exception:
         pass

@@ -25,6 +25,7 @@ from backend.core import config
 from backend.core.celery_app import celery_app
 from backend.monitoring.event_transport import publish_task_heartbeat, publish_task_status
 from backend.services.common_utils import coerce_bool
+from backend.scheduling.capability_router import parse_capability_queue
 from gpu_manager import (
     acquire_gpu,
     release_gpu,
@@ -170,7 +171,79 @@ def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool 
     return result
 
 
-def _acquire_gpu_with_non_peptide_wait_registration(task_id: str, timeout: int = 3600) -> int:
+def _task_schedule_info(self) -> tuple[str, str]:
+    """解析 celery 路由键为 (capability, priority)。
+
+    priority 的两层用途：选 broker 队列（dequeue 顺序）+ 传入 acquire_gpu
+    （GPU 等待阶段的插队让位：default 任务为高优等待者让出空卡）。
+    """
+    try:
+        routing_key = str(getattr(getattr(self, "request", None), "delivery_info", {}).get("routing_key") or "")
+        parsed = parse_capability_queue(routing_key)
+        if parsed:
+            return parsed[0], (parsed[1] or "default")
+    except Exception:
+        pass
+    return "", "default"
+
+
+GPU_RUNTIME_EWMA_KEY_PREFIX = "vbio:gpu_ewma:"
+GPU_RUNTIME_EWMA_TTL_SECONDS = 7 * 24 * 3600
+GPU_RUNTIME_EWMA_ALPHA = 0.3
+
+
+def _gpu_ewma_key(capability: str) -> str:
+    return f"{GPU_RUNTIME_EWMA_KEY_PREFIX}{str(capability or '').strip()}"
+
+
+def _update_gpu_runtime_ewma(capability: str, runtime_seconds: float) -> None:
+    """按引擎记录单次成功任务的 GPU 占用时长 EWMA(排队 ETA 的服务时长估计;
+    仅成功路径记录,失败率高的引擎 ETA 会系统性偏低)。"""
+    capability = str(capability or "").strip()
+    if not capability or runtime_seconds <= 0:
+        return
+    try:
+        client = get_redis_client()
+        raw = client.get(_gpu_ewma_key(capability))
+        old = float(raw) if raw else None
+        value = runtime_seconds if old is None else (
+            (1 - GPU_RUNTIME_EWMA_ALPHA) * old + GPU_RUNTIME_EWMA_ALPHA * runtime_seconds)
+        client.setex(_gpu_ewma_key(capability), GPU_RUNTIME_EWMA_TTL_SECONDS, f"{value:.1f}")
+    except Exception as exc:
+        logger.debug("EWMA 更新失败 (capability=%s): %s", capability, exc)
+
+
+def _read_gpu_runtime_ewma(capability: str) -> float | None:
+    try:
+        raw = get_redis_client().get(_gpu_ewma_key(capability))
+        return float(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _describe_gpu_wait(capability: str) -> str:
+    """排队可见性:等卡阶段的池占用、等待任务数与粗略 ETA(写入任务进度文本)。"""
+    try:
+        from gpu_manager import get_gpu_status
+        status = get_gpu_status()
+        total = int(status.get("valid_count") or 0)
+        busy = int(status.get("in_use_count") or 0)
+        waiting = (int(status.get("priority_waiting_live") or 0)
+                   + int(status.get("msa_waiting_live") or 0)
+                   + int(status.get("waiting_non_peptide_count") or 0))
+        parts = [f"{busy}/{total} GPUs busy", f"{waiting} waiting"]
+        ewma = _read_gpu_runtime_ewma(capability)
+        if ewma and total > 0:
+            eta_minutes = max(1, round(ewma * max(1, busy + waiting) / total / 60))
+            parts.append(f"ETA ~{eta_minutes} min (粗估)")
+        return " (" + ", ".join(parts) + ")"
+    except Exception:
+        return ""
+
+
+def _acquire_gpu_with_non_peptide_wait_registration(
+    task_id: str, timeout: int = 3600, priority: str = "default", cancel_check=None
+) -> int:
     """Register non-peptide waiting intent before blocking on GPU allocation,
     so peptide subtask workers yield instead of starving regular tasks."""
     wait_registered = False
@@ -181,7 +254,8 @@ def _acquire_gpu_with_non_peptide_wait_registration(task_id: str, timeout: int =
         logger.warning("Task %s: Failed to register non-peptide GPU waiter: %s", task_id, exc)
 
     try:
-        return acquire_gpu(task_id=task_id, timeout=timeout)
+        return acquire_gpu(
+            task_id=task_id, timeout=timeout, priority=priority, cancel_check=cancel_check)
     finally:
         if wait_registered:
             try:
@@ -293,6 +367,7 @@ def _terminate_task_container(container_name: str) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=30,
         )
     except Exception as exc:
         logger.warning("Failed to remove task container %s: %s", container_name, exc)
@@ -311,8 +386,7 @@ def _terminate_task_containers_by_task_id(task_id: str) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            check=False,
-        )
+            check=False, timeout=30,)
         container_ids = [line.strip() for line in str(query.stdout or "").splitlines() if line.strip()]
         for container_id in container_ids:
             _terminate_task_container(container_id)
@@ -1028,6 +1102,8 @@ def predict_task(self, predict_args: dict):
     the only safe delivery mode for this task.
     """
     gpu_id = -1
+    gpu_acquired_at = 0.0
+    task_capability = ""
     allocated_gpu_ids: list[int] = []
     reported_gpu_id = -1
     reported_gpu_ids: list[int] = []
@@ -1061,9 +1137,13 @@ def predict_task(self, predict_args: dict):
             tracker.update_status("preparing", "Scheduling peptide candidate subtasks")
         else:
             logger.info(f"Task {task_id}: Attempting to acquire GPU.")
-            tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
+            task_capability, task_priority = _task_schedule_info(self)
+            tracker.update_status("acquiring_gpu", "Waiting for GPU allocation" + _describe_gpu_wait(task_capability))
             _raise_if_task_cancelled(self, redis_client, task_id)
-            gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
+            gpu_id = _acquire_gpu_with_non_peptide_wait_registration(
+                task_id=task_id, timeout=3600, priority=task_priority,
+                cancel_check=lambda: _raise_if_task_cancelled(self, redis_client, task_id))
+            gpu_acquired_at = time.time()
             _raise_if_task_cancelled(self, redis_client, task_id)
             allocated_gpu_ids = [gpu_id]
             reported_gpu_id = gpu_id
@@ -1238,10 +1318,9 @@ def predict_task(self, predict_args: dict):
             logger.info(f"Task {task_id}: Released GPUs {released} before result upload.")
             allocated_gpu_ids = []
             gpu_id = -1
-        elif gpu_id != -1:
-            release_gpu(gpu_id=gpu_id, task_id=task_id)
-            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
-            gpu_id = -1
+        if gpu_acquired_at:
+            _update_gpu_runtime_ewma(task_capability, time.time() - gpu_acquired_at)
+            gpu_acquired_at = 0.0
 
         design_runtime_meta = {}
         if is_peptide_design:
@@ -1420,6 +1499,9 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     proc_env.pop("CUDA_VISIBLE_DEVICES", None)
     proc_env["BOLTZ_TASK_ID"] = str(task_id)
     proc_env["BOLTZ_PEPTIDE_WORKER_TASK_ID"] = str(task_id)
+    # 取消可见性:孙进程等卡时轮询父任务取消标记,避免父取消后孤儿继续等卡跑完整推理
+    if parent_task_id:
+        proc_env["BOLTZ_PARENT_TASK_ID"] = str(parent_task_id)
 
     command = [sys.executable, "-m", "backend.runtime.run_single_prediction", args_path]
     self.update_state(state="PROGRESS", meta={"status": "Peptide candidate task started"})
@@ -1477,6 +1559,8 @@ def boltz2score_task(self, score_args: dict):
     """Celery task for running Boltz2Score (confidence; optional affinity)."""
     gpu_id = -1
     reported_gpu_id = -1
+    gpu_acquired_at = 0.0
+    task_capability = ""
     task_id = self.request.id
     task_temp_dir = None
     tracker = None
@@ -1495,9 +1579,13 @@ def boltz2score_task(self, score_args: dict):
 
         logger.info(f"Task {task_id}: Attempting to acquire GPU for Boltz2Score.")
         _raise_if_task_cancelled(self, redis_client, task_id)
-        tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
+        task_capability, task_priority = _task_schedule_info(self)
+        tracker.update_status("acquiring_gpu", "Waiting for GPU allocation" + _describe_gpu_wait(task_capability))
 
-        gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
+        gpu_id = _acquire_gpu_with_non_peptide_wait_registration(
+            task_id=task_id, timeout=3600, priority=task_priority,
+            cancel_check=lambda: _raise_if_task_cancelled(self, redis_client, task_id))
+        gpu_acquired_at = time.time()
         reported_gpu_id = gpu_id
         _raise_if_task_cancelled(self, redis_client, task_id)
         self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting Boltz2Score.'})
@@ -1805,6 +1893,14 @@ def boltz2score_task(self, score_args: dict):
 
         tracker.update_status("processing_output", "Packaging Boltz2Score results")
 
+        if gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
+            gpu_id = -1
+        if gpu_acquired_at:
+            _update_gpu_runtime_ewma(task_capability, time.time() - gpu_acquired_at)
+            gpu_acquired_at = 0.0
+
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
         with zipfile.ZipFile(output_archive_path, 'w') as zipf:
             for root, _, files in os.walk(output_dir):
@@ -1836,10 +1932,6 @@ def boltz2score_task(self, score_args: dict):
         self.update_state(state='PROGRESS', meta={'status': f'Uploading results for task {task_id}'})
         tracker.update_status("uploading", "Uploading results to central API")
 
-        if gpu_id != -1:
-            release_gpu(gpu_id=gpu_id, task_id=task_id)
-            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
-            gpu_id = -1
 
         upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
 

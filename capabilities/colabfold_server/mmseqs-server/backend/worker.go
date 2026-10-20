@@ -404,10 +404,8 @@ rm -rf -- "${BASE}/tmp1" "${BASE}/tmp2" "${BASE}/tmp3"
 		}
 
 		select {
-		case <-time.After(1 * time.Hour):
-			if err := KillCommand(cmd); err != nil {
-				log.Printf("Failed to kill: %s\n", err)
-			}
+		case <-time.After(jobTimeout(config)):
+			TerminateCommand(cmd, done, terminateGrace(config))
 			return &JobTimeoutError{}
 		case err := <-done:
 			if err != nil {
@@ -561,10 +559,8 @@ rm -rf -- "${BASE}/tmp"
 		}
 
 		select {
-		case <-time.After(1 * time.Hour):
-			if err := KillCommand(cmd); err != nil {
-				log.Printf("Failed to kill: %s\n", err)
-			}
+		case <-time.After(jobTimeout(config)):
+			TerminateCommand(cmd, done, terminateGrace(config))
 			return &JobTimeoutError{}
 		case err := <-done:
 			if err != nil {

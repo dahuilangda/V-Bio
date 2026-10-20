@@ -358,6 +358,13 @@ func server(jobsystem JobSystem, config ConfigRoot) {
 			email = req.FormValue("email")
 		}
 
+		// 空/缺失 query 会一路建成空库任务(extractorfs "dbSize: 0" 直接失败),
+		// 并因内容寻址去重让后续所有空查询命中同一坏 ticket——在入口拒绝。
+		if strings.TrimSpace(query) == "" {
+			http.Error(w, "missing or empty query sequence (form field 'q')", http.StatusBadRequest)
+			return
+		}
+
 		databases, err := Databases(config.Paths.Databases, true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -416,6 +423,12 @@ func server(jobsystem JobSystem, config ConfigRoot) {
 			query = req.FormValue("q")
 			mode = req.FormValue("mode")
 			email = req.FormValue("email")
+		}
+
+		// 与 msa handler 同款守卫:空 query 会固化成永久命中的坏 ticket。
+		if strings.TrimSpace(query) == "" {
+			http.Error(w, "missing or empty query sequence (form field 'q')", http.StatusBadRequest)
+			return
 		}
 
 		request, err := NewPairJobRequest(query, mode, email)

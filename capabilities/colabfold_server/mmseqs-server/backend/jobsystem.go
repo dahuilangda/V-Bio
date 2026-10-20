@@ -642,9 +642,9 @@ func (j *LocalJobSystem) Dequeue() (*Ticket, error) {
 		j.QueueMutex.Unlock()
 		return nil, nil
 	}
-	// pop the tail of the queue
-	id := j.Queue[len(j.Queue)-1]
-	j.Queue = j.Queue[:len(j.Queue)-1]
+	// FIFO：先提交先服务，新 ticket 不得插队饿死旧 ticket。
+	id := j.Queue[0]
+	j.Queue = j.Queue[1:]
 	j.queued -= 1
 	j.QueueMutex.Unlock()
 
