@@ -17,11 +17,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # 使用连接池以实现高效和安全的 Redis 连接
 try:
+    # retry_on_timeout + health_check_interval + socket_keepalive: redis 短暂
+    # 不可达时自动重试/探活。reconnect_sleep_* 参数需要 redis-py >= 5.x,
+    # GPU worker 容器内是 7.2.1 已支持, 但不传以保持对旧版兼容。
     REDIS_CONNECTION_POOL = redis.ConnectionPool.from_url(
         config.REDIS_URL, decode_responses=True,
         retry_on_timeout=True, health_check_interval=30,
-        socket_keepalive=True, socket_keepalive_options={},
-        reconnect_sleep_base=1.0, reconnect_sleep_max=10.0,
+        socket_keepalive=True,
     )
 except Exception as e:
     logger.critical(f"无法创建 Redis 连接池，请检查 Redis 服务及配置: {e}")
