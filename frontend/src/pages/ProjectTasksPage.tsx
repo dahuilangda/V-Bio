@@ -355,15 +355,13 @@ export function ProjectTasksPage() {
     [project]
   );
   const supportsApiAccess =
-    projectWorkflowKey === 'prediction' || projectWorkflowKey === 'virtual_screening' || projectWorkflowKey === 'affinity';
+    projectWorkflowKey === 'prediction' || projectWorkflowKey === 'virtual_screening' ||
+    projectWorkflowKey === 'affinity' || projectWorkflowKey === 'peptide_design';
   const apiAccessDisabledReason = useMemo(() => {
     if (projectWorkflowKey === 'lead_optimization') {
       return 'Lead Optimization does not support API Access.';
     }
-    if (projectWorkflowKey === 'peptide_design') {
-      return 'Peptide Design does not support API Access.';
-    }
-    return 'API Access is available for Prediction, Virtual Screening, and Docking.';
+    return 'API Access is available for Prediction, Virtual Screening, Peptide Design, and Docking.';
   }, [projectWorkflowKey]);
 
   // clone & re-run: open the editor with this task's stored parameters
