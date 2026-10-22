@@ -1875,7 +1875,7 @@ ${submitTaskIdCapture}`;
                 <option value="high">High</option>
                 <option value="default">Default</option>
               </select>
-            </Field>}
+            </Field>
 
             {LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && (
               <>
