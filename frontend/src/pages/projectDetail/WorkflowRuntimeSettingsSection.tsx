@@ -1348,6 +1348,64 @@ export function WorkflowRuntimeSettingsSection({
               <section className="peptide-runtime-group peptide-runtime-group-bicyclic">
                 <div className="peptide-runtime-group-headline">
                   <div className="peptide-runtime-group-head">
+
+          <Field label="Fixed Non-natural Residue Modifications">
+            <div className="space-y-2">
+              {(peptideFixedModifications || []).map((mod, idx) => (
+                <div key={idx} className="flex items-center gap-2">
+                  <select
+                    className="border rounded px-2 py-1 text-sm w-20"
+                    value={mod.position}
+                    onChange={(e) => {
+                      const next = [...(peptideFixedModifications || [])];
+                      next[idx] = { ...next[idx], position: parseInt(e.target.value, 10) };
+                      onPeptideFixedModificationsChange(next);
+                    }}
+                  >
+                    {Array.from({ length: (peptideLengthMax || 15) }, (_, i) => i + 1).map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="border rounded px-2 py-1 text-sm flex-1"
+                    value={mod.ccd}
+                    onChange={(e) => {
+                      const next = [...(peptideFixedModifications || [])];
+                      next[idx] = { ...next[idx], ccd: e.target.value };
+                      onPeptideFixedModificationsChange(next);
+                    }}
+                  >
+                    {[...NATURAL_AMINO_ACID_RESIDUES, ...BUILT_IN_PROTEIN_MODIFICATIONS].map((entry) => (
+                      <option key={entry.ccd} value={entry.ccd}>
+                        {entry.ccd} — {entry.label} ({entry.group})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="text-red-500 hover:text-red-700 px-1"
+                    onClick={() => onPeptideFixedModificationsChange((peptideFixedModifications || []).filter((_, i) => i !== idx))}
+                  >✕</button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="border rounded px-3 py-1 text-sm hover:bg-gray-50"
+                onClick={() => onPeptideFixedModificationsChange([
+                  ...(peptideFixedModifications || []),
+                  { position: 1, ccd: 'NLE' },
+                ])}
+              >
+                + Add
+              </button>
+              <p className="text-xs text-gray-400 mt-1">
+                Fixed non-natural residues are applied to every candidate and excluded from mutation.
+              </p>
+            </div>
+          </Field>
+
+          <div
+
                     Bicyclic Specific
                     <InfoTip text="Linker and cysteine topology for bicyclic designs." align="start" />
                   </div>

@@ -9737,6 +9737,17 @@ def run_peptide_design_backend(
     use_initial_sequence = _read_bool_option(options, "peptideUseInitialSequence", False)
     sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
+    # 固定非天然残基修改: [{position, ccd}] — 每个候选在该位置替换为指定 CCD
+    fixed_mods_raw = options.get("peptideFixedModifications")
+    fixed_modifications: List[Dict[str, Any]] = []
+    if isinstance(fixed_mods_raw, list):
+        for item in fixed_mods_raw:
+            if not isinstance(item, dict):
+                continue
+            pos = item.get("position")
+            ccd = str(item.get("ccd") or "").strip().upper()
+            if isinstance(pos, (int, float)) and int(pos) >= 1 and ccd:
+                fixed_modifications.append({"position": int(pos), "ccd": ccd})
 
     used_chain_ids = _extract_chain_ids_from_yaml(base_yaml_data)
     chain_order = list(used_chain_ids)
@@ -10458,7 +10469,7 @@ def run_peptide_design_backend(
                 linker_ccd=linker_ccd,
                 linker_chain_id=linker_chain_id,
                 linker_atom_map=linker_atom_map,
-                modifications=candidate_modifications,
+                modifications=(fixed_modifications + candidate_modifications) if fixed_modifications else candidate_modifications,
                 backend=peptide_backend,
                 cys_positions=candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else None,
                 pocket_constraint=candidate_pocket_constraint,
