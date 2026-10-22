@@ -200,7 +200,7 @@ export function ApiAccessPage() {
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
-  const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('high');
+  const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('default');
   const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('dock');
   const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
