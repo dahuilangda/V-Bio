@@ -200,6 +200,7 @@ export function ApiAccessPage() {
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
+  const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('high');
   const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('dock');
   const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
@@ -1400,7 +1401,7 @@ fi
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectivePredictionBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
-  -F "priority=high"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
+  -F "priority=${builderPriority}"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinity = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
@@ -1410,7 +1411,7 @@ ${submitTaskIdCapture}`;
   -F "mode=${normalizedAffinityMode}" \\
   -F "compute_ipsae=true" \\
   -F "use_msa_server=true" \\
-  -F "priority=high"${affinitySeedFlag}${affinityActivityFlags})
+  -F "priority=${builderPriority}"${affinitySeedFlag}${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
     ? `# Workflow "${selectedWorkflow.title}" is not supported in Command Builder.\n# Use project workflows: Prediction, Virtual Screening, or Affinity.`
@@ -1865,6 +1866,16 @@ ${submitTaskIdCapture}`;
                 <span>Low VRAM</span>
               </label>
             )}
+
+            <Field label="Priority">
+              <select
+                value={builderPriority}
+                onChange={(e) => setBuilderPriority(e.target.value as 'high' | 'default')}
+              >
+                <option value="high">High</option>
+                <option value="default">Default</option>
+              </select>
+            </Field>}
 
             {LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && (
               <>
