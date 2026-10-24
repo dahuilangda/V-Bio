@@ -198,7 +198,7 @@ class ESM3Proposer:
         # De novo exploration (remaining 1/3, always fresh)
         n_denovo = n - len(proposals)
         if n_denovo > 0:
-            proposals.extend(self._denovo(n_denovo, elite_rows))
+            proposals.extend(self._denovo(n_denovo))
 
         # Threshold tuned for the mutation mode: without it every proposal
         # clusters around one parent's neighborhood.
@@ -211,47 +211,51 @@ class ESM3Proposer:
                   f"(diversity-filtered)")
         return proposals[:n]
 
-    def _denovo(self, n: int, elite_rows: list[dict]) -> list:
-        if self.peptide_length:
-            pep_len = self.peptide_length
-        elif elite_rows:
-            lens = [len(r["sequence"]) for r in elite_rows if r.get("sequence")]
-            pep_len = random.choice(lens) if lens else sum(self.len_range) // 2
-        else:
-            pep_len = random.randint(*self.len_range)
-
-        # Progressive temperature: high early (broad exploration),
-        # anneal toward exploitation in later generations, with a floor
-        # to maintain minimum diversity
+    def _denovo(self, n: int) -> list:
+        # de novo is the length-diversity channel: split the batch across
+        # a few window-random lengths instead of one (the mutation path
+        # climbs around its parents at fixed length).
         gen = self._generation
         temperature = max(1.2 - 0.1 * gen, 0.8)
-        for _ in range(3):
-            result = self._post({
-                "mode": "propose",
-                "receptor_sequence": self.receptor_sequence,
-                "peptide_length": pep_len,
-                "n_samples": max(n * 3, 48),
-                "n_keep": n,
-                "temperature": temperature,
-                "adapter_key": self.adapter_key,
-                "excluded_aas": sorted(self._excluded_aas),
-                **self._cond,
-            })
-            if result.get("ok") is False:
-                self._log(f"[esm3] propose rejected: {result.get('error')}")
-                return []
-            sequences = [
-                item for item in result.get("sequences", [])
-                if item.get("sequence") and len(item["sequence"]) >= 4
-            ]
-            if sequences:
-                break
-            temperature += 0.2
+        if self.peptide_length:
+            length_groups = [self.peptide_length]
         else:
-            return []
+            n_groups = max(1, min(4, n))
+            length_groups = sorted({
+                random.randint(*self.len_range) for _ in range(n_groups)})
+        per_group = max(1, n // len(length_groups))
 
-        return [(s["sequence"], [], [], f"denovo_gen{self._generation}")
-                for s in sequences]
+        proposals: list[tuple[str, list, list, str]] = []
+        for pep_len in length_groups:
+            # Progressive temperature: high early (broad exploration),
+            # anneal toward exploitation in later generations, with a floor
+            # to maintain minimum diversity
+            for _ in range(3):
+                result = self._post({
+                    "mode": "propose",
+                    "receptor_sequence": self.receptor_sequence,
+                    "peptide_length": pep_len,
+                    "n_samples": max(per_group * 3, 48),
+                    "n_keep": per_group,
+                    "temperature": temperature,
+                    "adapter_key": self.adapter_key,
+                    "excluded_aas": sorted(self._excluded_aas),
+                    **self._cond,
+                })
+                if result.get("ok") is False:
+                    self._log(f"[esm3] propose rejected: {result.get('error')}")
+                    break
+                sequences = [
+                    item for item in result.get("sequences", [])
+                    if item.get("sequence") and len(item["sequence"]) >= 4
+                ]
+                if sequences:
+                    proposals.extend(
+                        (s["sequence"], [], [], f"denovo_gen{self._generation}")
+                        for s in sequences)
+                    break
+                temperature += 0.2
+        return proposals[:n]
 
     def _mutate_from_elites(self, elite_rows: list[dict], n: int) -> list:
         """BindCraft2 Semigreedy: p(position_to_mutate) ∝ (1 - pLDDT_i).

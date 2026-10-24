@@ -128,3 +128,4 @@ frontend/server/frontend/.run/
 
 # ESM3 GRPO adapter 权重(运行时产物, 不进 git)
 capabilities/peptide_lm/adapters/
+capabilities/peptide_lm/esm3_local/data
