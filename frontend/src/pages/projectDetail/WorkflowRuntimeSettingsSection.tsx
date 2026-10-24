@@ -831,6 +831,31 @@ export function WorkflowRuntimeSettingsSection({
              fixedNote: `${mask.slice(0, prefixLen)}…${mask.slice(mask.length - suffixLen)}` };
   }, [normalizedSequenceMask, peptideLengthMin, peptideLengthMax]);
 
+  // Two-anchored mask (fixed head + free run + fixed tail) → zone strip.
+  // No-anchor layouts fall back to the flat rail. Pinned middle cells lock
+  // the layout: total length no longer stretches.
+  const maskZones = useMemo(() => {
+    const mask = normalizedSequenceMask;
+    if (!mask || mask.length < 8) return null;
+    let prefixLen = 0;
+    while (prefixLen < mask.length && mask[prefixLen] !== 'X') prefixLen += 1;
+    let suffixLen = 0;
+    while (suffixLen < mask.length - prefixLen && mask[mask.length - 1 - suffixLen] !== 'X') suffixLen += 1;
+    const middle = mask.slice(prefixLen, mask.length - suffixLen);
+    if (prefixLen + suffixLen === 0) return null;
+    // 中部固定格(用户钉的自由位)合法: 该掩码的 total length 随之锁定
+    const middleFixed = /[^X]/.test(middle);
+    const locked = peptideLengthMin === peptideLengthMax || middleFixed;
+    const freeMax = (middle.match(/X/g) || []).length;
+    const freeMin = locked
+      ? freeMax
+      : Math.min(freeMax, Math.max(1, peptideLengthMin - prefixLen - suffixLen));
+    return {
+      prefixLen, suffixLen, freeMin, freeMax, middleFixed, locked,
+      prefix: mask.slice(0, prefixLen), suffix: mask.slice(mask.length - suffixLen),
+    };
+  }, [normalizedSequenceMask, peptideLengthMin, peptideLengthMax]);
+
   const toggleExcludedAa = (letter: string) => {
     if (!isEditable) return;
     onPeptideExcludedAAsChange(
@@ -1347,6 +1372,76 @@ export function WorkflowRuntimeSettingsSection({
                     placeholder={lengthLocked ? `Reference sequence, length ${effectiveDesignLength}` : `Reference sequence, up to ${effectiveDesignLength} aa (design range ${peptideLengthMin}–${peptideLengthMax})`}
                     spellCheck={false}
                   />
+                  {maskZones ? (
+                    <div className={`mask-zone-strip${maskZones.locked ? ' locked' : ''}`}>
+                      <div className="mask-zone-row">
+                        {maskZones.prefixLen > 0 ? (
+                          <div className="mask-zone-seg mask-zone-fixed" title="Fixed head layout">
+                            {Array.from({ length: maskZones.prefixLen }, (_, i) => (
+                              <span key={`zone-head-${i}`} className="mask-cell mask-cell-locked">
+                                <span className="mask-cell-letter">{maskZones.prefix[i]}</span>
+                                <span className="mask-cell-pos">{i + 1}</span>
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div
+                          className={`mask-zone-seg mask-zone-free${maskZones.locked ? ' locked' : ''}`}
+                          title="Free positions — dashed cells fill only beyond the minimum length"
+                        >
+                          {Array.from({ length: maskZones.freeMax }, (_, i) => {
+                            const position = maskZones.prefixLen + i + 1;
+                            const refChar = normalizedInitialSequence[position - 1] || '';
+                            const isFreeSlot = normalizedSequenceMask[position - 1] === 'X';
+                            const pinned = !isFreeSlot;
+                            const stretch = !maskZones.locked && i >= maskZones.freeMin;
+                            const canFix = Boolean(refChar && refChar !== 'X') && isFreeSlot && !stretch;
+                            if (pinned) {
+                              return (
+                                <span key={`zone-free-${position}`} className="mask-cell mask-cell-locked">
+                                  <span className="mask-cell-letter">{normalizedSequenceMask[position - 1]}</span>
+                                  <span className="mask-cell-pos">{position}</span>
+                                </span>
+                              );
+                            }
+                            return (
+                              <button
+                                key={`zone-free-${position}`}
+                                type="button"
+                                className={['mask-cell', stretch ? 'stretch' : '', !canFix ? 'open' : ''].filter(Boolean).join(' ')}
+                                onClick={() => toggleMaskPosition(position)}
+                                disabled={!isEditable || stretch || !canFix}
+                                title={stretch
+                                  ? `Position ${position} exists only in candidates longer than ${peptideLengthMin} aa`
+                                  : canFix
+                                    ? `Click to fix position ${position} at ${refChar}`
+                                    : `Type residue ${position} in the reference sequence to fix it`}
+                              >
+                                <span className="mask-cell-letter">{refChar || '·'}</span>
+                                <span className="mask-cell-pos">{position}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {maskZones.suffixLen > 0 ? (
+                          <div className="mask-zone-seg mask-zone-fixed" title="Fixed tail anchor">
+                            {Array.from({ length: maskZones.suffixLen }, (_, i) => (
+                              <span key={`zone-tail-${i}`} className="mask-cell mask-cell-locked">
+                                <span className="mask-cell-letter">{maskZones.suffix[i]}</span>
+                                <span className="mask-cell-pos">{normalizedSequenceMask.length - maskZones.suffixLen + i + 1}</span>
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <p className="mask-zone-caption">
+                        {maskZones.locked
+                          ? `Layout pinned: ${normalizedSequenceMask.length} aa total.`
+                          : `Total ${peptideLengthMin}–${peptideLengthMax} aa → free segment ${maskZones.freeMin}–${maskZones.freeMax} (dashed cells fill only beyond ${peptideLengthMin} aa).`}
+                        {' '}Shown at max length. Head/tail stay fixed; click a free cell to pin a residue from the reference sequence.
+                      </p>
+                    </div>
+                  ) : (
                   <div className="peptide-mask-rail" role="list" aria-label="Sequence mask positions">
                     {positions.map((position) => {
                       const residue = maskChars[position - 1] || 'X';
@@ -1358,7 +1453,7 @@ export function WorkflowRuntimeSettingsSection({
                           key={`peptide-mask-${position}`}
                           type="button"
                           role="listitem"
-                          className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''} ${stretchVisual && !fixed && position > stretchVisual.prefixLen + stretchVisual.freeMin ? 'stretch' : ''}`}
+                          className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''}`}
                           onClick={() => toggleMaskPosition(position)}
                           disabled={!isEditable || !canFixPosition}
                           title={
@@ -1375,12 +1470,12 @@ export function WorkflowRuntimeSettingsSection({
                       );
                     })}
                   </div>
-                  {stretchVisual ? (
+                  )}
+                  {!maskZones && stretchVisual ? (
                     <p className="muted small">
-                      Free positions scale with the total length: {peptideLengthMin}–{peptideLengthMax} aa →
-                      {' '}{stretchVisual.freeMin}–{stretchVisual.freeMax} free positions; layout
-                      {' '}{stretchVisual.fixedNote} stays fixed. Dashed dots are filled only by candidates
-                      longer than the minimum.
+                      Length {peptideLengthMin}–{peptideLengthMax} aa → {stretchVisual.freeMin}–{stretchVisual.freeMax}
+                      free positions; layout {stretchVisual.fixedNote} stays fixed. Dashed dots fill only
+                      beyond {peptideLengthMin} aa.
                     </p>
                   ) : null}
                 </label>
