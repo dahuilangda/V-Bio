@@ -175,3 +175,27 @@ class TestAdaptiveMask:
         assert "C" not in out[6:-1]
         # 同长行为不变
         assert rsp._apply_sequence_mask("CREEECRGERARRLC", mask) == "CREEECRGERARRLC"
+
+
+class TestProposerFixes:
+    """三个提案器修复的回归锁定。"""
+
+    def test_identity_computed_on_variable_region(self):
+        from peplm.integrate.esm3_proposer import _diversity_filter
+        # 自由区差 2 步(全长 13/15=0.867 会被旧全长逻辑剔除), 可变区 6/8=0.75 保留
+        a = "CREEECRLKDAEQC"
+        b = "CREEECRLKDAQEC"
+        kept = _diversity_filter([(a, [], [], "g"), (b, [], [], "g")],
+                                 fixed_prefix="CREEEC", fixed_suffix="C")
+        assert [x[0] for x in kept] == [a, b]
+
+    def test_single_step_mutation_near_threshold(self):
+        from peplm.integrate.esm3_proposer import _diversity_filter
+        # 可变区单步 7/8=0.875 仍超 0.85 阈值: 该兄弟由 mutate 通道的
+        # round-robin 配额保证, 不由过滤器负责; 两步差异(0.75)必须存活
+        a = "CREEECRLKDAEQC"
+        b = "CREEECRLKDAQEC"
+        c = "CREEECRLKDEEYC"
+        kept = _diversity_filter([(a, [], [], "g"), (b, [], [], "g"), (c, [], [], "g")],
+                                 fixed_prefix="CREEEC", fixed_suffix="C")
+        assert [x[0] for x in kept] == [a, b, c]
