@@ -79,7 +79,7 @@ def _diversity_filter(
     before evaluation: the composite penalty cannot recover a spent
     structure-prediction slot."""
     kept: list[tuple] = []
-    kept_seqs: list[str] = []
+    kept_vars: list[str] = []
     for prop in proposals:
         seq = prop[0]
         variable = seq
@@ -91,10 +91,12 @@ def _diversity_filter(
             continue
         if any(aa in variable for aa in excluded_aas):
             continue
-        if any(_sequence_identity(seq, k) > threshold for k in kept_seqs):
+        # 恒等度算可变区: 全长恒等度会把 1-2 步突变(14/15 > 0.85)当
+        # 近重复剔除, 晚代爬山只剩每父本一个子代
+        if any(_sequence_identity(variable, k) > threshold for k in kept_vars):
             continue
         kept.append(prop)
-        kept_seqs.append(seq)
+        kept_vars.append(variable)
     return kept
 
 
@@ -190,8 +192,10 @@ class ESM3Proposer:
     ) -> list[tuple[str, list[dict], list[int], str]]:
         proposals: list[tuple[str, list[dict], list[int], str]] = []
 
-        # Semigreedy mutation from elites (pLDDT-guided, 2/3 of budget)
-        if elite_rows and self._generation > 0:
+        # Semigreedy mutation from elites (pLDDT-guided, 2/3 of budget).
+        # Generation 1 mutates the seed/initial sequence the same way —
+        # gating on _generation silently discarded user seeds.
+        if elite_rows:
             n_mutate = max(1, n * 2 // 3)
             proposals.extend(self._mutate_from_elites(elite_rows, n_mutate))
 
@@ -239,6 +243,7 @@ class ESM3Proposer:
                     "n_keep": per_group,
                     "temperature": temperature,
                     "adapter_key": self.adapter_key,
+                    "adapter_dir": str(self.adapter_dir),
                     "excluded_aas": sorted(self._excluded_aas),
                     **self._cond,
                 })
