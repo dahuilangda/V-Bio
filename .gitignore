@@ -36,6 +36,7 @@ nohup.out
 *.db-journal
 **/.run/
 results/
+exports/
 
 # Local data & caches
 .af3_jax_cache/
