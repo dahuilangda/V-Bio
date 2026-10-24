@@ -128,6 +128,7 @@ export function PeptideDesignResultsWorkspace({
       let diff = 0;
       if (sortKey === 'rank') diff = a.rank - b.rank;
       if (sortKey === 'generation') diff = score(a.generation) - score(b.generation);
+      if (sortKey === 'length') diff = score(a.sequence?.length ?? null) - score(b.sequence?.length ?? null);
       if (sortKey === 'score') diff = score(a.score) - score(b.score);
       if (sortKey === 'plddt') diff = score(a.plddt) - score(b.plddt);
       if (sortKey === 'interface') diff = score(a.interfaceMetric) - score(b.interfaceMetric);
@@ -331,6 +332,11 @@ export function PeptideDesignResultsWorkspace({
                   Gen{sortMark('generation')}
                 </button>
               </th>
+              <th className="col-len">
+                <button type="button" className="peptide-sort-btn" onClick={() => onSort('length')}>
+                  Len{sortMark('length')}
+                </button>
+              </th>
               <th className="col-delta">
                 <button type="button" className="peptide-sort-btn" onClick={() => onSort('score')}>
                   Score{sortMark('score')}
@@ -363,7 +369,7 @@ export function PeptideDesignResultsWorkspace({
             ))}
             {sortedCandidates.length === 0 ? (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={7}>
                   <div className="ligand-preview-empty">No designed peptide records yet.</div>
                 </td>
               </tr>

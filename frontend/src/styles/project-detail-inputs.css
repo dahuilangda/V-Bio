@@ -2502,3 +2502,9 @@
   height: 30px;
   min-height: 30px;
 }
+
+.peptide-mask-dot.stretch {
+  border-style: dashed;
+  background: #f2f7fb;
+  color: #5b7fa0;
+}

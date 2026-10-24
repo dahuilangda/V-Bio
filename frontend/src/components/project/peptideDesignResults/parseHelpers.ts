@@ -6,7 +6,7 @@ import { asRecord, asRecordArray, asString } from '../../../pages/projectTasks/r
 
 export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
 export type RuntimeState = 'SUCCESS' | 'RUNNING' | 'QUEUED' | 'FAILURE' | 'UNSCORED';
-export type PeptideSortKey = 'rank' | 'generation' | 'score' | 'plddt' | 'interface';
+export type PeptideSortKey = 'rank' | 'generation' | 'length' | 'score' | 'plddt' | 'interface';
 export type ConfidenceTone = 'vhigh' | 'high' | 'low' | 'vlow' | 'na';
 export const PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS = [8, 20, 50, 100] as const;
 export const EMPTY_RECORD_ROWS: Array<Record<string, unknown>> = [];
