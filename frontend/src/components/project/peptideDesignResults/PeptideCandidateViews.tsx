@@ -103,6 +103,7 @@ export const PeptideCandidateTableRow = memo(function PeptideCandidateTableRow({
         </button>
       </td>
       <td className="col-n">{candidate.generation !== null ? candidate.generation : '-'}</td>
+      <td className="col-len">{candidate.sequence ? candidate.sequence.length : '-'}</td>
       <td className="col-delta">
         <span className={`peptide-table-value conf-tone-${scoreTone}`}>{formatScore(candidate.score)}</span>
       </td>

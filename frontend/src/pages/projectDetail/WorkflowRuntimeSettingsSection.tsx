@@ -810,6 +810,27 @@ export function WorkflowRuntimeSettingsSection({
     onPeptideSequenceMaskChange(nextMask.join(''));
   };
 
+  // Stretch preview: free slots beyond the count the length minimum fills
+  // are used only by longer candidates (the backend stretches the mask's
+  // free segment to each candidate's actual length).
+  const stretchVisual = useMemo(() => {
+    const min = peptideLengthMin;
+    const max = peptideLengthMax;
+    if (!min || !max || min === max) return null;
+    const mask = normalizedSequenceMask;
+    let prefixLen = 0;
+    while (prefixLen < mask.length && mask[prefixLen] !== 'X') prefixLen += 1;
+    let suffixLen = 0;
+    while (suffixLen < mask.length - prefixLen && mask[mask.length - 1 - suffixLen] !== 'X') suffixLen += 1;
+    const middle = mask.slice(prefixLen, mask.length - suffixLen);
+    if (/[^X]/.test(middle)) return null;
+    const freeTotal = mask.length - prefixLen - suffixLen;
+    const freeMin = min - prefixLen - suffixLen;
+    if (freeMin < 1 || freeMin >= freeTotal) return null;
+    return { prefixLen, suffixLen, freeTotal, freeMin, freeMax: freeTotal,
+             fixedNote: `${mask.slice(0, prefixLen)}…${mask.slice(mask.length - suffixLen)}` };
+  }, [normalizedSequenceMask, peptideLengthMin, peptideLengthMax]);
+
   const toggleExcludedAa = (letter: string) => {
     if (!isEditable) return;
     onPeptideExcludedAAsChange(
@@ -1337,7 +1358,7 @@ export function WorkflowRuntimeSettingsSection({
                           key={`peptide-mask-${position}`}
                           type="button"
                           role="listitem"
-                          className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''}`}
+                          className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''} ${stretchVisual && !fixed && position > stretchVisual.prefixLen + stretchVisual.freeMin ? 'stretch' : ''}`}
                           onClick={() => toggleMaskPosition(position)}
                           disabled={!isEditable || !canFixPosition}
                           title={
@@ -1354,6 +1375,14 @@ export function WorkflowRuntimeSettingsSection({
                       );
                     })}
                   </div>
+                  {stretchVisual ? (
+                    <p className="muted small">
+                      Free positions scale with the total length: {peptideLengthMin}–{peptideLengthMax} aa →
+                      {' '}{stretchVisual.freeMin}–{stretchVisual.freeMax} free positions; layout
+                      {' '}{stretchVisual.fixedNote} stays fixed. Dashed dots are filled only by candidates
+                      longer than the minimum.
+                    </p>
+                  ) : null}
                 </label>
                 <Field label="Fixed Non-natural Residue Modifications">
                   <div className="space-y-2">
