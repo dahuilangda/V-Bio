@@ -6990,17 +6990,21 @@ def _pocket_contacts_for_staged_space(
     within the peptidePocketBox radius. Every requested residue must resolve
     — a silently wrong pocket site is worse than a loud failure.
     """
-    # Residue-list pocket input is disabled: the
-    # receptor-fixed blind generation localises via the model's own
-    # docking prior. Frontend submissions carrying the legacy option are
-    # ignored with a log line instead of erroring.
-    raw_residues = ""
-    _legacy_pocket = str(options.get("peptidePocketResidues") or options.get("peptide_pocket_residues") or "").strip()
-    if _legacy_pocket:
-        print("[d-peptide] peptidePocketResidues ignored: pocket guidance "
-              "removed; running receptor-fixed blind generation", flush=True)
+    # Residue-list input resolves to the centroid of the requested template
+    # residues and then takes the same center path. The diffusion-stage
+    # PocketPotential stays removed (it buckled aromatic rings); what
+    # survives is the model's own pocket conditioning in the candidate
+    # co-folding YAML.
     author_contacts: List[Tuple[str, int]] = []
     plain_positions: List[int] = []
+    raw_residues = str(
+        options.get("peptidePocketResidues") or options.get("peptide_pocket_residues") or ""
+    ).strip()
+    raw_center = str(options.get("peptidePocketCenter") or options.get("peptide_pocket_center") or "").strip()
+    if raw_residues and not raw_center:
+        residue_centroid = _pocket_residues_centroid(base_yaml_data, raw_residues)
+        if residue_centroid is not None:
+            raw_center = ",".join(f"{v:.1f}" for v in residue_centroid)
     if raw_residues:
         for token in raw_residues.split(","):
             token = token.strip()
@@ -7020,7 +7024,6 @@ def _pocket_contacts_for_staged_space(
                 if position > 0:
                     plain_positions.append(position)
 
-    raw_center = str(options.get("peptidePocketCenter") or options.get("peptide_pocket_center") or "").strip()
     if not author_contacts and not plain_positions and raw_center:
         parts = [float(x) for x in raw_center.split(",")]
         if len(parts) != 3:
@@ -7077,6 +7080,88 @@ def _pocket_contacts_for_staged_space(
             f"{', '.join(unresolved)}"
         )
     return author_contacts, translated
+
+
+def _pocket_residues_centroid(
+    base_yaml_data: Dict[str, Any],
+    raw_residues: str,
+) -> Optional[np.ndarray]:
+    """Heavy-atom centroid of the requested template residues.
+
+    Accepts the frontend picker's formats: "A:54,A:55" (chain:author),
+    "54,55" (plain author numbers on the single target chain), or the
+    3D-residue pick encoding. Returns None when nothing resolves — the
+    caller then reports the site as invalid rather than guessing.
+
+    The centroid feeds the center path: the model's pocket conditioning
+    in the candidate co-folding YAML, not the removed diffusion-stage
+    PocketPotential.
+    """
+    tokens = [t.strip() for t in raw_residues.replace(";", ",").split(",") if t.strip()]
+    if not tokens:
+        return None
+    wanted: List[Tuple[str, int]] = []
+    plain: List[int] = []
+    for token in tokens:
+        chain_part = ""
+        num_text = token
+        if ":" in token:
+            chain_part, num_text = token.split(":", 1)
+            chain_part = chain_part.strip()
+        try:
+            num = int(num_text.strip())
+        except ValueError:
+            # 3D pick style "A/54" or non-numeric — take trailing digits
+            digits = "".join(ch for ch in num_text if ch.isdigit())
+            if not digits:
+                continue
+            num = int(digits)
+        if chain_part:
+            wanted.append((chain_part, num))
+        else:
+            plain.append(num)
+
+    templates = base_yaml_data.get("templates")
+    if not isinstance(templates, list):
+        return None
+    for entry in templates:
+        if not isinstance(entry, dict):
+            continue
+        path_text = str(entry.get("author_pdb")
+                        or entry.get("cif") or entry.get("mmcif")
+                        or entry.get("pdb") or "").strip()
+        path = Path(path_text) if path_text else None
+        if path is None or not path.exists():
+            continue
+        chain_ids = _normalize_chain_id_list(entry.get("chain_id") or entry.get("target_chain_ids"))
+        if not chain_ids:
+            continue
+        try:
+            structure = gemmi.read_structure(str(path))
+            structure.setup_entities()
+        except Exception:
+            continue
+        model = structure[0] if len(structure) else None
+        if model is None:
+            continue
+        pts: List[np.ndarray] = []
+        for chain in model:
+            if chain.name not in chain_ids and len(chain_ids) > 1:
+                continue
+            for residue in chain:
+                if residue.het_flag != "A":
+                    continue
+                matched = ((chain.name, residue.seqid.num) in
+                           [(c, n) for c, n in wanted])
+                matched_plain = (not wanted) and (residue.seqid.num in plain)
+                if not matched and not matched_plain:
+                    continue
+                for atom in residue:
+                    if atom.element != gemmi.Element("H"):
+                        pts.append(np.array([atom.pos.x, atom.pos.y, atom.pos.z]))
+        if pts:
+            return np.mean(np.stack(pts), axis=0)
+    return None
 
 
 def _template_residues_near_center(
