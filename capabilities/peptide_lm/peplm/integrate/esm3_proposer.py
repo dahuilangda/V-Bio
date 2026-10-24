@@ -66,19 +66,30 @@ def _sequence_identity(a: str, b: str) -> float:
 
 
 def _diversity_filter(
-    proposals: list[tuple], threshold: float = 0.85
+    proposals: list[tuple], threshold: float = 0.85,
+    excluded_aas: frozenset[str] = frozenset(),
+    fixed_prefix: str = "", fixed_suffix: str = "",
 ) -> list[tuple]:
-    """Reject degenerate sequences (see peplm.sequence_quality) and
-    proposals whose identity to an already-kept proposal exceeds the
-    threshold. Greedy first-come-first-kept; the caller sorts by quality
-    before filtering so the best variant of each cluster survives.
-    Degenerates are dropped before the GPU call: the composite penalty
-    cannot recover a spent slot."""
+    """Reject degenerate sequences, proposals carrying a user-excluded
+    residue in the variable region, and proposals whose identity to an
+    already-kept proposal exceeds the threshold. Fixed layout (mask edges)
+    is stripped first — anchors are design, not violations. Greedy
+    first-come-first-kept; the caller sorts by quality before filtering so
+    the best variant of each cluster survives. Degenerates are dropped
+    before evaluation: the composite penalty cannot recover a spent
+    structure-prediction slot."""
     kept: list[tuple] = []
     kept_seqs: list[str] = []
     for prop in proposals:
         seq = prop[0]
-        if sequence_quality.degeneracy_flags(seq):
+        variable = seq
+        if fixed_prefix and variable.startswith(fixed_prefix):
+            variable = variable[len(fixed_prefix):]
+        if fixed_suffix and variable.endswith(fixed_suffix):
+            variable = variable[:-len(fixed_suffix)]
+        if sequence_quality.degeneracy_flags(variable):
+            continue
+        if any(aa in variable for aa in excluded_aas):
             continue
         if any(_sequence_identity(seq, k) > threshold for k in kept_seqs):
             continue
@@ -100,12 +111,22 @@ class ESM3Proposer:
         structure_mode: str = "env",
         chirality: str = "l",
         project_id: str = "",
+        excluded_aas: list[str] | None = None,
+        fixed_prefix: str = "",
+        fixed_suffix: str = "",
         log=print,
         **_unused: Any,
     ):
         self.receptor_sequence = receptor_sequence
         self.peptide_length = peptide_length
         self.len_range = len_range
+        from peplm.shared import AA20
+        # 用户排除的残基类型: worker 采样后过滤, 本地批次过滤与兜底替换再兜一层。
+        self._excluded_aas = frozenset(
+            a for a in (str(x).strip().upper() for x in (excluded_aas or []))
+            if a in AA20)
+        self._fixed_prefix = str(fixed_prefix or "")
+        self._fixed_suffix = str(fixed_suffix or "")
         self._log = log
         self._generation = 0
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
@@ -179,11 +200,11 @@ class ESM3Proposer:
         if n_denovo > 0:
             proposals.extend(self._denovo(n_denovo, elite_rows))
 
-        # Batch diversity filter: reject proposals too similar to ones
-        # already accepted in this batch (Hamming identity > 0.85). This
-        # prevents the mutation mode from clustering every proposal around
-        # the same parent's neighborhood.
-        proposals = _diversity_filter(proposals, threshold=0.85)
+        # Threshold tuned for the mutation mode: without it every proposal
+        # clusters around one parent's neighborhood.
+        proposals = _diversity_filter(
+            proposals, threshold=0.85, excluded_aas=self._excluded_aas,
+            fixed_prefix=self._fixed_prefix, fixed_suffix=self._fixed_suffix)
 
         self._generation += 1
         self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals "
@@ -213,6 +234,7 @@ class ESM3Proposer:
                 "n_keep": n,
                 "temperature": temperature,
                 "adapter_key": self.adapter_key,
+                "excluded_aas": sorted(self._excluded_aas),
                 **self._cond,
             })
             if result.get("ok") is False:
@@ -287,10 +309,12 @@ class ESM3Proposer:
                     "receptor_sequence": self.receptor_sequence,
                     "parent_sequence": seq,
                     "remask_positions": positions,
-                    "adapter_dir": str(self.adapter_dir),
                     "temperature": 0.7 + 0.1 * random.random(),
                     "adapter_key": self.adapter_key,
                     "adapter_dir": str(self.adapter_dir),
+                    "excluded_aas": sorted(self._excluded_aas),
+                    "fixed_prefix": self._fixed_prefix,
+                    "fixed_suffix": self._fixed_suffix,
                     **self._cond,
                 })
                 if result.get("ok"):
@@ -299,14 +323,22 @@ class ESM3Proposer:
                 self._log(f"[esm3] refill error: {exc}")
 
             # ESM3 may sample back the same residues (it considers those
-            # positions optimal) — fall back to a random substitution
-            # to guarantee exploration
-            if not mutated:
+            # positions optimal) or a user-excluded residue in the variable
+            # region — fall back to a random substitution to guarantee
+            # exploration
+            variable = mutated or ""
+            if self._fixed_prefix and variable.startswith(self._fixed_prefix):
+                variable = variable[len(self._fixed_prefix):]
+            if self._fixed_suffix and variable.endswith(self._fixed_suffix):
+                variable = variable[:-len(self._fixed_suffix)]
+            if not mutated or any(aa in variable for aa in self._excluded_aas):
                 chars = list(seq)
                 AA = "ACDEFGHIKLMNPQRSTVWY"
                 for pos in positions:
-                    chars[pos] = random.choice(
-                        [a for a in AA if a != chars[pos]])
+                    allowed = [a for a in AA
+                               if a != chars[pos] and a not in self._excluded_aas]
+                    if allowed:
+                        chars[pos] = random.choice(allowed)
                 mutated = "".join(chars)
 
             group = f"mut_{parent.get('sequence', '')[:8]}_g{self._generation}"

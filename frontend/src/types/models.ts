@@ -169,6 +169,8 @@ export interface PredictionOptions {
   peptideUseInitialSequence?: boolean;
   peptideInitialSequence?: string;
   peptideSequenceMask?: string;
+  peptideFixedModifications?: { position: number; ccd: string }[];
+  peptideExcludedAAs?: string[];
   peptideIterations?: number;
   peptidePopulationSize?: number;
   peptideEliteSize?: number;

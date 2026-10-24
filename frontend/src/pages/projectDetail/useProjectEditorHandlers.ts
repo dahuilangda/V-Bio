@@ -32,6 +32,8 @@ import {
   handleRuntimePeptideInitialSequenceChangeAction,
   handleRuntimePeptideIterationsChangeAction,
   handleRuntimePeptideSequenceMaskChangeAction,
+  handleRuntimePeptideExcludedAasChangeAction,
+  handleRuntimePeptideFixedModificationsChangeAction,
   handleRuntimePeptideNonNaturalRangeChangeAction,
   handleRuntimePeptidePopulationSizeChangeAction,
   handleRuntimePeptideResiduePoolChangeAction,
@@ -79,6 +81,8 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimePeptideUseInitialSequenceChange: (value: boolean) => void;
   handleRuntimePeptideInitialSequenceChange: (value: string) => void;
   handleRuntimePeptideSequenceMaskChange: (value: string) => void;
+  handleRuntimePeptideExcludedAasChange: (value: string[]) => void;
+  handleRuntimePeptideFixedModificationsChange: (value: { position: number; ccd: string }[]) => void;
   handleRuntimePeptideIterationsChange: (value: number) => void;
   handleRuntimePeptidePopulationSizeChange: (value: number) => void;
   handleRuntimePeptideEliteSizeChange: (value: number) => void;
@@ -247,6 +251,20 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   };
 
+  const handleRuntimePeptideExcludedAasChange = (value: string[]) => {
+    handleRuntimePeptideExcludedAasChangeAction({
+      peptideExcludedAAs: value,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideFixedModificationsChange = (value: { position: number; ccd: string }[]) => {
+    handleRuntimePeptideFixedModificationsChangeAction({
+      peptideFixedModifications: value,
+      setDraft
+    });
+  };
+
   const handleRuntimePeptideIterationsChange = (value: number) => {
     handleRuntimePeptideIterationsChangeAction({
       peptideIterations: value,
@@ -386,6 +404,8 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handleRuntimePeptideUseInitialSequenceChange,
     handleRuntimePeptideInitialSequenceChange,
     handleRuntimePeptideSequenceMaskChange,
+    handleRuntimePeptideExcludedAasChange,
+    handleRuntimePeptideFixedModificationsChange,
     handleRuntimePeptideIterationsChange,
     handleRuntimePeptidePocketFieldChange,
     handleRuntimePeptideDockPocketChange,

@@ -116,6 +116,16 @@ def _ss_profile_for(cond: dict, n: int):
                               cond.get("ss_profile"), n)
 
 
+def _excluded_aas(req: dict) -> list[str]:
+    """User-excluded residue letters. The worker is layout-blind — fixed
+    faces are stamped downstream — so the check runs on the whole decoded
+    sequence and a parent carrying a stamped face may over-reject; the
+    proposer re-checks the variable region, so over-rejection is safe."""
+    raw = req.get("excluded_aas") or []
+    return sorted({a.upper() for a in raw
+                   if isinstance(a, str) and len(a) == 1 and a.isalpha()})
+
+
 def _propose(req: dict) -> dict:
     import math
     from collections import Counter
@@ -123,35 +133,42 @@ def _propose(req: dict) -> dict:
     pep_len = int(req.get("peptide_length", 14))
     n = int(req.get("n_samples", 48))
     keep = int(req.get("n_keep", 16))
+    excluded = _excluded_aas(req)
     _sync_adapter(str(req.get("adapter_key") or "default"), req.get("adapter_dir"))
     cond = _conditioning(req)
     CHUNK = 8
-    all_trajs = []
-    with torch.no_grad():
-        remaining = n
-        while remaining > 0:
-            batch = min(CHUNK, remaining)
-            trajs = policy.sample_batch(
-                receptor=receptor, pep_len=pep_len, n=batch,
-                keep=batch,
-                temperature=float(req.get("temperature", 0.9)),
-                num_steps=8, strategy="entropy",
-                ss_profile=_ss_profile_for(cond, pep_len),
-                peptide_first=cond["peptide_first"])
-            all_trajs.extend(trajs)
-            remaining -= batch
-            if remaining > 0:
-                torch.cuda.empty_cache()
     seqs = []
-    for t in all_trajs:
-        s = policy.decode_tokens(t.peptide_tokens)
-        if not s or len(s) != pep_len:
-            continue
-        freq = Counter(s)
-        h = -sum((c / pep_len) * math.log2(c / pep_len) for c in freq.values())
-        if h < 1.5:
-            continue
-        seqs.append({"sequence": s, "logprob": t.mean_logprob})
+    sampled = 0
+    # 补采上限 4n: 名单越宽单轮存活率越低, 以多轮补采换满批次
+    for _round in range(4):
+        remaining = max(0, n - len(seqs))
+        if remaining <= 0:
+            break
+        with torch.no_grad():
+            while remaining > 0 and sampled < 4 * n:
+                batch = min(CHUNK, remaining)
+                trajs = policy.sample_batch(
+                    receptor=receptor, pep_len=pep_len, n=batch,
+                    keep=batch,
+                    temperature=float(req.get("temperature", 0.9)),
+                    num_steps=8, strategy="entropy",
+                    ss_profile=_ss_profile_for(cond, pep_len),
+                    peptide_first=cond["peptide_first"])
+                sampled += batch
+                for t in trajs:
+                    s = policy.decode_tokens(t.peptide_tokens)
+                    if not s or len(s) != pep_len:
+                        continue
+                    if any(aa in s for aa in excluded):
+                        continue
+                    freq = Counter(s)
+                    h = -sum((c / pep_len) * math.log2(c / pep_len) for c in freq.values())
+                    if h < 1.5:
+                        continue
+                    seqs.append({"sequence": s, "logprob": t.mean_logprob})
+                remaining -= batch
+                if remaining > 0:
+                    torch.cuda.empty_cache()
     seqs.sort(key=lambda x: -x["logprob"])
     return {"sequences": seqs[:keep]}
 
@@ -162,6 +179,10 @@ def _refill(req: dict) -> dict:
     positions = req.get("remask_positions", [])
     receptor = req.get("receptor_sequence", "")
     temperature = float(req.get("temperature", 0.7))
+    excluded = _excluded_aas(req)
+    # 固定段随请求传入: 违例判定只看可变区, 环锚点/固定面不算违例
+    fixed_prefix = str(req.get("fixed_prefix") or "")
+    fixed_suffix = str(req.get("fixed_suffix") or "")
     cond = _conditioning(req)
     if not parent or not positions:
         return {"error": "parent_sequence and remask_positions required"}
@@ -171,19 +192,31 @@ def _refill(req: dict) -> dict:
     if parent_tokens is None:
         return {"error": "failed to tokenize parent"}
 
+    seq = None
     with torch.no_grad():
-        traj = policy.refill(
-            receptor=receptor,
-            parent_tokens=parent_tokens,
-            remask_positions=[int(p) for p in positions],
-            temperature=temperature,
-            ss_profile=_ss_profile_for(cond, len(parent)),
-            peptide_first=cond["peptide_first"],
-        )
-    if traj is None:
-        return {"sequence": None, "reason": "no change"}
-
-    seq = policy.decode_tokens(traj.peptide_tokens)
+        # 违例重采: 名单生效时 refill 偶尔采回被排除残基; 重试耗尽后仍
+        # 违例则原样返回, 由提案器兜底替换
+        for _attempt in range(4):
+            traj = policy.refill(
+                receptor=receptor,
+                parent_tokens=parent_tokens,
+                remask_positions=[int(p) for p in positions],
+                temperature=temperature,
+                ss_profile=_ss_profile_for(cond, len(parent)),
+                peptide_first=cond["peptide_first"],
+            )
+            if traj is None:
+                return {"sequence": None, "reason": "no change"}
+            seq = policy.decode_tokens(traj.peptide_tokens)
+            if not seq:
+                continue
+            variable = seq
+            if fixed_prefix and variable.startswith(fixed_prefix):
+                variable = variable[len(fixed_prefix):]
+            if fixed_suffix and variable.endswith(fixed_suffix):
+                variable = variable[:-len(fixed_suffix)]
+            if not any(aa in variable for aa in excluded):
+                return {"sequence": seq}
     return {"sequence": seq if seq else None}
 
 

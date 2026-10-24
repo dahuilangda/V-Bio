@@ -1043,6 +1043,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimePeptideUseInitialSequenceChange,
     handleRuntimePeptideInitialSequenceChange,
     handleRuntimePeptideSequenceMaskChange,
+    handleRuntimePeptideExcludedAasChange,
+    handleRuntimePeptideFixedModificationsChange,
     handleRuntimePeptideIterationsChange,
     handleRuntimePeptidePocketFieldChange,
     handleRuntimePeptideDockPocketChange,
@@ -1408,6 +1410,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     peptideSequenceMask:
       draft.inputConfig.options.peptideSequenceMask ??
       'X'.repeat(Math.max(1, draft.inputConfig.options.peptideBinderLength ?? 20)),
+    peptideFixedModifications: draft.inputConfig.options.peptideFixedModifications ?? [],
+    peptideExcludedAAs: draft.inputConfig.options.peptideExcludedAAs ?? [],
     peptideIterations: draft.inputConfig.options.peptideIterations ?? 12,
     peptideTargetComponentId: peptideTargetContext.componentId,
     peptideTargetChainId: peptideTargetContext.chainId,
@@ -1449,6 +1453,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onPeptideUseInitialSequenceChange: handleRuntimePeptideUseInitialSequenceChange,
     onPeptideInitialSequenceChange: handleRuntimePeptideInitialSequenceChange,
     onPeptideSequenceMaskChange: handleRuntimePeptideSequenceMaskChange,
+    onPeptideFixedModificationsChange: handleRuntimePeptideFixedModificationsChange,
+    onPeptideExcludedAAsChange: handleRuntimePeptideExcludedAasChange,
     onPeptideIterationsChange: handleRuntimePeptideIterationsChange,
     onPeptidePocketFieldChange: handleRuntimePeptidePocketFieldChange,
     onPeptidePopulationSizeChange: handleRuntimePeptidePopulationSizeChange,
@@ -1704,6 +1710,18 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (peptideInitialSequence) handleRuntimePeptideInitialSequenceChange(peptideInitialSequence);
       const peptideSequenceMask = readText(patch.peptideSequenceMask).trim();
       if (peptideSequenceMask) handleRuntimePeptideSequenceMaskChange(peptideSequenceMask);
+      if (Array.isArray(patch.peptideExcludedAAs)) {
+        handleRuntimePeptideExcludedAasChange(
+          patch.peptideExcludedAAs.filter((aa) => typeof aa === 'string'));
+      }
+      if (Array.isArray(patch.peptideFixedModifications)) {
+        handleRuntimePeptideFixedModificationsChange(
+          patch.peptideFixedModifications.filter(
+            (mod) => mod && typeof mod === 'object'
+              && Number.isFinite(Number(mod.position)) && typeof mod.ccd === 'string'
+          ).map((mod) => ({ position: Math.floor(Number(mod.position)), ccd: mod.ccd }))
+        );
+      }
       const peptideChirality = readText(patch.peptideChirality).trim().toLowerCase();
       if (peptideChirality === 'l' || peptideChirality === 'd') {
         handleRuntimePeptideChiralityChange(peptideChirality as 'l' | 'd');

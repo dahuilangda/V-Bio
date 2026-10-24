@@ -42,6 +42,8 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'peptideUseInitialSequence',
   'peptideInitialSequence',
   'peptideSequenceMask',
+  'peptideFixedModifications',
+  'peptideExcludedAAs',
   'peptideIterations',
   'peptidePopulationSize',
   'peptideEliteSize',

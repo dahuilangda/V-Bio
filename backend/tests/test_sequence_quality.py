@@ -3,7 +3,7 @@
 退化模式能骗过置信度排序、污染 elite 池与 GRPO 奖励(动机见
 peplm.sequence_quality 模块注释)。本组测试锁定四类检测:同聚物连续段、
 精确周期重复(窗口 6/6/8)、低复杂度窗口、单残基占比,以及复合分惩罚、
-提案器过滤与固定段豁免的接线。
+提案器过滤、固定段豁免与用户排除名单接线的测试。
 """
 from __future__ import annotations
 
@@ -118,3 +118,31 @@ class TestDiversityFilter:
         # 历史事故: R7 提案带 inter_min 2.08 A / 27 clash 对
         kept = _diversity_filter([self._prop("CREEECRRRRRRRC")])
         assert kept == []
+
+
+class TestExcludedAasWiring:
+    def test_proposer_normalization(self):
+        from peplm.integrate.esm3_proposer import ESM3Proposer
+        p = ESM3Proposer(receptor_sequence="ACDEFG",
+                         excluded_aas=["c", "M", "X", "", "zz"])
+        assert sorted(p._excluded_aas) == ["C", "M"]
+
+    def test_filter_keeps_ring_anchors_and_drops_free_violation(self):
+        from peplm.integrate.esm3_proposer import ESM3Proposer, _diversity_filter
+        p = ESM3Proposer(receptor_sequence="ACDEFG", excluded_aas=["M"],
+                         fixed_prefix="CREEEC", fixed_suffix="C")
+        props = [("CREEECRGERARRLC", [], [], "a"),   # 环锚点 C 不在名单, 保留
+                 ("CREEECMMMMAAAC", [], [], "b")]    # 自由位 M → 拒
+        kept = _diversity_filter(props, excluded_aas=p._excluded_aas,
+                                 fixed_prefix=p._fixed_prefix,
+                                 fixed_suffix=p._fixed_suffix)
+        assert [x[0] for x in kept] == ["CREEECRGERARRLC"]
+
+    def test_normalize_rejects_invalid_letters(self):
+        import backend.runtime.run_single_prediction as rsp
+        assert rsp._normalize_excluded_aas(["C", "m"]) == ["C", "M"]
+        assert rsp._normalize_excluded_aas("C,M") == ["C", "M"]
+        assert rsp._normalize_excluded_aas("C M") == ["C", "M"]
+        assert rsp._normalize_excluded_aas(None) == []
+        with pytest.raises(ValueError):
+            rsp._normalize_excluded_aas(["B"])

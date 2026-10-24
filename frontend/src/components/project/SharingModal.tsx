@@ -162,14 +162,15 @@ export function SharingModal({
     setSubmitting(true);
     setError(null);
     try {
+      const matched = (await searchUsersServer(normalizedUsername)).find(
+        (row) => String(row.username || '').trim().toLowerCase() === normalizedUsername
+      );
       const user =
         selectedUser && String(selectedUser.username || '').trim().toLowerCase() === normalizedUsername
           ? selectedUser
-          : toAppUser(
-              (await searchUsersServer(normalizedUsername)).find(
-                (row) => String(row.username || '').trim().toLowerCase() === normalizedUsername
-              )
-            );
+          : matched
+            ? toAppUser(matched)
+            : null;
       if (!user || user.deleted_at) {
         throw new Error(`User "${normalizedUsername}" was not found.`);
       }
