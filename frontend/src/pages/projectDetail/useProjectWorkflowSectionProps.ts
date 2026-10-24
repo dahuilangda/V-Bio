@@ -169,6 +169,10 @@ interface UseProjectWorkflowSectionPropsInput {
     chainId: string;
   } | null) => void;
   peptideSequenceMask: string;
+  peptideFixedModifications?: { position: number; ccd: string }[];
+  onPeptideFixedModificationsChange?: (next: { position: number; ccd: string }[]) => void;
+  peptideExcludedAAs?: string[];
+  onPeptideExcludedAAsChange?: (next: string[]) => void;
   peptideIterations: number;
   /** Peptide design: the Binding target component hosting the pocket picker. */
   peptideTargetComponentId?: string | null;
@@ -368,6 +372,10 @@ export function useProjectWorkflowSectionProps({
   peptideStructureUpload = null,
   onPeptideStructureUploadChange = () => {},
   peptideSequenceMask,
+  peptideFixedModifications,
+  onPeptideFixedModificationsChange = () => {},
+  peptideExcludedAAs = [],
+  onPeptideExcludedAAsChange = () => {},
   peptideIterations,
   peptideTargetComponentId,
   peptideTargetChainId,
@@ -647,6 +655,10 @@ export function useProjectWorkflowSectionProps({
         peptideStructureUpload,
         onPeptideStructureUploadChange,
         peptideSequenceMask,
+        peptideFixedModifications,
+        onPeptideFixedModificationsChange,
+        peptideExcludedAAs,
+        onPeptideExcludedAAsChange,
         peptideIterations,
         peptidePopulationSize,
         peptideEliteSize,

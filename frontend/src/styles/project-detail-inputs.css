@@ -345,6 +345,13 @@
   color: #2d5d45;
 }
 
+.peptide-mask-dot.excluded {
+  border-color: #c26d6d;
+  background: #fdeeee;
+  color: #8c3535;
+  text-decoration: line-through;
+}
+
 .peptide-mask-dot.empty {
   border-color: #d9e1dd;
   background: #f6f8f7;

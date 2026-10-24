@@ -649,6 +649,28 @@ export function handleRuntimePeptideSequenceMaskChangeAction<TDraft extends Draf
   });
 }
 
+export function handleRuntimePeptideExcludedAasChangeAction<TDraft extends DraftLike>(params: {
+  peptideExcludedAAs: string[];
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideExcludedAAs, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideExcludedAAs
+  }));
+}
+
+export function handleRuntimePeptideFixedModificationsChangeAction<TDraft extends DraftLike>(params: {
+  peptideFixedModifications: { position: number; ccd: string }[];
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideFixedModifications, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideFixedModifications
+  }));
+}
+
 export function handleRuntimePeptideIterationsChangeAction<TDraft extends DraftLike>(params: {
   peptideIterations: number;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;

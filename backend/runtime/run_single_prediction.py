@@ -5348,6 +5348,41 @@ def _normalize_sequence_mask(raw_mask: Any, binder_length: int) -> str:
     return mask
 
 
+def _mask_fixed_edges(mask: str) -> tuple[str, str]:
+    """掩码两端的固定残基段(首个/末个 X 之前的部分)。固定段是用户设计,
+    序列质量检查与排除名单都须豁免。"""
+    prefix = ""
+    for ch in mask or "":
+        if ch == "X":
+            break
+        prefix += ch
+    suffix = ""
+    for ch in reversed(mask or ""):
+        if ch == "X":
+            break
+        suffix = ch + suffix
+    return prefix, suffix
+
+
+def _normalize_excluded_aas(raw: Any) -> List[str]:
+    """用户排除的氨基酸(omit_AAs 式)。接受列表或逗号/空白分隔串, 归一化
+    为 20 种天然氨基酸单字母的去重排序; 含非法字母抛 ValueError。"""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    if not isinstance(raw, (list, tuple, set)):
+        raise ValueError("peptideExcludedAAs 需为氨基酸单字母列表。")
+    valid = set("ACDEFGHIKLMNPQRSTVWY")
+    excluded = sorted({str(a).strip().upper() for a in raw
+                       if str(a).strip()})
+    bad = [a for a in excluded if a not in valid]
+    if bad:
+        raise ValueError(
+            f"peptideExcludedAAs 含非法氨基酸 {''.join(bad)}：仅允许 20 种天然氨基酸单字母。")
+    return excluded
+
+
 def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     if not sequence_mask:
         return sequence
@@ -9738,6 +9773,7 @@ def run_peptide_design_backend(
     elite_size = _read_int_option(options, "peptideEliteSize", 5, min_value=1, max_value=max(1, population_size))
     use_initial_sequence = _read_bool_option(options, "peptideUseInitialSequence", False)
     sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
+    excluded_aas = _normalize_excluded_aas(options.get("peptideExcludedAAs"))
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
     # 固定非天然残基修改: [{position, ccd}] — 每个候选在该位置替换为指定 CCD
     fixed_mods_raw = options.get("peptideFixedModifications")
@@ -10041,6 +10077,13 @@ def run_peptide_design_backend(
         sys.path.remove(_esm3_sys_path)
 
     _esm3_gpu = os.environ.get("ESM3_GPU_ID", "0")
+    # 双环布局按平台约定固定 CREEEC 面 + 末端锚点 C; 掩码固定了哪端就用
+    # 掩码端, 空缺的一端仍补约定段。
+    proposer_prefix, proposer_suffix = _mask_fixed_edges(sequence_mask)
+    if not proposer_prefix and design_mode == "bicyclic":
+        proposer_prefix = "CREEEC"
+    if not proposer_suffix and design_mode == "bicyclic":
+        proposer_suffix = "C"
     proposer = ESM3Proposer(
         chirality=peptide_chirality,
         project_id=str(predict_args.get("project_id") or ""),
@@ -10051,6 +10094,9 @@ def run_peptide_design_backend(
         len_range=(_length_lo or 8, _length_hi or 25),
         cyclic=(design_mode == "cyclic"),
         structure_mode=structure_mode,
+        excluded_aas=excluded_aas,
+        fixed_prefix=proposer_prefix,
+        fixed_suffix=proposer_suffix,
         device=f"cuda:{_esm3_gpu}",
         seed=random_seed,
         work_dir=str(Path(temp_dir) / "esm3_proposer"),
@@ -10934,20 +10980,10 @@ def run_peptide_design_backend(
             # ranking, elite selection and the GRPO reward all read that one
             # field. Fixed mask positions are exempt — they are user design,
             # not proposer collapse.
-            mask_fixed_prefix = ""
-            mask_fixed_suffix = ""
-            for ch in sequence_mask or "":
-                if ch == "X":
-                    break
-                mask_fixed_prefix += ch
-            for ch in reversed(sequence_mask or ""):
-                if ch == "X":
-                    break
-                mask_fixed_suffix = ch + mask_fixed_suffix
             degeneracy_flags = _seq_quality.degeneracy_flags(
                 candidate_sequence,
-                fixed_prefix=mask_fixed_prefix or _seq_quality.DEFAULT_FIXED_PREFIX,
-                fixed_suffix=mask_fixed_suffix)
+                fixed_prefix=proposer_prefix,
+                fixed_suffix=proposer_suffix)
             degeneracy_penalty = _seq_quality.degeneracy_penalty(degeneracy_flags)
             if degeneracy_penalty > 0 and isinstance(composite_score, (int, float)):
                 composite_score = max(0.0, composite_score - degeneracy_penalty)

@@ -393,6 +393,38 @@ function normalizePeptideSequenceMask(value: unknown, binderLength: number): str
   return normalized.padEnd(binderLength, 'X');
 }
 
+// 须与 WorkflowRuntimeSettingsSection 的 PEPTIDE_AA_LETTERS 及后端
+// _normalize_excluded_aas 的合法集保持一致
+const PEPTIDE_AA_LETTERS = 'ACDEFGHIKLMNPQRSTVWY'.split('');
+
+function normalizePeptideExcludedAAs(value: unknown): string[] {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string' ? value.split(/[\s,]+/) : [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const letter = String(item ?? '').trim().toUpperCase();
+    if (letter.length === 1 && PEPTIDE_AA_LETTERS.includes(letter)) seen.add(letter);
+  }
+  return PEPTIDE_AA_LETTERS.filter((letter) => seen.has(letter));
+}
+
+function normalizePeptideFixedModifications(
+  value: unknown
+): NonNullable<PredictionOptions['peptideFixedModifications']> {
+  if (!Array.isArray(value)) return [];
+  const mods: NonNullable<PredictionOptions['peptideFixedModifications']> = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const position = Number((item as Record<string, unknown>).position);
+    const ccd = String((item as Record<string, unknown>).ccd ?? '').trim().toUpperCase();
+    if (Number.isFinite(position) && position >= 1 && ccd) {
+      mods.push({ position: Math.floor(position), ccd });
+    }
+  }
+  return mods;
+}
+
 function countPeptideNonNaturalResidues(pool: NonNullable<PredictionOptions['peptideResiduePool']>): number {
   return pool.filter((item) => item.kind !== 'natural').length;
 }
@@ -625,6 +657,12 @@ function normalizeOptions(value: unknown): PredictionOptions {
     raw.peptideSequenceMask ?? rawObj.peptide_sequence_mask ?? rawObj.sequence_mask,
     effectiveBinderLength
   );
+  const peptideFixedModifications = normalizePeptideFixedModifications(
+    raw.peptideFixedModifications ?? rawObj.peptide_fixed_modifications
+  );
+  const peptideExcludedAAs = normalizePeptideExcludedAAs(
+    raw.peptideExcludedAAs ?? rawObj.peptide_excluded_aas
+  );
   const peptideIterations = normalizeIntegerOption(
     raw.peptideIterations ?? rawObj.peptide_iterations ?? rawObj.generations,
     DEFAULT_PEPTIDE_ITERATIONS,
@@ -740,6 +778,8 @@ function normalizeOptions(value: unknown): PredictionOptions {
       peptideUseInitialSequence,
       peptideInitialSequence,
       peptideSequenceMask,
+    peptideFixedModifications,
+    peptideExcludedAAs,
       peptideIterations,
       peptidePopulationSize,
       peptideEliteSize,
@@ -791,6 +831,8 @@ function normalizeOptions(value: unknown): PredictionOptions {
     peptideUseInitialSequence,
     peptideInitialSequence,
     peptideSequenceMask,
+    peptideFixedModifications,
+    peptideExcludedAAs,
     peptideIterations,
     peptidePopulationSize,
     peptideEliteSize,
