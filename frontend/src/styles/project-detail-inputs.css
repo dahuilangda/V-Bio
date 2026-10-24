@@ -2508,3 +2508,113 @@
   background: #f2f7fb;
   color: #5b7fa0;
 }
+
+/* 双环两端锚定布局的分区条: 固定头 | 自由段(伸缩) | 固定尾 */
+.mask-zone-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mask-zone-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mask-zone-seg {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.mask-zone-fixed {
+  background: #eef4f0;
+  border: 1px solid #cfe0d6;
+}
+
+.mask-zone-free {
+  background: #f7fafc;
+  border: 1px dashed #b9c8d4;
+}
+
+.mask-zone-free.locked {
+  border-style: solid;
+}
+
+.mask-cell {
+  position: relative;
+  min-width: 30px;
+  height: 34px;
+  padding: 0 6px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #c9d4ce;
+  border-radius: 6px;
+  background: #fff;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.mask-cell-letter {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #2f4a3d;
+}
+
+.mask-cell-pos {
+  font-size: 8px;
+  line-height: 1;
+  color: #8fa096;
+  font-weight: 500;
+}
+
+button.mask-cell:not(:disabled):hover {
+  border-color: #6a9c81;
+  background: #f3f9f5;
+}
+
+.mask-cell-locked {
+  background: #dcefe2;
+  border-color: #9cc4ad;
+}
+
+.mask-cell-locked .mask-cell-letter {
+  color: #275c40;
+}
+
+.mask-cell-locked .mask-cell-pos {
+  color: #6f9a82;
+}
+
+.mask-cell.stretch {
+  border-style: dashed;
+  background: #f2f7fb;
+}
+
+.mask-cell.stretch .mask-cell-letter,
+.mask-cell.stretch .mask-cell-pos {
+  color: #54685e;
+}
+
+.mask-cell.open .mask-cell-letter {
+  color: #b8c4bd;
+  font-weight: 500;
+}
+
+.mask-zone-caption {
+  font-size: 12px;
+  color: #6b7a72;
+  margin: 0;
+}
+.mask-zone-caption {
+  font-size: 12px;
+  color: #6b7a72;
+  margin: 0;
+}
