@@ -146,3 +146,32 @@ class TestExcludedAasWiring:
         assert rsp._normalize_excluded_aas(None) == []
         with pytest.raises(ValueError):
             rsp._normalize_excluded_aas(["B"])
+
+
+class TestAdaptiveMask:
+    """长度窗口下掩码自由段伸缩(固定两端布局)。"""
+
+    def test_adapt_mask_to_length(self):
+        import backend.runtime.run_single_prediction as rsp
+        mask = "CREEECXXXXXXXXC"
+        assert rsp._adapt_mask_to_length(mask, 15) == mask
+        assert rsp._adapt_mask_to_length(mask, 12) == "CREEECXXXXXC"
+        assert rsp._adapt_mask_to_length(mask, 18) == "CREEECXXXXXXXXXXXC"
+        # 掩码无自由位(固定段吃满整条): 无法伸缩
+        assert rsp._adapt_mask_to_length("CREEEC", 10) is None
+        # 中部固定残基(C 不与两端连续): 无法伸缩
+        assert rsp._adapt_mask_to_length("CREECXXCXXEEC", 10) is None
+        # 全固定掩码: 无法伸缩
+        assert rsp._adapt_mask_to_length("CREEECRRRC", 10) is None
+
+    def test_apply_sequence_mask_variable_length(self):
+        import backend.runtime.run_single_prediction as rsp
+        mask = "CREEECXXXXXXXXC"
+        # 13 aa 候选: 布局保持 CREEEC+自由+C, 自由位 Cys 降为 S
+        out = rsp._apply_sequence_mask("cREEECaptcaek", mask)
+        assert len(out) == 13
+        assert out.startswith("CREEEC")
+        assert out.endswith("C")
+        assert "C" not in out[6:-1]
+        # 同长行为不变
+        assert rsp._apply_sequence_mask("CREEECRGERARRLC", mask) == "CREEECRGERARRLC"

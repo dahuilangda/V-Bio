@@ -5383,11 +5383,34 @@ def _normalize_excluded_aas(raw: Any) -> List[str]:
     return excluded
 
 
+def _adapt_mask_to_length(mask: str, length: int) -> Optional[str]:
+    """把掩码适配到目标长度: 两端固定段保留, 自由 X 段伸缩。
+
+    仅当全部固定残基都落在两端时安全(双环 CREEEC+自由段+C); 中部
+    还有固定残基(如额外锚点 Cys)的掩码无法伸缩, 返回 None, 调用方
+    退回按原掩码处理。"""
+    if "X" not in mask:
+        return None
+    prefix, suffix = _mask_fixed_edges(mask)
+    if any(ch != "X" for ch in mask[len(prefix):len(mask) - len(suffix)]):
+        return None
+    free = length - len(prefix) - len(suffix)
+    if free < 1:
+        return None
+    return prefix + "X" * free + suffix
+
+
 def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     if not sequence_mask:
         return sequence
+    mask = sequence_mask
+    if len(sequence) != len(mask):
+        # 掩码与候选长度不等(长度窗口所致): 伸缩适配失败时沿用原掩码。
+        adapted = _adapt_mask_to_length(mask, len(sequence))
+        if adapted is not None:
+            mask = adapted
     seq_chars = list(sequence)
-    for idx, mask_char in enumerate(sequence_mask):
+    for idx, mask_char in enumerate(mask):
         if idx >= len(seq_chars):
             break
         if mask_char != "X":
@@ -5396,11 +5419,11 @@ def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     # mutation path can propose Cys at free positions, tripping the
     # "exactly 3" validation downstream. Free positions never carry Cys,
     # and anything past the mask length is dropped.
-    if "C" in sequence_mask:
-        for idx, mask_char in enumerate(sequence_mask):
+    if "C" in mask:
+        for idx, mask_char in enumerate(mask):
             if mask_char == "X" and idx < len(seq_chars) and seq_chars[idx] == "C":
                 seq_chars[idx] = "S"
-        seq_chars = seq_chars[:len(sequence_mask)]
+        seq_chars = seq_chars[:len(mask)]
     return "".join(seq_chars)
 
 
@@ -9772,7 +9795,17 @@ def run_peptide_design_backend(
     population_size = _read_int_option(options, "peptidePopulationSize", 16, min_value=2, max_value=100)
     elite_size = _read_int_option(options, "peptideEliteSize", 5, min_value=1, max_value=max(1, population_size))
     use_initial_sequence = _read_bool_option(options, "peptideUseInitialSequence", False)
-    sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
+    mask_raw = str(options.get("peptideSequenceMask") or "")
+    mask_stripped = mask_raw.replace("-", "").replace("_", "").replace(" ", "").upper()
+    if (mask_stripped and _length_lo
+            and len(mask_stripped) != binder_length
+            and _length_lo <= len(mask_stripped) <= _length_hi):
+        # 掩码长在窗口内即合法: 掩码定布局, 自由段随候选伸缩;
+        # _normalize_sequence_mask 返回值弃用, 仅借其校验字符集。
+        sequence_mask = mask_stripped
+        _normalize_sequence_mask(sequence_mask, len(sequence_mask))
+    else:
+        sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
     excluded_aas = _normalize_excluded_aas(options.get("peptideExcludedAAs"))
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
     # 固定非天然残基修改: [{position, ccd}] — 每个候选在该位置替换为指定 CCD
@@ -10090,7 +10123,9 @@ def run_peptide_design_backend(
         receptor_sequence=(
             _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
             if peptide_chirality in ("d", "l") else ""),
-        peptide_length=binder_length,
+        # 长度窗口时置 None: de novo 在窗口内随机取长, 掩码自由段按候选
+        # 伸缩(_apply_sequence_mask); 无窗口仍钉死。
+        peptide_length=None if _length_lo else binder_length,
         len_range=(_length_lo or 8, _length_hi or 25),
         cyclic=(design_mode == "cyclic"),
         structure_mode=structure_mode,
@@ -10518,7 +10553,10 @@ def run_peptide_design_backend(
                 linker_ccd=linker_ccd,
                 linker_chain_id=linker_chain_id,
                 linker_atom_map=linker_atom_map,
-                modifications=(fixed_modifications + candidate_modifications) if fixed_modifications else candidate_modifications,
+                modifications=(
+                    [m for m in fixed_modifications if m["position"] <= len(candidate_sequence)]
+                    + candidate_modifications
+                ) if fixed_modifications else candidate_modifications,
                 backend=peptide_backend,
                 cys_positions=candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else None,
                 pocket_constraint=candidate_pocket_constraint,
