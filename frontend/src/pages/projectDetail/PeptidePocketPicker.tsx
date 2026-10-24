@@ -265,8 +265,8 @@ export function PeptidePocketPicker({
         </button>
         <InfoTip
           text={hasStructure
-            ? 'Optional — leave empty to design over the whole target surface. Defined on the uploaded target structure.'
-            : 'Optional — leave empty to design over the whole target surface. Defined on the target sequence.'}
+            ? 'Optional soft constraint — the co-folding model folds the peptide toward this site. Leave empty to design over the whole surface. Defined on the uploaded target structure.'
+            : 'Optional soft constraint — the co-folding model folds the peptide toward this site. Leave empty to design over the whole surface. Defined on the target sequence.'}
           align="end"
         />
       </div>

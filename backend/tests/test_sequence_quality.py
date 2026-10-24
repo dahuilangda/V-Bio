@@ -199,3 +199,36 @@ class TestProposerFixes:
         kept = _diversity_filter([(a, [], [], "g"), (b, [], [], "g"), (c, [], [], "g")],
                                  fixed_prefix="CREEEC", fixed_suffix="C")
         assert [x[0] for x in kept] == [a, b, c]
+
+
+class TestPocketResiduesCentroid:
+    """residue-list 口袋输入→质心→center 桥接(恢复前端 picker)。"""
+
+    BASE = {
+        "version": 1,
+        "sequences": [{"protein": {"id": "A", "sequence": "X" * 337}}],
+        "templates": [{
+            "pdb": "/tmp/2CE8_chainC_receptor.pdb",
+            "chain_id": "A", "target_chain_ids": ["A"],
+        }],
+    }
+
+    def test_centroid_resolves_and_translates(self):
+        import backend.runtime.run_single_prediction as rsp
+        options = {"peptidePocketResidues": "A:618,A:532,A:550,A:718",
+                   "peptidePocketBox": 10}
+        author, seq_pos = rsp._pocket_contacts_for_staged_space(self.BASE, options, "A")
+        assert author == [("A", 618), ("A", 532), ("A", 550), ("A", 718)]
+        # WGP 沟残基 618 在 author 434..770 → seq 185
+        assert seq_pos[0] == ("A", 185)
+
+    def test_unresolvable_residue_fails_loud(self):
+        import backend.runtime.run_single_prediction as rsp
+        options = {"peptidePocketResidues": "A:618,A:99999",
+                   "peptidePocketBox": 10}
+        try:
+            rsp._pocket_contacts_for_staged_space(self.BASE, options, "A")
+            raised = False
+        except ValueError as exc:
+            raised = "A:99999" in str(exc)
+        assert raised, "未解析残基必须响亮失败"
