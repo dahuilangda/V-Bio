@@ -5763,6 +5763,8 @@ def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[L
     pro_gly_ratio = sum(counts.get(aa, 0) for aa in "PG") / length
     max_run = 1
     run = 1
+    # run>=4 阈值与 peplm.sequence_quality._MIN_RUN 联动: 本处按可开发性
+    # 计一层惩罚, 序列门禁再按预测器虚高置信计一层, 两处需同步修改。
     for idx in range(1, len(seq)):
         if seq[idx] == seq[idx - 1]:
             run += 1
@@ -10032,6 +10034,7 @@ def run_peptide_design_backend(
     _esm3_sys_path = str(CAPABILITIES_DIR / "peptide_lm")
     sys.path.insert(0, _esm3_sys_path)
     try:
+        from peplm import sequence_quality as _seq_quality
         from peplm.integrate.esm3_proposer import ESM3Proposer
         from peplm.loop.constraints import resolve_bicyclic_anchors as _resolve_bicyclic_anchors
     finally:
@@ -10927,6 +10930,27 @@ def run_peptide_design_backend(
             if peptide_chirality != 'd':
                 lpeptide_keep_file = _persist_lpeptide_structure_keep(
                     parent_task_id, generation, candidate_sequence, structure_file)
+            # Degenerate-sequence deduction goes into composite_score itself:
+            # ranking, elite selection and the GRPO reward all read that one
+            # field. Fixed mask positions are exempt — they are user design,
+            # not proposer collapse.
+            mask_fixed_prefix = ""
+            mask_fixed_suffix = ""
+            for ch in sequence_mask or "":
+                if ch == "X":
+                    break
+                mask_fixed_prefix += ch
+            for ch in reversed(sequence_mask or ""):
+                if ch == "X":
+                    break
+                mask_fixed_suffix = ch + mask_fixed_suffix
+            degeneracy_flags = _seq_quality.degeneracy_flags(
+                candidate_sequence,
+                fixed_prefix=mask_fixed_prefix or _seq_quality.DEFAULT_FIXED_PREFIX,
+                fixed_suffix=mask_fixed_suffix)
+            degeneracy_penalty = _seq_quality.degeneracy_penalty(degeneracy_flags)
+            if degeneracy_penalty > 0 and isinstance(composite_score, (int, float)):
+                composite_score = max(0.0, composite_score - degeneracy_penalty)
             result_row = {
                 "sequence": candidate_sequence,
                 "modifications": candidate_modifications,
@@ -10961,6 +10985,8 @@ def run_peptide_design_backend(
                 "pair_iptm_confidence": pair_iptm_confidence,
                 "developability_score": developability_score,
                 "liability_penalty": liability_penalty,
+                "degeneracy_flags": degeneracy_flags,
+                "degeneracy_penalty": degeneracy_penalty,
                 "sequence_liabilities": liability,
                 "composite_score": composite_score,
                 "score": composite_score,
