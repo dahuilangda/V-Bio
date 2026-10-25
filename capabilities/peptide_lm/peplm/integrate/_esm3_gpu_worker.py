@@ -67,6 +67,7 @@ def _sync_adapter(key: str, adapter_dir: str | None = None) -> None:
         return
     path = Path(adapter_dir) if adapter_dir else (_ADAPTERS_ROOT / key)
     if path.exists():
+        from peft import load_peft_weights
         from peft.utils import set_peft_model_state_dict
         weights = load_peft_weights(str(path), device=str(policy.device))
         set_peft_model_state_dict(policy.model, weights)
