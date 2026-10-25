@@ -6512,6 +6512,21 @@ def _execute_peptide_generation_jobs(
                 pass
         raise first_error
 
+    if running:
+        # Stuck-in-flight escape: a broker restart or worker crash orphans
+        # dispatched candidates as PENDING forever (no worker will ever ack
+        # them), and the parent would spin here for eternity. Treat any
+        # candidate still unfinished after the window as failed and let the
+        # generation complete with what landed.
+        stuck = [submitted for async_result, submitted in running
+                 if str(getattr(async_result, "state", "") or "").upper()
+                 in {"PENDING", "RECEIVED", "RETRY"}]
+        raise RuntimeError(
+            "Peptide candidate dispatch drained with unfinished jobs "
+            f"(parent_task_id={parent_task_id}, stuck={len(stuck)}/"
+            f"{len(running)}): probable broker/worker restart mid-flight."
+        )
+
     return completed_jobs
 
 
