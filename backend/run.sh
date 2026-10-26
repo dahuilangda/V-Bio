@@ -189,7 +189,7 @@ run_logs() {
   compose_cmd "${compose_file}" "${env_file}" "${args[@]}" "$@"
 }
 
-GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso)
+GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso esm3)
 
 gpu_profile_args() {
   local profiles=("$@")
@@ -209,6 +209,7 @@ gpu_service_name() {
     alphafold3) echo "gpu-worker-alphafold3" ;;
     protenix) echo "gpu-worker-protenix" ;;
     nesso) echo "gpu-worker-nesso" ;;
+    esm3) echo "esm3-service" ;;
     *) return 1 ;;
   esac
 }
@@ -319,7 +320,7 @@ for target in "${EXPANDED_TARGETS[@]}"; do
       handle_compose "${GPU_COMPOSE}" "${GPU_ENV}" gpu-worker
       ;;
     esm3)
-      "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_esm3.sh" "${ACTION}"
+      handle_gpu_caps "esm3"
       ;;
     *)
       echo "ERROR: unknown target: ${target}" >&2
