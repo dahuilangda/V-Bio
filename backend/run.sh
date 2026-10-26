@@ -48,6 +48,7 @@ Targets:
   central     central api + monitor
   redis       redis stack
   cpu         cpu worker
+  esm3        ESM3 peptide-LM inference service (host process, port 9333)
   gpu         all GPU capability workers
   boltz2      boltz2 GPU worker
   boltz2score boltz2score GPU worker
@@ -274,6 +275,7 @@ expand_targets() {
         # redis 不随 bulk restart 重启: redis 是基础设施, 重启会断联所有
         # 进程的 TCP 连接(设计父任务/候选/GRPO 全部死)。仅显式
         # `run.sh restart redis` 才触碰。首次部署用 `run.sh start all`。
+        expanded+=(esm3)
         if [[ "${ACTION}" == "restart" || "${ACTION}" == "stop" ]]; then
           expanded+=(central cpu "${GPU_PROFILES[@]}")
         else
@@ -315,6 +317,9 @@ for target in "${EXPANDED_TARGETS[@]}"; do
     gpu-unified)
       if ! has_stack_files "${GPU_COMPOSE}" "${GPU_ENV}"; then warn_missing_stack "${target}" "${GPU_COMPOSE}" "${GPU_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_compose "${GPU_COMPOSE}" "${GPU_ENV}" gpu-worker
+      ;;
+    esm3)
+      "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_esm3.sh" "${ACTION}"
       ;;
     *)
       echo "ERROR: unknown target: ${target}" >&2
