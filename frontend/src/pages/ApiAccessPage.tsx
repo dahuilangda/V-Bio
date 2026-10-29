@@ -201,6 +201,7 @@ export function ApiAccessPage() {
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
   const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('default');
+  const [builderMsaMode, setBuilderMsaMode] = useState<'env' | 'uniref' | 'auto' | 'none'>('env');
   const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('dock');
   const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
@@ -1392,7 +1393,7 @@ else
 fi
 `;
   const peptideDesignCurlFlags = selectedWorkflow.key === 'peptide_design'
-    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=env"`
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`
     : '';
 
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
@@ -1410,7 +1411,7 @@ ${submitTaskIdCapture}`;
   -F "backend=${effectiveAffinityBackend}" \\
   -F "mode=${normalizedAffinityMode}" \\
   -F "compute_ipsae=true" \\
-  -F "use_msa_server=true" \\\n  -F "msa_mode=env" \\
+  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}" \\
   -F "priority=${builderPriority}"${affinitySeedFlag}${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
@@ -1874,6 +1875,18 @@ ${submitTaskIdCapture}`;
               >
                 <option value="high">High</option>
                 <option value="default">Default</option>
+              </select>
+            </Field>
+
+            <Field label="MSA Mode">
+              <select
+                value={builderMsaMode}
+                onChange={(e) => setBuilderMsaMode(e.target.value as 'env' | 'uniref' | 'auto' | 'none')}
+              >
+                <option value="env">Env (full, deep)</option>
+                <option value="uniref">UniRef (fast)</option>
+                <option value="auto">Auto</option>
+                <option value="none">None (no MSA)</option>
               </select>
             </Field>
 
