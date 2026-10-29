@@ -4783,18 +4783,6 @@ def run_protenix_backend(
     if assigned_count:
         print(f"已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
 
-    # 拷贝用户上传的模板 mmCIF 到 Protenix 输入目录——Protenix 的
-    # TemplateHitFeaturizer 按 mmcif_dir 搜索结构模板, 序列精确匹配的
-    # 用户模板即为最佳 hit。
-    if af3_template_payloads:
-        template_mmcif_dir = os.path.join(protenix_input_dir, "template_mmcif")
-        os.makedirs(template_mmcif_dir, exist_ok=True)
-        for tpl in af3_template_payloads:
-            cif_src = tpl.get("mmcif") or tpl.get("cif") or ""
-            if cif_src and os.path.isfile(cif_src):
-                shutil.copyfile(cif_src, os.path.join(
-                    template_mmcif_dir, os.path.basename(cif_src)))
-
     input_json_path = os.path.join(protenix_input_dir, "input.json")
     with open(input_json_path, "w", encoding="utf-8") as f:
         json.dump(protenix_json, f, indent=2, ensure_ascii=False)
@@ -13188,7 +13176,7 @@ def main():
         with tempfile.TemporaryDirectory(dir=runtime_temp_parent) as temp_dir:
             processed_yaml = yaml_content
             af3_template_payloads: List[dict] = []
-            if template_inputs and (backend in ("boltz", "alphafold3", "protenix2dock") or workflow == "peptide_design"):
+            if template_inputs and (backend in ("boltz", "alphafold3") or workflow == "peptide_design"):
                 template_backend = "boltz" if workflow == "peptide_design" else backend
                 template_work_root = _resolve_backend_work_root(
                     _resolve_backend_results_root(template_backend, runtime_task_id, temp_dir)
