@@ -201,7 +201,7 @@ export function ApiAccessPage() {
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
   const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('default');
-  const [builderMsaMode, setBuilderMsaMode] = useState<'env' | 'uniref' | 'auto' | 'none'>('env');
+  const [builderMsaMode, setBuilderMsaMode] = useState<'env' | 'uniref' | 'auto' | 'none'>('uniref');
   const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('dock');
   const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
@@ -1883,8 +1883,8 @@ ${submitTaskIdCapture}`;
                 value={builderMsaMode}
                 onChange={(e) => setBuilderMsaMode(e.target.value as 'env' | 'uniref' | 'auto' | 'none')}
               >
-                <option value="env">Env (full, deep)</option>
                 <option value="uniref">UniRef (fast)</option>
+                <option value="env">Env (full, deep)</option>
                 <option value="auto">Auto</option>
                 <option value="none">None (no MSA)</option>
               </select>
