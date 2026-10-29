@@ -45,6 +45,9 @@ def build_configs(
         "sample_diffusion.N_sample": str(n_sample),
         "inference_noise_scheduler.s_max": str(sigma_max),
         "sample_diffusion.guidance.enable": str(guidance_enable).lower(),
+        "use_template": "true",
+        "data.template.prot_template_mmcif_dir": "/workspace/protenix_input/template_mmcif",
+        "data.template.fetch_remote": "false",
     }
     arg_str = " ".join(f"--{k} {v}" for k, v in overrides.items())
 
