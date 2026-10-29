@@ -1402,6 +1402,8 @@ fi
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectivePredictionBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
+  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \
+  -F "msa_mode=${builderMsaMode}" \
   -F "priority=${builderPriority}"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinity = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
