@@ -246,8 +246,11 @@ export function WorkflowRuntimeSettingsSection({
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   // peptide design only offers the docking engines (+ AF3); migrate a legacy
   // 'boltz' so the select never shows an unmatched value
+  // L-type designs can use standard protenix inference (full model + MSA + templates);
+  // D-type requires protenix2dock (mirror/refine workflow).
   const peptideBackendAllowed =
-    normalizedBackend === 'boltz2dock' || normalizedBackend === 'protenix2dock' || normalizedBackend === 'alphafold3';
+    normalizedBackend === 'boltz2dock' || normalizedBackend === 'protenix2dock' ||
+    normalizedBackend === 'alphafold3' || normalizedBackend === 'protenix';
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
       onBackendChange('protenix2dock');
