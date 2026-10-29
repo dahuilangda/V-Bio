@@ -1392,7 +1392,7 @@ else
 fi
 `;
   const peptideDesignCurlFlags = selectedWorkflow.key === 'peptide_design'
-    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true"`
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=env"`
     : '';
 
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
@@ -1410,7 +1410,7 @@ ${submitTaskIdCapture}`;
   -F "backend=${effectiveAffinityBackend}" \\
   -F "mode=${normalizedAffinityMode}" \\
   -F "compute_ipsae=true" \\
-  -F "use_msa_server=true" \\
+  -F "use_msa_server=true" \\\n  -F "msa_mode=env" \\
   -F "priority=${builderPriority}"${affinitySeedFlag}${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
