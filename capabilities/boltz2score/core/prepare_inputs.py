@@ -324,11 +324,10 @@ _BOND_PERCEPTION_TIMEOUT_SECONDS = 60.0
 def _run_bounded_determine(candidate: Chem.Mol, timeout: float, **kwargs):
     """带硬超时运行 RDKit 键级感知，返回 (mol, completed)。
 
-    DetermineBonds 对高共轭的坐标-only 配体是指数复杂度，最坏可把整个评分
-    任务挂死（实测 3 小时不返回）。放进 fork 子进程执行并 join(timeout)，
-    超时即 terminate——completed=False 表示被击杀，部分赋值结果不可信，
-    调用方应放弃该候选并走兜底路径。RDKit 抛错时沿用部分赋值（原行为），
-    视为 completed。
+    DetermineBonds 对高共轭的坐标-only 配体是指数复杂度，实测可让评分任务
+    悬挂 3 小时。放入 fork 子进程执行并 join(timeout)，超时即 terminate；
+    completed=False 表示被击杀，部分赋值结果不可信，调用方应放弃该候选。
+    RDKit 抛错视为 completed（保留部分赋值，沿用原行为）。
     """
     import multiprocessing as mp
 
