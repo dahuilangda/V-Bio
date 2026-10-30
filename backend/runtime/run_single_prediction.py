@@ -1114,15 +1114,12 @@ def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dic
 
 _PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
 _PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mmcif"
-# 用户模板走 Protenix 的同一套模板元数据机制：每个模板分配确定性合成 ID
-# （4 字符字母数字，满足 hit 名 "TTTT_C" 约束），release_dates 以按任务
-# 覆盖文件提供条目——过滤断言、取结构、kalign 对齐全链原样工作，无需
-# 借用真实 PDB 身份。日期取截止(2021-09-30)之前的固定值，表示"早于泄漏
-# 截止期"这一语义。
+# 用户模板缺少 PDB 注册元数据（release_dates、chem_comp.type），由后端按
+# 任务补齐：合成 ID 形如 t001（4 字符字母数字，满足 hit 名约束），日期取
+# 泄漏截止期（2021-09-30）之前的固定值。
 _PROTENIX_TEMPLATE_RELEASE_DATE = "2019-01-01"
 # 标准氨基酸的 PDB 注册 _chem_comp.type：Protenix 解析模板时以该字段判定
-# 蛋白链（须含 "peptide"）。结构转换/净化生成的 cif 此列常为 '.', 按注册
-# 表补全——与 release_dates 覆盖同属模板注册元数据。
+# 蛋白链（须含 "peptide"）。
 _PROTENIX_STD_AA_CHEM_COMP_TYPES = {
     **{aa: "L-peptide linking" for aa in
        ("ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "HIS", "ILE",
@@ -1135,8 +1132,7 @@ _PROTENIX_STD_AA_CHEM_COMP_TYPES = {
 def _complete_template_chem_comp_types(cif_text: str) -> str:
     """补全模板 cif 中缺失的标准氨基酸 _chem_comp.type 元数据。
 
-    _chem_comp 的 id/type 两列由转换管线保证存在；缺失或列长不一致说明
-    上游产物不符合契约，直接抛错而非静默跳过。
+    id/type 两列由转换管线保证存在且等长，缺失即上游产物违约，抛错。
     """
     doc = gemmi.cif.read_string(cif_text)
     block = doc.sole_block()
@@ -1155,7 +1151,7 @@ def _complete_template_chem_comp_types(cif_text: str) -> str:
         if str(type_col[i]) in (".", "?"):
             canonical = _PROTENIX_STD_AA_CHEM_COMP_TYPES.get(comp)
             if canonical:
-                # 含空格的值必须走 cif 引号序列化, 否则 loop 行值数错乱
+                # 含空格的值必须走 cif 引号序列化，否则 loop 行值数错乱。
                 type_col[i] = gemmi.cif.quote(canonical)
                 changed = True
     return doc.as_string() if changed else cif_text
@@ -1169,19 +1165,14 @@ def _stage_protenix_user_templates(
 ) -> bool:
     """把用户模板注册进 Protenix 推理模板体系。
 
-    根源机制：Protenix 过滤模板时按 hit ID 查 release_dates、按 ID 从
-    mmcif 目录取结构。用户模板缺少 PDB 注册元数据，因此由后端补齐——
-    分配合成 ID、写出对应命名的 cif、聚合 hit a3m，并生成按任务的
-    release_dates 覆盖文件（经 --data.template.release_dates_path 下发）。
-    过滤/取结构/对齐逻辑全部原样复用，不做任何 ID 猜测或硬过滤。
+    Protenix 按 hit ID 查 release_dates 并从 mmcif 目录取模板结构。用户
+    模板缺注册元数据，由本函数补齐：分配合成 ID、写出对应 cif、聚合
+    hit a3m、生成按任务 release_dates 覆盖文件；过滤/取结构/对齐全部
+    原样复用。实体定位与 MSA 挂载同源（entity_seq_positions 映射，
+    实体下标与 sequences 位置不保证一致）。
 
-    实体定位与 MSA 挂载同源：entity_chain_ids（yaml 链 ↔ 实体）、
-    entity_kinds（仅蛋白实体）、entity_seq_positions（实体 ↔ sequences
-    列表位置，两者不保证同一下标）。
-
-    契约：任何非法模板输入（内容为空、无蛋白链、链不匹配）直接抛
-    ValueError 并带可用实体信息——不做静默跳过。payloads 非空时必然
-    全部注册成功并返回 True；空列表返回 False。
+    契约：空内容、无蛋白链、target_chain_ids 不匹配任一蛋白实体时抛
+    ValueError；payloads 非空时全部注册成功返回 True，空列表返回 False。
     """
     if not template_payloads:
         return False
@@ -4978,10 +4969,8 @@ def run_protenix_backend(
     if assigned_count:
         print(f"已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
 
-    # 用户模板注入：写模板 cif + 单 hit a3m 并逐实体挂 templatesPath；
-    # 至少一条蛋白链拿到模板才开 use_template——无模板任务保持默认关闭，
-    # 行为与历史版本完全一致（fetch_remote 默认 true，缺失 hit 结构只会
-    # 记 error 跳过，不会中断推理）。
+    # 用户模板注册：仅当至少一条蛋白链挂到模板时开启 use_template；
+    # 无模板任务保持默认关闭，行为与历史版本一致。
     use_template = _stage_protenix_user_templates(
         template_payloads or [],
         protenix_json,
@@ -5137,9 +5126,8 @@ def run_protenix_backend(
         ]
     )
     if use_template:
-        # 模板目录与 release_dates 都指向任务内生成文件——默认 /cache/mmcif
-        # 不存在，且用户模板的合成 ID 不在全局 release_dates 里；两者由
-        # _stage_protenix_user_templates 按任务生成并经此下发。
+        # 模板目录与 release_dates 覆盖文件由 _stage_protenix_user_templates
+        # 按任务生成，默认 /cache 路径不含用户模板的合成 ID。
         docker_command.extend(
             [
                 "--use_template",
