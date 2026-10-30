@@ -27,35 +27,39 @@ def _prep(entity_chain_ids, entity_seq_positions):
     )
 
 
-def _single_chain_cif(chain_id: str = "A", n_res: int = 12) -> str:
-    """Minimal single-chain mmCIF via gemmi (same path production uses)."""
-    import gemmi
+def _single_chain_cif(tmp_path, chain_id: str = "A", n_res: int = 12) -> str:
+    """Template cif via the production conversion path (PDB → single-chain mmCIF).
 
-    structure = gemmi.Structure()
-    structure.name = "test"
-    model = gemmi.Model("1")
-    chain = gemmi.Chain(chain_id)
+    Uses convert_structure_to_single_chain_mmcif — the exact converter
+    prepare_template_payloads runs — so the fixture exercises the same
+    '.'-typed chem_comp output that production staging must complete.
+    PDB ATOM lines follow strict fixed columns (name 13-16, resName 18-20,
+    chainID 22, resSeq 23-26, xyz 31-54).
+    """
+    from backend.runtime.run_single_prediction import (
+        convert_structure_to_single_chain_mmcif,
+    )
+
+    lines = []
     for i in range(1, n_res + 1):
-        residue = gemmi.Residue()
-        residue.name = "ALA"
-        residue.seqid = gemmi.SeqId(i, " ")
-        residue.het_flag = "A"
-        atom = gemmi.Atom()
-        atom.name = "CA"
-        atom.element = gemmi.Element("C")
-        atom.pos = gemmi.Position(float(i), 0.0, 0.0)
-        residue.add_atom(atom)
-        chain.add_residue(residue)
-    model.add_chain(chain)
-    structure.add_model(model)
-    structure.setup_entities()
-    return structure.make_mmcif_document().as_string()
+        lines.append(
+            f"ATOM  {i:5d}  CA  ALA {chain_id}{i:4d}    "
+            f"{float(i):8.3f}{0.0:8.3f}{0.0:8.3f}  1.00  0.00          C"
+        )
+    pdb_text = "\n".join(lines) + "\nEND\n"
+    src = tmp_path / f"src_{chain_id}_{n_res}.pdb"
+    src.write_text(pdb_text)
+    cif_out = tmp_path / f"src_{chain_id}_{n_res}.cif"
+    _, cif_text, _, _ = convert_structure_to_single_chain_mmcif(
+        src, chain_id, cif_out
+    )
+    return cif_text
 
 
-def _payload(chain: str = "A", n_res: int = 12):
+def _payload(tmp_path, chain: str = "A", n_res: int = 12):
     return {
         "target_chain_ids": [chain],
-        "mmcif": _single_chain_cif(n_res=n_res),
+        "mmcif": _single_chain_cif(tmp_path, chain, n_res),
     }
 
 
@@ -73,7 +77,10 @@ def staged(tmp_path):
         }
     ]
     prep = _prep({1: ["A"], 2: ["B"]}, {1: 0, 2: 1})
-    payloads = [_payload("A"), _payload("A", n_res=10)]
+    payloads = [
+        _payload(tmp_path, "A"),
+        _payload(tmp_path, "A", n_res=10),
+    ]
     staged_ok = _stage_protenix_user_templates(
         payloads, protenix_json, str(tmp_path), prep
     )
@@ -122,20 +129,39 @@ def test_release_dates_overlay_covers_every_template(staged):
     assert _PROTENIX_TEMPLATE_RELEASE_DATE
 
 
-def test_unmatched_only_returns_false(tmp_path):
+def test_unmatched_target_chain_raises(tmp_path):
+    """链不匹配是配置错误：直接抛 ValueError 并列出可用蛋白链，不静默跳过。"""
+    import pytest
+
     protenix_json = [
         {"name": "task", "sequences": [{"proteinChain": {"sequence": "A" * 5}}]}
     ]
     prep = _prep({0: ["A"]}, {0: 0})
-    staged_ok = _stage_protenix_user_templates(
-        [{"target_chain_ids": ["Z"], "mmcif": _single_chain_cif()}],
-        protenix_json,
-        str(tmp_path),
-        prep,
-    )
-    assert staged_ok is False
+    with pytest.raises(ValueError, match="未匹配任何输入蛋白实体"):
+        _stage_protenix_user_templates(
+            [{"target_chain_ids": ["Z"], "mmcif": _single_chain_cif(tmp_path)}],
+            protenix_json,
+            str(tmp_path),
+            prep,
+        )
     assert "templatesPath" not in protenix_json[0]["sequences"][0]["proteinChain"]
     assert not list(tmp_path.glob("template_mmcif/*.a3m"))
+
+
+def test_empty_payload_raises(tmp_path):
+    """空内容是上游转换契约违约：抛错而非跳过。"""
+    import pytest
+
+    protenix_json = [
+        {"name": "task", "sequences": [{"proteinChain": {"sequence": "A" * 5}}]}
+    ]
+    with pytest.raises(ValueError, match="内容为空"):
+        _stage_protenix_user_templates(
+            [{"target_chain_ids": ["A"], "mmcif": ""}],
+            protenix_json,
+            str(tmp_path),
+            _prep({0: ["A"]}, {0: 0}),
+        )
 
 
 def test_empty_payloads_noop(tmp_path):

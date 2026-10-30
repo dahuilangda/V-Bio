@@ -1133,28 +1133,32 @@ _PROTENIX_STD_AA_CHEM_COMP_TYPES = {
 
 
 def _complete_template_chem_comp_types(cif_text: str) -> str:
-    """补全模板 cif 中缺失的标准氨基酸 _chem_comp.type 元数据。"""
-    import gemmi
+    """补全模板 cif 中缺失的标准氨基酸 _chem_comp.type 元数据。
 
-    try:
-        doc = gemmi.cif.read_string(cif_text)
-        block = doc.sole_block()
-        table = block.find("_chem_comp.", ["id", "type"])
-        if table is None or len(table) == 0:
-            return cif_text
-        changed = False
-        for row in table:
-            comp = str(row[0]).strip("'\"").upper()
-            if str(row[1]) in (".", "?"):
-                canonical = _PROTENIX_STD_AA_CHEM_COMP_TYPES.get(comp)
-                if canonical:
-                    row[1] = canonical
-                    changed = True
-        return doc.as_string() if changed else cif_text
-    except Exception as exc:
-        print(f"[WARN] 模板 chem_comp 元数据补全失败（原样使用）: {exc}",
-              file=sys.stderr)
-        return cif_text
+    _chem_comp 的 id/type 两列由转换管线保证存在；缺失或列长不一致说明
+    上游产物不符合契约，直接抛错而非静默跳过。
+    """
+    doc = gemmi.cif.read_string(cif_text)
+    block = doc.sole_block()
+    id_col = block.find_loop("_chem_comp.id")
+    type_col = block.find_loop("_chem_comp.type")
+    if id_col is None or type_col is None:
+        raise ValueError(
+            "模板 mmCIF 缺少 _chem_comp 注册元数据（id/type 列），"
+            "无法通过 Protenix 模板解析。")
+    if len(id_col) != len(type_col):
+        raise ValueError(
+            "模板 mmCIF 的 _chem_comp id/type 列长度不一致，文件已损坏。")
+    changed = False
+    for i in range(len(id_col)):
+        comp = str(id_col[i]).strip("'\"").upper()
+        if str(type_col[i]) in (".", "?"):
+            canonical = _PROTENIX_STD_AA_CHEM_COMP_TYPES.get(comp)
+            if canonical:
+                # 含空格的值必须走 cif 引号序列化, 否则 loop 行值数错乱
+                type_col[i] = gemmi.cif.quote(canonical)
+                changed = True
+    return doc.as_string() if changed else cif_text
 
 
 def _stage_protenix_user_templates(
@@ -1167,7 +1171,7 @@ def _stage_protenix_user_templates(
 
     根源机制：Protenix 过滤模板时按 hit ID 查 release_dates、按 ID 从
     mmcif 目录取结构。用户模板缺少 PDB 注册元数据，因此由后端补齐——
-    分配合成 ID、写出对应命名的 cif、单 hit a3m，并生成按任务的
+    分配合成 ID、写出对应命名的 cif、聚合 hit a3m，并生成按任务的
     release_dates 覆盖文件（经 --data.template.release_dates_path 下发）。
     过滤/取结构/对齐逻辑全部原样复用，不做任何 ID 猜测或硬过滤。
 
@@ -1175,7 +1179,9 @@ def _stage_protenix_user_templates(
     entity_kinds（仅蛋白实体）、entity_seq_positions（实体 ↔ sequences
     列表位置，两者不保证同一下标）。
 
-    返回 True 表示至少一条蛋白链拿到了模板（调用方据此加 --use_template）。
+    契约：任何非法模板输入（内容为空、无蛋白链、链不匹配）直接抛
+    ValueError 并带可用实体信息——不做静默跳过。payloads 非空时必然
+    全部注册成功并返回 True；空列表返回 False。
     """
     if not template_payloads:
         return False
@@ -1183,45 +1189,36 @@ def _stage_protenix_user_templates(
     os.makedirs(template_dir, exist_ok=True)
     container_dir = _PROTENIX_TEMPLATE_CONTAINER_DIR
 
-    entity_chain_ids = getattr(prep, "entity_chain_ids", None) or {}
-    entity_kinds = getattr(prep, "entity_kinds", None) or {}
-    entity_seq_positions = getattr(prep, "entity_seq_positions", None) or {}
+    entity_chain_ids = prep.entity_chain_ids
+    entity_kinds = prep.entity_kinds
+    entity_seq_positions = prep.entity_seq_positions
+    root_item = protenix_json[0] if isinstance(protenix_json, list) else protenix_json
+    sequences = root_item.get("sequences") or []
 
-    assemblies = protenix_json if isinstance(protenix_json, list) else [protenix_json]
-    sequences = []
-    for assembly in assemblies:
-        if isinstance(assembly, dict):
-            sequences.extend(assembly.get("sequences") or [])
+    available_chains = sorted({
+        str(c).upper()
+        for eidx, chains in entity_chain_ids.items()
+        if entity_kinds.get(eidx) == "protein"
+        for c in chains
+    })
 
-    # Pass 1: 落盘每份模板的 cif + 收集 release_dates 条目。
-    # hits_by_seq_pos[sequences 位置] 聚合该实体全部命中片段，Pass 2 合并
-    # 为单个多 hit a3m（templatesPath 每条蛋白链只能挂一个文件）。
+    # 先全部校验并构建，后落盘——失败时不留半成品文件。
     release_dates_overlay: Dict[str, Dict[str, str]] = {}
     hits_by_seq_pos: Dict[int, List[str]] = {}
-    staged_any = False
     for idx, payload in enumerate(template_payloads, start=1):
         cif_text = str(payload.get("mmcif") or payload.get("cif") or "")
         if not cif_text:
-            print(f"[WARN] 模板 #{idx} 内容为空，已跳过。", file=sys.stderr)
-            continue
+            raise ValueError(
+                f"模板 #{idx} 内容为空：模板转换产物缺少 mmCIF 字段。")
         synthetic_id = f"t{idx:03d}"
-        cif_path = os.path.join(template_dir, f"{synthetic_id}.cif")
-        with open(cif_path, "w", encoding="utf-8") as f:
-            f.write(_complete_template_chem_comp_types(cif_text))
-        try:
-            chain_sequences = extract_chain_sequences_from_structure(cif_text, "cif")
-        except Exception as exc:
-            print(f"[WARN] 解析模板 #{idx} 链序列失败: {exc}", file=sys.stderr)
-            continue
+        completed_cif = _complete_template_chem_comp_types(cif_text)
+        chain_sequences = extract_chain_sequences_from_structure(completed_cif, "cif")
         template_chain = next(iter(chain_sequences), None)
         template_seq = chain_sequences.get(template_chain, "") if template_chain else ""
         if not template_seq:
-            print(f"[WARN] 模板 #{idx} 未解析出蛋白链序列，已跳过。", file=sys.stderr)
-            continue
-        release_dates_overlay[synthetic_id] = {
-            "release_date": _PROTENIX_TEMPLATE_RELEASE_DATE
-        }
-
+            raise ValueError(
+                f"模板 #{idx} ({synthetic_id}.cif) 未解析出蛋白链序列——"
+                "模板必须是含蛋白链的结构。")
         target_chains = [
             str(c).strip().upper()
             for c in (payload.get("target_chain_ids") or [])
@@ -1230,49 +1227,44 @@ def _stage_protenix_user_templates(
             entity_seq_positions[eidx]
             for eidx, chains in entity_chain_ids.items()
             if entity_kinds.get(eidx) == "protein"
-            and any(str(c).strip().upper() in target_chains for c in chains)
             and entity_seq_positions.get(eidx) is not None
+            and any(str(c).strip().upper() in target_chains for c in chains)
         ]
         if not linked_seq_positions:
-            print(
-                f"[WARN] 模板 #{idx} 的 target_chain_ids "
-                f"{target_chains} 未匹配任何输入蛋白实体，已跳过。",
-                file=sys.stderr,
-            )
-            continue
-
+            raise ValueError(
+                f"模板 #{idx} 的 target_chain_ids {target_chains} "
+                f"未匹配任何输入蛋白实体；可用蛋白链: {available_chains}。"
+                "请核对 template_meta 的 target_chain_ids。")
         seq_len = len(template_seq)
         hit_block = (
             f">{synthetic_id}_{template_chain}/1-{seq_len} "
             f"protein length:{seq_len} mol:protein\n"
             f"{template_seq.upper()}\n"
         )
+        release_dates_overlay[synthetic_id] = {
+            "release_date": _PROTENIX_TEMPLATE_RELEASE_DATE
+        }
         for seq_pos in linked_seq_positions:
-            hits_by_seq_pos.setdefault(int(seq_pos), []).append(hit_block)
-        staged_any = True
+            hits_by_seq_pos.setdefault(seq_pos, []).append(hit_block)
 
-    if not staged_any:
-        return False
+        with open(os.path.join(template_dir, f"{synthetic_id}.cif"),
+                  "w", encoding="utf-8") as f:
+            f.write(completed_cif)
 
-    # Pass 2: 每个拿到命中的蛋白实体写聚合 a3m 并挂 templatesPath。
+    # 每个拿到命中的蛋白实体写聚合 a3m 并挂 templatesPath
+    # （templatesPath 每条蛋白链只能指向一个文件，多模板合并多 hit）。
     for seq_pos, hit_blocks in hits_by_seq_pos.items():
-        if seq_pos < 0 or seq_pos >= len(sequences):
-            continue
-        entry = sequences[seq_pos]
-        if not isinstance(entry, dict):
-            continue
         a3m_name = f"entity_{seq_pos:02d}_templates.a3m"
-        a3m_path = os.path.join(template_dir, a3m_name)
-        with open(a3m_path, "w", encoding="ascii") as f:
+        with open(os.path.join(template_dir, a3m_name),
+                  "w", encoding="ascii") as f:
             f.write("".join(hit_blocks))
+        entry = sequences[seq_pos]
         for kind, body in entry.items():
-            if "protein" not in kind or not isinstance(body, dict):
-                continue
-            body["templatesPath"] = f"{container_dir}/{a3m_name}"
+            if "protein" in kind and isinstance(body, dict):
+                body["templatesPath"] = f"{container_dir}/{a3m_name}"
 
-    release_dates_path = os.path.join(
-        protenix_input_dir, "template_release_dates.json")
-    with open(release_dates_path, "w", encoding="utf-8") as f:
+    with open(os.path.join(protenix_input_dir, "template_release_dates.json"),
+              "w", encoding="utf-8") as f:
         json.dump(release_dates_overlay, f, indent=1)
     return True
 
