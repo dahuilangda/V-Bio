@@ -318,6 +318,54 @@ def _has_non_single_bonds(mol: Chem.Mol) -> bool:
     )
 
 
+_BOND_PERCEPTION_TIMEOUT_SECONDS = 60.0
+
+
+def _run_bounded_determine(candidate: Chem.Mol, timeout: float, **kwargs):
+    """带硬超时运行 RDKit 键级感知，返回 (mol, completed)。
+
+    DetermineBonds 对高共轭的坐标-only 配体是指数复杂度，最坏可把整个评分
+    任务挂死（实测 3 小时不返回）。放进 fork 子进程执行并 join(timeout)，
+    超时即 terminate——completed=False 表示被击杀，部分赋值结果不可信，
+    调用方应放弃该候选并走兜底路径。RDKit 抛错时沿用部分赋值（原行为），
+    视为 completed。
+    """
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork")
+
+    def _worker(mol_, kwargs_, conn_):
+        try:
+            rdDetermineBonds.DetermineBonds(mol_, **kwargs_)
+        except Exception:
+            pass
+        try:
+            conn_.send(mol_)
+        except Exception:
+            pass
+        finally:
+            conn_.close()
+
+    recv, send = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_worker, args=(candidate, kwargs, send), daemon=True)
+    proc.start()
+    proc.join(timeout)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        recv.close()
+        send.close()
+        return Chem.Mol(candidate), False
+    try:
+        mol_out = recv.recv() if recv.poll() else Chem.Mol(candidate)
+    except Exception:
+        mol_out = Chem.Mol(candidate)
+    finally:
+        recv.close()
+        send.close()
+    return mol_out, True
+
+
 def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
     """Try to assign bond orders; fall back gracefully if not possible."""
     base = Chem.Mol(mol)
@@ -331,18 +379,23 @@ def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
         )
         return non_single, candidate.GetNumBonds()
 
-    def _try_determine_bonds(candidate: Chem.Mol, **kwargs) -> Chem.Mol:
-        """Run DetermineBonds but keep partially assigned bonds on recoverable failures."""
+    def _connectivity_only(source: Chem.Mol) -> Chem.Mol:
+        connected = Chem.Mol(source)
         try:
-            rdDetermineBonds.DetermineBonds(candidate, **kwargs)
+            rdDetermineBonds.DetermineConnectivity(connected)
         except Exception:
-            # RDKit may raise after assigning useful connectivity/bond orders
-            # (e.g. charge mismatch). Keep the candidate for scoring.
-            pass
-        return candidate
+            return source
+        return connected if connected.GetNumBonds() > 0 else source
 
-    candidate = Chem.Mol(base)
-    candidate = _try_determine_bonds(candidate)
+    candidate, completed = _run_bounded_determine(
+        base, _BOND_PERCEPTION_TIMEOUT_SECONDS)
+    if not completed:
+        print(
+            f"[Warning] DetermineBonds exceeded {_BOND_PERCEPTION_TIMEOUT_SECONDS:.0f}s "
+            "on a coordinate-only ligand (pathological conjugation); "
+            "falling back to connectivity-only single bonds."
+        )
+        return _connectivity_only(base)
     if _has_non_single_bonds(candidate):
         return candidate
     if candidate.GetNumBonds() > 0:
@@ -352,8 +405,14 @@ def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
     best = Chem.Mol(base)
     best_score = _score(best)
     for charge in charge_sweep:
-        candidate = Chem.Mol(base)
-        candidate = _try_determine_bonds(candidate, charge=charge)
+        candidate, completed = _run_bounded_determine(
+            base, _BOND_PERCEPTION_TIMEOUT_SECONDS, charge=charge)
+        if not completed:
+            print(
+                f"[Warning] DetermineBonds(charge={charge}) exceeded "
+                f"{_BOND_PERCEPTION_TIMEOUT_SECONDS:.0f}s; stopping the charge sweep."
+            )
+            break
         cand_score = _score(candidate)
         if cand_score > best_score:
             best = candidate
@@ -366,31 +425,29 @@ def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
 
     # Final fallback for coordinate-only ligands:
     # determine at least bond connectivity, then try to upgrade bond orders.
-    try:
-        connected = Chem.Mol(base)
-        rdDetermineBonds.DetermineConnectivity(connected)
-        if connected.GetNumBonds() == 0:
-            return base
-
-        best_conn = Chem.Mol(connected)
-        best_conn_score = _score(best_conn)
-        for charge in charge_sweep:
-            candidate = Chem.Mol(connected)
-            try:
-                rdDetermineBonds.DetermineBondOrders(candidate, charge=charge)
-            except Exception:
-                # Keep candidate; DetermineBondOrders can partially assign before error.
-                pass
-            cand_score = _score(candidate)
-            if cand_score > best_conn_score:
-                best_conn = candidate
-                best_conn_score = cand_score
-            if _has_non_single_bonds(candidate):
-                return candidate
-
-        return best_conn
-    except Exception:
+    connected = _connectivity_only(base)
+    if connected is base:
         return base
+
+    best_conn = Chem.Mol(connected)
+    best_conn_score = _score(best_conn)
+    for charge in charge_sweep:
+        candidate, completed = _run_bounded_determine(
+            connected, _BOND_PERCEPTION_TIMEOUT_SECONDS, charge=charge)
+        if not completed:
+            print(
+                f"[Warning] DetermineBondOrders(charge={charge}) exceeded "
+                f"{_BOND_PERCEPTION_TIMEOUT_SECONDS:.0f}s; keeping connectivity-only bonds."
+            )
+            break
+        cand_score = _score(candidate)
+        if cand_score > best_conn_score:
+            best_conn = candidate
+            best_conn_score = cand_score
+        if _has_non_single_bonds(candidate):
+            return candidate
+
+    return best_conn
 
 
 def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
