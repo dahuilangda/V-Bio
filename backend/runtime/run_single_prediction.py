@@ -2700,25 +2700,31 @@ def _run_protenix_ipsae_postprocess(
 
 
 def _extract_ligand_smiles_list(yaml_data: Dict[str, Any]) -> List[str]:
-    """按 YAML 出现顺序取全部小分子配体的 SMILES（boltz2 格式）。
+    """按 YAML 出现顺序取全部小分子配体的 SMILES。
 
-    配体条目支持 `ligand: <SMILES>` 与 `ligand: {ligand: <SMILES>}` 两种
-    写法。纯大写字母数字短串视为 CCD 代码而非 SMILES——两个方向的误判
-    不对称：CCD 误入 SMILES 路径会让 RDKit 解析直接失败，SMILES 误判为
-    CCD 只会退回有界的坐标感知路径，按保守方向处理。Protenix 以出现顺序
-    命名配体实体（l01、l02…），故顺序即实体序号。
+    覆盖两种配体写法：本后端解析器的 `ligand: {smiles: <SMILES>}` 与
+    boltz2 兼容的 `ligand: <SMILES>` / `ligand: {ligand: <SMILES>}`。
+    `smiles:` 键是显式声明，原样采用；裸字符串按保守方向分类——纯大写
+    字母数字短串视为 CCD 代码（CCD 误入 SMILES 路径会让 RDKit 解析直接
+    失败，SMILES 误判为 CCD 只会退回有界的坐标感知路径）。Protenix 以
+    出现顺序命名配体实体（l01、l02…），故顺序即实体序号。
     """
     smiles_list: List[str] = []
     for entry in (yaml_data or {}).get("sequences") or []:
         if not isinstance(entry, dict) or "ligand" not in entry:
             continue
         ligand = entry["ligand"]
+        explicit_smiles = False
         if isinstance(ligand, dict):
-            ligand = ligand.get("ligand")
+            if "smiles" in ligand:
+                ligand = ligand.get("smiles")
+                explicit_smiles = True
+            else:
+                ligand = ligand.get("ligand")
         if not isinstance(ligand, str):
             continue
         ligand = ligand.strip()
-        if ligand and not re.fullmatch(r"[A-Z0-9]{1,5}", ligand):
+        if ligand and (explicit_smiles or not re.fullmatch(r"[A-Z0-9]{1,5}", ligand)):
             smiles_list.append(ligand)
     return smiles_list
 

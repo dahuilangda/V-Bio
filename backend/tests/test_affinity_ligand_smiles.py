@@ -30,6 +30,24 @@ def test_multiple_ligands_keep_yaml_order():
     assert _extract_ligand_smiles_list(yaml_data) == ["C(F)(F)F", "c1ccccc1C"]
 
 
+def test_smiles_key_form_is_explicit():
+    """本后端解析器的 `smiles:` 键是显式声明，短大写串也原样采用。"""
+    yaml_data = {"sequences": [{"ligand": {"id": "C", "smiles": "CCO"}}]}
+    assert _extract_ligand_smiles_list(yaml_data) == ["CCO"]
+
+
+def test_user_rittac_yaml_form():
+    """DDTools 实际提交形态：蛋白+蛋白+smiles 配体，必须能取到拓扑。"""
+    yaml_data = {
+        "sequences": [
+            {"protein": {"id": "A", "sequence": "AAA"}},
+            {"protein": {"id": "B", "sequence": "BBB"}},
+            {"ligand": {"id": "C", "smiles": "COc1cc(N2CCN(CC3(O))CC3)ccc1"}},
+        ]
+    }
+    assert _extract_ligand_smiles_list(yaml_data) == ["COc1cc(N2CCN(CC3(O))CC3)ccc1"]
+
+
 def test_ccd_code_not_treated_as_smiles():
     assert _extract_ligand_smiles_list({"sequences": [{"ligand": "ATP"}]}) == []
     assert _extract_ligand_smiles_list({"sequences": [{"ligand": "L01"}]}) == []
