@@ -2699,14 +2699,16 @@ def _run_protenix_ipsae_postprocess(
     )
 
 
-def _extract_first_ligand_smiles(yaml_data: Dict[str, Any]) -> Optional[str]:
-    """取 YAML 序列里第一条小分子配体的 SMILES（boltz2 格式）。
+def _extract_ligand_smiles_list(yaml_data: Dict[str, Any]) -> List[str]:
+    """按 YAML 出现顺序取全部小分子配体的 SMILES（boltz2 格式）。
 
-    配体条目支持 `ligand: <SMILES>` 与 `ligand: {ligand: <SMILES>}` 两种写法。
-    纯大写字母数字短串视为 CCD 代码而非 SMILES——两个方向的误判不对称：
-    CCD 误入 SMILES 路径会让 RDKit 解析直接失败，SMILES 误判为 CCD 只会
-    退回有界的坐标感知路径，按保守方向处理。
+    配体条目支持 `ligand: <SMILES>` 与 `ligand: {ligand: <SMILES>}` 两种
+    写法。纯大写字母数字短串视为 CCD 代码而非 SMILES——两个方向的误判
+    不对称：CCD 误入 SMILES 路径会让 RDKit 解析直接失败，SMILES 误判为
+    CCD 只会退回有界的坐标感知路径，按保守方向处理。Protenix 以出现顺序
+    命名配体实体（l01、l02…），故顺序即实体序号。
     """
+    smiles_list: List[str] = []
     for entry in (yaml_data or {}).get("sequences") or []:
         if not isinstance(entry, dict) or "ligand" not in entry:
             continue
@@ -2717,8 +2719,8 @@ def _extract_first_ligand_smiles(yaml_data: Dict[str, Any]) -> Optional[str]:
             continue
         ligand = ligand.strip()
         if ligand and not re.fullmatch(r"[A-Z0-9]{1,5}", ligand):
-            return ligand
-    return None
+            smiles_list.append(ligand)
+    return smiles_list
 
 
 def _run_boltz2score_affinity_postprocess(
@@ -2729,7 +2731,7 @@ def _run_boltz2score_affinity_postprocess(
     ligand_resname: Optional[str],
     source: str,
     archive_prefix: str,
-    ligand_smiles: Optional[str] = None,
+    ligand_smiles_list: Optional[List[str]] = None,
 ) -> List[Tuple[Path, str]]:
     output_dir = affinity_base / "boltz2score_output"
     work_dir = affinity_base / "boltz2score_work"
@@ -2789,19 +2791,27 @@ def _run_boltz2score_affinity_postprocess(
         ",".join(target_chain_ids),
         "--ligand_chain",
         resolved_ligand_chain,
-        # cuequivariance 融合 kernel 在 RTX 4090 上申请的 shared memory 超硬件
-        # 上限（106KB > 99KB），亲和力/置信度前向必现 OutOfResources——本部署
-        # 全部为 4090，统一走 eager kernel。
+        # cuequivariance 融合 kernel 在 RTX 4090 上申请的 shared memory
+        # （106496 字节）超硬件上限（101376 字节），亲和力/置信度前向必现
+        # OutOfResources——本部署全部为 4090，统一走 eager kernel。
         "--no_kernels",
     ]
-    if ligand_smiles and ligand_resname:
+    if ligand_smiles_list and ligand_resname:
         # 预测输出的 CIF 只带坐标不带键级；坐标感知键级对高共轭配体会指数
-        # 爆炸（曾挂死 3 小时）。任务 YAML 里的 SMILES 是权威拓扑，直接下发
-        # 给 Boltz2Score 走确定性构键路径。
-        score_cmd.extend([
-            "--ligand_smiles_map",
-            json.dumps({f"{resolved_ligand_chain}:{ligand_resname}": ligand_smiles}),
-        ])
+        # 爆炸（曾挂死 3 小时）。任务 YAML 里的 SMILES 是权威拓扑，按
+        # Protenix 配体实体命名序号（l01→第 1 条）确定性下发。
+        m = re.fullmatch(r"l(\d+)", ligand_resname, re.IGNORECASE)
+        smiles_idx = int(m.group(1)) - 1 if m else None
+        smiles = (
+            ligand_smiles_list[smiles_idx]
+            if smiles_idx is not None and 0 <= smiles_idx < len(ligand_smiles_list)
+            else None
+        )
+        if smiles:
+            score_cmd.extend([
+                "--ligand_smiles_map",
+                json.dumps({f"{resolved_ligand_chain}:{ligand_resname}": smiles}),
+            ])
 
     try:
         gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
@@ -3214,7 +3224,7 @@ def run_af3_affinity_pipeline(
             ligand_resname=ligand_resname,
             source="alphafold3",
             archive_prefix="af3",
-            ligand_smiles=_extract_first_ligand_smiles(yaml_data),
+            ligand_smiles_list=_extract_ligand_smiles_list(yaml_data),
         )
     except Exception as err:
         print(f"[WARN] 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
@@ -3406,7 +3416,7 @@ def run_protenix_affinity_pipeline(
             ligand_resname=ligand_resname,
             source="protenix",
             archive_prefix="protenix",
-            ligand_smiles=_extract_first_ligand_smiles(yaml_data),
+            ligand_smiles_list=_extract_ligand_smiles_list(yaml_data),
         )
     except Exception as err:
         print(f"[WARN] 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
