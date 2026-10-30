@@ -2554,9 +2554,10 @@ def _run_protenix_ipsae_postprocess(
 def _extract_first_ligand_smiles(yaml_data: Dict[str, Any]) -> Optional[str]:
     """取 YAML 序列里第一条小分子配体的 SMILES（boltz2 格式）。
 
-    配体条目支持 `ligand: <SMILES>` 与 `ligand: {ligand: <SMILES>}` 两种写法；
-    CCD 代码（≤5 位字母数字）不算 SMILES，返回 None 表示结构里没有可直接
-    使用的拓扑描述。
+    配体条目支持 `ligand: <SMILES>` 与 `ligand: {ligand: <SMILES>}` 两种写法。
+    纯大写字母数字短串视为 CCD 代码而非 SMILES——两个方向的误判不对称：
+    CCD 误入 SMILES 路径会让 RDKit 解析直接失败，SMILES 误判为 CCD 只会
+    退回有界的坐标感知路径，按保守方向处理。
     """
     for entry in (yaml_data or {}).get("sequences") or []:
         if not isinstance(entry, dict) or "ligand" not in entry:
@@ -2567,7 +2568,7 @@ def _extract_first_ligand_smiles(yaml_data: Dict[str, Any]) -> Optional[str]:
         if not isinstance(ligand, str):
             continue
         ligand = ligand.strip()
-        if ligand and not re.fullmatch(r"[A-Za-z0-9]{1,5}", ligand):
+        if ligand and not re.fullmatch(r"[A-Z0-9]{1,5}", ligand):
             return ligand
     return None
 
