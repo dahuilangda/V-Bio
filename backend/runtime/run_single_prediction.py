@@ -2551,6 +2551,27 @@ def _run_protenix_ipsae_postprocess(
     )
 
 
+def _extract_first_ligand_smiles(yaml_data: Dict[str, Any]) -> Optional[str]:
+    """取 YAML 序列里第一条小分子配体的 SMILES（boltz2 格式）。
+
+    配体条目支持 `ligand: <SMILES>` 与 `ligand: {ligand: <SMILES>}` 两种写法；
+    CCD 代码（≤5 位字母数字）不算 SMILES，返回 None 表示结构里没有可直接
+    使用的拓扑描述。
+    """
+    for entry in (yaml_data or {}).get("sequences") or []:
+        if not isinstance(entry, dict) or "ligand" not in entry:
+            continue
+        ligand = entry["ligand"]
+        if isinstance(ligand, dict):
+            ligand = ligand.get("ligand")
+        if not isinstance(ligand, str):
+            continue
+        ligand = ligand.strip()
+        if ligand and not re.fullmatch(r"[A-Za-z0-9]{1,5}", ligand):
+            return ligand
+    return None
+
+
 def _run_boltz2score_affinity_postprocess(
     *,
     affinity_base: Path,
@@ -2559,6 +2580,7 @@ def _run_boltz2score_affinity_postprocess(
     ligand_resname: Optional[str],
     source: str,
     archive_prefix: str,
+    ligand_smiles: Optional[str] = None,
 ) -> List[Tuple[Path, str]]:
     output_dir = affinity_base / "boltz2score_output"
     work_dir = affinity_base / "boltz2score_work"
@@ -2618,7 +2640,19 @@ def _run_boltz2score_affinity_postprocess(
         ",".join(target_chain_ids),
         "--ligand_chain",
         resolved_ligand_chain,
+        # cuequivariance 融合 kernel 在 RTX 4090 上申请的 shared memory 超硬件
+        # 上限（106KB > 99KB），亲和力/置信度前向必现 OutOfResources——本部署
+        # 全部为 4090，统一走 eager kernel。
+        "--no_kernels",
     ]
+    if ligand_smiles and ligand_resname:
+        # 预测输出的 CIF 只带坐标不带键级；坐标感知键级对高共轭配体会指数
+        # 爆炸（曾挂死 3 小时）。任务 YAML 里的 SMILES 是权威拓扑，直接下发
+        # 给 Boltz2Score 走确定性构键路径。
+        score_cmd.extend([
+            "--ligand_smiles_map",
+            json.dumps({f"{resolved_ligand_chain}:{ligand_resname}": ligand_smiles}),
+        ])
 
     try:
         gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
@@ -3031,6 +3065,7 @@ def run_af3_affinity_pipeline(
             ligand_resname=ligand_resname,
             source="alphafold3",
             archive_prefix="af3",
+            ligand_smiles=_extract_first_ligand_smiles(yaml_data),
         )
     except Exception as err:
         print(f"[WARN] 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
@@ -3222,6 +3257,7 @@ def run_protenix_affinity_pipeline(
             ligand_resname=ligand_resname,
             source="protenix",
             archive_prefix="protenix",
+            ligand_smiles=_extract_first_ligand_smiles(yaml_data),
         )
     except Exception as err:
         print(f"[WARN] 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
