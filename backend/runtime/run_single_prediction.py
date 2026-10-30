@@ -1112,6 +1112,171 @@ def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dic
     return af3_templates
 
 
+_PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
+_PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mmcif"
+# 用户模板走 Protenix 的同一套模板元数据机制：每个模板分配确定性合成 ID
+# （4 字符字母数字，满足 hit 名 "TTTT_C" 约束），release_dates 以按任务
+# 覆盖文件提供条目——过滤断言、取结构、kalign 对齐全链原样工作，无需
+# 借用真实 PDB 身份。日期取截止(2021-09-30)之前的固定值，表示"早于泄漏
+# 截止期"这一语义。
+_PROTENIX_TEMPLATE_RELEASE_DATE = "2019-01-01"
+# 标准氨基酸的 PDB 注册 _chem_comp.type：Protenix 解析模板时以该字段判定
+# 蛋白链（须含 "peptide"）。结构转换/净化生成的 cif 此列常为 '.', 按注册
+# 表补全——与 release_dates 覆盖同属模板注册元数据。
+_PROTENIX_STD_AA_CHEM_COMP_TYPES = {
+    **{aa: "L-peptide linking" for aa in
+       ("ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "HIS", "ILE",
+        "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL")},
+    "GLY": "peptide linking",
+    "MSE": "L-peptide derivative",
+}
+
+
+def _complete_template_chem_comp_types(cif_text: str) -> str:
+    """补全模板 cif 中缺失的标准氨基酸 _chem_comp.type 元数据。"""
+    import gemmi
+
+    try:
+        doc = gemmi.cif.read_string(cif_text)
+        block = doc.sole_block()
+        table = block.find("_chem_comp.", ["id", "type"])
+        if table is None or len(table) == 0:
+            return cif_text
+        changed = False
+        for row in table:
+            comp = str(row[0]).strip("'\"").upper()
+            if str(row[1]) in (".", "?"):
+                canonical = _PROTENIX_STD_AA_CHEM_COMP_TYPES.get(comp)
+                if canonical:
+                    row[1] = canonical
+                    changed = True
+        return doc.as_string() if changed else cif_text
+    except Exception as exc:
+        print(f"[WARN] 模板 chem_comp 元数据补全失败（原样使用）: {exc}",
+              file=sys.stderr)
+        return cif_text
+
+
+def _stage_protenix_user_templates(
+    template_payloads: List[dict],
+    protenix_json: Any,
+    protenix_input_dir: str,
+    prep: Any,
+) -> bool:
+    """把用户模板注册进 Protenix 推理模板体系。
+
+    根源机制：Protenix 过滤模板时按 hit ID 查 release_dates、按 ID 从
+    mmcif 目录取结构。用户模板缺少 PDB 注册元数据，因此由后端补齐——
+    分配合成 ID、写出对应命名的 cif、单 hit a3m，并生成按任务的
+    release_dates 覆盖文件（经 --data.template.release_dates_path 下发）。
+    过滤/取结构/对齐逻辑全部原样复用，不做任何 ID 猜测或硬过滤。
+
+    实体定位与 MSA 挂载同源：entity_chain_ids（yaml 链 ↔ 实体）、
+    entity_kinds（仅蛋白实体）、entity_seq_positions（实体 ↔ sequences
+    列表位置，两者不保证同一下标）。
+
+    返回 True 表示至少一条蛋白链拿到了模板（调用方据此加 --use_template）。
+    """
+    if not template_payloads:
+        return False
+    template_dir = os.path.join(protenix_input_dir, "template_mmcif")
+    os.makedirs(template_dir, exist_ok=True)
+    container_dir = _PROTENIX_TEMPLATE_CONTAINER_DIR
+
+    entity_chain_ids = getattr(prep, "entity_chain_ids", None) or {}
+    entity_kinds = getattr(prep, "entity_kinds", None) or {}
+    entity_seq_positions = getattr(prep, "entity_seq_positions", None) or {}
+
+    assemblies = protenix_json if isinstance(protenix_json, list) else [protenix_json]
+    sequences = []
+    for assembly in assemblies:
+        if isinstance(assembly, dict):
+            sequences.extend(assembly.get("sequences") or [])
+
+    # Pass 1: 落盘每份模板的 cif + 收集 release_dates 条目。
+    # hits_by_seq_pos[sequences 位置] 聚合该实体全部命中片段，Pass 2 合并
+    # 为单个多 hit a3m（templatesPath 每条蛋白链只能挂一个文件）。
+    release_dates_overlay: Dict[str, Dict[str, str]] = {}
+    hits_by_seq_pos: Dict[int, List[str]] = {}
+    staged_any = False
+    for idx, payload in enumerate(template_payloads, start=1):
+        cif_text = str(payload.get("mmcif") or payload.get("cif") or "")
+        if not cif_text:
+            print(f"[WARN] 模板 #{idx} 内容为空，已跳过。", file=sys.stderr)
+            continue
+        synthetic_id = f"t{idx:03d}"
+        cif_path = os.path.join(template_dir, f"{synthetic_id}.cif")
+        with open(cif_path, "w", encoding="utf-8") as f:
+            f.write(_complete_template_chem_comp_types(cif_text))
+        try:
+            chain_sequences = extract_chain_sequences_from_structure(cif_text, "cif")
+        except Exception as exc:
+            print(f"[WARN] 解析模板 #{idx} 链序列失败: {exc}", file=sys.stderr)
+            continue
+        template_chain = next(iter(chain_sequences), None)
+        template_seq = chain_sequences.get(template_chain, "") if template_chain else ""
+        if not template_seq:
+            print(f"[WARN] 模板 #{idx} 未解析出蛋白链序列，已跳过。", file=sys.stderr)
+            continue
+        release_dates_overlay[synthetic_id] = {
+            "release_date": _PROTENIX_TEMPLATE_RELEASE_DATE
+        }
+
+        target_chains = [
+            str(c).strip().upper()
+            for c in (payload.get("target_chain_ids") or [])
+        ]
+        linked_seq_positions = [
+            entity_seq_positions[eidx]
+            for eidx, chains in entity_chain_ids.items()
+            if entity_kinds.get(eidx) == "protein"
+            and any(str(c).strip().upper() in target_chains for c in chains)
+            and entity_seq_positions.get(eidx) is not None
+        ]
+        if not linked_seq_positions:
+            print(
+                f"[WARN] 模板 #{idx} 的 target_chain_ids "
+                f"{target_chains} 未匹配任何输入蛋白实体，已跳过。",
+                file=sys.stderr,
+            )
+            continue
+
+        seq_len = len(template_seq)
+        hit_block = (
+            f">{synthetic_id}_{template_chain}/1-{seq_len} "
+            f"protein length:{seq_len} mol:protein\n"
+            f"{template_seq.upper()}\n"
+        )
+        for seq_pos in linked_seq_positions:
+            hits_by_seq_pos.setdefault(int(seq_pos), []).append(hit_block)
+        staged_any = True
+
+    if not staged_any:
+        return False
+
+    # Pass 2: 每个拿到命中的蛋白实体写聚合 a3m 并挂 templatesPath。
+    for seq_pos, hit_blocks in hits_by_seq_pos.items():
+        if seq_pos < 0 or seq_pos >= len(sequences):
+            continue
+        entry = sequences[seq_pos]
+        if not isinstance(entry, dict):
+            continue
+        a3m_name = f"entity_{seq_pos:02d}_templates.a3m"
+        a3m_path = os.path.join(template_dir, a3m_name)
+        with open(a3m_path, "w", encoding="ascii") as f:
+            f.write("".join(hit_blocks))
+        for kind, body in entry.items():
+            if "protein" not in kind or not isinstance(body, dict):
+                continue
+            body["templatesPath"] = f"{container_dir}/{a3m_name}"
+
+    release_dates_path = os.path.join(
+        protenix_input_dir, "template_release_dates.json")
+    with open(release_dates_path, "w", encoding="utf-8") as f:
+        json.dump(release_dates_overlay, f, indent=1)
+    return True
+
+
 def validate_template_paths(yaml_content: str) -> None:
     yaml_data = yaml.safe_load(yaml_content) or {}
     template_entries = yaml_data.get("templates") or []
@@ -4706,6 +4871,7 @@ def run_protenix_backend(
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
     low_vram: bool = False,
     ipsae_ligand_chain_id: Optional[str] = None,
+    template_payloads: Optional[List[dict]] = None,
 ) -> None:
     ensure_image(str(PROTENIX_DOCKER_IMAGE or "vbio-protenix-v2-runtime:2.0.0").strip())
     print("Using Protenix backend", file=sys.stderr)
@@ -4819,6 +4985,22 @@ def run_protenix_backend(
         )
     if assigned_count:
         print(f"已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
+
+    # 用户模板注入：写模板 cif + 单 hit a3m 并逐实体挂 templatesPath；
+    # 至少一条蛋白链拿到模板才开 use_template——无模板任务保持默认关闭，
+    # 行为与历史版本完全一致（fetch_remote 默认 true，缺失 hit 结构只会
+    # 记 error 跳过，不会中断推理）。
+    use_template = _stage_protenix_user_templates(
+        template_payloads or [],
+        protenix_json,
+        protenix_input_dir,
+        prep,
+    )
+    if use_template:
+        print(
+            "Protenix 模板输入已启用：用户模板写入 template_mmcif 并挂载到对应蛋白实体。",
+            file=sys.stderr,
+        )
 
     input_json_path = os.path.join(protenix_input_dir, "input.json")
     with open(input_json_path, "w", encoding="utf-8") as f:
@@ -4962,6 +5144,20 @@ def run_protenix_backend(
             "true" if effective_use_msa else "false",
         ]
     )
+    if use_template:
+        # 模板目录与 release_dates 都指向任务内生成文件——默认 /cache/mmcif
+        # 不存在，且用户模板的合成 ID 不在全局 release_dates 里；两者由
+        # _stage_protenix_user_templates 按任务生成并经此下发。
+        docker_command.extend(
+            [
+                "--use_template",
+                "True",
+                "--data.template.prot_template_mmcif_dir",
+                _PROTENIX_TEMPLATE_CONTAINER_DIR,
+                "--data.template.release_dates_path",
+                f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_release_dates.json",
+            ]
+        )
     if seed is not None:
         docker_command.extend(["--seeds", str(int(seed))])
     if linker_codes and os.environ.get("PROTENIX_DISABLE_TFG", "") != "1":
@@ -13213,7 +13409,7 @@ def main():
         with tempfile.TemporaryDirectory(dir=runtime_temp_parent) as temp_dir:
             processed_yaml = yaml_content
             af3_template_payloads: List[dict] = []
-            if template_inputs and (backend in ("boltz", "alphafold3") or workflow == "peptide_design"):
+            if template_inputs and (backend in ("boltz", "alphafold3", "protenix") or workflow == "peptide_design"):
                 template_backend = "boltz" if workflow == "peptide_design" else backend
                 template_work_root = _resolve_backend_work_root(
                     _resolve_backend_results_root(template_backend, runtime_task_id, temp_dir)
@@ -13280,8 +13476,6 @@ def main():
                     low_vram=low_vram,
                 )
             elif backend == "protenix":
-                if template_inputs:
-                    print("Protenix backend 当前未启用模板输入，已忽略 template_files。", file=sys.stderr)
                 run_protenix_backend(
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,
@@ -13292,6 +13486,7 @@ def main():
                     task_id=runtime_task_id,
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                     low_vram=low_vram,
+                    template_payloads=af3_template_payloads if isinstance(af3_template_payloads, list) else None,
                 )
             else:
                 if seed is not None:
