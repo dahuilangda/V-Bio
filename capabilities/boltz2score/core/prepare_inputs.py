@@ -355,10 +355,17 @@ def _run_bounded_determine(candidate: Chem.Mol, timeout: float, **kwargs):
         recv.close()
         send.close()
         return Chem.Mol(candidate), False
+    if not recv.poll():
+        # 子进程已退出却未回传结果：RDKit 层崩溃（段错误等）。这是真实
+        # 故障，必须响亮失败而非以未赋值候选冒充完成。
+        exitcode = proc.exitcode
+        recv.close()
+        send.close()
+        raise RuntimeError(
+            f"RDKit 键级感知子进程异常退出（exitcode={exitcode}），"
+            "配体结构无法被安全处理。")
     try:
-        mol_out = recv.recv() if recv.poll() else Chem.Mol(candidate)
-    except Exception:
-        mol_out = Chem.Mol(candidate)
+        mol_out = recv.recv()
     finally:
         recv.close()
         send.close()
@@ -366,7 +373,11 @@ def _run_bounded_determine(candidate: Chem.Mol, timeout: float, **kwargs):
 
 
 def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
-    """Try to assign bond orders; fall back gracefully if not possible."""
+    """为坐标-only 分子指派键级，感知路径有界且确定性降级。
+
+    首次 DetermineBonds 超时即跳过电荷扫描并降级为 connectivity-only
+    单键（响亮警告）；正常分子在预算内完成，行为与原实现一致。
+    """
     base = Chem.Mol(mol)
     charge_sweep = (-8, -6, -4, -2, 0, 2, 4, 6, 8)
 

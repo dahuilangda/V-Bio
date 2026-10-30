@@ -1,6 +1,6 @@
 """Ligand SMILES extraction for the Boltz2Score affinity handoff."""
 
-from backend.runtime.run_single_prediction import _extract_first_ligand_smiles
+from backend.runtime.run_single_prediction import _extract_ligand_smiles_list
 
 
 def test_string_form():
@@ -10,25 +10,38 @@ def test_string_form():
             {"ligand": "COc1ccccc1"},
         ]
     }
-    assert _extract_first_ligand_smiles(yaml_data) == "COc1ccccc1"
+    assert _extract_ligand_smiles_list(yaml_data) == ["COc1ccccc1"]
 
 
 def test_dict_form():
     yaml_data = {"sequences": [{"ligand": {"ligand": "CC(O)C", "id": "C"}}]}
-    assert _extract_first_ligand_smiles(yaml_data) == "CC(O)C"
+    assert _extract_ligand_smiles_list(yaml_data) == ["CC(O)C"]
+
+
+def test_multiple_ligands_keep_yaml_order():
+    """Protenix 以出现顺序命名配体实体（l01、l02…），顺序即实体序号。"""
+    yaml_data = {
+        "sequences": [
+            {"ligand": "C(F)(F)F"},
+            {"proteinChain": {"sequence": "AAA", "id": "A"}},
+            {"ligand": {"ligand": "c1ccccc1C", "id": "C"}},
+        ]
+    }
+    assert _extract_ligand_smiles_list(yaml_data) == ["C(F)(F)F", "c1ccccc1C"]
 
 
 def test_ccd_code_not_treated_as_smiles():
-    assert _extract_first_ligand_smiles({"sequences": [{"ligand": "ATP"}]}) is None
-    assert _extract_first_ligand_smiles({"sequences": [{"ligand": "L01"}]}) is None
-    # 全大写短串即使能解析成 SMILES 也按 CCD 处理（误判方向保守：退回有界坐标路径）
-    assert _extract_first_ligand_smiles({"sequences": [{"ligand": "CCO"}]}) is None
+    assert _extract_ligand_smiles_list({"sequences": [{"ligand": "ATP"}]}) == []
+    assert _extract_ligand_smiles_list({"sequences": [{"ligand": "L01"}]}) == []
+    # 全大写短串即使能解析成 SMILES 也按 CCD 处理（误判方向保守：退回有界
+    # 坐标感知路径）。
+    assert _extract_ligand_smiles_list({"sequences": [{"ligand": "CCO"}]}) == []
 
 
 def test_empty_and_missing():
-    assert _extract_first_ligand_smiles(None) is None
-    assert _extract_first_ligand_smiles({}) is None
-    assert _extract_first_ligand_smiles({"sequences": []}) is None
+    assert _extract_ligand_smiles_list(None) == []
+    assert _extract_ligand_smiles_list({}) == []
+    assert _extract_ligand_smiles_list({"sequences": []}) == []
 
 
 def test_skips_non_ligand_entries():
@@ -39,7 +52,7 @@ def test_skips_non_ligand_entries():
             {"ligand": {"ligand": "c1ccccc1C", "id": "C"}},
         ]
     }
-    assert _extract_first_ligand_smiles(yaml_data) == "c1ccccc1C"
+    assert _extract_ligand_smiles_list(yaml_data) == ["c1ccccc1C"]
 
 
 def test_whitespace_and_blank_ligand_ignored():
@@ -49,9 +62,9 @@ def test_whitespace_and_blank_ligand_ignored():
             {"ligand": {"ligand": " C(F)(F)F "}},
         ]
     }
-    assert _extract_first_ligand_smiles(yaml_data) == "C(F)(F)F"
+    assert _extract_ligand_smiles_list(yaml_data) == ["C(F)(F)F"]
 
 
 def test_lowercase_short_smiles_accepted():
     # 小写芳香原子是大写 CCD 不会出现的形态
-    assert _extract_first_ligand_smiles({"sequences": [{"ligand": "c1ccn"}]}) == "c1ccn"
+    assert _extract_ligand_smiles_list({"sequences": [{"ligand": "c1ccn"}]}) == ["c1ccn"]

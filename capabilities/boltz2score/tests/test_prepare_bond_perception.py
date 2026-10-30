@@ -56,6 +56,19 @@ class TestAssignBondOrdersBounded:
         assert completed is False
         assert out.GetNumAtoms() == big.GetNumAtoms()
 
+    def test_child_crash_raises_instead_of_faking_completion(self, monkeypatch):
+        """RDKit 崩溃（子进程无回传）必须响亮抛错，不得以未赋值候选冒充完成。"""
+        mol = Chem.MolFromSmiles("CCO")
+
+        def crashing_determine(mol_, **kwargs):
+            import os
+
+            os._exit(1)
+
+        monkeypatch.setattr(pi.rdDetermineBonds, "DetermineBonds", crashing_determine)
+        with pytest.raises(RuntimeError, match="异常退出"):
+            pi._run_bounded_determine(mol, 10.0)
+
     def test_timeout_keeps_total_time_bounded(self, monkeypatch):
         """_assign_bond_orders returns within a small multiple of the budget."""
         mol = Chem.MolFromSmiles("c1ccccc1CCc1ccccc1")

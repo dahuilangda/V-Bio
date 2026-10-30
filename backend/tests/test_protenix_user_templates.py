@@ -100,13 +100,19 @@ def test_two_pass_staging_marks_only_matched_entities(staged):
 
 
 def test_synthetic_ids_are_hit_format_compliant(staged):
-    """Hit names must satisfy get_pdb_id_and_chain: ([a-zA-Z\\d]{4})_(chain)."""
+    """Hit 名必须满足 get_pdb_id_and_chain: ([a-zA-Z\\d]{4})_(chain)；落盘
+    cif 的 chem_comp.type 已按注册表补全（quote 修复的回归点）。"""
     import re
 
     staged_ok, _, tmp_path = staged
     template_dir = tmp_path / "template_mmcif"
     cifs = sorted(p.name for p in template_dir.glob("*.cif"))
     assert cifs == ["t001.cif", "t002.cif"]
+
+    for cif_name in cifs:
+        content = (template_dir / cif_name).read_text()
+        assert "'L-peptide linking'" in content, (
+            f"{cif_name} 的 chem_comp.type 未补全")
 
     a3m_files = list(template_dir.glob("*.a3m"))
     assert len(a3m_files) == 1  # only entity 0 matched; single aggregated a3m
@@ -116,6 +122,7 @@ def test_synthetic_ids_are_hit_format_compliant(staged):
     for hit in hits:
         m = re.match(r"^>?([a-zA-Z\d]{4})_([a-zA-Z0-9.]+)/1-\d+ protein length:\d+ mol:protein", hit)
         assert m, f"hit name violates protenix format: {hit}"
+        assert f"{m.group(1)}.cif" in cifs  # hit 引用的 cif 必须已落盘
 
 
 def test_release_dates_overlay_covers_every_template(staged):
