@@ -49,3 +49,33 @@ docker run --rm --entrypoint= --gpus device=0 \
 
 输出 `<output-dir>/summary.json`：每个 seed 的置信度 JSON 与 cif 路径，
 `best` 按 ranking_score 取最优。
+
+## mol1dock（peptide 模式）
+
+```bash
+python3.12 mol1_predict.py --input-json task.json \
+    --output-dir $OUT --work-dir $WORK \
+    --mode peptide --peptide-chain B --samples 3 --seeds 101,102 \
+    --pocket-res 'A:57,A:189' --pocket-max-dist 6.0 \
+    --linker-ccd-dir /workspace/linker_ccd
+```
+
+- 多 seed/多样本，summary 字段与 protenix2dock 对齐（confidences/best/
+  best_by_interface/n_geometrically_clean，附 interface_min_dist/
+  interface_clash_pairs/n_interface_hbonds/pocket 报告）
+- pocket 为采集后门槛与评分信号（Mol-1 无推理期 pocket 引导）——与平台
+  blind 路线协议一致；口袋残基须用 Mol-1 输出 cif 的编号（每实体 1..L 重
+  编号，与输入 yaml 编号可能错位，unmatched 会显式列出）
+- 平台自定义连接子（SEZ/29N/BS3）：cif 不在 Mol-1 官方 components.cif 中，
+  引擎自含解析（atom/bond 表 + ideal 坐标）转 SDF，bond 原子名经
+  AtomMapNum 重映射为序号——Mol-1 对 FILE_ 配体会丢弃原原子名
+
+### 实测边界（KLK2 + 10aa 头尾环肽；TTR + 15aa 双环 + SEZ）
+
+| 模式 | 结果 | 结论 |
+|---|---|---|
+| 环肽（头尾酰胺） | ranking 0.870 / ipTM 0.849，头尾键 5/5 自闭合（无 TFG），Rama 离群 0/40 | **生产可用** |
+| 双环（SEZ 三桥） | ranking ~0.39，桥键以原子重叠方式满足（0.0 Å），有 clash | **实验性**：键满足退化，置信度显著低于 protenix2dock 完整管线（staged pose + TFG + 钉住） |
+
+定位：Mol-1 引擎作为**环肽候选的快速无约束共折叠参考**与第二引擎交叉
+验证；双环候选仍以 protenix2dock 为主引擎。
