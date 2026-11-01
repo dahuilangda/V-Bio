@@ -13,6 +13,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from peplm.generate.masked_grpo import MaskedGRPOUpdater, Rollout
+from peplm.integrate.esm3_proposer import (
+    _diversity_filter,
+    junction_pro_positions,
+    violates_junction_pro,
+)
 from peplm.models.esm3_policy import ESM3Policy
 from peplm.score.interface import InterfaceMetrics, compute_interface_metrics
 from peplm.score.peptide_reward import (
@@ -582,3 +587,33 @@ def test_best_sample_prefers_stereo_clean_tier(tmp_path, monkeypatch):
     best = O._best_sample("AAAA", FakePath(), 4, "B")
     # clean stereo (sample 1) must win despite the worse ipae
     assert best.metrics.mean_interface_pae == 6.0
+
+
+# ------------------------------------------------- junction-pro gate (cyclic)
+def test_junction_pro_positions_ring_band():
+    assert junction_pro_positions(14) == {2, 3, 13}
+    assert junction_pro_positions(9) == {2, 3, 8}
+    assert junction_pro_positions(5) == set()  # 过短不设闸
+
+
+def test_junction_pro_violation_detection():
+    # 14 肽，位置 2/3/13 为 P 即违规；位置 7 的 P 合法
+    base = list("AGALLKEALLMEEQ")
+    assert not violates_junction_pro("AGALLKEALLMEEQ", cyclic=True)
+    for pos in (1, 2, 12):  # 0-based
+        seq = base.copy()
+        seq[pos] = "P"
+        assert violates_junction_pro("".join(seq), cyclic=True)
+    assert not violates_junction_pro("AGAPLKEALLMEEQ", cyclic=True)
+    # 线性链不受限
+    assert not violates_junction_pro("PGPLLKEALLMEEQ", cyclic=False)
+
+
+def test_diversity_filter_rejects_junction_pro_when_cyclic():
+    ok = ("AGALLKEALLMEEQ", [], [], "g1")
+    bad = ("PPNRSTWVHCYIDP", [], [], "g1")  # 位置 2 为 P，且与 ok 序列迥异
+    kept = _diversity_filter([bad, ok], cyclic=True)
+    assert [p[0] for p in kept] == [ok[0]]
+    # 线性模式不拒绝
+    kept = _diversity_filter([bad, ok], cyclic=False)
+    assert len(kept) == 2
