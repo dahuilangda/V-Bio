@@ -24,6 +24,7 @@ GPU_CAPABILITIES = {
     "alphafold3",
     "protenix",
     "protenix2dock",
+    "mol1",
     "nesso",
     "boltz2score",
 }
@@ -40,6 +41,8 @@ _CAPABILITY_ALIASES = {
     "protenix": "protenix",
     "protenix2dock": "protenix2dock",
     "p2d": "protenix2dock",
+    "mol1": "mol1",
+    "mol-1": "mol1",
     "nesso": "nesso",
     "nesso1": "nesso",
     "nesso-1": "nesso",
@@ -201,7 +204,7 @@ def normalize_capability(capability: str | None) -> str | None:
 def capability_from_prediction_backend(backend: str | None) -> str:
     normalized = normalize_capability(str(backend or "").strip().lower())
     if normalized in {"boltz2", "alphafold3", "protenix", "nesso",
-                      "protenix2dock"}:
+                      "protenix2dock", "mol1"}:
         # protenix2dock parents (D-peptide loop) run on the protenix worker,
         # which has the docker CLI for its conformer sub-steps.
         return normalized

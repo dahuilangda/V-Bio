@@ -274,6 +274,10 @@ SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_SENDER_NAME = os.environ.get("SMTP_SENDER_NAME", "V-Bio")
 # Task-email batching window in seconds; 0 = one immediate email per task.
 NOTIFY_DIGEST_WINDOW_SECONDS = int(os.environ.get("NOTIFY_DIGEST_WINDOW_SECONDS", "900") or 0)
+MOL1_DOCKER_IMAGE = os.environ.get(
+    "MOL1_DOCKER_IMAGE", "vbio-mol1-runtime:1.0.0"
+)
+MOL1_DATA_DIR = os.environ.get("MOL1_DATA_DIR", "/data/mol1")
 PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
 PROTENIX_SOURCE_DIR = os.environ.get(
     "PROTENIX_SOURCE_DIR",
