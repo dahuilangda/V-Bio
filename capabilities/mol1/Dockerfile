@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common git curl ca-certificates gcc \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 python3.12-venv python3.12-dev \
+        python3.12 python3.12-venv python3.12-dev libxrender1 libxext6 libsm6 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
