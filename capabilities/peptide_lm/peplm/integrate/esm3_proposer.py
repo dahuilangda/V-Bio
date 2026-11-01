@@ -65,13 +65,35 @@ def _sequence_identity(a: str, b: str) -> float:
     return sum(1 for x, y in zip(a, b) if x == y) / len(a)
 
 
+def junction_pro_positions(seq_len: int) -> set[int]:
+    """头尾环肽交界区的 1-based 位置（res 2、3 与 L-1）。
+
+    实测依据：12 个 KLK2 环肽候选（Top8000 口径 Ramachandran）的残余
+    应变 78% 落在 res 2-3，其中 59% 是 PRO（phi≈0 的脯氨酸环压扁），
+    集中在头尾酰胺交界带；res L-1 同属交界带。
+    """
+    if seq_len < 6:
+        return set()
+    return {2, 3, seq_len - 1}
+
+
+def violates_junction_pro(seq: str, cyclic: bool) -> bool:
+    """环肽proposal 的交界区 PRO 检查（线性链不适用）。"""
+    if not cyclic:
+        return False
+    seq = str(seq or "").upper()
+    return any(seq[p - 1] == "P" for p in junction_pro_positions(len(seq)))
+
+
 def _diversity_filter(
     proposals: list[tuple], threshold: float = 0.85,
     excluded_aas: frozenset[str] = frozenset(),
     fixed_prefix: str = "", fixed_suffix: str = "",
+    cyclic: bool = False,
 ) -> list[tuple]:
     """Reject degenerate sequences, proposals carrying a user-excluded
-    residue in the variable region, and proposals whose identity to an
+    residue in the variable region, cyclic proposals with PRO in the
+    head-tail junction band, and proposals whose identity to an
     already-kept proposal exceeds the threshold. Fixed layout (mask edges)
     is stripped first — anchors are design, not violations. Greedy
     first-come-first-kept; the caller sorts by quality before filtering so
@@ -82,6 +104,8 @@ def _diversity_filter(
     kept_vars: list[str] = []
     for prop in proposals:
         seq = prop[0]
+        if violates_junction_pro(seq, cyclic):
+            continue
         variable = seq
         if fixed_prefix and variable.startswith(fixed_prefix):
             variable = variable[len(fixed_prefix):]
@@ -129,6 +153,7 @@ class ESM3Proposer:
             if a in AA20)
         self._fixed_prefix = str(fixed_prefix or "")
         self._fixed_suffix = str(fixed_suffix or "")
+        self._cyclic = bool(cyclic)
         self._log = log
         self._generation = 0
         self._endpoint = ESM3_SERVER_URL.rstrip("/")
@@ -208,7 +233,8 @@ class ESM3Proposer:
         # clusters around one parent's neighborhood.
         proposals = _diversity_filter(
             proposals, threshold=0.85, excluded_aas=self._excluded_aas,
-            fixed_prefix=self._fixed_prefix, fixed_suffix=self._fixed_suffix)
+            fixed_prefix=self._fixed_prefix, fixed_suffix=self._fixed_suffix,
+            cyclic=self._cyclic)
 
         self._generation += 1
         self._log(f"[esm3] gen {self._generation}: {len(proposals)} proposals "
@@ -340,12 +366,17 @@ class ESM3Proposer:
                 variable = variable[len(self._fixed_prefix):]
             if self._fixed_suffix and variable.endswith(self._fixed_suffix):
                 variable = variable[:-len(self._fixed_suffix)]
-            if not mutated or any(aa in variable for aa in self._excluded_aas):
+            junction = junction_pro_positions(len(seq)) if self._cyclic else set()
+            if (not mutated or any(aa in variable for aa in self._excluded_aas)
+                    or violates_junction_pro(mutated, self._cyclic)):
                 chars = list(seq)
                 AA = "ACDEFGHIKLMNPQRSTVWY"
                 for pos in positions:
+                    banned = set(self._excluded_aas)
+                    if (pos + 1) in junction:
+                        banned.add("P")
                     allowed = [a for a in AA
-                               if a != chars[pos] and a not in self._excluded_aas]
+                               if a != chars[pos] and a not in banned]
                     if allowed:
                         chars[pos] = random.choice(allowed)
                 mutated = "".join(chars)
