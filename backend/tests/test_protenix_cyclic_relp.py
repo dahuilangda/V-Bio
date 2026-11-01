@@ -30,6 +30,7 @@ from protenix.model.modules.embedders import RelativePositionEncoding  # noqa: E
 
 R_MAX, S_MAX = 32, 2
 POS_WIDTH = 2 * (R_MAX + 1)  # a_rel_pos 在 relp 拼接中的列宽
+TOK_SLICE = slice(POS_WIDTH, 2 * POS_WIDTH)  # a_rel_token 的列区间
 
 
 def make_atom_array(chains):
@@ -198,6 +199,62 @@ class TestCyclicWrap:
         x = feature_dict([(1, 200)], cyclic_flags_by_chain={1: 1})
         bins = relp_pos_bins(model, x)
         assert bins[0, 100] == 0  # 环距 -100 clip 到最低 bin
+
+
+class TestTokenWrap:
+    """a_rel_token 与 a_rel_pos 同规则环绕，两路偏移信号不得相互矛盾。"""
+
+    def token_bins(self, model, x):
+        out = model.generate_relp(dict(x))["relp"]
+        return out[..., TOK_SLICE].argmax(dim=-1)
+
+    def reference_token_bins(self, x):
+        """AF3 原公式的 d_token bin。"""
+        asym = x["asym_id"]
+        ri = x["residue_index"]
+        ti = x["token_index"]
+        same_chain = (asym[..., :, None] == asym[..., None, :]).long()
+        same_res = (ri[..., :, None] == ri[..., None, :]).long()
+        d = torch.clip(ti[..., :, None] - ti[..., None, :] + R_MAX, 0, 2 * R_MAX)
+        return (d * same_chain * same_res
+                + (1 - same_chain * same_res) * (2 * R_MAX + 1)).long()
+
+    def test_linear_chain_token_bins_match_af3(self):
+        model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
+        x = feature_dict([(1, 15), (2, 120)], cyclic_flags_by_chain={1: 0, 2: 0})
+        assert torch.equal(self.token_bins(model, x), self.reference_token_bins(x))
+
+    def test_head_tail_token_bin_wraps(self):
+        model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
+        x = feature_dict([(1, 10)], cyclic_flags_by_chain={1: 1})
+        bins = self.token_bins(model, x)
+        # (1,10)：线性 token 距 -9，环绕后 +1（与残距环绕同向同值）
+        assert bins[0, 9] == R_MAX + 1
+        assert bins[9, 0] == R_MAX - 1
+
+    def test_mid_ring_token_bins_unchanged(self):
+        model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
+        x = feature_dict([(1, 10)], cyclic_flags_by_chain={1: 1})
+        bins = self.token_bins(model, x)
+        assert bins[0, 4] == R_MAX - 4
+        assert bins[0, 6] == R_MAX + 4
+
+    def test_token_and_residue_bins_agree_on_ring(self):
+        """肽链一残基一 token，环绕后两路偏移必须逐位一致。"""
+        model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
+        x = feature_dict([(1, 14)], cyclic_flags_by_chain={1: 1})
+        pos = relp_pos_bins(model, x)
+        tok = self.token_bins(model, x)
+        # 对角块（同链）内 a_rel_pos 与 a_rel_token 相同（跨链/异链 bin 值不同）
+        assert torch.equal(pos, tok)
+
+    def test_cross_chain_token_bins_untouched(self):
+        model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
+        x = feature_dict([(1, 12), (2, 200)], cyclic_flags_by_chain={1: 1, 2: 0})
+        ref = self.reference_token_bins(x)
+        bins = self.token_bins(model, x)
+        assert torch.equal(bins[:12, 12:], ref[:12, 12:])
+        assert torch.equal(bins[12:, 12:], ref[12:, 12:])
 
 
 class TestCyclicFeatureDetection:
