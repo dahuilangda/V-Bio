@@ -1,0 +1,50 @@
+# Versions here are the ones Mol-1 inference and fine-tuning have been run on;
+# docs/installation.md describes the ranges the extras in pyproject.toml accept.
+#
+# PyTorch and the cuEquivariance operator packages are CUDA-major-version
+# specific. The pins below match a CUDA 13 build (torch 2.12 / *-cu13). On a
+# CUDA 12 build install the cu12 wheels of the same cuEquivariance version and
+# the matching torch instead. Do not mix: a cu12 operator wheel on a CUDA 13
+# torch fails at import, and nothing downstream reports a clear reason.
+torch==2.12.0
+
+# Core data and model dependencies.
+numpy==2.4.4
+scipy==1.18.0
+pandas==2.3.1
+networkx>=3.4.2
+ml_collections==1.1.0
+PyYAML==6.0.2
+tqdm==4.67.1
+pydantic>=2.0.0
+optree==0.17.0
+protobuf==6.31.1
+
+# Structure and chemistry.
+biotite==1.7.1
+biopython==1.85
+rdkit==2025.9.3
+gemmi==0.6.7
+modelcif==1.4
+pdbeccdutils==1.0.0
+scikit-learn==1.7.1
+
+# GPU kernels. CUDA only; drop these for a CPU install, where the PyTorch
+# triangle path is used instead. triangle_* = auto resolves to torch when
+# they are absent.
+cuequivariance==0.10.0
+cuequivariance-torch==0.10.0
+cuequivariance-ops-cu13==0.10.0
+cuequivariance-ops-torch-cu13==0.10.0
+triton==3.7.0
+
+# FlashPairformer TMK3, selected with triangle_multiplicative=flashpairformer.
+# Optional: set OPT_CORE_DIR to a source checkout instead of installing it.
+opt_core @ git+https://github.com/anthropics/uplifting-biomolecular-modeling.git@f4f62fa6592ae4938d49b1757bea0cfeff9f468e#subdirectory=common/opt_core
+
+# Not required to run anything in this repository. wandb is imported lazily in
+# runner/train.py and only when --use_wandb is set, which defaults to false, so
+# a default install does not pull in an experiment-tracking client:
+#   wandb==0.21.1
+# matplotlib / ipywidgets / py3Dmol were used by notebook tooling that is no
+# longer part of the tree.

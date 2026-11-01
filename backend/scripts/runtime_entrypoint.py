@@ -135,6 +135,7 @@ def _preflight_docker_capabilities(logger, raw_capabilities: str) -> None:
         "protenix": getattr(config, "PROTENIX_DOCKER_IMAGE", ""),
         "protenix2dock": getattr(config, "PROTENIX_DOCKER_IMAGE", ""),
         "alphafold3": getattr(config, "ALPHAFOLD3_DOCKER_IMAGE", ""),
+        "mol1": getattr(config, "MOL1_DOCKER_IMAGE", ""),
         "nesso": getattr(config, "NESSO_DOCKER_IMAGE", ""),
     }
     for cap in (s.strip() for s in raw_capabilities.split(",") if s.strip()):
