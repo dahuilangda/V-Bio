@@ -186,3 +186,32 @@ def test_build_dock_summary_shape(tmp_path):
     row = summary["best"]
     assert row["ranking_score"] == 0.9
     assert "interface_min_dist" in row and "pocket" in row
+
+
+def test_apply_d_chirality_conversion(tmp_path):
+    """D 肽逐位 D-CCD 修饰：G 跳过、已有修饰保留、受体链不动。"""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from mol1_predict import apply_d_chirality  # noqa: E402
+
+    jobs = [{"name": "t", "sequences": [
+        {"proteinChain": {"sequence": "AGKLMNPQRSTVWYEDC", "count": 1,
+                          "id": ["B"],
+                          "modifications": [{"ptmType": "CCD_PCA",
+                                             "ptmPosition": 2}]}},
+        {"proteinChain": {"sequence": "IVGG", "count": 1, "id": ["A"]}},
+    ], "covalent_bonds": []}]
+    apply_d_chirality(jobs, "B")
+    mods = {m["ptmPosition"]: m["ptmType"]
+            for m in jobs[0]["sequences"][0]["proteinChain"]["modifications"]}
+    assert mods[1] == "CCD_DAL"          # A -> DAL
+    assert mods[2] == "CCD_PCA"          # 用户修饰保留
+    assert mods[5] == "CCD_MED"          # M -> MED
+    assert mods[6] == "CCD_DSG"          # N -> DSG（非 DSN）
+    assert mods[8] == "CCD_DGN"          # Q -> DGN
+    assert mods[17] == "CCD_DCY"         # C -> DCY
+    # 序列 AGKLMNPQRSTVWYEDC 中 G 在位 2，被 PCA 修饰覆盖保留；
+    # 其余 G 无（逐位断言见上）
+    # 受体链 A 不转换
+    a_mods = jobs[0]["sequences"][1]["proteinChain"].get("modifications")
+    assert not a_mods
