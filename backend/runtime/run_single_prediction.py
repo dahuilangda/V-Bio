@@ -13475,7 +13475,7 @@ def main():
             backend = "protenix"
         elif backend == "boltz2dock":
             backend = "boltz"
-        if backend not in ("boltz", "alphafold3", "protenix", "nesso"):
+        if backend not in ("boltz", "alphafold3", "protenix", "nesso", "mol1"):
             raise ValueError(f"Unsupported backend '{backend}'.")
         low_vram = resolve_low_vram(predict_args)
         workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
@@ -13609,6 +13609,15 @@ def main():
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                     low_vram=low_vram,
                     template_payloads=af3_template_payloads if isinstance(af3_template_payloads, list) else None,
+                )
+            elif backend == "mol1":
+                run_mol1_backend(
+                    temp_dir=temp_dir,
+                    yaml_content=processed_yaml,
+                    output_archive_path=output_archive_path,
+                    use_msa_server=use_msa_server,
+                    seed=seed,
+                    task_id=runtime_task_id,
                 )
             else:
                 if seed is not None:
