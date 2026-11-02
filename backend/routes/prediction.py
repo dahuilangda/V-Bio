@@ -345,10 +345,6 @@ def register_prediction_routes(
                 return jsonify({'error': "Backend 'protenix2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
             backend = 'protenix2dock'
         elif backend in {'mol1', 'mol-1'}:
-            # Mol-1 native 共折叠：结构预测 workflow 已端到端可用；肽设计
-            # 循环的引擎抽象（refine 分发/收集）接入前暂不放行。
-            if requested_workflow == 'peptide_design':
-                return jsonify({'error': "Backend 'mol1' 已支持结构预测；肽设计接入即将开放，当前请使用 Protenix 系列。"}), 400
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
             # Mol1Dock（盲折叠 + 采集后口袋门槛）的肽设计循环 refine 分发
