@@ -129,3 +129,8 @@ frontend/server/frontend/.run/
 # ESM3 GRPO adapter 权重(运行时产物, 不进 git)
 capabilities/peptide_lm/adapters/
 capabilities/peptide_lm/esm3_local/data
+
+# Mol-1 引擎运行时产物（推理输出/自体 MSA/连接子 SDF 均写在工作目录，不进 git）
+capabilities/mol1/Mol-1-source/output/
+capabilities/mol1/Mol-1-source/**/linker_sdf/
+capabilities/mol1/Mol-1-source/**/self_msa/
