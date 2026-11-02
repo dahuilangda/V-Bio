@@ -282,9 +282,9 @@ export function WorkflowRuntimeSettingsSection({
       !supportedNonLinear.has(normalizedBackend) &&
       canEditRuntimeIdentity
     ) {
-      onBackendChange('mol1dock');
+      onBackendChange(peptideChirality === 'd' ? 'mol1dock' : 'mol1');
     }
-  }, [isPeptideDesignWorkflow, peptideDesignMode, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
+  }, [isPeptideDesignWorkflow, peptideDesignMode, peptideChirality, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
   // rail reference length: range max when set, else the legacy binder length
   const cysReferenceLength = Math.max(8, peptideLengthMax || peptideBinderLength || 20);
   // preview length = the range the backend designs in: locked uses that exact
@@ -909,11 +909,19 @@ export function WorkflowRuntimeSettingsSection({
                               { value: 'mol1dock', label: 'Mol1Dock' },
                               { value: 'protenix2dock', label: 'Protenix2Dock' }
                             ])
-                      : [
-                          { value: 'mol1dock', label: 'Mol1Dock' },
-                          { value: 'protenix2dock', label: 'Protenix2Dock' },
-                          { value: 'alphafold3', label: 'AlphaFold3' }
-                        ])
+                      : (peptideChirality === 'l'
+                          ? [
+                              { value: 'mol1', label: 'Mol-1 (native)' },
+                              { value: 'mol1dock', label: 'Mol1Dock' },
+                              { value: 'protenix2dock', label: 'Protenix2Dock' },
+                              { value: 'protenix', label: 'Protenix (native)' },
+                              { value: 'alphafold3', label: 'AlphaFold3' }
+                            ]
+                          : [
+                              { value: 'mol1dock', label: 'Mol1Dock' },
+                              { value: 'protenix2dock', label: 'Protenix2Dock' },
+                              { value: 'alphafold3', label: 'AlphaFold3' }
+                            ]))
                   : [
                       { value: 'protenix', label: 'Protenix' },
                       { value: 'boltz', label: 'Boltz-2' },
