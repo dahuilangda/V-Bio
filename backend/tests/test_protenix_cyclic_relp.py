@@ -217,7 +217,7 @@ class TestCyclicWrap:
               "cyclic": cyc}
         bins = relp_pos_bins(model, xx)
         n = 14 + extra
-        # 首尾残基对：token 0（res1）与 token 13（res14，最后一根）
+        # 首尾残基对：token 0（res1）与 token n-1（末尾残基）
         # 残距环绕按 N_res=14：d(1,14)=-13 -> 环上 +1 -> bin R_MAX+1
         assert bins[0, n - 1] == R_MAX + 1
         assert bins[n - 1, 0] == R_MAX - 1
@@ -309,6 +309,12 @@ class TestCyclicFeatureDetection:
         # res2-res4 二硫键式交联不构成首尾闭环
         feat = featurizer_for([(1, 6)], bonds=[(5, 13)])
         assert feat.get_cyclic_features()["cyclic"].tolist() == [0] * 6
+
+    def test_head_tail_disulfide_flags_chain(self):
+        # 首尾残基侧链二硫（每残基 4 原子模型里无 SG，用 CA 代替示意侧链
+        # 原子）：只要成键双方是首尾残基，主链即闭合为环
+        feat = featurizer_for([(1, 5)], bonds=[(1, 17)])  # CA(1)-CA(5)
+        assert feat.get_cyclic_features()["cyclic"].tolist() == [1] * 5
 
     def test_single_residue_chain_not_flagged(self):
         feat = featurizer_for([(1, 1)], bonds=[(0, 2)])

@@ -682,11 +682,11 @@ class Featurizer(object):
         """
         Per-token flag marking chains closed by a head-to-tail covalent bond.
 
-        A chain counts as cyclic when a bond joins its first and last
-        residues (res_id extents of the chain). This is how backbone-cyclized
-        peptides are recorded both in structure files (struct_conn) and in
-        inference inputs (covalent_bonds). The model consumes the flag to
-        wrap the relative residue offset around the ring.
+        A chain counts as cyclic when any bond joins its first and last
+        residues (res_id extents of the chain). 主链头尾酰胺只是最常见情形：
+        首尾残基间的侧链内酰胺、二硫、硫醚同样把主链闭合成环，均应按环形
+        编码。这也是 struct_conn 与推理输入 covalent_bonds 记录主链环化的
+        方式；模型用该标志把相对残距沿环环绕。
 
         Returns:
             Dict[str, torch.Tensor]: {"cyclic": [N_token] int64} flag.
