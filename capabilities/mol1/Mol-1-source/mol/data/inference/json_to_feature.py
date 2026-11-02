@@ -418,6 +418,7 @@ class SampleDictToFeatures:
         feature_dict["structure_condition_mask"] = torch.from_numpy(mask)
         feature_dict["structure_condition_mode"] = torch.tensor([mode_id])
         feature_dict["structure_condition_pull"] = torch.tensor([pull])
+        # VDW 壳层与 pocket 引导全部在 generator 内从 coords/mask 推导
 
     def get_feature_dict(self) -> tuple[dict[str, torch.Tensor], AtomArray, TokenArray]:
         """
