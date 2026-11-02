@@ -450,6 +450,14 @@ def _parse_pdb(path: str) -> list[MolAtom]:
 # 平台自定义连接子 CCD（不在 Mol-1 官方 components.cif 中，需转 SDF）
 CUSTOM_LINKER_CCDS = ("SEZ", "29N", "BS3")
 
+# D-对映体 CCD 代码（逐一实测存在于 Mol-1 components.cif；Gly 无手性跳过）
+D_AA_CCD = {
+    "A": "DAL", "C": "DCY", "D": "DAS", "E": "DGL", "F": "DPN",
+    "H": "DHI", "I": "DIL", "K": "DLY", "L": "DLE", "M": "MED",
+    "N": "DSG", "P": "DPR", "Q": "DGN", "R": "DAR", "S": "DSN",
+    "T": "DTH", "V": "DVA", "W": "DTR", "Y": "DTY",
+}
+
 
 def parse_ccd_cif(cif_path: Path):
     """解析平台自定义连接子 CCD cif（chem_comp atom/bond 表）。
@@ -594,6 +602,40 @@ def prepare_custom_linkers(jobs: list[dict], work_dir: Path,
                             f"bond atom '{atom_name}' not in linker {seg} "
                             f"atom table {atom_ids}")
                     bond[f"atom{side}"] = atom_ids.index(atom_name) + 1
+
+
+def apply_d_chirality(jobs: list[dict], peptide_chain: str | None) -> None:
+    """D 肽：肽链逐位加 D-对映体修饰（真实化学：D 肽结合 L 受体）。
+
+    仅处理 id 匹配 --peptide-chain 的蛋白链；未指定时转换唯一蛋白链。
+    Gly 无手性跳过；已有修饰的位保留用户修饰（如 PCA 帽、NCAA），
+    其余未修饰位补 D-CCD。
+    """
+    for job in jobs:
+        for entry in job["sequences"]:
+            entity = entry.get("proteinChain")
+            if not entity:
+                continue
+            chain_ids = [str(x).upper() for x in _to_mol_id_list(entity.get("id"))]
+            if peptide_chain:
+                if peptide_chain.upper() not in chain_ids:
+                    continue
+            elif len([e for j in jobs for s in j["sequences"]
+                      if (e := s.get("proteinChain"))]) > 1:
+                raise ValueError(
+                    "多条蛋白链时必须用 --peptide-chain 指定 D 肽所在链")
+            seq = str(entity["sequence"]).strip().upper()
+            mods = {int(m["ptmPosition"]): str(m["ptmType"])
+                    for m in entity.get("modifications", [])}
+            for pos, aa in enumerate(seq, start=1):
+                if aa == "G" or pos in mods:
+                    continue
+                code = D_AA_CCD.get(aa)
+                if code:
+                    mods[pos] = f"CCD_{code}"
+            entity["modifications"] = [
+                {"ptmType": code, "ptmPosition": pos}
+                for pos, code in sorted(mods.items())]
 
 
 def parse_pocket_res(text: str | None) -> list[tuple[str, int]]:
@@ -769,6 +811,21 @@ def run_inference(input_json: Path, output_dir: Path, seed: int,
         raise RuntimeError(f"mol inference exited {result.returncode}")
 
 
+def mirror_structure(path: str, out_path: str) -> str:
+    """结构镜像（x -> -x）：D 肽工作流的第一步。"""
+    import gemmi
+
+    st = gemmi.read_structure(path)
+    st.setup_entities()
+    for model in st:
+        for chain in model:
+            for res in chain:
+                for atom in res:
+                    atom.pos.x = -atom.pos.x
+    st.write_pdb(out_path)
+    return out_path
+
+
 def collect_summaries(output_dir: Path) -> list[dict]:
     """汇总各 seed 的置信度 JSON 与对应 cif。
 
@@ -824,6 +881,20 @@ def main() -> None:
     ap.add_argument("--linker-ccd-dir", default=os.environ.get(
         "MOL1_LINKER_CCD_DIR", "/workspace/linker_ccd"),
         help="平台自定义连接子 cif 目录（SEZ/29N/BS3）")
+    ap.add_argument("--peptide-chirality", default="l", choices=["l", "d"],
+                    help="d 时肽链逐位加 D-对映体修饰（配合 --peptide-chain）")
+    ap.add_argument("--reference-structure", default=None,
+                    help="镜像受体结构（结构条件化：钉住/引导其原子）")
+    ap.add_argument("--reference-chain", default="A",
+                    help="参考结构对应的受体链 id")
+    ap.add_argument("--restraint-mode", default="pin", choices=["pin", "guide"],
+                    help="pin=受体原子钉在参考坐标；guide=谐波拉伸允许小幅调整")
+    ap.add_argument("--restraint-pull", type=float, default=0.5,
+                    help="guide 模式的每步拉伸系数")
+    ap.add_argument("--mirror-reference", action="store_true",
+                    help="把参考结构先做 x->-x 镜像（D 肽工作流）")
+    ap.add_argument("--mirror-output", action="store_true",
+                    help="推理完成后把复合物整体 x->-x 翻回")
     args = ap.parse_args()
     seeds = ([int(s) for s in str(args.seeds).split(",") if s.strip()]
              if args.seeds else [args.seed])
@@ -840,7 +911,24 @@ def main() -> None:
         if isinstance(jobs, dict):
             jobs = [jobs]
 
+    if args.peptide_chirality == "d":
+        apply_d_chirality(jobs, args.peptide_chain)
     prepare_custom_linkers(jobs, work_dir, args.linker_ccd_dir)
+
+    reference_path = None
+    if args.reference_structure:
+        reference_path = os.path.abspath(args.reference_structure)
+        if args.mirror_reference:
+            mirrored = os.path.join(str(work_dir), "reference_mirrored.pdb")
+            mirror_structure(reference_path, mirrored)
+            reference_path = mirrored
+        for job in jobs:
+            job["structure_condition"] = {
+                "reference_path": reference_path,
+                "chain": args.reference_chain,
+                "mode": args.restraint_mode,
+                "pull": args.restraint_pull,
+            }
     if not args.no_msa:
         attach_cached_msa(jobs, args.msa_cache_dir)
         fill_missing_msa(jobs, work_dir, args.msa_server_url)
@@ -853,6 +941,22 @@ def main() -> None:
     for seed in seeds:
         run_inference(input_json, output_dir, seed, args.checkpoint_dir,
                       use_msa=not args.no_msa, samples=args.samples)
+
+    if args.mirror_output:
+        import gemmi
+        n_flipped = 0
+        for cif in output_dir.glob("*/seed_*/predictions/*_sample_*.cif"):
+            st = gemmi.make_structure_from_block(
+                gemmi.cif.read(str(cif)).sole_block())
+            for model in st:
+                for chain in model:
+                    for res in chain:
+                        for atom in res:
+                            atom.pos.x = -atom.pos.x
+            st.setup_entities()
+            st.make_mmcif_document().write_file(str(cif))
+            n_flipped += 1
+        print(f"[mol1] 镜像输出翻转：{n_flipped} 个 cif")
 
     summaries = collect_summaries(output_dir)
     if args.mode == "peptide":
