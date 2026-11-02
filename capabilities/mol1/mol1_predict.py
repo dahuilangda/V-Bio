@@ -312,7 +312,7 @@ def patch_msa_server(url: str | None) -> None:
 
 def run_inference(input_json: Path, output_dir: Path, seed: int,
                   checkpoint_dir: str, use_msa: bool = True,
-                  samples: int = 5) -> None:
+                  samples: int = 5, atom_confidence: bool = False) -> None:
     checkpoint = Path(checkpoint_dir) / "mol-1-base.pt"
     cmd = [
         "python3.12", "-m", "mol.runner.batch_inference",
@@ -323,6 +323,8 @@ def run_inference(input_json: Path, output_dir: Path, seed: int,
         "--use_msa", "true" if use_msa else "false",
         "--sample", str(samples),
     ]
+    if atom_confidence:
+        cmd += ["--need_atom_confidence", "true"]
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"mol inference exited {result.returncode}")
@@ -361,6 +363,8 @@ def main() -> None:
         "MOL_MSA_SERVER_URL", "http://host.docker.internal:8080"))
     ap.add_argument("--no-msa", action="store_true",
                     help="完全不用 MSA（精度损失大，仅诊断用）")
+    ap.add_argument("--atom-confidence", action="store_true",
+                    help="输出 token/原子级置信（含 PAE），供 ipSAE 等后处理使用")
     args = ap.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -383,7 +387,7 @@ def main() -> None:
     input_json.write_text(json.dumps(jobs, ensure_ascii=False, indent=1))
 
     run_inference(input_json, output_dir, args.seed, args.checkpoint_dir,
-                  use_msa=not args.no_msa)
+                  use_msa=not args.no_msa, atom_confidence=args.atom_confidence)
 
     summaries = collect_summaries(output_dir)
     summary = {
