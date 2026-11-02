@@ -965,6 +965,7 @@ def data_type_transform(
 # List of "index" or "type" data
 # Their data type should be int
 IntDataList = [
+    "cyclic",
     "residue_index",
     "token_index",
     "asym_id",

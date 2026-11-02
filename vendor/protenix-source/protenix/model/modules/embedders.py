@@ -189,20 +189,29 @@ class RelativePositionEncoding(nn.Module):
             b_cyclic_pair = None
             n_pair = None
             if cyclic is not None:
+                cyclic = cyclic.to(asym_id.device)
                 tok_cyclic = cyclic.bool()
                 b_cyclic_pair = (
                     tok_cyclic[..., :, None] & tok_cyclic[..., None, :]
                 ) & b_same_chain.bool()
             cyclic_enabled = cyclic is not None and bool(b_cyclic_pair.any())
             if cyclic_enabled:
-                # Ring size per token: token count of the owning chain
-                # (polymer chains carry one token per residue, so this
-                # equals the residue count N).
+                # Ring size per token. Non-standard residues tokenize per
+                # atom, so the residue-space modulus (distinct residue
+                # count) differs from the token-space one (token count);
+                # each wrap must use the modulus of its own space.
                 n_ring = b_same_chain.sum(dim=-1)
                 n_pair = torch.minimum(n_ring[..., :, None], n_ring[..., None, :])
-                d_wrapped = ((d_linear + n_pair // 2) % n_pair) - n_pair // 2
+                n_res_per_token = torch.zeros_like(asym_id)
+                for c in torch.unique(asym_id):
+                    mask = asym_id == c
+                    n_res_per_token[mask] = torch.unique(
+                        residue_index[mask]).numel()
+                n_res_pair = torch.minimum(
+                    n_res_per_token[..., :, None], n_res_per_token[..., None, :])
+                d_res_wrapped = ((d_linear + n_res_pair // 2) % n_res_pair) - n_res_pair // 2
                 d_cyclic_bin = torch.clip(
-                    input=d_wrapped + self.r_max, min=0, max=2 * self.r_max
+                    input=d_res_wrapped + self.r_max, min=0, max=2 * self.r_max
                 ).long()
                 d_residue = torch.where(b_cyclic_pair, d_cyclic_bin, d_residue.long())
 
@@ -217,8 +226,8 @@ class RelativePositionEncoding(nn.Module):
                 2 * self.r_max + 1
             )
             if cyclic is not None and cyclic_enabled:
-                # 环内 token 偏移与残基偏移同规则环绕，否则线性 token 距离
-                # 会与环绕的残距信号相抵（首尾仍被读作远端）。
+                # token 环绕用 token 计数做模数（token 空间自洽），
+                # 与残距环绕（残基计数）各按自身空间取模。
                 d_token_wrapped = ((d_token_linear + n_pair // 2) % n_pair) - n_pair // 2
                 d_token_bin = torch.clip(
                     input=d_token_wrapped + self.r_max, min=0, max=2 * self.r_max
