@@ -195,10 +195,7 @@ def yaml_to_mol_jobs(yaml_path: Path) -> list[dict]:
             kind = "dnaSequence"
         elif kind == "rna":
             kind = "rnaSequence"
-        elif kind == "ligand" or kind == "ion":
-            # yaml 的 constraints.bond 用 [chain, position, atom] 寻址，
-            # ligand/ion 的 yaml 键与 Mol-1 同形
-            pass
+        # ligand/ion 的 yaml 键与 Mol-1 同形，直接透传
         sequences.append({kind: dict(info)})
 
     bonds = list(explicit_bonds)
