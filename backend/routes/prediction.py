@@ -327,8 +327,8 @@ def register_prediction_routes(
         backend = str(request.form.get('backend', '')).strip().lower()
         requested_workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
         if not backend:
-            # Defaults per workflow: prediction -> Protenix, peptide design -> Protenix2Dock.
-            backend = 'protenix2dock' if requested_workflow in {'peptide_design'} else 'protenix'
+            # Defaults per workflow: prediction -> Protenix, peptide design -> Mol1Dock.
+            backend = 'mol1dock' if requested_workflow in {'peptide_design'} else 'protenix'
         if backend in {'nesso1', 'nesso-1'}:
             backend = 'nesso'
         if requested_workflow in {'peptide', 'peptide_designer', 'designer'}:
@@ -339,9 +339,7 @@ def register_prediction_routes(
         # the engine level (target predicted first when not uploaded); they
         # differ only in workflow gating.
         if backend in {'boltz2dock', 'boltz-2-dock'}:
-            if requested_workflow not in {'peptide_design', 'lead_optimization'}:
-                return jsonify({'error': "Backend 'boltz2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
-            backend = 'boltz2dock'
+            return jsonify({'error': "Backend 'boltz2dock' 已下线；肽设计请使用 Mol1Dock 或 Protenix2Dock。"}), 400
         elif backend in {'protenix2dock', 'protenix-2-dock'}:
             if requested_workflow not in {'peptide_design', 'lead_optimization'}:
                 return jsonify({'error': "Backend 'protenix2dock' is only available for the peptide_design and lead_optimization workflows."}), 400

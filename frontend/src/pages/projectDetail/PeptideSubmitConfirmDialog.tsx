@@ -26,7 +26,6 @@ interface PeptideSubmitConfirmDialogProps {
 
 const BACKEND_LABELS: Record<string, string> = {
   protenix2dock: 'Protenix2Dock',
-  boltz2dock: 'Boltz2Dock',
   alphafold3: 'AlphaFold3',
   protenix: 'Protenix',
   boltz: 'Boltz-2',

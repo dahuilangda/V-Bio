@@ -249,11 +249,12 @@ export function WorkflowRuntimeSettingsSection({
   // L-type designs can use standard protenix inference (full model + MSA + templates);
   // D-type requires protenix2dock (mirror/refine workflow).
   const peptideBackendAllowed =
-    normalizedBackend === 'boltz2dock' || normalizedBackend === 'protenix2dock' ||
-    normalizedBackend === 'alphafold3' || normalizedBackend === 'protenix';
+    normalizedBackend === 'mol1dock' || normalizedBackend === 'protenix2dock' ||
+    normalizedBackend === 'alphafold3' || normalizedBackend === 'mol1' ||
+    normalizedBackend === 'protenix';
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
-      onBackendChange('protenix2dock');
+      onBackendChange('mol1dock');
     }
   }, [isPeptideDesignWorkflow, peptideBackendAllowed, onBackendChange]);
   // local mirror for instant clicks; external value changes win
@@ -281,7 +282,7 @@ export function WorkflowRuntimeSettingsSection({
       !supportedNonLinear.has(normalizedBackend) &&
       canEditRuntimeIdentity
     ) {
-      onBackendChange('protenix2dock');
+      onBackendChange('mol1dock');
     }
   }, [isPeptideDesignWorkflow, peptideDesignMode, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
   // rail reference length: range max when set, else the legacy binder length
@@ -879,7 +880,7 @@ export function WorkflowRuntimeSettingsSection({
 
           <Field
             label={<>Backend <span className="required-mark">*</span></>}
-            hint="Structure prediction engine. Protenix2Dock supports every peptide design mode, including cyclic/bicyclic covalent-bond constraints."
+            hint="Design engine. Mol1Dock runs Mol-1 blind co-folding with native cyclic-bond support; Protenix2Dock adds staged-pose refinement with TFG constraints."
           >
             <select
               required
@@ -899,19 +900,18 @@ export function WorkflowRuntimeSettingsSection({
                   ? (peptideDesignMode !== 'linear'
                       ? (peptideChirality === 'l'
                           ? [
-                              { value: 'protenix2dock', label: 'Protenix2Dock' },
-                              { value: 'protenix', label: 'Protenix (native)' },
                               { value: 'mol1dock', label: 'Mol1Dock' },
-                              { value: 'mol1', label: 'Mol-1 (native)' }
+                              { value: 'protenix2dock', label: 'Protenix2Dock' },
+                              { value: 'mol1', label: 'Mol-1 (native)' },
+                              { value: 'protenix', label: 'Protenix (native)' }
                             ]
                           : [
-                              { value: 'protenix2dock', label: 'Protenix2Dock' },
-                              { value: 'mol1dock', label: 'Mol1Dock' }
+                              { value: 'mol1dock', label: 'Mol1Dock' },
+                              { value: 'protenix2dock', label: 'Protenix2Dock' }
                             ])
                       : [
-                          { value: 'protenix2dock', label: 'Protenix2Dock' },
-                          { value: 'boltz2dock', label: 'Boltz2Dock' },
                           { value: 'mol1dock', label: 'Mol1Dock' },
+                          { value: 'protenix2dock', label: 'Protenix2Dock' },
                           { value: 'alphafold3', label: 'AlphaFold3' }
                         ])
                   : [
@@ -932,7 +932,7 @@ export function WorkflowRuntimeSettingsSection({
         {(isPredictionWorkflow || isPeptideDesignWorkflow) && (
                       <Field
             label="Seed (optional)"
-            hint="Reproducibility seed. Protenix and Boltz2Dock default to 42; AlphaFold3 draws a random seed when unset."
+            hint="Reproducibility seed. Protenix and Mol1Dock default to 42; AlphaFold3 draws a random seed when unset."
           >
             <input
             type="number"
@@ -985,7 +985,7 @@ export function WorkflowRuntimeSettingsSection({
                   </Field>
                                   <Field
                   label="Peptide Chirality"
-                  hint="D-peptides run the mirror workflow: the target is mirrored, design happens in D-space, results are flipped back. Available on Boltz2Dock/Protenix2Dock."
+                  hint="D-peptides run the mirror workflow: the target is mirrored, design happens in D-space, results are flipped back. Available on Mol1Dock/Protenix2Dock."
                 >
                   <select
                   value={peptideChirality}
@@ -995,7 +995,7 @@ export function WorkflowRuntimeSettingsSection({
                   disabled={!isEditable}
                   >
                   <option value="l">L-peptide (standard)</option>
-                  <option value="d" disabled={normalizedBackend !== 'boltz2dock' && normalizedBackend !== 'protenix2dock'}>
+                  <option value="d" disabled={normalizedBackend !== 'mol1dock' && normalizedBackend !== 'protenix2dock'}>
                     D-peptide
                   </option>
                   </select>
