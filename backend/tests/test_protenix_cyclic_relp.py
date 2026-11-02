@@ -10,8 +10,10 @@
 运行环境需要 protenix 依赖（optree/biotite/torch）。宿主机缺依赖时自动
 跳过；完整运行：
 
+    vendor 内的修改需挂载覆盖镜像内快照：
     docker run --rm --entrypoint= \\
         -v /data/V-Bio:/workspace/vbio \\
+        -v /data/V-Bio/vendor/protenix-source:/workspace/vbio/vendor/protenix-source \\
         -e PYTHONPATH=/workspace/vbio/vendor/protenix-source \\
         vbio-protenix-v2-runtime:2.0.0 \\
         /usr/local/micromamba/envs/protenix/bin/python \\
