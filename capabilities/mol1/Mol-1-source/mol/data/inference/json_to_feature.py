@@ -43,7 +43,6 @@ class SampleDictToFeatures:
         self, single_sample_dict: dict[str, Any]
     ) -> None:
         self.single_sample_dict = single_sample_dict
-        self.structure_condition = single_sample_dict.get("structure_condition")
         self.input_dict = add_entity_atom_array(single_sample_dict)
         self.entity_poly_type_and_seqs = self.get_entity_poly_type_and_seqs()
         self.entity_poly_type = self.entity_poly_type_and_seqs["entity_poly_type"]
@@ -349,77 +348,6 @@ class SampleDictToFeatures:
         atom_array = self.add_atom_array_attributes(atom_array, self.entity_poly_type)
         return atom_array
 
-    def _attach_structure_condition(self, feature_dict, atom_array) -> None:
-        """结构条件化：按参考坐标约束部分原子（受体钉住/引导）。
-
-        输入 JSON 的 structure_condition 字段：
-          {"reference_path": str, "chain": str, "mode": "pin"|"guide",
-           "pull": float}
-        参考坐标按（链 id, 残基序号, 原子名）对齐到裁剪后原子序；
-        未匹配原子（如设计的肽链）mask=0，自由去噪。
-        """
-        import os
-
-        sc = self.structure_condition
-        if not sc:
-            return
-        import gemmi
-
-        ref_path = sc.get("reference_path")
-        chain = str(sc.get("chain", "")).strip()
-        mode = str(sc.get("mode", "pin")).strip().lower()
-        mode_id = 0 if mode == "pin" else 1
-        pull = float(sc.get("pull", 0.5))
-        if not ref_path or not chain:
-            raise ValueError(
-                "structure_condition requires reference_path and chain.")
-        if not os.path.exists(ref_path):
-            raise FileNotFoundError(
-                f"structure_condition reference not found: {ref_path}")
-
-        st = gemmi.read_structure(ref_path)
-        st.setup_entities()
-        st.remove_hydrogens()
-        ref_lookup = {}
-        for model in st:
-            for ch in model:
-                if ch.name != chain:
-                    continue
-                for res in ch:
-                    num = res.seqid.num
-                    for atom in res:
-                        ref_lookup[(num, atom.name.upper())] = (
-                            atom.pos.x, atom.pos.y, atom.pos.z)
-
-        n_atom = len(atom_array)
-        coords = np.zeros((n_atom, 3), dtype=np.float32)
-        mask = np.zeros(n_atom, dtype=np.int64)
-        res_arr = np.asarray(atom_array.res_id)
-        chain_arr = np.asarray(atom_array.chain_id)
-        name_arr = np.asarray([n.upper() for n in atom_array.atom_name])
-        for k in range(n_atom):
-            if chain_arr[k] != chain:
-                continue
-            pos = ref_lookup.get((int(res_arr[k]), name_arr[k]))
-            if pos is not None:
-                coords[k] = pos
-                mask[k] = 1
-        matched = int(mask.sum())
-        if matched == 0:
-            raise ValueError(
-                f"structure_condition: no atoms matched chain {chain!r} in "
-                f"reference {ref_path}; the reference must be renumbered to "
-                "the input 1..N convention")
-        logger.info(
-            "structure_condition: %d/%d atoms restrained (chain %s, mode %s)",
-            matched, n_atom, chain, mode)
-
-        feature_dict["structure_condition_coords"] = torch.tensor(coords)
-        feature_dict["structure_condition_mask"] = torch.from_numpy(mask)
-        feature_dict["structure_condition_mode"] = torch.tensor([mode_id])
-        feature_dict["structure_condition_pull"] = torch.tensor([pull])
-        # VDW 壳层与 pocket 引导全部在 generator 内从 coords/mask 推导
-
     def get_feature_dict(self) -> tuple[dict[str, torch.Tensor], AtomArray, TokenArray]:
         """
         Generates a feature dictionary from the input sample dictionary.
@@ -439,7 +367,6 @@ class SampleDictToFeatures:
             token_array, atom_array, include_discont_poly_poly_bonds=True
         )
         feature_dict = featurizer.get_all_input_features()
-        self._attach_structure_condition(feature_dict, atom_array)
 
         token_array_with_frame = featurizer.get_token_frame(
             token_array=token_array,

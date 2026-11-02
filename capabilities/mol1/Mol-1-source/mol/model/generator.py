@@ -193,55 +193,22 @@ def sample_diffusion(
         if projected_pair_biases is not None
         else denoise_net
     )
-
-    # Structure-conditioned diffusion (V-Bio): pin or guide a subset of atoms
-    # (e.g. the receptor in peptide docking) toward reference coordinates while
-    # the remaining atoms denoise freely. Condition tensors ride in
-    # input_feature_dict and are popped here so the denoiser never sees them.
-    sc_coords = input_feature_dict.pop("structure_condition_coords", None)
-    sc_mask = input_feature_dict.pop("structure_condition_mask", None)
-    sc_mode = input_feature_dict.pop("structure_condition_mode", None)
-    sc_pull = input_feature_dict.pop("structure_condition_pull", None)
-    structure_condition = None
-    if sc_coords is not None and sc_mask is not None:
-        free_idx = (sc_mask == 0).any(dim=-1).nonzero(as_tuple=True)[0] if sc_mask.dim() > 1 else (sc_mask == 0).nonzero(as_tuple=True)[0]
-        pin_idx = (sc_mask == 1).any(dim=-1).nonzero(as_tuple=True)[0] if sc_mask.dim() > 1 else (sc_mask == 1).nonzero(as_tuple=True)[0]
-        structure_condition = {
-            "coords": sc_coords.to(device=device, dtype=dtype),
-            "mask": sc_mask.to(device=device, dtype=dtype),
-            "mode": (sc_mode.reshape(-1)[0].item() if sc_mode is not None else 0),
-            "pull": (float(sc_pull.reshape(-1)[0].item())
-                     if sc_pull is not None else 0.5),
-            "free_idx": free_idx,
-            "pin_idx": pin_idx,
-            "vdw_floor": 3.1,
-        }
-
     def _chunk_sample_diffusion(chunk_n_sample, inplace_safe):
         # init noise
         # [..., N_sample, N_atom, 3]
         x_l = noise_schedule[0] * torch.randn(
             size=(*batch_shape, chunk_n_sample, N_atom, 3), device=device, dtype=dtype
         )  # NOTE: set seed in distributed training
-        if structure_condition is not None:
-            ref = structure_condition["coords"]
-            m = structure_condition["mask"][..., None].to(dtype)
-            # restrained atoms start at the reference + schedule[0] noise;
-            # free atoms keep pure noise
-            x_l = m * (ref + noise_schedule[0] * torch.randn_like(x_l)) \
-                + (1 - m) * x_l
 
         for step_i, (c_tau_last, c_tau) in enumerate(
             zip(noise_schedule[:-1], noise_schedule[1:])
         ):
-            if structure_condition is None:
-                # [..., N_sample, N_atom, 3]
-                x_l = (
-                    centre_random_augmentation(x_input_coords=x_l, N_sample=1)
-                    .squeeze(dim=-3)
-                    .to(dtype)
-                )
-            # 条件化时不做随机增广：坐标全程固定在参考坐标系，约束每步精确施加
+            # [..., N_sample, N_atom, 3]
+            x_l = (
+                centre_random_augmentation(x_input_coords=x_l, N_sample=1)
+                .squeeze(dim=-3)
+                .to(dtype)
+            )
 
             # Denoise with a predictor-corrector sampler
             # 1. Add noise to move x_{c_tau_last} to x_{t_hat}
@@ -281,33 +248,6 @@ def sample_diffusion(
             ]  # Line 9 of AF3 uses 'x_l_hat' instead, which we believe  is a typo.
             dt = c_tau - t_hat
             x_l = x_noisy + step_scale_eta * dt[..., None, None] * delta
-
-            if structure_condition is not None:
-                ref = structure_condition["coords"]
-                m = structure_condition["mask"][..., None].to(dtype)
-                if structure_condition["mode"] == 0:
-                    # pin：被约束原子重加噪到当前噪声水平（末步收敛到参考坐标）
-                    x_l = m * (ref + c_tau * torch.randn_like(x_l)) \
-                        + (1 - m) * x_l
-                else:
-                    # guide：谐波拉伸，受体可小幅调整但被拉向参考构象
-                    x_l = x_l + m * structure_condition["pull"] * (ref - x_l)
-
-            # VDW 壳层投影：最后一个去噪步后，把自由原子推离钉住原子的 VDW 冲突区
-            if structure_condition is not None:
-                vdw_floor = structure_condition.get("vdw_floor", 3.1)
-                free_idx = structure_condition.get("free_idx")
-                pin_idx = structure_condition.get("pin_idx")
-                if free_idx is not None and pin_idx is not None and \
-                        len(free_idx) > 0 and len(pin_idx) > 0:
-                    fc = x_l[..., free_idx, :]
-                    pc = x_l[..., pin_idx, :]
-                    dm = (fc[..., :, None, :] - pc[..., None, :, :]).norm(dim=-1)
-                    violation = (vdw_floor - dm).clamp(min=0)
-                    direction = fc[..., :, None, :] - pc[..., None, :, :]
-                    dn = direction.norm(dim=-1).clamp(min=1e-6)
-                    push_vec = direction / dn[..., None] * violation[..., None]
-                    x_l[..., free_idx, :] = x_l[..., free_idx, :] + push_vec.sum(dim=-2)
 
         return x_l
 
