@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Mol-1 源码随镜像固定（Apache-2.0，见 Mol-1-source/LICENSE）
 COPY Mol-1-source /workspace/Mol-1
+COPY mol1_predict.py /workspace/capabilities/mol1/mol1_predict.py
 RUN python3.12 -m pip install --no-cache-dir "/workspace/Mol-1[cuda12]"
 
 ENV HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \

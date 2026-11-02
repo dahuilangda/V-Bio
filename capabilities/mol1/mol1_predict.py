@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import subprocess
 import json
 import os
 import sys
@@ -160,6 +161,8 @@ def yaml_to_mol_jobs(yaml_path: Path) -> list[dict]:
             kind = "proteinChain"
             if info.get("cyclic"):
                 seq = str(info.get("sequence") or "").strip().upper()
+                if not seq:
+                    raise ValueError("cyclic chain has empty sequence")
                 chain_id = info["id"][0]
                 explicit_bonds.append({"bond": {
                     "atom1": [chain_id, 1, "N"],
@@ -280,7 +283,8 @@ def fill_missing_msa(jobs: list[dict], work_dir: Path,
                 try:
                     res_dirs = msa_search([seq], str(chain_dir))
                     chain_dir_out = res_dirs[0] if res_dirs else None
-                except Exception:
+                except Exception as exc:
+                    print(f"[mol1] MSA search failed: {exc}", file=sys.stderr)
                     chain_dir_out = None
                 hits = []
                 if chain_dir_out:
@@ -309,8 +313,6 @@ def patch_msa_server(url: str | None) -> None:
 def run_inference(input_json: Path, output_dir: Path, seed: int,
                   checkpoint_dir: str, use_msa: bool = True,
                   samples: int = 5) -> None:
-    import subprocess
-
     checkpoint = Path(checkpoint_dir) / "mol-1-base.pt"
     cmd = [
         "python3.12", "-m", "mol.runner.batch_inference",
@@ -330,7 +332,10 @@ def collect_summaries(output_dir: Path) -> list[dict]:
     summaries = []
     for conf in sorted(output_dir.glob(
             "*/seed_*/predictions/*summary_confidence*.json")):
-        data = json.loads(conf.read_text())
+        try:
+            data = json.loads(conf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
         cif = conf.parent / conf.name.replace("_summary_confidence", "")
         summaries.append({
             "seed": conf.parent.parent.name,
