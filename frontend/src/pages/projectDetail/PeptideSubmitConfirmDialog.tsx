@@ -30,7 +30,9 @@ const BACKEND_LABELS: Record<string, string> = {
   alphafold3: 'AlphaFold3',
   protenix: 'Protenix',
   boltz: 'Boltz-2',
-  nesso: 'Nesso-1'
+  nesso: 'Nesso-1',
+  mol1: 'Mol-1',
+  mol1dock: 'Mol1Dock'
 };
 
 function backendLabel(backend: string): string {

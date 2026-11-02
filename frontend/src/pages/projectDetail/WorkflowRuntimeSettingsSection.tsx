@@ -272,10 +272,13 @@ export function WorkflowRuntimeSettingsSection({
   const isBicyclicMode = isPeptideDesignWorkflow && peptideDesignMode === 'bicyclic';
   // constrained rings are Protenix-only; migrate stale selections before submit
   useEffect(() => {
+    const supportedNonLinear = new Set([
+      'protenix', 'protenix2dock', 'mol1', 'mol1dock',
+    ]);
     if (
       isPeptideDesignWorkflow &&
       peptideDesignMode !== 'linear' &&
-      normalizedBackend !== 'protenix' &&
+      !supportedNonLinear.has(normalizedBackend) &&
       canEditRuntimeIdentity
     ) {
       onBackendChange('protenix2dock');
@@ -897,20 +900,25 @@ export function WorkflowRuntimeSettingsSection({
                       ? (peptideChirality === 'l'
                           ? [
                               { value: 'protenix2dock', label: 'Protenix2Dock' },
-                              { value: 'protenix', label: 'Protenix (native)' }
+                              { value: 'protenix', label: 'Protenix (native)' },
+                              { value: 'mol1dock', label: 'Mol1Dock' },
+                              { value: 'mol1', label: 'Mol-1 (native)' }
                             ]
                           : [
-                              { value: 'protenix2dock', label: 'Protenix2Dock' }
+                              { value: 'protenix2dock', label: 'Protenix2Dock' },
+                              { value: 'mol1dock', label: 'Mol1Dock' }
                             ])
                       : [
                           { value: 'protenix2dock', label: 'Protenix2Dock' },
                           { value: 'boltz2dock', label: 'Boltz2Dock' },
+                          { value: 'mol1dock', label: 'Mol1Dock' },
                           { value: 'alphafold3', label: 'AlphaFold3' }
                         ])
                   : [
                       { value: 'protenix', label: 'Protenix' },
                       { value: 'boltz', label: 'Boltz-2' },
-                      { value: 'alphafold3', label: 'AlphaFold3' }
+                      { value: 'alphafold3', label: 'AlphaFold3' },
+                      { value: 'mol1', label: 'Mol-1' }
                     ]
               ).map((option) => (
                 <option key={option.value} value={option.value}>
