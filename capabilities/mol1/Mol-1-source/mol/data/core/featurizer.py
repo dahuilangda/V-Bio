@@ -685,6 +685,73 @@ class Featurizer(object):
         ).long()  # [N_atom, N_atom]
         return mask_features
 
+    def get_cyclic_features(self) -> dict[str, torch.Tensor]:
+        """
+        Per-token flag marking chains closed by a head-to-tail covalent bond.
+
+        A chain counts as cyclic when a bond joins its first and last
+        residues (res_id extents of the chain). This is how backbone-cyclized
+        peptides are recorded both in structure files (struct_conn) and in
+        inference inputs (covalent_bonds). The model consumes the flag to
+        wrap the relative residue offset around the ring.
+
+        Returns:
+            Dict[str, torch.Tensor]: {"cyclic": [N_token] int64} flag.
+        """
+        centre_atoms_indices = self.cropped_token_array.get_annotation(
+            "centre_atom_index"
+        )
+        centre_atoms = self.cropped_atom_array[centre_atoms_indices]
+
+        chain = self.cropped_atom_array.asym_id_int
+        res = self.cropped_atom_array.res_id
+        name = self.cropped_atom_array.atom_name
+        mol_type = self.cropped_atom_array.mol_type
+        cyclic_chains = set()
+        bond_list = self.cropped_atom_array.bonds
+        bonds = bond_list.as_array() if bond_list is not None else []
+        if len(bonds) > 0:
+            chain_res_extent = {}
+            for c in np.unique(chain):
+                res_c = res[chain == c]
+                chain_res_extent[int(c)] = (int(res_c.min()), int(res_c.max()))
+            for a1, a2, _ in bonds:
+                c = int(chain[a1])
+                if chain[a1] != chain[a2]:
+                    continue
+                lo, hi = chain_res_extent[c]
+                if lo == hi:
+                    continue
+                # 骨架头尾酰胺键判定（N 在首残基、C 在末残基）：侧链交联
+                # （如首尾二硫）不构成主链环化。仅聚合物链参与检测。
+                if mol_type[a1] not in ("protein", "dna", "rna"):
+                    continue
+                lo_atoms = {
+                    name[k].upper()
+                    for k in np.where((chain == c) & (res == lo))[0]
+                }
+                hi_atoms = {
+                    name[k].upper()
+                    for k in np.where((chain == c) & (res == hi))[0]
+                }
+                pair = {name[a1].upper(), name[a2].upper()}
+                n_ok = "N" in lo_atoms
+                c_ok = "C" in hi_atoms
+                if n_ok and c_ok and "N" in pair and "C" in pair:
+                    if (name[a1].upper() == "N" and int(res[a1]) == lo
+                            and name[a2].upper() == "C"
+                            and int(res[a2]) == hi):
+                        cyclic_chains.add(c)
+                    elif (name[a2].upper() == "N" and int(res[a2]) == lo
+                          and name[a1].upper() == "C"
+                          and int(res[a1]) == hi):
+                        cyclic_chains.add(c)
+
+        cyclic = np.isin(
+            centre_atoms.asym_id_int, list(cyclic_chains)
+        ).astype(np.int64)
+        return {"cyclic": torch.from_numpy(cyclic)}
+
     def get_all_input_features(self):
         """
         Get input features from cropped data.
@@ -710,6 +777,9 @@ class Featurizer(object):
 
         mask_features = self.get_mask_features()
         features.update(mask_features)
+
+        cyclic_features = self.get_cyclic_features()
+        features.update(cyclic_features)
         return features
 
     def get_labels(self) -> dict[str, torch.Tensor]:

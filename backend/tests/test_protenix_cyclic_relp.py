@@ -194,6 +194,32 @@ class TestCyclicWrap:
         out = model.generate_relp(x1)["relp"]
         assert out.shape == (1, 1, 4 * R_MAX + 2 * S_MAX + 7)
 
+    def test_multi_token_residue_ring_uses_residue_modulus(self):
+        """环链含逐原子 token 化的修饰残基（N_tok=18 > N_res=14）时，
+        残距环绕必须用残基计数做模数（NCAA 环肽场景）。"""
+        model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
+        x = feature_dict([(1, 14)], cyclic_flags_by_chain={1: 1})
+        # 残基 7 拆成 5 个 token：residue_index 重复，token_index 连续递增
+        extra = 5 - 1
+        ri = torch.cat([
+            x["residue_index"][:6],
+            torch.full((5,), 7, dtype=torch.long),
+            x["residue_index"][7:],
+        ])
+        ti = torch.arange(14 + extra)
+        asym = torch.full((14 + extra,), 1, dtype=torch.long)
+        ent = torch.ones(14 + extra, dtype=torch.long)
+        cyc = torch.ones(14 + extra, dtype=torch.long)
+        xx = {"asym_id": asym, "residue_index": ri, "entity_id": ent,
+              "token_index": ti, "sym_id": torch.ones(len(asym)).long(),
+              "cyclic": cyc}
+        bins = relp_pos_bins(model, xx)
+        n = 14 + extra
+        # 首尾残基对：token 0（res1）与 token 13（res14，最后一根）
+        # 残距环绕按 N_res=14：d(1,14)=-13 -> 环上 +1 -> bin R_MAX+1
+        assert bins[0, n - 1] == R_MAX + 1
+        assert bins[n - 1, 0] == R_MAX - 1
+
     def test_ring_larger_than_r_max_clips(self):
         model = RelativePositionEncoding(r_max=R_MAX, s_max=S_MAX)
         x = feature_dict([(1, 200)], cyclic_flags_by_chain={1: 1})
