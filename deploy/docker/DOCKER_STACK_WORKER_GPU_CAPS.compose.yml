@@ -97,7 +97,7 @@ services:
     profiles: ["protenix"]
     container_name: vbio-gpu-worker-protenix
     environment:
-      GPU_WORKER_CAPABILITIES: "protenix"
+      GPU_WORKER_CAPABILITIES: "protenix,mol1"
       MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_PROTENIX:--1}"
       GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_PROTENIX:-}"
 
