@@ -132,17 +132,7 @@ class RelativePositionEncoding(nn.Module):
         }
 
     def generate_relp(self, input_feature_dict: dict[str, Any]) -> dict[str, Any]:
-        """asym_id, residue_index, entity_id, token_index, sym_id
-
-        For chains flagged ``cyclic`` (per token), both the residue offset and
-        the token offset wrap around the ring so head and tail residues are
-        embedded as adjacent: d(i, j) = ((i - j + N//2) mod N) - N//2
-        (AfCycDesign, Rettie 2025). Wrapping only one of the two would leave
-        the other contradicting it with a linear head-to-tail distance. The
-        even-ring distance N/2 follows the floor-mod tie-break (+N/2 maps to
-        -N/2); magnitudes are preserved. All non-cyclic behaviour is identical
-        to the AF3 formulation.
-        """
+        """asym_id, residue_index, entity_id, token_index, sym_id"""
         with torch.no_grad():
             asym_id = input_feature_dict["asym_id"]
             residue_index = input_feature_dict["residue_index"]
@@ -158,65 +148,26 @@ class RelativePositionEncoding(nn.Module):
             ).long()  # [..., N_token, N_token]
             b_same_entity = (
                 entity_id[..., :, None] == entity_id[..., None, :]
-            ).long()
-
-            d_linear = residue_index[..., :, None] - residue_index[..., None, :]
+            ).long()  # [..., N_token, N_token]
             d_residue = torch.clip(
-                input=d_linear + self.r_max,
+                input=residue_index[..., :, None]
+                - residue_index[..., None, :]
+                + self.r_max,
                 min=0,
                 max=2 * self.r_max,
             ) * b_same_chain + (1 - b_same_chain) * (
                 2 * self.r_max + 1
             )  # [..., N_token, N_token]
-
-            cyclic = input_feature_dict.get("cyclic")  # [..., N_token]
-            b_cyclic_pair = None
-            n_pair = None
-            n_res_pair = None
-            if cyclic is not None:
-                cyclic = cyclic.to(asym_id.device)
-                tok_cyclic = cyclic.bool()
-                b_cyclic_pair = (
-                    tok_cyclic[..., :, None] & tok_cyclic[..., None, :]
-                ) & b_same_chain.bool()
-            cyclic_enabled = cyclic is not None and bool(b_cyclic_pair.any())
-            if cyclic_enabled:
-                # Ring size per token. Non-standard residues tokenize per
-                # atom, so the residue-space modulus (distinct residue
-                # count) differs from the token-space one (token count);
-                # each wrap must use the modulus of its own space.
-                n_ring = b_same_chain.sum(dim=-1)
-                n_pair = torch.minimum(n_ring[..., :, None], n_ring[..., None, :])
-                n_res_per_token = torch.zeros_like(asym_id)
-                for c in torch.unique(asym_id):
-                    mask = asym_id == c
-                    n_res_per_token[mask] = torch.unique(
-                        residue_index[mask]).numel()
-                n_res_pair = torch.minimum(
-                    n_res_per_token[..., :, None], n_res_per_token[..., None, :])
-                d_res_wrapped = ((d_linear + n_res_pair // 2) % n_res_pair) - n_res_pair // 2
-                d_cyclic_bin = torch.clip(
-                    input=d_res_wrapped + self.r_max, min=0, max=2 * self.r_max
-                ).long()
-                d_residue = torch.where(b_cyclic_pair, d_cyclic_bin, d_residue.long())
-
             a_rel_pos = F.one_hot(d_residue, 2 * (self.r_max + 1))
-            d_token_linear = token_index[..., :, None] - token_index[..., None, :]
             d_token = torch.clip(
-                input=d_token_linear + self.r_max,
+                input=token_index[..., :, None]
+                - token_index[..., None, :]
+                + self.r_max,
                 min=0,
                 max=2 * self.r_max,
             ) * b_same_chain * b_same_residue + (1 - b_same_chain * b_same_residue) * (
                 2 * self.r_max + 1
-            )
-            if cyclic_enabled:
-                # token 环绕用 token 计数做模数（token 空间自洽），
-                # 与残距环绕（残基计数）各按自身空间取模。
-                d_token_wrapped = ((d_token_linear + n_pair // 2) % n_pair) - n_pair // 2
-                d_token_bin = torch.clip(
-                    input=d_token_wrapped + self.r_max, min=0, max=2 * self.r_max
-                ).long()
-                d_token = torch.where(b_cyclic_pair, d_token_bin, d_token.long())
+            )  # [..., N_token, N_token]
             a_rel_token = F.one_hot(d_token, 2 * (self.r_max + 1))
             d_chain = torch.clip(
                 input=sym_id[..., :, None] - sym_id[..., None, :] + self.s_max,

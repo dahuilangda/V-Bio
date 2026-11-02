@@ -249,12 +249,12 @@ export function WorkflowRuntimeSettingsSection({
   // L-type designs can use standard protenix inference (full model + MSA + templates);
   // D-type requires protenix2dock (mirror/refine workflow).
   const peptideBackendAllowed =
-    normalizedBackend === 'mol1dock' || normalizedBackend === 'protenix2dock' ||
+    normalizedBackend === 'protenix2dock' ||
     normalizedBackend === 'alphafold3' || normalizedBackend === 'mol1' ||
     normalizedBackend === 'protenix';
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
-      onBackendChange('mol1dock');
+      onBackendChange('protenix2dock');
     }
   }, [isPeptideDesignWorkflow, peptideBackendAllowed, onBackendChange]);
   // local mirror for instant clicks; external value changes win
@@ -274,7 +274,7 @@ export function WorkflowRuntimeSettingsSection({
   // constrained rings are Protenix-only; migrate stale selections before submit
   useEffect(() => {
     const supportedNonLinear = new Set([
-      'protenix', 'protenix2dock', 'mol1', 'mol1dock',
+      'protenix', 'protenix2dock', 'mol1',
     ]);
     if (
       isPeptideDesignWorkflow &&
@@ -282,7 +282,7 @@ export function WorkflowRuntimeSettingsSection({
       !supportedNonLinear.has(normalizedBackend) &&
       canEditRuntimeIdentity
     ) {
-      onBackendChange(peptideChirality === 'd' ? 'mol1dock' : 'mol1');
+      onBackendChange('protenix2dock');
     }
   }, [isPeptideDesignWorkflow, peptideDesignMode, peptideChirality, normalizedBackend, canEditRuntimeIdentity, onBackendChange]);
   // rail reference length: range max when set, else the legacy binder length
@@ -900,25 +900,21 @@ export function WorkflowRuntimeSettingsSection({
                   ? (peptideDesignMode !== 'linear'
                       ? (peptideChirality === 'l'
                           ? [
-                              { value: 'mol1dock', label: 'Mol1Dock' },
                               { value: 'protenix2dock', label: 'Protenix2Dock' },
                               { value: 'mol1', label: 'Mol-1 (native)' },
                               { value: 'protenix', label: 'Protenix (native)' }
                             ]
                           : [
-                              { value: 'mol1dock', label: 'Mol1Dock' },
                               { value: 'protenix2dock', label: 'Protenix2Dock' }
                             ])
                       : (peptideChirality === 'l'
                           ? [
                               { value: 'mol1', label: 'Mol-1 (native)' },
-                              { value: 'mol1dock', label: 'Mol1Dock' },
                               { value: 'protenix2dock', label: 'Protenix2Dock' },
                               { value: 'protenix', label: 'Protenix (native)' },
                               { value: 'alphafold3', label: 'AlphaFold3' }
                             ]
                           : [
-                              { value: 'mol1dock', label: 'Mol1Dock' },
                               { value: 'protenix2dock', label: 'Protenix2Dock' },
                               { value: 'alphafold3', label: 'AlphaFold3' }
                             ]))
@@ -1003,7 +999,7 @@ export function WorkflowRuntimeSettingsSection({
                   disabled={!isEditable}
                   >
                   <option value="l">L-peptide (standard)</option>
-                  <option value="d" disabled={normalizedBackend !== 'mol1dock' && normalizedBackend !== 'protenix2dock'}>
+                  <option value="d" disabled={normalizedBackend !== 'protenix2dock'}>
                     D-peptide
                   </option>
                   </select>

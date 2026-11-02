@@ -347,11 +347,7 @@ def register_prediction_routes(
         elif backend in {'mol1', 'mol-1'}:
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
-            # Mol1Dock（盲折叠 + 采集后口袋门槛）的肽设计循环 refine 分发
-            # 接入中，暂以明确提示守卫。
-            if requested_workflow != 'peptide_design':
-                return jsonify({'error': "Backend 'mol1dock' is only available for the peptide_design workflow."}), 400
-            return jsonify({'error': "Backend 'mol1dock' 接入中：环肽模式已验证，设计循环接入即将开放。"}), 400
+            return jsonify({'error': "Backend 'mol1dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400
         elif backend not in ['boltz', 'alphafold3', 'protenix', 'nesso']:
             return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso, boltz2dock, protenix2dock, mol1, mol1dock."}), 400
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
