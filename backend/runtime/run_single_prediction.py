@@ -73,6 +73,7 @@ from backend.core.config import (
     PROTENIX_DOCKER_EXTRA_ARGS,
     PROTENIX_INFER_EXTRA_ARGS,
     PROTENIX_PYTHON_BIN,
+    MOL1_DOCKER_IMAGE,
     PROTENIX_USE_HOST_USER,
     PROTENIX_CONTAINER_APP_DIR,
     PROTENIX_CONTAINER_MODEL_DIR,
@@ -4866,7 +4867,6 @@ def run_mol1_backend(
     use_msa_server: bool,
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
-    msa_mode: str = "auto",
 ) -> None:
     """Mol-1 共折叠引擎（环肽头尾酰胺/二硫原生支持）。
 
@@ -4874,9 +4874,7 @@ def run_mol1_backend(
     平台 yaml -> Mol-1 JSON（cyclic 自动头尾键、modifications CCD 前缀、
     constraints.bond -> covalent_bonds）-> 推理 -> cif + 置信度汇总。
     """
-    import shlex
-
-    mol1_image = "vbio-mol1-runtime:1.0.3"
+    mol1_image = str(MOL1_DOCKER_IMAGE or "").strip()
     ensure_image(mol1_image)
     print("Using Mol-1 backend", file=sys.stderr)
 
@@ -4891,9 +4889,9 @@ def run_mol1_backend(
     with open(yaml_path, "w", encoding="utf-8") as handle:
         handle.write(yaml_content)
 
-    msa_server_url = str(MSA_SERVER_URL or "").strip()
-    if not msa_server_url:
-        msa_server_url = "http://host.docker.internal:8080"
+    msa_server_url = (
+        _assert_msa_server_configured("mol1") if use_msa_server else "")
+    # 与引擎验证批一致：未指定种子时用 101（路由层不对 mol1 注入缺省）
     seed_value = int(seed) if seed is not None else 101
 
     from backend.worker.docker_cmd import image_and_python
@@ -4902,10 +4900,11 @@ def run_mol1_backend(
     mol1_python = "python3.12"  # Mol-1 镜像内的解释器（deadsnakes 3.12）
     import uuid as _uuid
     container_name = f"mol1-predict-{_uuid.uuid4().hex[:12]}"
+    gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
     command = [
         "docker", "run", "--rm", "--name", container_name, "--entrypoint=",
         "--runtime", "nvidia", "--shm-size", "16g",
-        "--gpus", "device=0",
+        "--gpus", gpu_arg,
         "--add-host", "host.docker.internal:host-gateway",
         "--volume", "/data/mol1/common/common:/cache/common:ro",
         "--volume", "/data/mol1/checkpoint:/cache/checkpoint:ro",
@@ -10478,6 +10477,9 @@ def run_peptide_design_backend(
         pocket_author_contacts, pocket_sequence_contacts = (
             _pocket_contacts_for_staged_space(
                 base_yaml_data, options, resolved_target_chain_id))
+        if peptide_backend == "mol1" and pocket_sequence_contacts:
+            raise ValueError(
+                "Mol-1 不支持 pocket 约束；pocket 肽设计请使用 Protenix 后端。")
         # ── Chemistry-informed warm-start seeds (BindCraft motif-grafting) ──
         # When the user provides NO seed sequence but defined a pocket, derive
         # generation-1 anchor sequences from the pocket's amino-acid composition:
@@ -13414,7 +13416,6 @@ def main():
                         use_msa_server=worker_use_msa_server,
                         seed=worker_seed,
                         task_id=worker_task_id,
-                        msa_mode=str(worker_predict_args.get("msa_mode") or "auto"),
                     )
                 elif worker_backend == "protenix":
                     run_protenix_backend(

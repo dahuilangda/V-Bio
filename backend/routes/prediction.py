@@ -327,7 +327,7 @@ def register_prediction_routes(
         backend = str(request.form.get('backend', '')).strip().lower()
         requested_workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
         if not backend:
-            # Defaults per workflow: prediction -> Protenix, peptide design -> Mol1Dock.
+            # Defaults per workflow: prediction -> Protenix, peptide design -> Protenix2Dock.
             backend = 'protenix2dock' if requested_workflow in {'peptide_design'} else 'protenix'
         if backend in {'nesso1', 'nesso-1'}:
             backend = 'nesso'
@@ -339,28 +339,32 @@ def register_prediction_routes(
         # the engine level (target predicted first when not uploaded); they
         # differ only in workflow gating.
         if backend in {'boltz2dock', 'boltz-2-dock'}:
-            return jsonify({'error': "Backend 'boltz2dock' 已下线；肽设计请使用 Mol1Dock 或 Protenix2Dock。"}), 400
+            return jsonify({'error': "Backend 'boltz2dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400
         elif backend in {'protenix2dock', 'protenix-2-dock'}:
             if requested_workflow not in {'peptide_design', 'lead_optimization'}:
                 return jsonify({'error': "Backend 'protenix2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
             backend = 'protenix2dock'
         elif backend in {'mol1', 'mol-1'}:
-            import yaml as _yaml
             try:
-                _y = _yaml.safe_load(request.form.get('yaml_content', '') or '{}')
-                _has_pocket = any(
-                    isinstance(c, dict) and 'pocket' in c
-                    for c in (_y.get('constraints') or [])
-                )
-            except Exception:
-                _has_pocket = False
-            if _has_pocket and requested_workflow in {'peptide_design', 'lead_optimization'}:
+                _y = yaml.safe_load(yaml_content) or {}
+            except yaml.YAMLError as exc:
+                return jsonify({'error': f'Invalid YAML: {exc}'}), 400
+            _opts_raw = request.form.get('peptide_design_options') or ''
+            try:
+                _opts = json.loads(_opts_raw) if _opts_raw else {}
+            except json.JSONDecodeError as exc:
+                return jsonify({'error': f'Invalid peptide_design_options JSON: {exc}'}), 400
+            _has_pocket = any(
+                isinstance(c, dict) and 'pocket' in c
+                for c in (_y.get('constraints') or [])
+            ) or any('pocket' in str(key).lower() for key in _opts)
+            if _has_pocket:
                 return jsonify({'error': "Backend 'mol1' 不支持 pocket 约束；请使用 Protenix2Dock。"}), 400
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
             return jsonify({'error': "Backend 'mol1dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400
         elif backend not in ['boltz', 'alphafold3', 'protenix', 'nesso']:
-            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso, boltz2dock, protenix2dock, mol1, mol1dock."}), 400
+            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso, protenix2dock, mol1."}), 400
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
         if requested_workflow not in {'prediction', 'peptide_design', 'virtual_screening', 'lead_optimization'}:
             return jsonify({
@@ -415,7 +419,7 @@ def register_prediction_routes(
             if low_vram:
                 return jsonify({'error': 'Nesso does not support low-VRAM mode.', 'backend': backend}), 400
 
-        if backend in {'boltz', 'alphafold3', 'protenix', 'boltz2dock', 'protenix2dock'}:
+        if backend in {'boltz', 'alphafold3', 'protenix', 'boltz2dock', 'protenix2dock', 'mol1'}:
             yaml_requires_msa = infer_use_msa_server_from_yaml_text(yaml_content)
             if yaml_requires_msa:
                 msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
@@ -547,6 +551,12 @@ def register_prediction_routes(
         if backend == 'nesso' and custom_ccd_molecules:
             return jsonify({
                 'error': 'Nesso does not support custom CCD residue uploads; use protein sequences and ligand SMILES or standard CCD.',
+                'backend': backend,
+            }), 400
+
+        if backend == 'mol1' and custom_ccd_molecules:
+            return jsonify({
+                'error': 'Mol-1 does not support custom CCD residue uploads; use standard CCD modifications or the Protenix backend.',
                 'backend': backend,
             }), 400
 
