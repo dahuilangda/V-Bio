@@ -328,7 +328,7 @@ def register_prediction_routes(
         requested_workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
         if not backend:
             # Defaults per workflow: prediction -> Protenix, peptide design -> Mol1Dock.
-            backend = 'mol1dock' if requested_workflow in {'peptide_design'} else 'protenix'
+            backend = 'protenix2dock' if requested_workflow in {'peptide_design'} else 'protenix'
         if backend in {'nesso1', 'nesso-1'}:
             backend = 'nesso'
         if requested_workflow in {'peptide', 'peptide_designer', 'designer'}:
@@ -345,6 +345,17 @@ def register_prediction_routes(
                 return jsonify({'error': "Backend 'protenix2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
             backend = 'protenix2dock'
         elif backend in {'mol1', 'mol-1'}:
+            import yaml as _yaml
+            try:
+                _y = _yaml.safe_load(request.form.get('yaml_content', '') or '{}')
+                _has_pocket = any(
+                    isinstance(c, dict) and 'pocket' in c
+                    for c in (_y.get('constraints') or [])
+                )
+            except Exception:
+                _has_pocket = False
+            if _has_pocket and requested_workflow in {'peptide_design', 'lead_optimization'}:
+                return jsonify({'error': "Backend 'mol1' 不支持 pocket 约束；请使用 Protenix2Dock。"}), 400
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
             return jsonify({'error': "Backend 'mol1dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400
