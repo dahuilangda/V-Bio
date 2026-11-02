@@ -83,7 +83,6 @@ export type PredictionBackend =
   | 'alphafold3'
   | 'protenix'
   | 'nesso'
-  | 'mol1dock'
   | 'mol1'
   | 'protenix2dock';
 
@@ -95,7 +94,6 @@ export function normalizePredictionBackend(
     return normalized;
   }
   if (normalized === 'nesso1' || normalized === 'nesso-1') return 'nesso';
-  if (normalized === 'mol1dock' || normalized === 'mol-1-dock') return 'mol1dock';
   if (normalized === 'mol1' || normalized === 'mol-1') return 'mol1';
   if (normalized === 'protenix2dock' || normalized === 'protenix-2-dock') return 'protenix2dock';
   if (normalized === 'boltz' || normalized === 'boltz2' || normalized === 'boltz-2') return 'boltz';

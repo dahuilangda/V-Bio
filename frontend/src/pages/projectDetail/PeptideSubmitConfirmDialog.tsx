@@ -31,7 +31,6 @@ const BACKEND_LABELS: Record<string, string> = {
   boltz: 'Boltz-2',
   nesso: 'Nesso-1',
   mol1: 'Mol-1',
-  mol1dock: 'Mol1Dock'
 };
 
 function backendLabel(backend: string): string {
