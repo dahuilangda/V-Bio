@@ -33,8 +33,6 @@ CPU_CAPABILITIES = {"lead_opt", "peptide_design", "export"}
 _CAPABILITY_ALIASES = {
     "boltz": "boltz2",
     "boltz2": "boltz2",
-    "boltz2dock": "boltz2",
-    "boltz-2-dock": "boltz2",
     "predict_boltz": "boltz2",
     "alphafold3": "alphafold3",
     "af3": "alphafold3",

@@ -689,7 +689,7 @@ export function normalizePredictionBackendStrict(value: unknown): string {
   const token = readText(value).trim().toLowerCase();
   if (token === 'boltz2') return 'boltz';
   if (token === 'nesso1' || token === 'nesso-1') return 'nesso';
-  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'nesso' || token === 'pocketxmol' || token === 'boltz2dock' || token === 'protenix2dock') return token;
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'nesso' || token === 'pocketxmol' || token === 'boltz2dock' || token === 'protenix2dock' || token === 'mol1' || token === 'mol1dock') return token;
   return '';
 }
 
