@@ -1,12 +1,13 @@
-"""mol1_predict 的单元测试：输入转换、连接子寻址、口袋/界面几何。
+"""mol1_predict 的单元测试：输入转换、键校验、MSA 缓存与汇总。
 
-不依赖 GPU 与 Mol-1 包（仅 rdkit/yaml）；引擎的 Mol-1 调用路径由
+不依赖 GPU 与 Mol-1 包（仅 yaml/json）；引擎的 Mol-1 调用路径由
 E2E 冒烟覆盖（README）。
 """
 from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -14,16 +15,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mol1_predict import (  # noqa: E402
-    MolAtom,
+    _cached_a3m_matches,
     _to_mol_bonds,
+    _to_mol_modifications,
     _to_mol_sequences,
-    build_dock_summary,
     collect_summaries,
-    interface_metrics,
-    parse_pocket_res,
-    parse_structure,
-    pocket_contact_report,
-    prepare_custom_linkers,
+    fill_missing_msa,
     yaml_to_mol_jobs,
 )
 
@@ -104,22 +101,7 @@ def test_ligand_and_ion_mapping():
     assert seqs[2]["ion"]["ion"] == "MG"
 
 
-# ------------------------------------------------------------ 双环连接子
-
-def test_prepare_custom_linkers_converts_cif_to_sdf(tmp_path):
-    cif_src = Path("/data/V-Bio/backend/runtime/linker_ccd/SEZ.cif")
-    if not cif_src.exists():
-        pytest.skip("linker ccd fixtures 不在本机")
-    pdbeccdutils = pytest.importorskip("pdbeccdutils")
-    work = tmp_path / "work"
-    work.mkdir()
-    jobs = [{"name": "t", "sequences": [
-        {"ligand": {"ligand": "CCD_SEZ", "count": 1}}], "covalent_bonds": []}]
-    prepare_custom_linkers(jobs, work, "/data/V-Bio/backend/runtime/linker_ccd")
-    lig = jobs[0]["sequences"][0]["ligand"]["ligand"]
-    assert lig.startswith("FILE_") and lig.endswith("SEZ.sdf")
-    assert Path(lig[len("FILE_"):]).exists()
-
+# ------------------------------------------------------------ 键与修饰校验
 
 def test_bicyclic_bond_payload_passthrough():
     bonds = _to_mol_bonds([
@@ -128,90 +110,89 @@ def test_bicyclic_bond_payload_passthrough():
     assert bonds[0]["atom1"] == "SG" and bonds[0]["entity2"] == "3"
 
 
-# ------------------------------------------------------------ 几何与汇总
-
-def _atom(chain, resid, name, elem, x, y, z):
-    return MolAtom(chain, resid, "ALA", name, elem, x, y, z)
-
-
-def test_pocket_contact_report():
-    atoms = [
-        _atom("A", 18, "CA", "C", 0.0, 0.0, 0.0),
-        _atom("A", 99, "CA", "C", 50.0, 0.0, 0.0),
-        _atom("B", 1, "CA", "C", 1.0, 0.0, 0.0),
-    ]
-    rep = pocket_contact_report(atoms, "B", [("A", 18)], 6.0)
-    assert rep["pocket_min"] == pytest.approx(1.0, abs=1e-6)
-    assert rep["pocket_pass"] is True
-    rep_far = pocket_contact_report(atoms, "B", [("A", 99)], 6.0)
-    assert rep_far["pocket_pass"] is False
+def test_bond_missing_required_key_raises():
+    with pytest.raises(ValueError, match="missing required keys"):
+        _to_mol_bonds([{"entity1": 2, "position1": 1, "atom1": "SG",
+                        "entity2": 3, "position2": 1}])
 
 
-def test_interface_metrics_counts_clash_and_hbond():
-    atoms = [
-        # 受体
-        _atom("A", 1, "O", "O", 0.0, 0.0, 0.0),
-        _atom("A", 2, "CA", "C", 8.0, 0.0, 0.0),
-        # 肽：一个 1.0Å 的 O-O 接触（clash 且计氢键）、一个 3.0Å 的 N-O、一个远处
-        _atom("B", 1, "O", "O", 1.0, 0.0, 0.0),
-        _atom("B", 2, "N", "N", 3.0, 0.0, 0.0),
-        _atom("B", 3, "CA", "C", 30.0, 0.0, 0.0),
-    ]
-    m = interface_metrics(atoms, "B")
-    assert m["interface_min_dist"] == pytest.approx(1.0, abs=1e-6)
-    assert m["interface_clash_pairs"] == 1
-    assert m["n_interface_hbonds"] == 2
+def test_modification_missing_field_raises():
+    with pytest.raises(ValueError, match="missing ccd/position"):
+        _to_mol_modifications([{"position": 1}])
+    with pytest.raises(ValueError, match="must be a mapping"):
+        _to_mol_modifications(["PCA"])
 
 
-def test_parse_pocket_res():
-    assert parse_pocket_res("A:18, A:76") == [("A", 18), ("A", 76)]
-    assert parse_pocket_res("") == []
+def test_cyclic_multi_id_raises(tmp_path):
+    yaml_text = """
+name: t
+sequences:
+  - protein:
+      id: [B, C]
+      count: 2
+      sequence: ACDEFGHIKL
+      cyclic: true
+"""
+    p = tmp_path / "t.yaml"
+    p.write_text(yaml_text)
+    with pytest.raises(ValueError, match="exactly one id"):
+        yaml_to_mol_jobs(p)
 
 
-def test_build_dock_summary_shape(tmp_path):
-    conf = {"ranking_score": 0.9, "iptm": 0.8, "ptm": 0.7, "plddt": 90.0,
-            "sample": 0}
+# ------------------------------------------------------------ MSA 缓存
+
+def _write_a3m(path: Path, first_seq: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# a3m\n>query\n{first_seq}\n>seq1\n{first_seq}\n")
+
+
+def test_cached_a3m_requires_content_match(tmp_path):
+    seq = "IVGGWECEKHSQPWQAV"
+    good = tmp_path / "good.a3m"
+    _write_a3m(good, seq)
+    assert _cached_a3m_matches(good, seq)
+    # 小写插入列剔除后比对
+    with_ins = tmp_path / "ins.a3m"
+    with_ins.write_text(">query\n" + "".join(ch + "i" for ch in seq) + "\n")
+    assert _cached_a3m_matches(with_ins, seq)
+    # 同长不同序列：长度校验放行的错缓存，内容比对必须拒绝
+    other = tmp_path / "other.a3m"
+    _write_a3m(other, "IVGGWECEKHSQPWQAA")
+    assert not _cached_a3m_matches(other, seq)
+
+
+def test_msa_search_failure_raises(tmp_path, monkeypatch):
+    fake = types.ModuleType("mol.runner.msa_search")
+    fake.msa_search = lambda seqs, out: []
+    monkeypatch.setitem(sys.modules, "mol.runner.msa_search", fake)
+    jobs = [{"name": "t", "sequences": [
+        {"proteinChain": {"sequence": "IVGGWECEKHSQPWQAVYSHGWAHCGGV",
+                          "count": 1, "id": ["A"]}}], "covalent_bonds": []}]
+    with pytest.raises(RuntimeError, match="msa_search returned no result"):
+        fill_missing_msa(jobs, tmp_path, None)
+
+
+def test_short_chain_uses_self_a3m(tmp_path):
+    jobs = [{"name": "t", "sequences": [
+        {"proteinChain": {"sequence": "ACDEFGHIKL", "count": 1,
+                          "id": ["B"]}}], "covalent_bonds": []}]
+    fill_missing_msa(jobs, tmp_path, None)
+    path = Path(jobs[0]["sequences"][0]["proteinChain"]["unpairedMsaPath"])
+    assert path.read_text() == ">query_0\nACDEFGHIKL\n"
+
+
+# ------------------------------------------------------------ 汇总
+
+def test_collect_summaries_reports_skipped(tmp_path):
     out = tmp_path / "out" / "job" / "seed_101" / "predictions"
     out.mkdir(parents=True)
-    cif = out / "job_sample_0.cif"
-    cif.write_text("data_x\n")
-    conf_file = out / "job_summary_confidence_sample_0.json"
-    conf_file.write_text(json.dumps(conf))
-    summaries = collect_summaries(tmp_path / "out")
+    conf = {"ranking_score": 0.9, "iptm": 0.8, "ptm": 0.7, "plddt": 90.0}
+    (out / "job_sample_0.cif").write_text("data_x\n")
+    (out / "job_summary_confidence_sample_0.json").write_text(json.dumps(conf))
+    broken = out / "job_summary_confidence_sample_1.json"
+    broken.write_text("{not json")
+    summaries, skipped = collect_summaries(tmp_path / "out")
     assert len(summaries) == 1
-    summary = build_dock_summary(summaries, tmp_path / "out", "peptide",
-                                 [("A", 18)], 6.0)
-    assert summary["engine"] == "mol1dock"
-    assert summary["n_confidences"] == 1
-    row = summary["best"]
-    assert row["ranking_score"] == 0.9
-    assert "interface_min_dist" in row and "pocket" in row
-
-
-def test_apply_d_chirality_conversion(tmp_path):
-    """D 肽逐位 D-CCD 修饰：G 跳过、已有修饰保留、受体链不动。"""
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from mol1_predict import apply_d_chirality  # noqa: E402
-
-    jobs = [{"name": "t", "sequences": [
-        {"proteinChain": {"sequence": "AGKLMNPQRSTVWYEDC", "count": 1,
-                          "id": ["B"],
-                          "modifications": [{"ptmType": "CCD_PCA",
-                                             "ptmPosition": 2}]}},
-        {"proteinChain": {"sequence": "IVGG", "count": 1, "id": ["A"]}},
-    ], "covalent_bonds": []}]
-    apply_d_chirality(jobs, "B")
-    mods = {m["ptmPosition"]: m["ptmType"]
-            for m in jobs[0]["sequences"][0]["proteinChain"]["modifications"]}
-    assert mods[1] == "CCD_DAL"          # A -> DAL
-    assert mods[2] == "CCD_PCA"          # 用户修饰保留
-    assert mods[5] == "CCD_MED"          # M -> MED
-    assert mods[6] == "CCD_DSG"          # N -> DSG（非 DSN）
-    assert mods[8] == "CCD_DGN"          # Q -> DGN
-    assert mods[17] == "CCD_DCY"         # C -> DCY
-    # 序列 AGKLMNPQRSTVWYEDC 中 G 在位 2，被 PCA 修饰覆盖保留；
-    # 其余 G 无（逐位断言见上）
-    # 受体链 A 不转换
-    a_mods = jobs[0]["sequences"][1]["proteinChain"].get("modifications")
-    assert not a_mods
+    assert summaries[0]["confidence"]["ranking_score"] == 0.9
+    assert summaries[0]["cif"].endswith("job_sample_0.cif")
+    assert skipped == [str(broken)]

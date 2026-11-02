@@ -6,7 +6,7 @@
 
 输入二选一：
   --yaml       平台设计 yaml（constraints.bond / modifications 等平台约定）
-  --input-json Mol-1 推理 JSON（AF3 server 风格，顶层为 list）
+  --input-json Mol-1 推理 JSON（AF3 server 风格，顶层为 list，单个 dict 亦接受）
 
 支持：
   modifications {position, ccd}   -> {ptmType: "CCD_<ccd>", ptmPosition}
@@ -28,7 +28,6 @@ import hashlib
 import subprocess
 import json
 import os
-import sys
 from pathlib import Path
 
 import yaml
@@ -40,12 +39,13 @@ def _to_mol_modifications(mods: list | None) -> list[dict]:
     out = []
     for m in mods or []:
         if not isinstance(m, dict):
-            continue
+            raise ValueError(f"modification entry must be a mapping: {m!r}")
         ccd = str(m.get("ccd") or m.get("ptmType") or "").strip().upper()
         ccd = ccd[4:] if ccd.startswith("CCD_") else ccd
         pos = int(m.get("position") or m.get("ptmPosition") or 0)
-        if ccd and pos > 0:
-            out.append({"ptmType": f"CCD_{ccd}", "ptmPosition": pos})
+        if not ccd or pos <= 0:
+            raise ValueError(f"modification missing ccd/position: {m!r}")
+        out.append({"ptmType": f"CCD_{ccd}", "ptmPosition": pos})
     return out
 
 
@@ -106,19 +106,23 @@ def _to_mol_sequences(sequences: list[dict]) -> list[dict]:
 
 
 def _to_mol_bonds(bonds: list[dict] | None) -> list[dict]:
+    required = ("entity1", "position1", "atom1", "entity2", "position2", "atom2")
     out = []
     for b in bonds or []:
         if not isinstance(b, dict):
-            continue
+            raise ValueError(f"bond entry must be a mapping: {b!r}")
+        missing = [k for k in required if b.get(k) in (None, "")]
+        if missing:
+            raise ValueError(f"bond missing required keys {missing}: {b!r}")
         out.append({
-            "entity1": str(b.get("entity1", "")),
+            "entity1": str(b["entity1"]),
             "copy1": int(b["copy1"]) if b.get("copy1") is not None else 1,
-            "position1": str(b.get("position1", "")),
-            "atom1": str(b.get("atom1", "")),
-            "entity2": str(b.get("entity2", "")),
+            "position1": str(b["position1"]),
+            "atom1": str(b["atom1"]),
+            "entity2": str(b["entity2"]),
             "copy2": int(b["copy2"]) if b.get("copy2") is not None else 1,
-            "position2": str(b.get("position2", "")),
-            "atom2": str(b.get("atom2", "")),
+            "position2": str(b["position2"]),
+            "atom2": str(b["atom2"]),
         })
     return out
 
@@ -163,12 +167,13 @@ def yaml_to_mol_jobs(yaml_path: Path) -> list[dict]:
                 seq = str(info.get("sequence") or "").strip().upper()
                 if not seq:
                     raise ValueError("cyclic chain has empty sequence")
-                chain_id = info["id"][0]
+                ids = _to_mol_id_list(info.get("id"))
+                if len(ids) != 1:
+                    raise ValueError(f"cyclic chain must have exactly one id: {ids}")
                 explicit_bonds.append({"bond": {
-                    "atom1": [chain_id, 1, "N"],
-                    "atom2": [chain_id, len(seq), "C"],
+                    "atom1": [ids[0], 1, "N"],
+                    "atom2": [ids[0], len(seq), "C"],
                 }})
-            kind = "proteinChain"
         elif kind == "dna":
             kind = "dnaSequence"
         elif kind == "rna":
@@ -227,15 +232,17 @@ def _seq_md5(seq: str) -> str:
 
 
 def _cached_a3m_matches(path: Path, seq: str) -> bool:
+    """缓存首条序列（去小写插入与 gap）与目标序列内容一致才算命中。"""
     try:
-        for line in path.read_text(errors="replace").splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or s.startswith(">"):
-                continue
-            aligned = "".join(ch for ch in s if not ch.islower())
-            return len(aligned) == len(seq)
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return False
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith(">"):
+            continue
+        aligned = "".join(ch for ch in s if not ch.islower() and ch != "-")
+        return aligned == _sanitize_for_msa_key(seq)
     return False
 
 
@@ -258,12 +265,14 @@ def fill_missing_msa(jobs: list[dict], work_dir: Path,
                      msa_server_url: str | None) -> None:
     """为缺 MSA 的受体链跑 colabfold 搜索并回填路径。
 
-    短链（<=25aa）不搜（colabfold 对过短序列报错），回退为自体 a3m
-    （仅含查询自身的最小合法 a3m）。
+    短链（<=25aa）不搜（colabfold 对过短序列报错），用仅含查询自身的
+    自体 a3m。长链搜索失败直接报错终止，不用自体 a3m 兜底（错误的
+    MSA 比失败更有害）。
     """
     a3m_dir = work_dir / "self_msa"
     a3m_dir.mkdir(parents=True, exist_ok=True)
     idx = 0
+    patched = False
     for job in jobs:
         for entry in job["sequences"]:
             entity = entry.get("proteinChain")
@@ -278,23 +287,22 @@ def fill_missing_msa(jobs: list[dict], work_dir: Path,
                     entity["unpairedMsaPath"] = str(cached[0])
                     idx += 1
                     continue
-                patch_msa_server(msa_server_url)
+                if not patched:
+                    patch_msa_server(msa_server_url)
+                    patched = True
                 from mol.runner.msa_search import msa_search
-                try:
-                    res_dirs = msa_search([seq], str(chain_dir))
-                    chain_dir_out = res_dirs[0] if res_dirs else None
-                except Exception as exc:
-                    print(f"[mol1] MSA search failed: {exc}", file=sys.stderr)
-                    chain_dir_out = None
-                hits = []
-                if chain_dir_out:
-                    hits = [p for p in sorted(
-                        Path(chain_dir_out).glob("**/non_pairing.a3m"))
-                        if p.stat().st_size > 0]
-                if hits:
-                    entity["unpairedMsaPath"] = str(hits[0])
-                    idx += 1
-                    continue
+                res_dirs = msa_search([seq], str(chain_dir))
+                if not res_dirs:
+                    raise RuntimeError(f"msa_search returned no result for {seq[:24]}")
+                hits = [p for p in sorted(
+                    Path(res_dirs[0]).glob("**/non_pairing.a3m"))
+                    if p.stat().st_size > 0]
+                if not hits:
+                    raise RuntimeError(
+                        f"msa_search produced empty non_pairing.a3m for {seq[:24]}")
+                entity["unpairedMsaPath"] = str(hits[0])
+                idx += 1
+                continue
             self_a3m = a3m_dir / f"self_{idx}.a3m"
             self_a3m.write_text(f">query_0\n{seq}\n")
             entity["unpairedMsaPath"] = str(self_a3m)
@@ -302,6 +310,7 @@ def fill_missing_msa(jobs: list[dict], work_dir: Path,
 
 
 def patch_msa_server(url: str | None) -> None:
+    """colabfold 客户端从模块全局读服务地址、没有参数入口，只能改写全局。"""
     if not url:
         return
     import mol.web_service.colab_request_parser as parser
@@ -330,21 +339,24 @@ def run_inference(input_json: Path, output_dir: Path, seed: int,
         raise RuntimeError(f"mol inference exited {result.returncode}")
 
 
-def collect_summaries(output_dir: Path) -> list[dict]:
-    summaries = []
+def collect_summaries(output_dir: Path) -> tuple[list[dict], list[str]]:
+    """读全部样本置信度；损坏文件不进结果，路径返回给调用方显式上报。"""
+    summaries, skipped = [], []
     for conf in sorted(output_dir.glob(
             "*/seed_*/predictions/*summary_confidence*.json")):
         try:
             data = json.loads(conf.read_text())
         except (json.JSONDecodeError, OSError):
+            skipped.append(str(conf))
             continue
-        cif = conf.parent / conf.name.replace("_summary_confidence", "")
+        cif = conf.parent / conf.name.replace(
+            "_summary_confidence", "").replace(".json", ".cif")
         summaries.append({
             "seed": conf.parent.parent.name,
             "confidence": data,
             "cif": str(cif) if cif.exists() else None,
         })
-    return summaries
+    return summaries, skipped
 
 
 def main() -> None:
@@ -353,7 +365,8 @@ def main() -> None:
     src.add_argument("--yaml", help="平台设计 yaml")
     src.add_argument("--input-json", help="Mol-1 推理 JSON（顶层 list）")
     ap.add_argument("--output-dir", required=True)
-    ap.add_argument("--work-dir", default=None)
+    ap.add_argument("--work-dir", default=None,
+                    help="中间产物目录（默认 output-dir 同级 work/）")
     ap.add_argument("--seed", type=int, default=101)
     ap.add_argument("--checkpoint-dir", default=os.environ.get(
         "MOL_CHECKPOINT_DIR", "/cache/checkpoint"))
@@ -389,11 +402,12 @@ def main() -> None:
     run_inference(input_json, output_dir, args.seed, args.checkpoint_dir,
                   use_msa=not args.no_msa, atom_confidence=args.atom_confidence)
 
-    summaries = collect_summaries(output_dir)
+    summaries, skipped = collect_summaries(output_dir)
     summary = {
         "engine": "mol1",
         "input": str(input_json),
         "n_summaries": len(summaries),
+        "skipped": skipped,
         "best": (max(summaries, key=lambda s: s["confidence"].get("ranking_score", 0))
                  if summaries else None),
         "summaries": summaries,
