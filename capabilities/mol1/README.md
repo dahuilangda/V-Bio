@@ -37,10 +37,11 @@ unpaired 语义）；未命中走 Mol-1 内置 colabfold 搜索，服务地址�
 docker run --rm --entrypoint= --gpus device=0 \
   -v /data/mol1:/cache:ro \
   -v /data/boltz_msa_cache:/data/msa_cache:ro \
+  -v $INPUT_DIR:$INPUT_DIR:ro \
   -v $WORK:$WORK -v $OUT:$OUT --shm-size 16g \
-  vbio-mol1-runtime:1.0.0 \
-  python3.12 /workspace/mol1_predict.py \
-    --yaml /inputs/task.yaml --output-dir $OUT \
+  vbio-mol1-runtime:1.0.3 \
+  python3.12 /workspace/capabilities/mol1/mol1_predict.py \
+    --yaml $INPUT_DIR/task.yaml --output-dir $OUT \
     --seed 101
 ```
 
@@ -49,60 +50,3 @@ docker run --rm --entrypoint= --gpus device=0 \
 
 输出 `<output-dir>/summary.json`：每个 seed 的置信度 JSON 与 cif 路径，
 `best` 按 ranking_score 取最优。
-
-## mol1dock（peptide 模式）
-
-```bash
-python3.12 mol1_predict.py --input-json task.json \
-    --output-dir $OUT --work-dir $WORK \
-    --mode peptide --peptide-chain B --samples 3 --seeds 101,102 \
-    --pocket-res 'A:57,A:189' --pocket-max-dist 6.0 \
-    --linker-ccd-dir /workspace/linker_ccd
-```
-
-- 多 seed/多样本，summary 字段与 protenix2dock 对齐（confidences/best/
-  best_by_interface/n_geometrically_clean，附 interface_min_dist/
-  interface_clash_pairs/n_interface_hbonds/pocket 报告）
-- pocket 为采集后门槛与评分信号（Mol-1 无推理期 pocket 引导）——与平台
-  blind 路线协议一致；口袋残基须用 Mol-1 输出 cif 的编号（每实体 1..L 重
-  编号，与输入 yaml 编号可能错位，unmatched 会显式列出）
-- 平台自定义连接子（SEZ/29N/BS3）：cif 不在 Mol-1 官方 components.cif 中，
-  引擎自含解析（atom/bond 表 + ideal 坐标）转 SDF，bond 原子名经
-  AtomMapNum 重映射为序号——Mol-1 对 FILE_ 配体会丢弃原原子名
-
-### 实测边界（KLK2 充分测试：12 环肽候选 x 60 样本；双环 + SEZ）
-
-环肽相对位置编码已按环形距离计算（残距与 token 双路环绕，各自按
-残基/token 空间取模），环内含修饰残基（逐原子 token 化）时模数自动区分。
-
-| 维度 | Mol-1（cyclic offset 后） | protenix2dock（staged + TFG 钉住） |
-|---|---|---|
-| 头尾键闭合率 | **100%**（60/60，无外力） | 100%（TFG 硬约束） |
-| 头尾中位距离 | **1.36 A**（精确酰胺键长） | 1.38-1.83 A |
-| Rama 离群（Top8000） | **0.4%**（全闭环下的真实环张力） | 7.1% |
-| ranking 均值 | **0.737** | 0.720 |
-| pocket 模式 | 5/5 pass（S1 口袋 2.7 A） | 采集后过滤同构 |
-| 双环 SEZ | 桥键以原子重叠满足（退化），ranking ~0.39 | ranking 0.915 |
-
-## D 肽镜像工作流（mol1dock）
-
-D 肽设计采用与 Protenix2Dock 相同的镜像靶方案，外加 Mol-1 原生的
-结构条件化扩散（`structure_condition`）：
-
-1. 镜像受体结构（x -> -x，链/残基编号不变）；
-2. 以镜像受体为参考做**条件化扩散**：`--restraint-mode pin` 时受体原子
-   每步重加噪到当前噪声水平（末步收敛到参考坐标）；`guide` 模式改为
-   谐波拉伸，允许受体小幅调整。肽链无约束，自由折叠；
-3. 输出复合物整体 x -> -x 翻回，肽恢复 D 手性、受体恢复 L。
-
-实测（KLK2 12 环肽候选 x 镜像受体 pin 模式，60 样本）：
-受体原子相对镜像参考的平均偏差 0.001-0.070 A（钉住生效）；
-头尾闭合 60/60，中位 1.25-1.44 A；镜像 phi/psi 75% 落回 L 允许区
-（D 手性确认）。
-
-修复前（无环绕）头尾闭合率仅 20%、中位 3.8 A；环绕后从根源解决。
-
-**结论**：
-1. 环肽模式生产可用：盲折叠即可全闭合且构象质量优于 protenix2dock。
-2. 双环仍以 protenix2dock 为主引擎；Mol-1 定位为环肽候选的快速共折叠
-   引擎与交叉验证。
