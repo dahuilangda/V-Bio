@@ -2,7 +2,7 @@
 # 构建（HTTP_PROXY 为构建期拉取 pip/apt 的代理，不影响运行时）:
 #   docker build --build-arg HTTP_PROXY=http://172.16.34.31:2080 \
 #     --build-arg HTTPS_PROXY=http://172.16.34.31:2080 \
-#     -t vbio-mol1-runtime:1.0.0 .
+#     -t vbio-mol1-runtime:1.0.3 .
 # 说明: 基础镜像为 runtime 版（无 nvcc），fused LayerNorm 扩展不可编译，
 # 引擎脚本以 LAYERNORM_TYPE=torch 运行 PyTorch 实现（与 boltz2score 的
 # --no_kernels 同理，24GB 卡上更稳）。
