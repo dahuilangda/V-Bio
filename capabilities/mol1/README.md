@@ -70,12 +70,19 @@ python3.12 mol1_predict.py --input-json task.json \
   引擎自含解析（atom/bond 表 + ideal 坐标）转 SDF，bond 原子名经
   AtomMapNum 重映射为序号——Mol-1 对 FILE_ 配体会丢弃原原子名
 
-### 实测边界（KLK2 + 10aa 头尾环肽；TTR + 15aa 双环 + SEZ）
+### 实测边界（KLK2 充分测试：12 环肽候选 x 60 样本；双环 + SEZ）
 
-| 模式 | 结果 | 结论 |
+| 维度 | Mol-1（盲折叠） | protenix2dock（staged + TFG 钉住） |
 |---|---|---|
-| 环肽（头尾酰胺） | ranking 0.870 / ipTM 0.849，头尾键 5/5 自闭合（无 TFG），Rama 离群 0/40 | **生产可用** |
-| 双环（SEZ 三桥） | ranking ~0.39，桥键以原子重叠方式满足（0.0 Å），有 clash | **实验性**：键满足退化，置信度显著低于 protenix2dock 完整管线（staged pose + TFG + 钉住） |
+| 环肽 ranking 均值 | **0.783**（闭合子集 0.825） | 0.731 |
+| 头尾键闭合率 | **20%**（12/60；小环 10aa 高，14aa 低） | 100%（TFG 硬约束） |
+| Rama 离群（Top8000） | 闭合子集 **0.0%** | 7.1% |
+| pocket 模式 | 5/5 pass（S1 口袋 2.7 Å，编号匹配） | 采集后过滤同构 |
+| 双环 SEZ | 桥键以原子重叠满足（退化），ranking ~0.39 | ranking 0.915 |
 
-定位：Mol-1 引擎作为**环肽候选的快速无约束共折叠参考**与第二引擎交叉
-验证；双环候选仍以 protenix2dock 为主引擎。
+**结论**：
+1. Mol-1 闭环子集的构象质量（Rama 0%、ranking 0.825）优于 protenix2dock，
+   但盲折叠的键闭合率仅 20%——**生产用法：多样本（>=10）+ 头尾闭合过滤
+   （<=2.5 A），只取闭合子集**。
+2. 双环仍以 protenix2dock 为主引擎；Mol-1 定位为环肽候选的快速共折叠
+   参考与交叉验证引擎。
