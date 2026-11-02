@@ -16,6 +16,7 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     "boltz2score",
     "lead_opt",
     "peptide_design",
+    "mol1",
     "export",
 )
 
@@ -206,6 +207,10 @@ def capability_from_prediction_backend(backend: str | None) -> str:
         # protenix2dock parents (D-peptide loop) run on the protenix worker,
         # which has the docker CLI for its conformer sub-steps.
         return normalized
+    if normalized in {"mol1dock", "mol-1-dock"}:
+        # 已下线的 mol1dock 历史任务行仍按 mol1 能力归队。
+        return "mol1"
+    # 其余旧任务行无法判定能力，落回 boltz2 队列。
     return "boltz2"
 
 
