@@ -204,12 +204,17 @@ def sample_diffusion(
     sc_pull = input_feature_dict.pop("structure_condition_pull", None)
     structure_condition = None
     if sc_coords is not None and sc_mask is not None:
+        free_idx = (sc_mask == 0).any(dim=-1).nonzero(as_tuple=True)[0] if sc_mask.dim() > 1 else (sc_mask == 0).nonzero(as_tuple=True)[0]
+        pin_idx = (sc_mask == 1).any(dim=-1).nonzero(as_tuple=True)[0] if sc_mask.dim() > 1 else (sc_mask == 1).nonzero(as_tuple=True)[0]
         structure_condition = {
             "coords": sc_coords.to(device=device, dtype=dtype),
             "mask": sc_mask.to(device=device, dtype=dtype),
             "mode": (sc_mode.reshape(-1)[0].item() if sc_mode is not None else 0),
             "pull": (float(sc_pull.reshape(-1)[0].item())
                      if sc_pull is not None else 0.5),
+            "free_idx": free_idx,
+            "pin_idx": pin_idx,
+            "vdw_floor": 3.1,
         }
 
     def _chunk_sample_diffusion(chunk_n_sample, inplace_safe):
@@ -287,6 +292,22 @@ def sample_diffusion(
                 else:
                     # guide：谐波拉伸，受体可小幅调整但被拉向参考构象
                     x_l = x_l + m * structure_condition["pull"] * (ref - x_l)
+
+            # VDW 壳层投影：最后一个去噪步后，把自由原子推离钉住原子的 VDW 冲突区
+            if structure_condition is not None:
+                vdw_floor = structure_condition.get("vdw_floor", 3.1)
+                free_idx = structure_condition.get("free_idx")
+                pin_idx = structure_condition.get("pin_idx")
+                if free_idx is not None and pin_idx is not None and \
+                        len(free_idx) > 0 and len(pin_idx) > 0:
+                    fc = x_l[..., free_idx, :]
+                    pc = x_l[..., pin_idx, :]
+                    dm = (fc[..., :, None, :] - pc[..., None, :, :]).norm(dim=-1)
+                    violation = (vdw_floor - dm).clamp(min=0)
+                    direction = fc[..., :, None, :] - pc[..., None, :, :]
+                    dn = direction.norm(dim=-1).clamp(min=1e-6)
+                    push_vec = direction / dn[..., None] * violation[..., None]
+                    x_l[..., free_idx, :] = x_l[..., free_idx, :] + push_vec.sum(dim=-2)
 
         return x_l
 
