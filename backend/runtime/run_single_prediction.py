@@ -4911,6 +4911,7 @@ def run_mol1_backend(
         "--volume", "/data/mol1/checkpoint:/cache/checkpoint:ro",
         "--volume", f"{MSA_CACHE_CONFIG['cache_dir']}:/data/msa_cache:ro",
         "--volume", "/data/V-Bio:/workspace/vbio:ro",
+        "--volume", "/data/V-Bio/capabilities/mol1/Mol-1-source:/workspace/Mol-1:ro",
         "--volume", f"{RESULTS_BASE_DIR}:{RESULTS_BASE_DIR}",
         "--volume", f"{yaml_path}:{yaml_path}",
         "-w", "/workspace/vbio/capabilities/mol1",
