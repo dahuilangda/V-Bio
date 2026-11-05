@@ -245,7 +245,10 @@ class ProjectTaskStore:
                 self.postgrest.request(
                     "PATCH",
                     "project_tasks",
-                    query={"task_id": f"eq.{task_id}"},
+                    query={
+                        "task_id": f"eq.{task_id}",
+                        "project_id": f"eq.{project_id}",
+                    },
                     payload={
                         "task_state": row_state,
                         "status_text": "Task completed successfully"

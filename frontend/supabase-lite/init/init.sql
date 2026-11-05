@@ -799,6 +799,8 @@ create index if not exists idx_projects_deleted_at on public.projects (deleted_a
 create index if not exists idx_project_tasks_project_id on public.project_tasks (project_id, created_at desc);
 create index if not exists idx_project_tasks_project_state on public.project_tasks (project_id, task_state);
 create index if not exists idx_project_tasks_task_id on public.project_tasks (task_id);
+-- 运行时任务 id 的唯一部分索引: gateway 快照插入与 UI DRAFT 行挂接 task_id 都依赖它去重
+create unique index if not exists uniq_project_tasks_task_id on public.project_tasks (task_id) where task_id <> '';
 
 create or replace function public.strip_task_components_for_storage(input jsonb)
 returns jsonb

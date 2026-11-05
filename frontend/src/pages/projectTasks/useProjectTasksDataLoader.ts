@@ -747,7 +747,8 @@ export function useProjectTasksDataLoader({
     if (workspaceView !== 'tasks') return;
     const projectRow = projectRef.current;
     if (!projectRow) return;
-    if (normalizeWorkflowKey(projectRow.task_type) !== 'prediction') return;
+    // peptide_design 的 API 行同样需要回填 structure_name/confidence（API 提交无浏览器会话）
+    if (!['prediction', 'peptide_design'].includes(normalizeWorkflowKey(projectRow.task_type))) return;
     const currentRows = sanitizeTaskRows(tasksRef.current);
     if (currentRows.length === 0) return;
 
