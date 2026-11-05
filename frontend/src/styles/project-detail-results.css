@@ -386,6 +386,12 @@
   text-align: center;
 }
 
+.peptide-result-table.lead-opt-result-table .col-len {
+  width: 76px !important;
+  min-width: 76px !important;
+  text-align: center;
+}
+
 .peptide-result-table.lead-opt-result-table .col-delta {
   width: 100px !important;
   min-width: 100px !important;
@@ -430,6 +436,12 @@
 }
 
 .peptide-result-table .col-n {
+  width: 76px;
+  min-width: 76px;
+  text-align: center;
+}
+
+.peptide-result-table .col-len {
   width: 76px;
   min-width: 76px;
   text-align: center;
