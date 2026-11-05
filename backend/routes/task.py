@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,84 @@ from backend.runtime import peptide_archive_layout
 
 # A 200-compound ranking is a few hundred KB; 32 MB bounds decompression of a crafted member.
 SCREENING_JSON_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _pick_structure_name_from_archive(zip_path: str) -> str:
+    """Best structure member basename: ranked picks first, then any cif/pdb."""
+    best_ranked = None
+    first_sample = None
+    first_any = None
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                lower = member.lower()
+                if not (lower.endswith(".cif") or lower.endswith(".pdb")):
+                    continue
+                base = os.path.basename(member.rstrip("/"))
+                if not base:
+                    continue
+                if first_any is None:
+                    first_any = base
+                m = re.search(r"rank_(\d+)", base)
+                if m:
+                    rank_no = int(m.group(1))
+                    if best_ranked is None or rank_no < best_ranked[0]:
+                        best_ranked = (rank_no, base)
+                if first_sample is None and "_sample_0." in lower:
+                    first_sample = base
+    except (OSError, zipfile.BadZipFile):
+        return ""
+    return (best_ranked or (None, first_sample or first_any or ""))[1]
+
+
+def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> None:
+    """Mirror terminal state into project_tasks when the row exists.
+
+    API-submitted tasks have no browser session to backfill completed_at /
+    structure_name; the upload endpoint is the one server-side point that
+    observes real completion, so the write happens here. Best-effort: any
+    failure is logged and ignored so the upload itself never fails.
+    """
+    database_url = os.environ.get("VBIO_MONITOR_DATABASE_URL", "").strip()
+    if not database_url:
+        return
+    try:
+        import psycopg2
+
+        structure_name = _pick_structure_name_from_archive(zip_path)
+        with psycopg2.connect(database_url, connect_timeout=5,
+                              application_name="vbio-upload-result") as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT submitted_at FROM project_tasks "
+                    "WHERE task_id = %s AND task_id <> ''",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return
+                submitted_at = row[0]
+                cur.execute(
+                    "UPDATE project_tasks SET "
+                    "task_state = 'SUCCESS', "
+                    "status_text = 'Task completed successfully.', "
+                    "completed_at = NOW(), "
+                    "duration_seconds = CASE WHEN %s::timestamptz IS NULL THEN NULL "
+                    "ELSE EXTRACT(EPOCH FROM (NOW() - %s::timestamptz)) END, "
+                    "structure_name = CASE WHEN %s = '' THEN %s ELSE structure_name END, "
+                    "updated_at = NOW() "
+                    "WHERE task_id = %s AND task_id <> '' "
+                    "AND task_state <> 'SUCCESS'",
+                    (submitted_at, submitted_at, structure_name, structure_name, task_id),
+                )
+        logger_.info(
+            "Synced project_tasks terminal state for task %s (structure=%s).",
+            task_id, structure_name or "-",
+        )
+    except Exception as exc:
+        logger_.warning(
+            "project_tasks terminal sync skipped for task %s: %s", task_id, exc,
+        )
 
 
 def register_task_routes(
@@ -630,6 +709,8 @@ def register_task_routes(
                     build_or_get_view_archive(save_path)
                 except Exception as view_exc:
                     logger.warning('Failed to prebuild view archive for %s (task %s): %s', filename, task_id, view_exc)
+
+            _sync_project_task_terminal_state(task_id, save_path, logger)
 
             logger.info("Result file '%s' for task %s received and saved to %s.", filename, task_id, save_path)
             return jsonify({'message': f"File '{filename}' uploaded successfully for task {task_id}"}), 200
