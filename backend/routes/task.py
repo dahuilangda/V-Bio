@@ -64,6 +64,8 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
         with psycopg2.connect(database_url, connect_timeout=5,
                               application_name="vbio-upload-result") as conn:
             with conn.cursor() as cur:
+                # PostgREST 写入走 anon 角色（RLS using(true) 全放行），直连需显式切换
+                cur.execute("SET ROLE anon")
                 cur.execute(
                     "SELECT submitted_at FROM project_tasks "
                     "WHERE task_id = %s AND task_id <> ''",
@@ -93,6 +95,65 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
     except Exception as exc:
         logger_.warning(
             "project_tasks terminal sync skipped for task %s: %s", task_id, exc,
+        )
+
+
+def _sync_project_task_design_candidates(task_id: str, zip_path: str, logger_) -> None:
+    """Store peptide-design candidates into project_tasks.confidence so the
+    results workspace renders them without a browser session. Mirrors the
+    designer UI write path: candidates live under
+    confidence.peptide_design.candidates. Best-effort, never raises."""
+    database_url = os.environ.get("VBIO_MONITOR_DATABASE_URL", "").strip()
+    if not database_url:
+        return
+    try:
+        import psycopg2
+        from psycopg2.extras import Json
+
+        candidates = None
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                if os.path.basename(member) != "design_results.json":
+                    continue
+                payload = json.loads(zf.read(member))
+                if isinstance(payload, list) and payload:
+                    candidates = payload
+                elif isinstance(payload, dict):
+                    for key in ("candidates", "results"):
+                        value = payload.get(key)
+                        if isinstance(value, list) and value:
+                            candidates = value
+                            break
+                break
+        if not candidates:
+            return
+        with psycopg2.connect(database_url, connect_timeout=5,
+                              application_name="vbio-upload-result") as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET ROLE anon")
+                cur.execute(
+                    "SELECT COALESCE(confidence::text, '') FROM project_tasks "
+                    "WHERE task_id = %s AND task_id <> ''",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return
+                current = (row[0] or "").strip()
+                if current not in ("", "{}", "null"):
+                    return
+                cur.execute(
+                    "UPDATE project_tasks SET confidence = %s, updated_at = NOW() "
+                    "WHERE task_id = %s AND task_id <> ''",
+                    (Json({"peptide_design": {"candidates": candidates}}), task_id),
+                )
+        logger_.info(
+            "Stored %d design candidates into project_tasks.confidence for task %s.",
+            len(candidates), task_id,
+        )
+    except Exception as exc:
+        logger_.warning(
+            "project_tasks candidate sync skipped for task %s: %s", task_id, exc,
         )
 
 
@@ -711,6 +772,7 @@ def register_task_routes(
                     logger.warning('Failed to prebuild view archive for %s (task %s): %s', filename, task_id, view_exc)
 
             _sync_project_task_terminal_state(task_id, save_path, logger)
+            _sync_project_task_design_candidates(task_id, save_path, logger)
 
             logger.info("Result file '%s' for task %s received and saved to %s.", filename, task_id, save_path)
             return jsonify({'message': f"File '{filename}' uploaded successfully for task {task_id}"}), 200
