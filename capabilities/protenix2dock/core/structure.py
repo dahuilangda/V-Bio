@@ -31,6 +31,21 @@ _CCD_MODIFICATIONS: dict[str, str] = {
     "PCA": "Q",  # pyroglutamate (from Gln)
     "CSX": "C",
     "SEP": "S", "TPO": "T",
+    # 肽设计器成药 NCAA 预设（backend PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES）。
+    # 缺这些会让 fixed-modification 候选的 NCAA 残基在 staged 解析时被静默
+    # 丢弃，残基编号塌缩、双环 SG 锚点错位（键约束找不到 SG）。
+    "AIB": "A",  # alpha-aminoisobutyric acid
+    "NLE": "L",  # norleucine
+    "NVA": "V",  # norvaline
+    "ORN": "K",  # ornithine
+    "CIT": "R",  # citrulline
+    "HSE": "S",  # homoserine
+    "HCY": "C",  # homocysteine
+    "MSE": "M",  # selenomethionine
+    "SEC": "C",  # selenocysteine
+    "MLY": "K",  # N6-methyllysine
+    "DAL": "A",  # D-alanine
+    "BALA": "A",  # beta-alanine
 }
 # Capping groups and misc artifacts that are dropped entirely.
 _DROP_RESIDUES = {"ACE", "NMA", "HOH", "DOD"}
