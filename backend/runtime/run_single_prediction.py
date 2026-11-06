@@ -5545,13 +5545,14 @@ def _normalize_peptide_backend(raw: Any) -> str:
     # themselves are carried by _is_docking_peptide_backend / peptideChirality
     if token in {"protenix2dock", "protenix-2-dock"}:
         return "protenix"
-    if token in {"mol1dock", "mol-1-dock"}:
+    if token in {"mol1dock", "mol-1-dock", "mol-1"}:
         return "mol1"
     return "boltz"
 
 
 def _is_docking_peptide_backend(raw: Any) -> bool:
-    """Structure-based peptide docking engines (boltz2dock / protenix2dock).
+    """Structure-based peptide docking engines (protenix2dock; boltz2dock 与
+mol1dock 已下线，token 仅为历史任务行保留).
 
     They map onto the corresponding full predictors at the engine level but
     carry docking semantics: a target structure is required (uploaded, or
@@ -8496,8 +8497,8 @@ def _dpeptide_dispatch_refine(
                 else {}
             ),
             # blind inpainting route flag — the worker appends --blind_peptide
-            # and echoes it back; the collector's expect_blind contract check
-            # contract guard) fails the candidate if it's missing.
+            # and echoes it back; the collector's expect_blind contract guard
+            # fails the candidate if it's missing.
             "blind_peptide": bool(blind),
             # PocketPotential per-pair upper bound: boltz2's pocket
             # max_distance default is 6.0 (= POCKET_CONTACT_MAX_A + 1, so the
@@ -10479,7 +10480,7 @@ def run_peptide_design_backend(
                 base_yaml_data, options, resolved_target_chain_id))
         if peptide_backend == "mol1" and pocket_sequence_contacts:
             raise ValueError(
-                "Mol-1 不支持 pocket 约束；pocket 肽设计请使用 Protenix 后端。")
+                "Mol-1 不支持 pocket 约束；pocket 肽设计请使用 Protenix2Dock 后端。")
         # ── Chemistry-informed warm-start seeds (BindCraft motif-grafting) ──
         # When the user provides NO seed sequence but defined a pocket, derive
         # generation-1 anchor sequences from the pocket's amino-acid composition:
@@ -11511,7 +11512,7 @@ def run_peptide_design_backend(
                 "composite_score": composite_score,
                 "score": composite_score,
                 "plddt": binder_avg_plddt,
-                "model": "Boltz" if peptide_backend == "boltz" else ("AlphaFold3" if peptide_backend == "alphafold3" else "Protenix"),
+                "model": ("Boltz" if peptide_backend == "boltz" else "AlphaFold3" if peptide_backend == "alphafold3" else "Mol-1" if peptide_backend == "mol1" else "Protenix"),
                 "backend": peptide_backend,
                 "target_chain_id": resolved_target_chain_id,
                 "binder_chain_id": binder_chain_id,

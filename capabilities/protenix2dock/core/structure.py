@@ -18,12 +18,11 @@ import gemmi
 # Common non-standard residues -> closest standard amino acid. Residues that
 # exist as CCD entries are kept as modifications instead (CCD_ prefix in the
 # input json) so their real geometry survives.
+# MSE/SEC/MLY 不在此表：设计器 NCAA 预设含这三项，需按 CCD 保留真实几何
+# （见 _CCD_MODIFICATIONS），降级为标准残基会丢侧链并触发锚点错位。
 _TO_STANDARD: dict[str, str] = {
-    "MSE": "M",  # selenomethionine
-    "SEC": "U",  # selenocysteine; rare in docking targets
     "CSO": "C", "CSD": "C", "CME": "C", "OCS": "C",
     "HYP": "P",
-    "MLY": "K",
     "FME": "M",
 }
 # Residues kept as CCD modifications (base letter must be a valid standard AA).
@@ -46,6 +45,11 @@ _CCD_MODIFICATIONS: dict[str, str] = {
     "MLY": "K",  # N6-methyllysine
     "DAL": "A",  # D-alanine
     "BALA": "A",  # beta-alanine
+    "PTR": "Y",  # phosphotyrosine
+    "MANS": "N", "MANT": "T", "MANN": "N",  # O-Man / N-Man
+    "NAGS": "S", "NAGT": "T", "NAGN": "N",  # O/N-GlcNAc
+    "GALS": "S", "GALT": "T",  # O-Gal
+    "FUCS": "S", "GLCS": "S", "XYLS": "S",  # O-Fuc / O-Glc / O-Xyl
 }
 # Capping groups and misc artifacts that are dropped entirely.
 _DROP_RESIDUES = {"ACE", "NMA", "HOH", "DOD"}

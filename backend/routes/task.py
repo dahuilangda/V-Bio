@@ -73,6 +73,8 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
                 )
                 row = cur.fetchone()
                 if row is None:
+                    logger_.warning(
+                        "project_tasks 无 task_id=%s 的行，终态回写跳过", task_id)
                     return
                 submitted_at = row[0]
                 cur.execute(
@@ -85,13 +87,17 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
                     "structure_name = CASE WHEN %s = '' THEN %s ELSE structure_name END, "
                     "updated_at = NOW() "
                     "WHERE task_id = %s AND task_id <> '' "
-                    "AND task_state <> 'SUCCESS'",
-                    (submitted_at, submitted_at, structure_name, structure_name, task_id),
+                    "AND task_state NOT IN ('SUCCESS', 'FAILURE', 'REVOKED')",
+                    (submitted_at, submitted_at, structure_name, task_id),
                 )
-        logger_.info(
-            "Synced project_tasks terminal state for task %s (structure=%s).",
-            task_id, structure_name or "-",
-        )
+        if cur.rowcount == 0:
+            logger_.info(
+                "project_tasks 终态回写 0 行（行已是终态），task %s 跳过", task_id)
+        else:
+            logger_.info(
+                "Synced project_tasks terminal state for task %s (structure=%s).",
+                task_id, structure_name or "-",
+            )
     except Exception as exc:
         logger_.warning(
             "project_tasks terminal sync skipped for task %s: %s", task_id, exc,
