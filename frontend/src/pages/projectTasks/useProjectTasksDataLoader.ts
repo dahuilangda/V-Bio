@@ -855,7 +855,6 @@ export function useProjectTasksDataLoader({
     });
     scheduler.start();
     return () => {
-      cancelled = true;
       scheduler.stop();
     };
   }, [runtimePollState.hasActiveRuntime, runtimePollState.hasQueued, runtimePollState.hasRunning, syncCachedRuntimeState, workspaceView]);
