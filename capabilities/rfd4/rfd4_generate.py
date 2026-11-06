@@ -34,9 +34,14 @@ def _assert_gpu(allow_cpu: bool) -> None:
     import torch
 
     if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        if count != 1:
+            raise RuntimeError(
+                f"检测到 {count} 张卡。GPU 生成必须单卡派发"
+                "（宿主侧 --gpus device=N 只绑一张），请修正派发参数。")
         name = torch.cuda.get_device_name(0)
         total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        _log(f"GPU: {name}, {total:.0f} GiB")
+        _log(f"GPU: {name}, {total:.0f} GiB（单卡）")
         return
     if allow_cpu:
         _log("未检测到 CUDA 设备，按 --allow-cpu 以 CPU 诊断模式继续")
@@ -65,12 +70,17 @@ def _resolve_spec(spec: Path, out_dir: Path) -> Path:
             continue
         input_path = Path(raw)
         if input_path.is_absolute():
-            design["input"] = str(input_path)
+            resolved = input_path
         elif input_path.exists():  # 相对 cwd（容器 /workspace）可直接命中
-            design["input"] = str(input_path.resolve())
+            resolved = input_path.resolve()
         else:  # 相对 spec 目录
-            design["input"] = str((spec_dir / input_path).resolve())
+            resolved = (spec_dir / input_path).resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(
+                f"条件化 spec 的 input 不存在: {raw}（解析为 {resolved}）")
+        design["input"] = str(resolved)
     resolved = out_dir / (spec.stem + "_resolved" + spec.suffix)
+    out_dir.mkdir(parents=True, exist_ok=True)
     resolved.write_text(yaml.safe_dump(data, sort_keys=False))
     return resolved
 
@@ -178,8 +188,6 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    import yaml  # noqa: F401  # 提前失败：spec 解析需要 yaml
-
     args.resolved_spec = _resolve_spec(spec, out_dir)
     overrides = _build_overrides(args, out_dir)
     started = time.monotonic()
@@ -187,8 +195,14 @@ def main() -> None:
     cifs = _collect_cifs(out_dir)
     summary_path = _write_summary(args, out_dir, cifs,
                                   time.monotonic() - started)
-    print(json.dumps({"ok": True, "n_structures": len(cifs),
+    summary = json.loads(summary_path.read_text())
+    n_chain_errors = sum(1 for o in summary["outputs"] if "chains_error" in o)
+    print(json.dumps({"ok": n_chain_errors == 0,
+                      "n_structures": len(cifs),
+                      "n_chain_errors": n_chain_errors,
                       "summary": str(summary_path)}, ensure_ascii=False))
+    if n_chain_errors:
+        raise SystemExit(f"{n_chain_errors} 个产物的链解析失败，详见 summary.json")
 
 
 if __name__ == "__main__":

@@ -25,21 +25,25 @@ NCAA 生成的实测样例见 `examples/ncaa_phosphopeptide.yaml`：PTR（磷酸
 
 ## 镜像构建
 
+引擎镜像以上游官方镜像为基底（先构建上游，再叠加封装，两步均离线可重复）：
+
 ```bash
-cd capabilities/rfd4
-docker build \
-  --build-arg HTTP_PROXY=http://<proxy>:2080 \
+# 1) 上游镜像：依赖安装与验证（需代理）
+git clone --depth 1 https://github.com/RosettaCommons/RFD4-Proteina.git
+cd RFD4-Proteina
+docker build --build-arg HTTP_PROXY=http://<proxy>:2080 \
   --build-arg HTTPS_PROXY=http://<proxy>:2080 \
-  --build-arg RFD4_ACCELERATOR=cu13 \
-  -t rfd4-proteina-engine:cu13 .
+  --build-arg RFD4_ACCELERATOR=cu13 -t rfd4-proteina:cu13 .
+
+# 2) 平台封装镜像：纯 COPY，秒级
+cd ../V-Bio/capabilities/rfd4
+docker build -t rfd4-proteina-engine:cu13 .
 ```
 
 依赖清单来自随目录钉死的上游 `pyproject.toml`（版本组合经实测可复现）。
-驱动只支持 CUDA 12 时把 build-arg 换成 `cu12`。
-
-本机（/data/rfd4-proteina）已按上游仓库构建过等价镜像 `rfd4-proteina:cu13`，
-含 docs/examples；烟测脚本用 `IMAGE=` 指定任一即可，入口路径差异见
-`scripts/run_smoke.sh` 内注释。
+驱动只支持 CUDA 12 时上游 build-arg 换成 `cu12`。烟测脚本
+`IMAGE=` 只认封装镜像 `rfd4-proteina-engine:cu13`（入口路径绑定
+`/app/rfd4_generate.py`，上游镜像无 /app）。
 
 ## 运行方式
 
@@ -50,7 +54,7 @@ docker build \
 | `--spec` | 必填 | 条件化 YAML/JSON，路径相对容器 `/workspace` |
 | `--out-dir` | 必填 | 输出目录，写结构 cif 与 `summary.json` |
 | `--num-designs` | 2 | 重复设计数 |
-| `--seed` | 0 | 随机种子，决定复现性 |
+| `--seed` | 0 | 随机种子；有默认值，显式指定以固定复现 |
 | `--preset` | quickstart | 推理预设；quickstart 跳过评分与编译预热 |
 | `--timeout-min` | 120 | 生成超时（分钟），超时显式报错 |
 | `--allow-cpu` | 关 | 允许无 GPU 的诊断运行 |
@@ -80,7 +84,7 @@ docker run --rm --runtime nvidia --gpus device=0 \
   不在容器内做多卡分发。
 - 封装启动时断言 CUDA 可用并记录设备名与显存；无卡时显式报错，
   `--allow-cpu` 仅用于诊断。
-- 每次生成必须带 `--seed`，同 seed 同条件可复现。
+- `--seed` 有默认值；显式指定同 seed 同条件可复现。
 - 长任务必须带超时（宿主侧 `timeout` 或 `--timeout-min`），避免挂死占卡。
 
 ## 部署烟测
@@ -100,6 +104,9 @@ docker run --rm -v "$PWD:/app" -w /app \
   rfd4-proteina-engine:cu13 bash -c \
   'pip install -q pytest && python -m pytest tests -q'
 ```
+
+容器内 pip 需网络，离线环境给容器注入代理 env
+（`-e HTTPS_PROXY=... -e http_proxy=...`）。
 
 ## 已知问题与边界
 
