@@ -286,6 +286,14 @@ class MonitorCollector:
                     result_stats.deleted_files, result_stats.deleted_dirs, msa_stats.deleted_files,
                     (result_stats.freed_bytes + msa_stats.freed_bytes) / (1024 ** 3),
                 )
+            # monitor_events 无界增长（每次 project_tasks 写入都会投影事件），
+            # 60 天前的历史行没有查询方，随同一 GC 周期分批修剪。
+            try:
+                pruned = self.store.prune_events(retention_days=60)
+                if pruned:
+                    LOGGER.info("Pruned %s monitor_events rows older than 60 days", pruned)
+            except Exception:
+                LOGGER.exception("monitor_events prune failed; will retry next interval")
         except Exception:
             LOGGER.exception("Task result cleanup failed; will retry next interval")
         finally:
