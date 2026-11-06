@@ -84,7 +84,9 @@ export type PredictionBackend =
   | 'protenix'
   | 'nesso'
   | 'mol1'
-  | 'protenix2dock';
+  | 'protenix2dock'
+  | 'rfd4';
+;
 
 export function normalizePredictionBackend(
   value: unknown

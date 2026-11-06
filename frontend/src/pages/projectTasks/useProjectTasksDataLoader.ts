@@ -479,12 +479,14 @@ export function useProjectTasksDataLoader({
       // Functional merge: rows fetched by a concurrent pagination loop during
       // the sync's network awaits must survive this write. 签名门禁：无实质
       // 变化时保留 prev 引用，阻断"每 tick 全列表重算+重渲染"的自持回路。
-      const mergedRows = sanitizeTaskRows(mergeTaskRowPages(syncedRows, prev));
+      const mergedRows = sanitizeTaskRows(mergeTaskRowPages(syncedRows, tasksRef.current));
       const mergedSig = mergedRows
         .map((row) => `${row.id}:${row.task_state}:${row.updated_at}:${row.status_text}`)
         .join('|');
-      setTasks(mergedSig === tasksSignatureRef.current ? prev : mergedRows);
-      tasksSignatureRef.current = mergedSig;
+      if (mergedSig !== tasksSignatureRef.current) {
+        tasksSignatureRef.current = mergedSig;
+        setTasks(mergedRows);
+      }
       persistRuntimeCache(
         synced.project,
         sanitizeTaskRows(mergeTaskRowPages(syncedRows, dropDeletedTaskRows(cachedTasks)))
@@ -827,7 +829,6 @@ export function useProjectTasksDataLoader({
   useEffect(() => {
     if (workspaceView !== 'tasks') return;
     if (!runtimePollState.hasActiveRuntime) return;
-    let cancelled = false;
     let pauseChainOnce = false;
     const scheduler = createAdaptivePollScheduler({
       tickOnStart: true,
