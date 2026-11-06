@@ -138,7 +138,7 @@ function normalizePeptideInitializationOptions(
 
 function normalizePeptideBackendValue(
   value: unknown,
-): 'boltz' | 'alphafold3' | 'protenix' | 'protenix2dock' | 'mol1' {
+): 'boltz' | 'alphafold3' | 'protenix' | 'protenix2dock' | 'mol1' | 'rfd4' {
   const normalized = normalizePredictionBackend(value);
   return normalized === 'nesso' ? 'boltz' : normalized;
 }
