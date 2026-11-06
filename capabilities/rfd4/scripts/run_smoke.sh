@@ -4,6 +4,8 @@
 #
 # 用法: GPU=0 bash scripts/run_smoke.sh
 # 前提: 镜像已构建（rfd4-proteina-engine:cu13）。
+#       注意入口路径绑定平台封装镜像（/app/rfd4_generate.py）；
+#       上游镜像 rfd4-proteina:cu13 无 /app，不能通过 IMAGE= 替换。
 #       HF 权重缓存挂载在 /workspace/hf_cache，首次运行会拉取约 1.7GB，
 #       之后再跑不再下载。
 set -euo pipefail
@@ -15,6 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 run_case() {
   local name="$1" spec="$2" host_out="$3"
+  rm -rf "/data/rfd4-proteina/$host_out"  # 清旧产物，断言只对本轮生效
   echo "[$(date +%H:%M:%S)] $name 开始"
   docker run --rm --runtime nvidia --gpus "device=$GPU" \
     -e HF_HOME=/workspace/hf_cache \

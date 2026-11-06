@@ -9,13 +9,17 @@ from pathlib import Path
 
 import pytest
 
-gemmi = pytest.importorskip("gemmi")
-
 from rfd4_generate import (  # noqa: E402
     _build_overrides,
     _chain_summary,
     _collect_cifs,
+    _resolve_spec,
     _write_summary,
+)
+
+pytestmark_chain_summary = pytest.mark.skipif(
+    __import__("importlib.util", fromlist=["find_spec"]).find_spec("gemmi") is None,
+    reason="需要 gemmi",
 )
 
 
@@ -85,3 +89,56 @@ def test_write_summary_shape(tmp_path: Path):
     data = json.loads(summary_path.read_text())
     assert data["engine"] == "rfd4-proteina"
     assert data["outputs"][0]["chains"]["A"]["sequence"] == "G"
+
+
+# ------------------------------------------------------------ spec 路径解析
+
+def _write_spec(tmp_path: Path, input_value: str) -> Path:
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(
+        "design:\n"
+        f"  input: {input_value}\n"
+        "  contig: \"10-20\"\n")
+    return spec
+
+
+def test_resolve_spec_cwd_hit(tmp_path, monkeypatch):
+    """input 相对 cwd 可命中时按 cwd 解析。"""
+    import os
+    (tmp_path / "target.cif").write_text("data_t\n")
+    spec = _write_spec(tmp_path, "target.cif")
+    monkeypatch.chdir(tmp_path)
+    resolved = _resolve_spec(spec, tmp_path / "out")
+    data = __import__("yaml").safe_load(resolved.read_text())
+    assert data["design"]["input"] == str((tmp_path / "target.cif").resolve())
+
+
+def test_resolve_spec_spec_dir_hit(tmp_path, monkeypatch):
+    """cwd 不命中时回退 spec 目录解析。"""
+    monkeypatch.chdir(tmp_path)  # cwd 无 target
+    sub = tmp_path / "inputs"
+    sub.mkdir()
+    (sub / "target.cif").write_text("data_t\n")
+    spec = _write_spec(sub, "target.cif")
+    resolved = _resolve_spec(spec, tmp_path / "out")
+    data = __import__("yaml").safe_load(resolved.read_text())
+    assert data["design"]["input"] == str((sub / "target.cif").resolve())
+
+
+def test_resolve_spec_absolute_passthrough(tmp_path, monkeypatch):
+    """绝对路径原样透传。"""
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "abs.cif"
+    target.write_text("data_t\n")
+    spec = _write_spec(tmp_path, str(target))
+    resolved = _resolve_spec(spec, tmp_path / "out")
+    data = __import__("yaml").safe_load(resolved.read_text())
+    assert data["design"]["input"] == str(target.resolve())
+
+
+def test_resolve_spec_missing_input_raises(tmp_path, monkeypatch):
+    """两级都未命中的 input 显式报错，不静默写坏 spec。"""
+    monkeypatch.chdir(tmp_path)
+    spec = _write_spec(tmp_path, "nonexistent.cif")
+    with pytest.raises(FileNotFoundError, match="input 不存在"):
+        _resolve_spec(spec, tmp_path / "out")
