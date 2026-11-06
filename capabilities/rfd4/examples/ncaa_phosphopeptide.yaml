@@ -1,0 +1,8 @@
+# 磷酸肽 motif 条件化：PTR（磷酸酪氨酸 NCAA）身份与磷酸基坐标固定，
+# 可伸缩段 6-9 由模型设计。实测输出保留 PTR@7（NCAA 生成验证用例）。
+peptide_motif:
+  input: examples/inputs/egfr2_phosphopeptide.cif
+  contig: "/0, B1-13, 6-9"
+  conditions:
+    C_SEQ: {true: [{select: "sel('B/PTR/7')"}]}
+    C_CRD: {true: [{select: "sel('B/PTR/7/[P,O1P,O2P,O3P]')"}]}
