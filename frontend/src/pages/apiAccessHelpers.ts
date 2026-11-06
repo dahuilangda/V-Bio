@@ -14,7 +14,7 @@ export type UsageWindow = '7d' | '30d' | '90d' | 'all';
 export type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'virtual_screening' | 'affinity' | 'lead_optimization';
 export type ProjectStatsSort = 'calls_desc' | 'calls_asc' | 'success_desc' | 'success_asc' | 'last_desc' | 'last_asc';
 export type BuilderWorkflowKey = 'prediction' | 'virtual_screening' | 'affinity' | 'lead_optimization';
-export type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix' | 'nesso' | 'protenix2dock' | 'mol1';
+export type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix' | 'nesso' | 'protenix2dock' | 'mol1' | 'rfd4';
 export type AffinityBackend = 'boltz' | 'protenix';
 
 export interface ProjectStatsRow {
@@ -125,6 +125,7 @@ export function normalizePredictionBackend(value: string | null | undefined): Pr
   if (normalized === 'alphafold3') return 'alphafold3';
   if (normalized === 'protenix') return 'protenix';
   if (normalized === 'mol1' || normalized === 'mol-1') return 'mol1';
+  if (normalized === 'rfd4') return 'rfd4';
   if (normalized === 'protenix2dock' || normalized === 'protenix-2-dock') return 'protenix2dock';
   if (normalized === 'nesso' || normalized === 'nesso1' || normalized === 'nesso-1') return 'nesso';
   return 'boltz';
