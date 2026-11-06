@@ -18,8 +18,10 @@ import gemmi
 # Common non-standard residues -> closest standard amino acid. Residues that
 # exist as CCD entries are kept as modifications instead (CCD_ prefix in the
 # input json) so their real geometry survives.
-# MSE/SEC/MLY 不在此表：设计器 NCAA 预设含这三项，需按 CCD 保留真实几何
-# （见 _CCD_MODIFICATIONS），降级为标准残基会丢侧链并触发锚点错位。
+# MSE/SEC/MLY stay out of this table: the designer's NCAA presets include
+# them and they must keep real geometry as CCD modifications (see
+# _CCD_MODIFICATIONS); downgrading to canonical residues drops sidechains
+# and misaligns anchors.
 _TO_STANDARD: dict[str, str] = {
     "CSO": "C", "CSD": "C", "CME": "C", "OCS": "C",
     "HYP": "P",
@@ -30,9 +32,11 @@ _CCD_MODIFICATIONS: dict[str, str] = {
     "PCA": "Q",  # pyroglutamate (from Gln)
     "CSX": "C",
     "SEP": "S", "TPO": "T",
-    # 肽设计器成药 NCAA 预设（backend PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES）。
-    # 缺这些会让 fixed-modification 候选的 NCAA 残基在 staged 解析时被静默
-    # 丢弃，残基编号塌缩、双环 SG 锚点错位（键约束找不到 SG）。
+    # Drug-development NCAA presets from the peptide designer
+    # (backend PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES). Missing entries here
+    # silently drop fixed-modification NCAA residues during staged parsing,
+    # collapsing residue numbering and misaligning bicyclic SG anchors
+    # (bond constraints lose their SG).
     "AIB": "A",  # alpha-aminoisobutyric acid
     "NLE": "L",  # norleucine
     "NVA": "V",  # norvaline
