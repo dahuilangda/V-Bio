@@ -419,7 +419,7 @@ def register_prediction_routes(
             if low_vram:
                 return jsonify({'error': 'Nesso does not support low-VRAM mode.', 'backend': backend}), 400
 
-        if backend in {'boltz', 'alphafold3', 'protenix', 'boltz2dock', 'protenix2dock', 'mol1'}:
+        if backend in {'boltz', 'alphafold3', 'protenix', 'protenix2dock', 'mol1'}:
             yaml_requires_msa = infer_use_msa_server_from_yaml_text(yaml_content)
             if yaml_requires_msa:
                 msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
@@ -528,7 +528,7 @@ def register_prediction_routes(
             if not is_valid_notify_email(notify_email):
                 return jsonify({'error': "notify_email must be a valid email address."}), 400
         seed_value = parse_int(request.form.get('seed'), None)
-        if seed_value is None and backend in {'protenix', 'nesso', 'protenix2dock', 'boltz2dock'}:
+        if seed_value is None and backend in {'protenix', 'nesso', 'protenix2dock'}:
             seed_value = 42
             logger.info('seed parameter missing for backend=%s; defaulting to %s for client %s.', backend, seed_value, request.remote_addr)
 

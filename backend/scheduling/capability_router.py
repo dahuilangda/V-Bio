@@ -207,8 +207,10 @@ def capability_from_prediction_backend(backend: str | None) -> str:
         # protenix2dock parents (D-peptide loop) run on the protenix worker,
         # which has the docker CLI for its conformer sub-steps.
         return normalized
-    if normalized in {"mol1dock", "mol-1-dock"}:
-        # 已下线的 mol1dock 历史任务行仍按 mol1 能力归队。
+    # normalize_capability 只认别名表的 value，mol1dock 不在其中，
+    # 需按原始 token 判断（已下线的 mol1dock 历史任务行仍按 mol1 能力归队）。
+    raw = str(backend or "").strip().lower()
+    if raw in {"mol1dock", "mol-1-dock"}:
         return "mol1"
     # 其余旧任务行无法判定能力，落回 boltz2 队列。
     return "boltz2"
