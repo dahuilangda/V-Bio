@@ -1,0 +1,336 @@
+[project]
+name = "rfd4-proteina"
+version = "0.0.3"
+description = "Flow-matching foundation model for all-atom biomolecular design: proteins, nucleic acids, ligands and complexes"
+readme = "README.md"
+license-files = ["LICENSE"]
+license = "BSD-3-Clause"
+requires-python = ">=3.12,<3.15"
+authors = [
+    { name = "Institute for Protein Design", email = "contact@ipd.uw.edu" },
+]
+keywords = [
+    "protein design",
+    "generative model",
+    "flow matching",
+    "diffusion",
+    "structural biology",
+    "bioinformatics",
+    "deep learning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA :: 13",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    # AtomWorks pins the exact Biotite it supports, so Biotite is only given a floor here.
+    "atomworks[ml,openbabel]>=3.0.4,<4",
+    "biotite>=1.6.0",
+    # Configuration & CLI (inherited from the root rc-foundry project)
+    "rootutils>=1.0.7,<1.1",
+    "hydra-core>=1.3.0,<1.4",
+    "environs>=11.0.0,<12",
+    # Model serialization and Hub downloads
+    "huggingface-hub>=1.0,<2",
+    "safetensors>=0.4,<1",
+    # Logging
+    "wandb>=0.15.10,<1",
+    "rich>=13.9.4",
+    "loguru",
+    # Typing
+    "jaxtyping>=0.2.17,<1",
+    "beartype>=0.18.0,<1",
+    # ML core
+    "torch>=2.11,<3",
+    "lightning>=2.6.0",
+    "peft>=0.21.2,<0.22",
+    "einops>=0.8.0,<1",
+    "opt_einsum>=3.4.0,<4",
+    # Data / numerics
+    "numpy>=1.25.0",
+    "scipy>=1.13.1",
+    "pandas>=2,<3",
+    "pyyaml>=6.0",  # Packaged RFD4 residue vocabulary
+    "toolz",
+    "fire",
+    "networkx",
+    # Antibody numbering, used by the default metric set
+    "anarcii>=2.0.8,<3",
+    "assertpy",
+]
+
+[project.optional-dependencies]
+docs = [
+    "linkify-it-py>=2.0.0,<3",
+    "myst-parser>=4.0.0,<5",
+    "nbsphinx>=0.9.0,<1",
+    "pypandoc-binary>=1.15,<2",
+    "pydata-sphinx-theme>=0.16.0,<1",
+    "sphinx>=8.0.0,<9",
+    "sphinx-autodoc-typehints>=2.0.0,<4",
+    "sphinx-reredirects>=1.0,<2",
+    "sphinx-togglebutton>=0.3,<1",
+]
+# Everything beyond the base package, for one CUDA major. Install the one matching your driver even if you never compute
+# a metric: it carries the fused cuEquivariance kernels the model itself loads (see rfproteina/__init__.py) as well as
+# the TMol CUDA operators. It also adds the training and analysis tools (matplotlib, scikit-learn, boto3 for the S3
+# blob store) and, for CUDA 13 only, the BioIR runtime. The two extras are mutually exclusive.
+all-cuda13 = [
+    "tmol[cu13]>=0.2.0,<0.3; sys_platform == 'linux'",
+    "posebusters",
+    "matplotlib",
+    "scikit-learn",
+    "boto3>=1.34,<2",
+    # PyTorch's CuTe RMSNorm kernels require both CUTLASS DSL and TVM FFI.
+    "apache-tvm-ffi>=0.1.14,<0.2; sys_platform == 'linux'",
+    "cuda-core>=1.0.1,<2; sys_platform == 'linux'",
+    "cuda-python>=13.3.1,<14; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl>=4.5.2,<4.6; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl-libs-base>=4.5.2,<4.6; sys_platform == 'linux'",
+    "cuequivariance>=0.13.0,<0.14; sys_platform == 'linux'",
+    "cuequivariance-torch>=0.13.0,<0.14; sys_platform == 'linux'",
+    "cuequivariance-ops-cu13>=0.13.0,<0.14; sys_platform == 'linux'",
+    "cuequivariance-ops-torch-cu13>=0.13.0,<0.14; sys_platform == 'linux'",
+    "bionemo-ir>=0.2.1,<0.3; sys_platform == 'linux'",
+]
+all-cuda12 = [
+    "tmol[cu12]>=0.2.0,<0.3; sys_platform == 'linux'",
+    "posebusters",
+    "matplotlib",
+    "scikit-learn",
+    "boto3>=1.34,<2",
+    "cuequivariance>=0.13.0,<0.14; sys_platform == 'linux'",
+    "cuequivariance-torch>=0.13.0,<0.14; sys_platform == 'linux'",
+    "cuequivariance-ops-cu12>=0.13.0,<0.14; sys_platform == 'linux'",
+    "cuequivariance-ops-torch-cu12>=0.13.0,<0.14; sys_platform == 'linux'",
+]
+
+# Contributor tooling (not a published extra): pip install -e . --group dev   |   uv pip install -e . --group dev
+[dependency-groups]
+dev = [
+    # Linters & formatters
+    "ruff==0.8.3",
+    # Debugger/interactive
+    "debugpy>=1.8.5,<2",
+    "ipykernel>=6.31.0,<7",
+    # Testing tools
+    "pytest>=8.2.0,<9",
+    "pytest-testmon>=2.1.1,<3",
+    "pytest-xdist>=3.6.1,<4",
+    "pytest-dotenv>=0.5.2,<1",
+    "pytest-cov>=4.1.0,<5",
+    "coverage[toml]>=7.10.2,<8",
+    "pytest-benchmark>=5.0.0,<6",
+]
+
+[project.urls]
+Homepage = "https://rfd4-proteina.org/"
+Documentation = "https://rfd4-proteina.org/latest/"
+Repository = "https://github.com/RosettaCommons/RFD4-Proteina"
+Issues = "https://github.com/RosettaCommons/RFD4-Proteina/issues"
+
+[project.scripts]
+rfd4-generate = "script_utils.entrypoints:generate"
+rfd4-evaluate = "rfproteina.evaluate:main_hydra"
+rfd4-train = "rfproteina.train:main"
+rfd4-train-ae = "rfproteina.partial_autoencoder.train:main"
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "all-cuda12" },
+        { extra = "all-cuda13" },
+    ],
+]
+
+# Pytest
+[tool.pytest.ini_options]
+# Register the markers used across the suite so `-m` filters (and any future
+# `--strict-markers`) stay warning-free.
+markers = [
+    "gpu: end-to-end tests that require a GPU",
+    "regression: GPU regression tests gated on a SOTA checkpoint",
+    "cluster: cluster launcher / srun syntax checks",
+    "slow: slower tests",
+    "very_slow: tests too slow for the default CPU lane",
+    "benchmark: pytest-benchmark performance tests",
+    "fast: fast-running tests",
+    "no_checkpoint_cache: opt out of the shared checkpoint-load fixture (needs fresh model state per run)",
+]
+
+# Build system
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "pyproject.toml", "README.md", "LICENSE", ".project-root",
+    "src", "configs", "data/cath_label_mapping.pkl",
+    "data/benchmarks/monomer",
+    "scripts/check_distribution.py",
+    "docs/contributing/packaging.md",
+]
+exclude = [
+    "configs/metrics/custom_metrics/**",
+    "src/rfproteina/metrics/custom_metrics/**",
+    "src/rfproteina/metrics/cdr_torsion_data/**",
+    "**/__pycache__/**",
+]
+
+[tool.hatch.build.targets.wheel]
+exclude = [
+    "configs/metrics/custom_metrics/**",
+    "src/rfproteina/metrics/custom_metrics/**",
+    "src/rfproteina/metrics/cdr_torsion_data/**",
+    "**/__pycache__/**",
+]
+only-include = [
+    "src/rfproteina",
+    "src/rfd4_proteina",
+    "src/script_utils",
+    "configs",
+    "data/benchmarks/monomer",
+    "data/cath_label_mapping.pkl",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"configs" = "rfproteina/configs"
+"data" = "rfproteina/data"
+
+[tool.hatch.build.targets.wheel.force-include]
+".project-root" = "rfproteina/.project-root"
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py310"
+exclude = [
+    "docs/examples/*.py",  # Jupytext notebook sources
+    "*.ipynb",  # notebooks are not linted or formatted
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "env",
+    ".venv",
+    "venv",
+    "data",
+    "dev.py",
+    "ProteinMPNN/*"
+]
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+# Enable auto-formatting of code examples in docstrings. Markdown,
+# reStructuredText code/literal blocks and doctests are all supported.
+docstring-code-format = true
+docstring-code-line-length = 88
+
+[tool.ruff.lint]
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+# Enable a comprehensive set of rules for better code quality
+extend-select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    #"D",   # pydocstyle
+    "UP",  # pyupgrade -- use the latest supported python syntax
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "NPY", # fix deprecated numpy functions / types
+    "RUF", # Ruff-specific rules
+    "T10", # catch accidental debugger breakpoints in code
+    "ANN"
+]
+
+# Ignore specific rules that might conflict with our style or are too strict
+ignore = [
+    "B006",  # do not use mutable data structures for argument defaults
+    "D203",  # 1 blank line required before class docstring
+    "D212",  # Multi-line docstring summary should start at the first line
+    "D100",  # Missing docstring in public module
+    "NPY002",  # replacing legacy np.random.rand wih np.random.Generator
+    "SIM108",  # Replace if-else blocks
+    "ANN002",  # missing annotation for `*args`
+    "ANN003",  # missing annotation for `**kwargs`
+    "ANN204",  # missing return type annotation for special method `__init__`
+    "ANN401",  # disallow `Any` type
+    "F722",  # for jaxtyping shape annotation
+    "F821",  # temporary to avoid jaxtyping warnings
+    "E741",  # enable us to use variables like "L"
+    "N806",  # enable us to use capital letters in variable names, also like "L"
+    "N812",  # allow standard conventions like `import lightning as L` and `import torch.nn.functional as F`
+    "N801",  # enable us to use non-CapWords class names
+    "N802",  # enable us to use capital letters in function names
+    "N803",  # enable us to use capital letters in argument names
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rfproteina"]
+known-third-party = ["wandb"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]              # re-exports and import-for-side-effect
+"tests/*" = ["D", "E", "RUF", "ANN"]  # annotating test signatures buys nothing
+"docs/**/*.ipynb" = ["D", "E", "RUF", "ANN"]  # tutorial helpers: annotations/style buy nothing (B stays on)
+
+[tool.pyright]
+typeCheckingMode = "off"
