@@ -430,6 +430,8 @@ export function useProjectDetailRuntimeContext() {
       let rowsForUiSnapshot: ProjectTask[] = [];
       try {
         const rowsRaw = await listProjectTasksForList(projectIdValue, {
+          // 轮询路径只刷新可见范围；全量拉取在首次加载/分页链路里。
+          limit: 200,
           includeComponents: false,
           includeConfidence: false,
           includeConfidenceSummary: workflowKey !== 'lead_optimization',

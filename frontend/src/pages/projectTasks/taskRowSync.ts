@@ -420,14 +420,13 @@ async function persistProjectTaskPatch(task: ProjectTask, patch: Partial<Project
       ...writePatch
     } as ProjectTask;
   }
-  const patchedTask = await updateProjectTask(task.id, writePatch);
+  const patchedTask = await updateProjectTask(task.id, writePatch, { minimalReturn: true });
   if (!isProjectTaskRow(patchedTask)) {
     throw new Error(`updateProjectTask returned invalid row for task row ${task.id}`);
   }
   return {
     ...task,
-    ...writePatch,
-    ...patchedTask
+    ...writePatch
   } as ProjectTask;
 }
 
@@ -1385,16 +1384,41 @@ export async function syncRuntimeTaskRows(
         ? mergePeptidePreviewIntoProperties(runtimeTask.properties, runtimeConfidencePatch || runtimeTask.confidence)
         : null;
 
-    const taskNeedsPatch =
+    // 终态/迁移判定：只有状态机变化或终态字段（completed_at/duration）落定时
+    // 才写数据库。进度类文本（status_text）与 progress confidence 每个轮询
+    // 周期都可能变化，只更新内存——否则 PATCH 会 bump updated_at，让 changed
+    // 判定恒真、轮询自持在最快档（详情页 projectTaskRuntime.ts 已修过同一回路）。
+    const stateMigrated =
       runtimeTask.task_state !== taskState ||
-      (runtimeTask.status_text || '') !== statusText ||
       (runtimeTask.error_text || '') !== errorText ||
-      runtimeTask.completed_at !== completedAt ||
-      runtimeTask.duration_seconds !== durationSeconds ||
-      Boolean(runtimeConfidencePatch) ||
-      Boolean(runtimePropertiesPatch);
+      (runtimeTask.completed_at || '') !== (completedAt || '') ||
+      runtimeTask.duration_seconds !== durationSeconds;
+    const terminalBackfill = taskState === 'SUCCESS' || taskState === 'FAILURE';
+    const confidencePatchIsTerminal = Boolean(runtimeConfidencePatch) && terminalBackfill;
+    const propertiesPatchIsTerminal = Boolean(runtimePropertiesPatch) && terminalBackfill;
+    const taskNeedsPatch = stateMigrated || confidencePatchIsTerminal || propertiesPatchIsTerminal;
 
-    if (taskNeedsPatch) {
+    // 内存先行：进度文本与 progress confidence 始终进本地行，UI 立即更新。
+    const localPatch: Partial<ProjectTask> = {
+      task_state: taskState,
+      status_text: statusText,
+      error_text: errorText,
+      completed_at: completedAt,
+      duration_seconds: durationSeconds
+    };
+    if (runtimeConfidencePatch) {
+      localPatch.confidence = runtimeConfidencePatch;
+    }
+    if (runtimePropertiesPatch) {
+      localPatch.properties = runtimePropertiesPatch as unknown as ProjectTask['properties'];
+    }
+    const localTask: ProjectTask = {
+      ...runtimeTask,
+      ...localPatch
+    } as ProjectTask;
+    if (!taskNeedsPatch) {
+      nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? localTask : row));
+    } else {
       const taskPatch: Partial<ProjectTask> = {
         task_state: taskState,
         status_text: statusText,
@@ -1402,24 +1426,19 @@ export async function syncRuntimeTaskRows(
         completed_at: completedAt,
         duration_seconds: durationSeconds
       };
-      if (runtimeConfidencePatch) {
+      if (runtimeConfidencePatch && confidencePatchIsTerminal) {
         taskPatch.confidence = runtimeConfidencePatch;
       }
-      if (runtimePropertiesPatch) {
+      if (runtimePropertiesPatch && propertiesPatchIsTerminal) {
         taskPatch.properties = runtimePropertiesPatch as unknown as ProjectTask['properties'];
       }
-
-      // Apply runtime status locally first so UI updates immediately even if DB write lags/fails.
-      const localTask: ProjectTask = {
-        ...runtimeTask,
-        ...taskPatch
-      } as ProjectTask;
-      nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? localTask : row));
 
       try {
         const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);
         nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
       } catch (error) {
+        // DB 写失败不回滚内存行：UI 仍显示最新状态，下次迁移再落库。
+        nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? localTask : row));
         console.error('[taskRowSync] Failed to persist runtime task patch.', {
           taskRowId: runtimeTask.id,
           taskId: runtimeTask.task_id,

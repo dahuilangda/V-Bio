@@ -7,6 +7,7 @@ import {
   listProjectTasksForList,
   sanitizeProjectForTaskShare
 } from '../../api/supabaseLite';
+import { createAdaptivePollScheduler } from '../../utils/adaptivePollScheduler';
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import { mergeTaskPropertiesPreservingInputOptions } from '../projectDetail/projectTaskSnapshot';
 import {
@@ -325,6 +326,7 @@ export function useProjectTasksDataLoader({
   const resultHydrationDoneRef = useRef<Set<string>>(new Set());
   const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
   const runtimeSnapshotTaskIdsRef = useRef<Set<string>>(new Set());
+  const tasksSignatureRef = useRef<string>('');
   const pendingForceRefetchRef = useRef(false);
   const loadDataRef = useRef<((options?: LoadTaskDataOptions) => Promise<void>) | null>(null);
 
@@ -475,8 +477,14 @@ export function useProjectTasksDataLoader({
       }
       setProject(synced.project);
       // Functional merge: rows fetched by a concurrent pagination loop during
-      // the sync's network awaits must survive this write.
-      setTasks((prev) => sanitizeTaskRows(mergeTaskRowPages(syncedRows, prev)));
+      // the sync's network awaits must survive this write. 签名门禁：无实质
+      // 变化时保留 prev 引用，阻断"每 tick 全列表重算+重渲染"的自持回路。
+      const mergedRows = sanitizeTaskRows(mergeTaskRowPages(syncedRows, prev));
+      const mergedSig = mergedRows
+        .map((row) => `${row.id}:${row.task_state}:${row.updated_at}:${row.status_text}`)
+        .join('|');
+      setTasks(mergedSig === tasksSignatureRef.current ? prev : mergedRows);
+      tasksSignatureRef.current = mergedSig;
       persistRuntimeCache(
         synced.project,
         sanitizeTaskRows(mergeTaskRowPages(syncedRows, dropDeletedTaskRows(cachedTasks)))
@@ -727,12 +735,19 @@ export function useProjectTasksDataLoader({
 
   useEffect(() => {
     if (workspaceView !== 'tasks') return;
-    const onFocus = () => {
-      void loadData({ silent: true, showRefreshing: false, forceRefetch: true });
+    // focus/可见性刷新走轻量 sync 并节流 8s：alt-tab 不再触发 forceRefetch
+    // 全页重拉（跳缓存+双查询+后台分块重启）。
+    let lastFocusRefresh = 0;
+    const refreshIfStale = () => {
+      const now = Date.now();
+      if (now - lastFocusRefresh < 8000) return;
+      lastFocusRefresh = now;
+      void loadData({ silent: true, showRefreshing: false });
     };
+    const onFocus = () => refreshIfStale();
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void loadData({ silent: true, showRefreshing: false, forceRefetch: true });
+        refreshIfStale();
       }
     };
     window.addEventListener('focus', onFocus);
@@ -813,35 +828,34 @@ export function useProjectTasksDataLoader({
     if (workspaceView !== 'tasks') return;
     if (!runtimePollState.hasActiveRuntime) return;
     let cancelled = false;
-    let timer: number | null = null;
-    let inFlight = false;
-    const computeDelayMs = () => {
-      const baseDelay = runtimePollState.hasRunning ? 2500 : runtimePollState.hasQueued ? 4000 : 9000;
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-        return baseDelay * 2;
-      }
-      return baseDelay;
-    };
-    const scheduleNext = () => {
-      if (cancelled) return;
-      timer = window.setTimeout(() => {
-        void tick();
-      }, computeDelayMs());
-    };
-    const tick = async () => {
-      if (cancelled || inFlight) return;
-      inFlight = true;
-      try {
+    let pauseChainOnce = false;
+    const scheduler = createAdaptivePollScheduler({
+      tickOnStart: true,
+      resolveIntervals: () => {
+        if (pauseChainOnce) {
+          pauseChainOnce = false;
+          return null;
+        }
+        if (runtimePollState.hasRunning) {
+          return { activeMs: 2500, idleMs: 9000 };
+        }
+        if (runtimePollState.hasQueued) {
+          return { activeMs: 4000, idleMs: 12000 };
+        }
+        return null; // 无运行中/排队任务时暂停链
+      },
+      idleAfterUnchangedTicks: 3,
+      hiddenIntervalMultiplier: 2,
+      maxIntervalMs: 30000,
+      tick: async () => {
         await syncCachedRuntimeState();
-      } finally {
-        inFlight = false;
-        scheduleNext();
+        return true; // 退避由 scheduler 的错误路径处理
       }
-    };
-    scheduleNext();
+    });
+    scheduler.start();
     return () => {
       cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      scheduler.stop();
     };
   }, [runtimePollState.hasActiveRuntime, runtimePollState.hasQueued, runtimePollState.hasRunning, syncCachedRuntimeState, workspaceView]);
 
