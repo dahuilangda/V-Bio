@@ -1384,10 +1384,12 @@ export async function syncRuntimeTaskRows(
         ? mergePeptidePreviewIntoProperties(runtimeTask.properties, runtimeConfidencePatch || runtimeTask.confidence)
         : null;
 
-    // 终态/迁移判定：只有状态机变化或终态字段（completed_at/duration）落定时
-    // 才写数据库。进度类文本（status_text）与 progress confidence 每个轮询
-    // 周期都可能变化，只更新内存——否则 PATCH 会 bump updated_at，让 changed
-    // 判定恒真、轮询自持在最快档（详情页 projectTaskRuntime.ts 已修过同一回路）。
+    // Terminal/migration gating: only a state-machine change or terminal
+    // fields (completed_at/duration) land in the database. Progress text
+    // (status_text) and progress confidence change every poll cycle and stay
+    // in memory only — a PATCH would bump updated_at, making the changed
+    // check always true and pinning the poll at its fastest tier (the same
+    // loop was fixed in projectTaskRuntime.ts for the detail page).
     const stateMigrated =
       runtimeTask.task_state !== taskState ||
       (runtimeTask.error_text || '') !== errorText ||
@@ -1398,7 +1400,8 @@ export async function syncRuntimeTaskRows(
     const propertiesPatchIsTerminal = Boolean(runtimePropertiesPatch) && terminalBackfill;
     const taskNeedsPatch = stateMigrated || confidencePatchIsTerminal || propertiesPatchIsTerminal;
 
-    // 内存先行：进度文本与 progress confidence 始终进本地行，UI 立即更新。
+    // Memory first: progress text and progress confidence always update the
+    // local row so the UI reflects them immediately.
     const localPatch: Partial<ProjectTask> = {
       task_state: taskState,
       status_text: statusText,
@@ -1437,7 +1440,8 @@ export async function syncRuntimeTaskRows(
         const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);
         nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
       } catch (error) {
-        // DB 写失败不回滚内存行：UI 仍显示最新状态，下次迁移再落库。
+        // On DB failure keep the in-memory row: the UI still shows the latest
+      // state and the next migration persists it.
         nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? localTask : row));
         console.error('[taskRowSync] Failed to persist runtime task patch.', {
           taskRowId: runtimeTask.id,

@@ -486,10 +486,12 @@ class MonitorStore:
         return reconciled
 
     def prune_events(self, retention_days: int = 60, batch_limit: int = 50000) -> int:
-        """删除超过保留期的 monitor_events 行，控制表的无界增长。
+        """Delete monitor_events rows past the retention window to bound
+        table growth.
 
-        事件只服务近期的活动追溯，历史行没有查询方；按 occurred_at 分批
-        删除，避免单次事务过长阻塞投影写入。返回删除的行数。
+        Events only serve recent activity tracing; no reader touches older
+        rows. Deleted in occurred_at batches so a single transaction never
+        blocks projection writes. Returns the number of rows removed.
         """
         with self._transaction() as cur:
             cur.execute(

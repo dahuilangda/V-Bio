@@ -477,8 +477,9 @@ export function useProjectTasksDataLoader({
       }
       setProject(synced.project);
       // Functional merge: rows fetched by a concurrent pagination loop during
-      // the sync's network awaits must survive this write. 签名门禁：无实质
-      // 变化时保留 prev 引用，阻断"每 tick 全列表重算+重渲染"的自持回路。
+      // the sync's network awaits must survive this write. Signature gate:
+      // keep the prev reference when nothing substantively changed, breaking
+      // the self-sustaining per-tick full-relist recompute loop.
       const mergedRows = sanitizeTaskRows(mergeTaskRowPages(syncedRows, tasksRef.current));
       const mergedSig = mergedRows
         .map((row) => `${row.id}:${row.task_state}:${row.updated_at}:${row.status_text}`)
@@ -737,8 +738,9 @@ export function useProjectTasksDataLoader({
 
   useEffect(() => {
     if (workspaceView !== 'tasks') return;
-    // focus/可见性刷新走轻量 sync 并节流 8s：alt-tab 不再触发 forceRefetch
-    // 全页重拉（跳缓存+双查询+后台分块重启）。
+    // focus/visibility refreshes run the lightweight sync, throttled to 8s:
+    // alt-tab no longer triggers a full forceRefetch (cache skip + double
+    // query + background chunk restart).
     let lastFocusRefresh = 0;
     const refreshIfStale = () => {
       const now = Date.now();
@@ -764,7 +766,8 @@ export function useProjectTasksDataLoader({
     if (workspaceView !== 'tasks') return;
     const projectRow = projectRef.current;
     if (!projectRow) return;
-    // peptide_design 的 API 行同样需要回填 structure_name/confidence（API 提交无浏览器会话）
+    // peptide_design API rows also need structure_name/confidence backfill
+    // (API submissions have no browser session to hydrate them)
     if (!['prediction', 'peptide_design'].includes(normalizeWorkflowKey(projectRow.task_type))) return;
     const currentRows = sanitizeTaskRows(tasksRef.current);
     if (currentRows.length === 0) return;
@@ -843,14 +846,14 @@ export function useProjectTasksDataLoader({
         if (runtimePollState.hasQueued) {
           return { activeMs: 4000, idleMs: 12000 };
         }
-        return null; // 无运行中/排队任务时暂停链
+        return null; // pause the chain with no running/queued tasks
       },
       idleAfterUnchangedTicks: 3,
       hiddenIntervalMultiplier: 2,
       maxIntervalMs: 30000,
       tick: async () => {
         await syncCachedRuntimeState();
-        return true; // 退避由 scheduler 的错误路径处理
+        return true; // the scheduler backs off on its error path
       }
     });
     scheduler.start();

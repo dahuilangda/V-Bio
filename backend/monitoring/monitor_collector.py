@@ -286,8 +286,9 @@ class MonitorCollector:
                     result_stats.deleted_files, result_stats.deleted_dirs, msa_stats.deleted_files,
                     (result_stats.freed_bytes + msa_stats.freed_bytes) / (1024 ** 3),
                 )
-            # monitor_events 无界增长（每次 project_tasks 写入都会投影事件），
-            # 60 天前的历史行没有查询方，随同一 GC 周期分批修剪。
+            # monitor_events grows without bound (every project_tasks write
+            # projects an event); rows older than 60 days have no readers, so
+            # prune them in batches on the same GC cycle.
             try:
                 pruned = self.store.prune_events(retention_days=60)
                 if pruned:
