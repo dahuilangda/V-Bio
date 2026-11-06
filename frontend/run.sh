@@ -225,7 +225,7 @@ start_frontend_prod() {
   echo "[V-Bio frontend] starting preview on ${VBIO_FRONTEND_HOST}:${VBIO_FRONTEND_PORT}..."
   (
     cd "${VBIO_DIR}"
-    nohup npm run preview -- --outDir dist-served --host "${VBIO_FRONTEND_HOST}" --port "${VBIO_FRONTEND_PORT}" --strictPort >"${FRONTEND_LOG}" 2>&1 &
+    setsid nohup npm run preview -- --outDir dist-served --host "${VBIO_FRONTEND_HOST}" --port "${VBIO_FRONTEND_PORT}" --strictPort >"${FRONTEND_LOG}" 2>&1 < /dev/null &
     echo $! >"${FRONTEND_PID_FILE}"
   )
   echo "[V-Bio frontend] started (pid: $(cat "${FRONTEND_PID_FILE}"))."
@@ -240,7 +240,7 @@ start_frontend_dev() {
   echo "[V-Bio frontend] starting dev server on ${VBIO_FRONTEND_HOST}:${VBIO_FRONTEND_PORT}..."
   (
     cd "${VBIO_DIR}"
-    nohup npm run dev -- --host "${VBIO_FRONTEND_HOST}" --port "${VBIO_FRONTEND_PORT}" --strictPort >"${FRONTEND_LOG}" 2>&1 &
+    setsid nohup npm run dev -- --host "${VBIO_FRONTEND_HOST}" --port "${VBIO_FRONTEND_PORT}" --strictPort >"${FRONTEND_LOG}" 2>&1 < /dev/null &
     echo $! >"${FRONTEND_PID_FILE}"
   )
   echo "[V-Bio frontend] started (pid: $(cat "${FRONTEND_PID_FILE}"))."
