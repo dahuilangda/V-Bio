@@ -10564,6 +10564,16 @@ def run_peptide_design_backend(
         proposer_prefix = "CREEEC"
     if not proposer_suffix and design_mode == "bicyclic":
         proposer_suffix = "C"
+    # 提案器后端选择：peptideProposerBackend=rfd4 时以 RFD4 全原子生成
+    # 模型产出候选群（同一 propose 契约，GRPO 精英回注为 motif 重采样）。
+    # RFD4 在线世代融合在独立提交中开放；当前显式报错防误用。
+    proposer_backend_sel = str(
+        options.get("peptideProposerBackend")
+        or options.get("peptide_proposer_backend") or "esm3").strip().lower()
+    if proposer_backend_sel == "rfd4":
+        raise ValueError(
+            "RFD4 提案器与世代循环的在线融合在下一版本开放；"
+            "当前请先用 peplm 提案器产出母本，再经 Mol-1 成熟化环掺入 NCAA。")
     proposer = ESM3Proposer(
         chirality=peptide_chirality,
         project_id=str(predict_args.get("project_id") or ""),
