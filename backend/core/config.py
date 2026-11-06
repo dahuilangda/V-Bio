@@ -278,6 +278,10 @@ MOL1_DOCKER_IMAGE = os.environ.get(
     "MOL1_DOCKER_IMAGE", "vbio-mol1-runtime:1.0.3"
 )
 MOL1_DATA_DIR = os.environ.get("MOL1_DATA_DIR", "/data/mol1")
+RFD4_DOCKER_IMAGE = os.environ.get(
+    "RFD4_DOCKER_IMAGE", "rfd4-proteina-engine:cu13"
+)
+RFD4_DATA_DIR = os.environ.get("RFD4_DATA_DIR", "/data/rfd4-proteina")
 PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
 PROTENIX_SOURCE_DIR = os.environ.get(
     "PROTENIX_SOURCE_DIR",

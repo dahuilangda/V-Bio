@@ -363,8 +363,8 @@ def register_prediction_routes(
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
             return jsonify({'error': "Backend 'mol1dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400
-        elif backend not in ['boltz', 'alphafold3', 'protenix', 'nesso']:
-            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso, protenix2dock, mol1."}), 400
+        elif backend not in ['boltz', 'alphafold3', 'protenix', 'nesso', 'rfd4']:
+            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso, protenix2dock, mol1, rfd4."}), 400
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
         if requested_workflow not in {'prediction', 'peptide_design', 'virtual_screening', 'lead_optimization'}:
             return jsonify({
@@ -419,7 +419,7 @@ def register_prediction_routes(
             if low_vram:
                 return jsonify({'error': 'Nesso does not support low-VRAM mode.', 'backend': backend}), 400
 
-        if backend in {'boltz', 'alphafold3', 'protenix', 'protenix2dock', 'mol1'}:
+        if backend in {'boltz', 'alphafold3', 'protenix', 'protenix2dock', 'mol1', 'rfd4'}:
             yaml_requires_msa = infer_use_msa_server_from_yaml_text(yaml_content)
             if yaml_requires_msa:
                 msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
