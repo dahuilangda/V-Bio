@@ -251,6 +251,7 @@ export function WorkflowRuntimeSettingsSection({
   const peptideBackendAllowed =
     normalizedBackend === 'protenix2dock' ||
     normalizedBackend === 'alphafold3' || normalizedBackend === 'mol1' ||
+    normalizedBackend === 'rfd4' ||
     normalizedBackend === 'protenix';
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
@@ -274,7 +275,7 @@ export function WorkflowRuntimeSettingsSection({
   // constrained rings are Protenix-only; migrate stale selections before submit
   useEffect(() => {
     const supportedNonLinear = new Set([
-      'protenix', 'protenix2dock', 'mol1',
+      'protenix', 'protenix2dock', 'mol1', 'rfd4',
     ]);
     if (
       isPeptideDesignWorkflow &&
@@ -911,6 +912,7 @@ export function WorkflowRuntimeSettingsSection({
                           ? [
                               { value: 'mol1', label: 'Mol-1 (native)' },
                               { value: 'protenix2dock', label: 'Protenix2Dock' },
+                              { value: 'rfd4', label: 'RFD4-Proteina (generation)' },
                               { value: 'protenix', label: 'Protenix (native)' },
                               { value: 'alphafold3', label: 'AlphaFold3' }
                             ]
@@ -922,7 +924,8 @@ export function WorkflowRuntimeSettingsSection({
                       { value: 'protenix', label: 'Protenix' },
                       { value: 'boltz', label: 'Boltz-2' },
                       { value: 'alphafold3', label: 'AlphaFold3' },
-                      { value: 'mol1', label: 'Mol-1' }
+                      { value: 'mol1', label: 'Mol-1' },
+                      { value: 'rfd4', label: 'RFD4-Proteina' }
                     ]
               ).map((option) => (
                 <option key={option.value} value={option.value}>

@@ -17,6 +17,7 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     "lead_opt",
     "peptide_design",
     "mol1",
+    "rfd4",
     "export",
 )
 
@@ -26,6 +27,7 @@ GPU_CAPABILITIES = {
     "protenix",
     "protenix2dock",
     "mol1",
+    "rfd4",
     "nesso",
     "boltz2score",
 }
@@ -42,6 +44,7 @@ _CAPABILITY_ALIASES = {
     "p2d": "protenix2dock",
     "mol1": "mol1",
     "mol-1": "mol1",
+    "rfd4": "rfd4",
     "nesso": "nesso",
     "nesso1": "nesso",
     "nesso-1": "nesso",
@@ -203,7 +206,7 @@ def normalize_capability(capability: str | None) -> str | None:
 def capability_from_prediction_backend(backend: str | None) -> str:
     normalized = normalize_capability(str(backend or "").strip().lower())
     if normalized in {"boltz2", "alphafold3", "protenix", "nesso",
-                      "protenix2dock", "mol1"}:
+                      "protenix2dock", "mol1", "rfd4"}:
         # protenix2dock parents (D-peptide loop) run on the protenix worker,
         # which has the docker CLI for its conformer sub-steps.
         return normalized
