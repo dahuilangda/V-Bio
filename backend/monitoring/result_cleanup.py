@@ -42,8 +42,9 @@ LOGGER = logging.getLogger(__name__)
 
 # *_keep_* 导出回退目录在标准保留期之外的额外宽限天数。
 KEEP_GRACE_DAYS = 30
-# _runtime_tmp 中间工作树的额外宽限天数（结果归档保留期之外的追加期）。
-# 实测该树是磁盘大头（单目录树可达数 GB），需要独立于归档保留期收紧。
+# Extra grace days for _runtime_tmp intermediate work trees, beyond the
+# archive retention. This tree dominates disk usage (single trees reach
+# several GB), so it tightens independently of the archive retention.
 RUNTIME_TMP_EXTRA_DAYS = 14
 
 # backend 结果根目录下的保留名目录：exports 已有自身的文件 TTL 清理，_runtime_tmp

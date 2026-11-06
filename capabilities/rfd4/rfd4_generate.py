@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""RFD4-Proteina 生成引擎封装（V-Bio capability）。
+"""RFD4-Proteina generation wrapper for V-Bio.
 
-在 rfd4-proteina-engine 镜像内运行，职责：
-  条件化 YAML/JSON → rfd4-generate → 结构 cif + summary.json
+Runs inside the rfd4-proteina-engine image: condition spec YAML/JSON ->
+rfd4-generate -> structure CIFs + summary.json.
 
-GPU 规范：容器由宿主侧按单卡单任务派发（--runtime nvidia --gpus device=N），
-封装内只做可用性断言与设备日志，不做多卡分发。
-失败一律显式报错退出：生成非零退出、超时、产物缺失都直接抛错，不做兜底重试。
+GPU contract: one container per GPU, dispatched host-side via
+`--runtime nvidia --gpus device=N`. This wrapper asserts device availability
+and logs the assigned device; it never schedules across GPUs.
+Failures are explicit: non-zero exits, timeouts, and missing artifacts all
+raise — no silent retries.
 """
 from __future__ import annotations
 
@@ -37,27 +39,28 @@ def _assert_gpu(allow_cpu: bool) -> None:
         count = torch.cuda.device_count()
         if count != 1:
             raise RuntimeError(
-                f"检测到 {count} 张卡。GPU 生成必须单卡派发"
-                "（宿主侧 --gpus device=N 只绑一张），请修正派发参数。")
+                f"{count} GPUs visible. Generation requires single-GPU "
+                "dispatch (host-side --gpus device=N binds exactly one).")
         name = torch.cuda.get_device_name(0)
         total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        _log(f"GPU: {name}, {total:.0f} GiB（单卡）")
+        _log(f"GPU: {name}, {total:.0f} GiB (single)")
         return
     if allow_cpu:
-        _log("未检测到 CUDA 设备，按 --allow-cpu 以 CPU 诊断模式继续")
+        _log("No CUDA device; continuing in CPU diagnostic mode via --allow-cpu")
         return
     raise RuntimeError(
-        "无可用 CUDA 设备。GPU 生成必须单卡派发"
-        "（宿主侧 docker run --runtime nvidia --gpus device=N）；"
-        "诊断可加 --allow-cpu。"
+        "No CUDA device available. GPU generation requires single-GPU dispatch "
+        "host-side (docker run --runtime nvidia --gpus device=N); "
+        "pass --allow-cpu for diagnostics."
     )
 
 
 def _resolve_spec(spec: Path, out_dir: Path) -> Path:
-    """把条件化 spec 里的相对 input 路径解析为绝对路径，写副本返回。
+    """Resolve relative input paths in the condition spec to absolute
+    paths and write a resolved copy.
 
-    Hydra 运行时会切换 cwd，spec 里的相对 input 会失效；统一解析为绝对
-    路径后免疫 cwd 变化。"""
+    Hydra switches cwd at runtime, breaking relative input paths in
+    the spec; absolute paths are immune. """
     import yaml
 
     data = yaml.safe_load(spec.read_text())
@@ -71,13 +74,13 @@ def _resolve_spec(spec: Path, out_dir: Path) -> Path:
         input_path = Path(raw)
         if input_path.is_absolute():
             resolved = input_path
-        elif input_path.exists():  # 相对 cwd（容器 /workspace）可直接命中
+        elif input_path.exists():  # relative to cwd (container /workspace) hits directly
             resolved = input_path.resolve()
-        else:  # 相对 spec 目录
+        else:  # relative to the spec directory
             resolved = (spec_dir / input_path).resolve()
         if not resolved.exists():
             raise FileNotFoundError(
-                f"条件化 spec 的 input 不存在: {raw}（解析为 {resolved}）")
+                f"spec input not found: {raw} (resolved to {resolved})")
         design["input"] = str(resolved)
     resolved = out_dir / (spec.stem + "_resolved" + spec.suffix)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -101,27 +104,28 @@ def _build_overrides(args: argparse.Namespace, out_dir: Path) -> list[str]:
 
 def _run_generation(overrides: list[str], timeout_min: float) -> None:
     cmd = ["rfd4-generate", *overrides]
-    _log("执行: " + " ".join(cmd))
+    _log("running: " + " ".join(cmd))
     started = time.monotonic()
     try:
         proc = subprocess.run(cmd, timeout=timeout_min * 60)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"rfd4-generate 超时（>{timeout_min:.0f} 分钟），已终止") from exc
+            f"rfd4-generate timed out after {timeout_min:.0f} min") from exc
     if proc.returncode != 0:
-        raise RuntimeError(f"rfd4-generate 退出码 {proc.returncode}")
-    _log(f"生成完成，耗时 {time.monotonic() - started:.0f} 秒")
+        raise RuntimeError(f"rfd4-generate exited {proc.returncode}")
+    _log(f"generation finished in {time.monotonic() - started:.0f} s")
 
 
 def _collect_cifs(out_dir: Path) -> list[Path]:
     cifs = sorted(out_dir.rglob("*.cif"))
     if not cifs:
-        raise RuntimeError(f"{out_dir} 下没有任何结构产物")
+        raise RuntimeError(f"no structure artifacts under {out_dir}")
     return cifs
 
 
 def _chain_summary(cif_path: Path) -> dict:
-    """按链提取残基数与 one-letter 序列；非标准残基记作 [CCD]。"""
+    """Per-chain residue counts and one-letter sequence; non-standard
+    residues are reported as [CCD_NAME]."""
     import gemmi
 
     st = gemmi.read_structure(str(cif_path))
@@ -154,7 +158,7 @@ def _write_summary(args: argparse.Namespace, out_dir: Path,
         entry = {"cif": str(cif)}
         try:
             entry["chains"] = _chain_summary(cif)
-        except Exception as exc:  # 结构损坏时保留路径，链摘要置空
+        except Exception as exc:  # keep the path, blank the chain digest
             entry["chains_error"] = str(exc)
         summary["outputs"].append(entry)
     summary_path = out_dir / "summary.json"
@@ -164,27 +168,27 @@ def _write_summary(args: argparse.Namespace, out_dir: Path,
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="RFD4-Proteina 生成引擎封装：条件化 YAML 驱动，结构产物校验")
+        description="RFD4-Proteina generation wrapper: condition-spec YAML in, validated structures out")
     ap.add_argument("--spec", required=True,
-                    help="条件化 YAML/JSON（相对容器工作目录 /workspace）")
-    ap.add_argument("--out-dir", required=True, help="输出目录")
-    ap.add_argument("--num-designs", type=int, default=2, help="重复设计数")
-    ap.add_argument("--seed", type=int, default=0, help="随机种子（决定复现性）")
+                    help="condition spec YAML/JSON, relative to container cwd /workspace")
+    ap.add_argument("--out-dir", required=True, help="output directory")
+    ap.add_argument("--num-designs", type=int, default=2, help="number of designs")
+    ap.add_argument("--seed", type=int, default=0, help="random seed; fixes reproducibility")
     ap.add_argument("--preset", default="quickstart",
-                    help="推理预设（quickstart 跳过评分与编译预热）")
+                    help="inference preset (quickstart skips scoring and compile warm-up)")
     ap.add_argument("--timeout-min", type=float, default=120.0,
-                    help="生成超时（分钟），超时显式报错")
+                    help="generation timeout in minutes; hard error on exceed")
     ap.add_argument("--allow-cpu", action="store_true",
-                    help="允许无 GPU 运行（仅诊断用）")
+                    help="allow running without a GPU (diagnostics only)")
     ap.add_argument("--extra", action="append", default=[],
-                    help="追加 rfd4-generate 的 Hydra override，可多次")
+                    help="extra rfd4-generate Hydra override, repeatable")
     args = ap.parse_args()
 
     _assert_gpu(args.allow_cpu)
 
     spec = Path(args.spec)
     if not spec.is_file():
-        raise SystemExit(f"条件化文件不存在: {spec}")
+        raise SystemExit(f"spec file not found: {spec}")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -202,7 +206,8 @@ def main() -> None:
                       "n_chain_errors": n_chain_errors,
                       "summary": str(summary_path)}, ensure_ascii=False))
     if n_chain_errors:
-        raise SystemExit(f"{n_chain_errors} 个产物的链解析失败，详见 summary.json")
+        raise SystemExit(
+            f"{n_chain_errors} artifacts failed chain parsing; see summary.json")
 
 
 if __name__ == "__main__":

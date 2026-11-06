@@ -64,7 +64,8 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
         with psycopg2.connect(database_url, connect_timeout=5,
                               application_name="vbio-upload-result") as conn:
             with conn.cursor() as cur:
-                # PostgREST 写入走 anon 角色（RLS using(true) 全放行），直连需显式切换
+                # PostgREST writes go through the anon role (RLS using(true) allows all);
+        # a direct connection must switch explicitly
                 cur.execute("SET ROLE anon")
                 cur.execute(
                     "SELECT submitted_at FROM project_tasks "
@@ -74,7 +75,7 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
                 row = cur.fetchone()
                 if row is None:
                     logger_.warning(
-                        "project_tasks 无 task_id=%s 的行，终态回写跳过", task_id)
+                        "no project_tasks row for task_id=%s; terminal sync skipped", task_id)
                     return
                 submitted_at = row[0]
                 cur.execute(
@@ -92,7 +93,7 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
                 )
         if cur.rowcount == 0:
             logger_.info(
-                "project_tasks 终态回写 0 行（行已是终态），task %s 跳过", task_id)
+                "terminal sync updated 0 rows (row already terminal), task %s skipped", task_id)
         else:
             logger_.info(
                 "Synced project_tasks terminal state for task %s (structure=%s).",

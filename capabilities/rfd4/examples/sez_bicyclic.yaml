@@ -1,5 +1,6 @@
-# SEZ 双环 motif 条件化：SEZ 三臂（CD/C1/C2）与三 Cys 锚点固定，
-# 两环序列由模型设计。实测输出 SEZ 三硫醚闭合（1.98/2.25/2.18 Å）。
+# SEZ bicyclic motif conditioning: SEZ arms (CD/C1/C2) and the
+# three Cys anchors pinned; both ring sequences designed by the model.
+# Verified output closes the trithioether (1.98/2.25/2.18 Å).
 bicyclic_motif:
   input: examples/inputs/sez_bicyclic.cif
   contig: "B1-15, /0, C1"

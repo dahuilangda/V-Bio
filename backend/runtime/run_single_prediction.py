@@ -4870,11 +4870,12 @@ def run_rfd4_backend(
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
 ) -> None:
-    """RFD4-Proteina 生成引擎：条件化 YAML 驱动的结构生成 backend。
+    """RFD4-Proteina generation backend driven by a condition YAML.
 
-    输入 yaml 的 sequences[0] 为靶点蛋白（链 A），constraints 携带
-    pocket/motif 条件化；生成产物 cif 打包为结果归档，结构摘要写入
-    summary.json 供前端渲染。
+    sequences[0] in the input yaml is the target protein (chain A);
+    constraints carry pocket/motif conditioning. Generated CIFs are packed
+    into the result archive and a structure summary lands in summary.json
+    for the frontend.
     """
     import yaml as _yaml
 
@@ -4889,8 +4890,8 @@ def run_rfd4_backend(
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 条件化 spec：靶点序列取自设计 yaml 第一条蛋白链（生成模型按该链
-    # 条件化 scaffold，靶点结构由引擎端从 staged 输入读取）
+    # Condition spec: the target sequence comes from the first protein
+    # chain in the design yaml (the model scaffolds against it).
     spec_payload = _yaml.safe_load(yaml_content) or {}
     target_entry = next(
         (s["protein"] for s in spec_payload.get("sequences", [])
@@ -4944,8 +4945,9 @@ def run_rfd4_backend(
     if proc.returncode != 0:
         raise RuntimeError(f"rfd4-generate exited {proc.returncode}")
 
-    # 结果归档：引擎把 cif/summary 写到 RFD4_DATA_DIR/runs/generation，
-    # 容器内外同路径（RFD4_DATA_DIR 卷挂载），直接从引擎输出目录收集。
+    # Archive: the engine writes cif/summary under
+    # RFD4_DATA_DIR/runs/generation — same path inside and outside the
+    # container via the RFD4_DATA_DIR mount — so collect from there.
     archive_root = os.path.join(work_root, "archive")
     os.makedirs(archive_root, exist_ok=True)
     engine_out_dir = os.path.join(RFD4_DATA_DIR, "runs", "generation")
@@ -10672,9 +10674,10 @@ def run_peptide_design_backend(
         proposer_prefix = "CREEEC"
     if not proposer_suffix and design_mode == "bicyclic":
         proposer_suffix = "C"
-    # 提案器后端选择：peptideProposerBackend=rfd4 时以 RFD4 全原子生成
-    # 模型产出候选群（同一 propose 契约，GRPO 精英回注为 motif 重采样）。
-    # RFD4 在线世代融合在独立提交中开放；当前显式报错防误用。
+    # Proposer backend selection: peptideProposerBackend=rfd4 produces
+    # candidates via the RFD4 all-atom generative model (same propose
+    # contract, elite rows fed back as motif resampling). Online generation
+    # fusion opens in a separate change; error out explicitly for now.
     proposer_backend_sel = str(
         options.get("peptideProposerBackend")
         or options.get("peptide_proposer_backend") or "esm3").strip().lower()

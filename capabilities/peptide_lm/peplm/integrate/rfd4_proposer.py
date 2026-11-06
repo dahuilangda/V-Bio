@@ -1,13 +1,18 @@
-"""RFD4-Proteina 提案器：以全原子生成模型为多肽强化学习环提供候选群。
+"""RFD4-Proteina proposer: feeds candidates from an all-atom generative
+model into the peptide RL loop.
 
-与 ESM3Proposer 同一 propose() 契约——输入残基池/精英行/数量，输出
-(sequence, modifications, cys_anchors, group) 四元组。差异在候选来源：
-RFD4 按靶点 pocket 条件化直接生成 binder 结构，序列从生成的结构里提取，
-天然带 NCAA 词表能力（147 类词表含 100 NCAA）。
+Same propose() contract as ESM3Proposer — residue pool, elite rows, count
+in; (sequence, modifications, cys_anchors, group) tuples out. The difference
+is the candidate source: RFD4 generates binder structures conditioned on the
+target pocket, and sequences are extracted from the generated structures,
+with native NCAA vocabulary coverage (100 NCAA types in the 147-class
+vocabulary).
 
-RL 融合点：精英行（上一世代按 ipSAE/refine 分数选出的优胜者）以 C_SEQ/
-C_CRD 条件化回注给 RFD4——把上一代最优骨架作为 motif，让 RFD4 在其邻域
-重采样，GRPO 的组相对优势因此作用于 RFD4 生成分布。
+RL fusion point: elite rows (previous-generation winners selected by
+ipSAE/refine score) are fed back to RFD4 as C_SEQ/C_CRD conditioning —
+the best backbone from the last generation becomes the motif and RFD4
+resamples its neighborhood, so the GRPO group-relative advantage acts on
+the RFD4 generation distribution.
 """
 from __future__ import annotations
 
@@ -22,7 +27,8 @@ _IMAGE = "rfd4-proteina-engine:cu13"
 
 def _run_rfd4(spec_payload: dict, out_dir: Path, seed: int,
               gpu_id: int, timeout_min: float = 30.0) -> list[Path]:
-    """在引擎容器里跑一次 rfd4-generate，返回生成的 cif 路径列表。"""
+    """Run one rfd4-generate inside the engine container; returns generated
+    cif paths."""
     out_dir.mkdir(parents=True, exist_ok=True)
     spec_path = out_dir / "rfd4_spec.yaml"
     import yaml
@@ -45,12 +51,13 @@ def _run_rfd4(spec_payload: dict, out_dir: Path, seed: int,
     ]
     proc = subprocess.run(cmd, timeout=timeout_min * 60)
     if proc.returncode != 0:
-        raise RuntimeError(f"rfd4-generate 退出码 {proc.returncode}")
+        raise RuntimeError(f"rfd4-generate exited {proc.returncode}")
     return sorted(out_dir.rglob("*.cif"))
 
 
 def _sequence_from_cif(cif_path: Path) -> tuple[str, list[int]]:
-    """从生成的 binder cif 提取最短聚合物链的序列与 Cys 锚点（0 基）。"""
+    """Extract the shortest polymer chain sequence and Cys anchors
+    (0-based) from a generated binder cif."""
     import gemmi
 
     st = gemmi.read_structure(str(cif_path))
@@ -58,7 +65,7 @@ def _sequence_from_cif(cif_path: Path) -> tuple[str, list[int]]:
     st.remove_alternative_conformations()
     polymers = [c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3]
     if not polymers:
-        raise RuntimeError(f"RFD4 产物无聚合物链: {cif_path}")
+        raise RuntimeError(f"RFD4 artifact has no polymer chain: {cif_path}")
     chain = min(polymers, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
     aa3_to_aa1 = {
         "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
@@ -73,7 +80,8 @@ def _sequence_from_cif(cif_path: Path) -> tuple[str, list[int]]:
 
 
 class RFD4Proposer:
-    """RFD4 引擎提案器：候选由全原子生成模型按 pocket/motif 条件化产出。"""
+    """RFD4 proposer: candidates come from the all-atom generative model
+    conditioned on pocket/motif."""
 
     def __init__(
         self,
@@ -104,10 +112,11 @@ class RFD4Proposer:
         n: int,
         plddt_hint: float | None = None,
     ) -> list[tuple[str, list[dict], list[int], str]]:
-        """按 RL 契约产出 n 个候选。
+        """Produce n candidates under the RL contract.
 
-        精英融合：有精英行时，把最强精英的骨架作 motif 条件化重采样
-        （RFD4 版的 semigreedy），其余预算走 pocket 条件化的 de novo。
+        Elite fusion: with elite rows present, the strongest elite backbone
+        is resampled as motif conditioning (the RFD4 analog of semigreedy);
+        the remaining budget goes to pocket-conditioned de novo.
         """
         self._log(f"RFD4 propose: n={n}, elites={len(elite_rows)}")
         proposals: list[tuple[str, list[dict], list[int], str]] = []
@@ -115,7 +124,7 @@ class RFD4Proposer:
         batch_dir = self.work_dir / f"propose_{uuid.uuid4().hex[:8]}"
 
         specs = []
-        # de novo：pocket 条件化 binder，长度窗口内
+        # de novo: pocket-conditioned binder within the length window
         lo, hi = self.binder_len_lo, self.binder_len_hi
         pocket = ",".join(str(p) for p in self.pocket_positions)
         specs.append({
@@ -126,7 +135,8 @@ class RFD4Proposer:
                 "pocket_residues": pocket,
             }
         })
-        # 精英邻域：把最强精英序列固定为 motif（C_SEQ），骨架重采样
+        # elite neighborhood: pin the strongest elite sequence as motif
+        # (C_SEQ) and resample the backbone
         if elite_rows:
             elite = elite_rows[0]
             specs.append({
@@ -149,7 +159,7 @@ class RFD4Proposer:
                 try:
                     seq, anchors = _sequence_from_cif(cif)
                 except RuntimeError as exc:
-                    self._log(f"跳过 {cif.name}: {exc}")
+                    self._log(f"skipping {cif.name}: {exc}")
                     continue
                 if len(seq) < lo or len(seq) > hi or seq in seen:
                     continue
@@ -159,7 +169,8 @@ class RFD4Proposer:
                 proposals.append((seq, [], anchors, group))
                 idx += 1
 
-        # 预算缺口：按残基池半随机补齐（保持 RL 预算恒定）
+        # budget gap: fill semi-randomly from the residue pool (keeps the
+        # RL budget constant)
         import random
 
         rng = random.Random(self.seed + idx)
