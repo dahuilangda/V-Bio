@@ -485,6 +485,23 @@ class MonitorStore:
             reconciled += 1
         return reconciled
 
+    def prune_events(self, retention_days: int = 60, batch_limit: int = 50000) -> int:
+        """删除超过保留期的 monitor_events 行，控制表的无界增长。
+
+        事件只服务近期的活动追溯，历史行没有查询方；按 occurred_at 分批
+        删除，避免单次事务过长阻塞投影写入。返回删除的行数。
+        """
+        with self._transaction() as cur:
+            cur.execute(
+                "DELETE FROM monitor_events WHERE sequence IN ("
+                "  SELECT sequence FROM monitor_events"
+                "  WHERE occurred_at < NOW() - (%s || ' days')::interval"
+                "  ORDER BY occurred_at LIMIT %s)",
+                (str(retention_days), batch_limit),
+            )
+            deleted = cur.rowcount
+        return deleted
+
     def expire_leases(self) -> int:
         with self._transaction() as cursor:
             cursor.execute("select public.monitor_expire_leases() as expired")

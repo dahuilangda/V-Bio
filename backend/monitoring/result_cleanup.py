@@ -42,6 +42,9 @@ LOGGER = logging.getLogger(__name__)
 
 # *_keep_* 导出回退目录在标准保留期之外的额外宽限天数。
 KEEP_GRACE_DAYS = 30
+# _runtime_tmp 中间工作树的额外宽限天数（结果归档保留期之外的追加期）。
+# 实测该树是磁盘大头（单目录树可达数 GB），需要独立于归档保留期收紧。
+RUNTIME_TMP_EXTRA_DAYS = 14
 
 # backend 结果根目录下的保留名目录：exports 已有自身的文件 TTL 清理，_runtime_tmp
 # 作为容器目录跳过（其子目录仍会单独按 mtime 清理）。
@@ -166,7 +169,8 @@ def _path_collector(results_base: Path, lead_opt_root: Optional[Path], min_mtime
     # 它们会让断点续跑后的归档重新退回"无结构"，因此给予远超任务生命周期的
     # 额外宽限（KEEP_GRACE_DAYS），仅在彻底陈旧后才回收，避免无限累积。
     runtime_tmp = results_base / "_runtime_tmp"
-    keep_min_mtime = min_mtime - KEEP_GRACE_DAYS * 86400.0
+    runtime_min_mtime = min_mtime - RUNTIME_TMP_EXTRA_DAYS * 86400.0
+    keep_min_mtime = runtime_min_mtime - KEEP_GRACE_DAYS * 86400.0
     if runtime_tmp.is_dir():
         try:
             with os.scandir(runtime_tmp) as it:
@@ -179,7 +183,9 @@ def _path_collector(results_base: Path, lead_opt_root: Optional[Path], min_mtime
                         continue
                     if '_keep_' in entry.name and mtime > keep_min_mtime:
                         continue
-                    if mtime <= min_mtime:
+                    # 中间工作树（staged/MSA/初始坐标）在结果 zip 上传后即无用，
+                    # 保留期比结果归档多放 RUNTIME_TMP_EXTRA_DAYS 天。
+                    if mtime <= runtime_min_mtime:
                         task_id = _looks_like_task_id(entry.name)
                         if task_id is None or task_id not in active:
                             yield Path(entry.path), True, task_id
