@@ -1,4 +1,10 @@
-import { API_HEADERS, managementApiUrl, requestManagement } from './backendClient';
+import { API_HEADERS, managementApiUrl, managementSessionHeader, requestManagement } from './backendClient';
+
+// copilot 端点要求登录会话，存在会话时自动附带。
+function copilotSessionHeaders(): Record<string, string> {
+  const token = managementSessionHeader();
+  return token ? { 'X-VBio-Session': token } : {};
+}
 import type { CopilotPlanAction, CopilotPlannerQuestion, CopilotQuestionOption, CopilotTraceStep } from '../types/models';
 
 const MAX_CONTEXT_STRING_CHARS = 1600;
@@ -338,6 +344,7 @@ export async function requestCopilotTurn(input: {
       method: 'POST',
       headers: {
         ...API_HEADERS,
+        ...copilotSessionHeaders(),
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -406,10 +413,11 @@ export async function streamCopilotTurn(
   const timeoutController = new AbortController();
   const timer = setTimeout(() => timeoutController.abort(), 180000);
 
-  // Combine the external cancel signal with the internal timeout signal.
-  const combinedSignal = signal
-    ? AbortSignal.any([signal, timeoutController.signal])
-    : timeoutController.signal;
+  // 手动转发取消，AbortSignal.any 在旧 WebKit 上会直接抛错。
+  if (signal) {
+    if (signal.aborted) timeoutController.abort();
+    else signal.addEventListener('abort', () => timeoutController.abort(), { once: true });
+  }
 
   let res: Response;
   try {
@@ -419,6 +427,7 @@ export async function streamCopilotTurn(
         method: 'POST',
         headers: {
           ...API_HEADERS,
+          ...copilotSessionHeaders(),
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -429,7 +438,7 @@ export async function streamCopilotTurn(
           content: input.content,
           ...(input.turnKey ? { turn_key: input.turnKey } : {})
         }),
-        signal: combinedSignal
+        signal: timeoutController.signal
       }
     );
   } catch (error) {
@@ -535,7 +544,7 @@ export async function requestCopilotStop(input: { turnKey: string }): Promise<bo
   try {
     const res = await fetch(managementApiUrl('/vbio-api/copilot/stop'), {
       method: 'POST',
-      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      headers: { ...API_HEADERS, ...copilotSessionHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ turn_key: input.turnKey })
     });
     if (!res.ok) return false;
@@ -550,7 +559,7 @@ export async function submitCopilotSteering(input: { turnKey: string; text: stri
   try {
     const res = await fetch(managementApiUrl('/vbio-api/copilot/steer'), {
       method: 'POST',
-      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      headers: { ...API_HEADERS, ...copilotSessionHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ turn_key: input.turnKey, text: input.text })
     });
     if (!res.ok) return false;
@@ -584,7 +593,7 @@ export async function requestCopilotCompletions(
   try {
     const res = await fetch(managementApiUrl('/vbio-api/copilot/complete'), {
       method: 'POST',
-      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      headers: { ...API_HEADERS, ...copilotSessionHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         context_type: input.contextType,
         context_payload: sanitizeCopilotContextPayload(input.contextPayload),

@@ -48,7 +48,7 @@ from management_api.copilot_settings import (
     validate_api_url,
     validate_proxy_url,
 )
-from management_api.copilot_stream import copilot_event_stream, register_steering, submit_follow_up, submit_steering
+from management_api.copilot_stream import copilot_event_stream, registry_key_for, register_steering, submit_follow_up, submit_steering
 from management_api.usage_tracker import UsageTracker
 from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
 
@@ -327,6 +327,17 @@ def _verify_management_session(token: str, *, allow_refresh: bool = False, requi
     return payload
 
 
+def _session_stale_for_user(claims: Dict[str, Any], user: Dict[str, Any]) -> bool:
+    """会话签发时间早于密码重置纪元（sessions_valid_after）即为失效。"""
+    epoch = user.get("sessions_valid_after")
+    if epoch is None:
+        return False
+    try:
+        return float(claims.get("iat") or 0) < float(epoch)
+    except (TypeError, ValueError):
+        return True
+
+
 def _session_from_user_row(row: Dict[str, Any], *, provider: str, login_at: str | None = None) -> Dict[str, Any]:
     username = str(row.get("username") or "")
     email = row.get("email")
@@ -468,6 +479,34 @@ def runtime_status() -> Tuple[Response, int]:
 @app.get("/vbio-api/copilot/config")
 def copilot_config() -> Tuple[Response, int]:
     return jsonify({"enabled": _copilot_is_configured(), "completionEnabled": _copilot_is_completion_enabled()}), 200
+
+
+# Copilot 端点需登录会话（可设 VBIO_COPILOT_REQUIRE_SESSION=0 退回旧行为）。
+_COPILOT_REQUIRE_SESSION = os.environ.get(
+    "VBIO_COPILOT_REQUIRE_SESSION", "1"
+).strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _require_copilot_session() -> Tuple[Tuple[Response, int] | None, str]:
+    """要求登录会话；返回 (错误响应或 None, 已认证 user_id)。"""
+    if not _COPILOT_REQUIRE_SESSION:
+        return None, ""
+    token = str(request.headers.get("X-VBio-Session") or "").strip()
+    if not token:
+        return (jsonify({"error": "Copilot requires a signed-in session."}), 401), ""
+    try:
+        claims = _verify_management_session(token, allow_refresh=True, require_super_admin=False)
+        user = _find_user_by_id(str(claims.get("sub") or ""))
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 401, ""
+    except Exception:
+        logger.exception("Copilot session verification failed")
+        return jsonify({"error": "Unable to verify session"}), 503, ""
+    if not user or user.get("deleted_at"):
+        return (jsonify({"error": "Management user is no longer active"}), 401, "")
+    if _session_stale_for_user(claims, user):
+        return (jsonify({"error": "Session expired by a password change; sign in again"}), 401, "")
+    return None, str(claims.get("sub") or "")
 
 
 @app.get("/vbio-api/copilot/settings")
@@ -767,6 +806,9 @@ def refresh_management_session() -> Tuple[Response, int]:
         user = _find_user_by_id(str(claims.get("sub") or ""))
         if not user or user.get("deleted_at"):
             return jsonify({"error": "Management user is no longer active"}), 401
+        # refresh token 沿用登录时 iat，改密即吊销整条链。
+        if _session_stale_for_user(claims, user):
+            return jsonify({"error": "Session expired by a password change; sign in again"}), 401
         username = str(user.get("username") or "")
         email = user.get("email")
         if not bool(user.get("is_admin") or _is_super_admin(username, str(email or ""))):
@@ -811,10 +853,18 @@ def _require_jwt_admin() -> Tuple[Response, int] | None:
     if not token:
         return jsonify({"error": "Missing management session"}), 403
     try:
-        _verify_management_session(token)
-        return None
+        claims = _verify_management_session(token)
     except PermissionError as exc:
         return jsonify({"error": str(exc)}), 403
+    # 本地账号受改密纪元约束；纯外部 JWT 身份无本地行，由签发方管理。
+    try:
+        user = _find_user_by_id(str(claims.get("sub") or ""))
+    except Exception:
+        logger.exception("Administrator session verification failed")
+        return jsonify({"error": "Unable to verify administrator session"}), 503
+    if user and _session_stale_for_user(claims, user):
+        return jsonify({"error": "Session expired by a password change; sign in again"}), 401
+    return None
 
 def _require_platform_admin() -> Tuple[Response, int] | None:
     token = str(request.headers.get("X-VBio-Session") or "").strip()
@@ -831,6 +881,8 @@ def _require_platform_admin() -> Tuple[Response, int] | None:
 
     if not user or user.get("deleted_at"):
         return jsonify({"error": "Management user is no longer active"}), 403
+    if _session_stale_for_user(claims, user):
+        return jsonify({"error": "Session expired by a password change; sign in again"}), 401
     username = str(user.get("username") or "")
     email = str(user.get("email") or "")
     if not bool(user.get("is_admin") or _is_super_admin(username, email)):
@@ -1004,6 +1056,9 @@ def _copilot_request_too_large() -> bool:
 
 @app.post("/vbio-api/copilot/turn")
 def copilot_turn() -> Tuple[Response, int]:
+    forbidden, auth_user_id = _require_copilot_session()
+    if forbidden:
+        return forbidden
     _check_settings_reload()
     if not _copilot_is_configured():
         return jsonify({"error": "Copilot is not configured."}), 404
@@ -1014,7 +1069,7 @@ def copilot_turn() -> Tuple[Response, int]:
         result = copilot_assistant.plan_turn(
             context_type=str(payload.get("context_type") or "").strip(),
             context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
-            user_id=str(payload.get("user_id") or "").strip(),
+            user_id=auth_user_id or str(payload.get("user_id") or "").strip(),
             username=str(payload.get("username") or "").strip(),
             content=str(payload.get("content") or "").strip(),
         )
@@ -1029,6 +1084,9 @@ def copilot_turn() -> Tuple[Response, int]:
 
 @app.post("/vbio-api/copilot/stream")
 def copilot_stream() -> Response:
+    forbidden, auth_user_id = _require_copilot_session()
+    if forbidden:
+        return forbidden
     _check_settings_reload()
     if not _copilot_is_configured():
         return jsonify({"error": "Copilot is not configured."}), 404
@@ -1037,7 +1095,9 @@ def copilot_stream() -> Response:
     payload = request.get_json(silent=True) or {}
     context_type = str(payload.get("context_type") or "").strip()
     context_payload = payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {}
-    user_id = str(payload.get("user_id") or "").strip()
+    # Registry namespacing keys on the AUTHENTICATED id: a client-declared user_id must
+    # not be able to register/steer/stop another user's turn.
+    user_id = auth_user_id or str(payload.get("user_id") or "").strip()
     username = str(payload.get("username") or "").strip()
     content = str(payload.get("content") or "").strip()
 
@@ -1047,8 +1107,8 @@ def copilot_stream() -> Response:
         # Client-pinned key (legacy path): eager registration so early steers land.
         # Server-signed keys (no client key) register inside the generator before
         # the control frame hands the key out — no leak window.
-        register_steering(f"{user_id}::{turn_key}")
-        register_steering(f"{user_id}::{turn_key}::followup")
+        register_steering(registry_key_for(user_id, turn_key))
+        register_steering(f"{registry_key_for(user_id, turn_key)}::followup")
 
     def plan(on_step, abort, get_steering=None, get_follow_ups=None):
         return copilot_assistant.plan_turn(
@@ -1074,18 +1134,21 @@ def copilot_stream() -> Response:
 @app.post("/vbio-api/copilot/steer")
 def copilot_steer() -> Tuple[Response, int]:
     """Queue a user interjection for an in-flight streaming turn (pi steering alignment)."""
+    forbidden, auth_user_id = _require_copilot_session()
+    if forbidden:
+        return forbidden
     if not _copilot_is_configured():
         return jsonify({"error": "Copilot is not configured."}), 404
     payload = request.get_json(silent=True) or {}
     turn_key = str(payload.get("turn_key") or "").strip()
-    user_id = str(payload.get("user_id") or "").strip()
+    user_id = auth_user_id or str(payload.get("user_id") or "").strip()
     text = str(payload.get("text") or "").strip()
     if not turn_key or not text:
         return jsonify({"error": "turn_key and text are required."}), 400
     if len(text) > 4000:
         return jsonify({"error": "Steering text is too large."}), 413
-    # Registry keys are user-namespaced server-side; apply the same namespace.
-    namespaced = f"{user_id}::{turn_key}" if user_id else turn_key
+    # 与 stream 侧共用同一命名规则，否则早期 steer 落到孤儿队列。
+    namespaced = registry_key_for(user_id, turn_key)
     is_follow_up = bool(payload.get("follow_up")) or namespaced.endswith("::followup")
     queued = (
         submit_follow_up(namespaced.removesuffix("::followup"), text)
@@ -1101,16 +1164,19 @@ def copilot_steer() -> Tuple[Response, int]:
 @app.post("/vbio-api/copilot/stop")
 def copilot_stop() -> Tuple[Response, int]:
     """Stop an in-flight streaming turn; later checkpoints see the abort (the current model call still finishes)."""
+    forbidden, auth_user_id = _require_copilot_session()
+    if forbidden:
+        return forbidden
     if not _copilot_is_configured():
         return jsonify({"error": "Copilot is not configured."}), 404
     payload = request.get_json(silent=True) or {}
     turn_key = str(payload.get("turn_key") or "").strip()
-    user_id = str(payload.get("user_id") or "").strip()
+    user_id = auth_user_id or str(payload.get("user_id") or "").strip()
     if not turn_key:
         return jsonify({"error": "turn_key is required."}), 400
     from management_api.copilot_stream import request_abort
 
-    namespaced = f"{user_id}::{turn_key}" if user_id else turn_key
+    namespaced = registry_key_for(user_id, turn_key)
     stopped = request_abort(namespaced)
     if stopped:
         return jsonify({"stopped": True}), 200
@@ -1120,6 +1186,9 @@ def copilot_stop() -> Tuple[Response, int]:
 @app.post("/vbio-api/copilot/complete")
 def copilot_complete() -> Tuple[Response, int]:
     # Best-effort: never blocks the composer; failures return an empty suggestion.
+    forbidden, _auth_user_id = _require_copilot_session()
+    if forbidden:
+        return forbidden
     _check_settings_reload()
     if not _copilot_is_completion_enabled():
         return jsonify({"suggestion": "", "completions": []}), 200

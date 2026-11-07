@@ -114,7 +114,7 @@ class SteeringTests(unittest.TestCase):
     """pi steering alignment: interjections queue per in-flight turn and drain between rounds."""
 
     def test_submit_and_drain(self):
-        from management_api.copilot_stream import _register_steering, _unregister_steering, submit_steering
+        from management_api.copilot_stream import register_steering as _register_steering, _unregister_steering, submit_steering
 
         q = _register_steering("t-1")
         self.assertTrue(submit_steering("t-1", "用 4NFF 那个"))
@@ -126,7 +126,7 @@ class SteeringTests(unittest.TestCase):
         self.assertFalse(submit_steering("t-1", "late"))  # post-stream submit rejected
 
     def test_queue_is_bounded(self):
-        from management_api.copilot_stream import _STEERING_MAX_ENTRIES, _register_steering, _unregister_steering, submit_steering
+        from management_api.copilot_stream import _STEERING_MAX_ENTRIES, register_steering as _register_steering, _unregister_steering, submit_steering
 
         q = _register_steering("t-2")
         for i in range(_STEERING_MAX_ENTRIES):
@@ -135,13 +135,17 @@ class SteeringTests(unittest.TestCase):
         _unregister_steering("t-2")
 
     def test_steer_endpoint_routes(self):
-        from management_api.copilot_stream import _register_steering, _unregister_steering, submit_steering
+        from management_api.copilot_stream import register_steering as _register_steering, _unregister_steering, submit_steering
 
         _register_steering("t-3")
         # Unknown key → 409 (honest, actionable); known key → 200 queued.
+        # This test targets the steering-routing contract, not auth — the copilot
+        # session gate is off for the same reason.
         with patch("vbio_management_api.copilot_assistant") as _ca, patch(
             "vbio_management_api._copilot_is_configured", return_value=True
-        ), patch("vbio_management_api._copilot_request_too_large", return_value=False):
+        ), patch("vbio_management_api._copilot_request_too_large", return_value=False), patch(
+            "vbio_management_api._COPILOT_REQUIRE_SESSION", False
+        ):
             client = app.test_client()
             r1 = client.post("/vbio-api/copilot/steer", json={"turn_key": "nope", "text": "hi"})
             self.assertEqual(r1.status_code, 409)

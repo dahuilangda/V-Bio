@@ -129,7 +129,11 @@ def register_steering(turn_key: str) -> "queue.Queue[str]":
         return q
 
 
-_register_steering = register_steering
+def registry_key_for(user_id: str, turn_key: str) -> str:
+    """steering/abort 注册键唯一命名规则（两侧必须一致）。"""
+    user = str(user_id or "").strip()
+    key = str(turn_key or "").strip()
+    return f"{user}::{key}" if user else key
 
 
 def _unregister_steering(turn_key: str) -> None:
@@ -160,7 +164,7 @@ def copilot_event_stream(
     server_signed_key = not str(turn_key or "").strip()
     if server_signed_key:
         turn_key = f"turn-{uuid.uuid4().hex}"
-    registry_key = f"{user_id}::{turn_key}" if user_id else turn_key
+    registry_key = registry_key_for(user_id, turn_key)
     if turn_key:
         register_abort_event(registry_key, abort)
     steering_queue = register_steering(registry_key) if turn_key else None
