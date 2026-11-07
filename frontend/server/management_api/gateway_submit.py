@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Tuple
@@ -18,11 +20,19 @@ from management_api.task_snapshot import (
 
 # A single bounded thread pool for snapshot persistence — replaces the per-submit daemon thread
 # that could spawn unboundedly under load and was silently dropped on process exit. The pool is
-# shared across all submit calls. Note the executor's queue is unbounded, so submit() only rejects
-# after shutdown (process exit); snapshots still queued at that point are dropped — snapshots are
-# best-effort display backfill, the runtime task row remains the authority. Pool size 4 keeps the
-# PostgREST write pressure bounded under bursts.
+# shared across all submit calls. 信号量限制 executor 内部队列长度，PostgREST 变慢时
+# 丢弃快照（仅展示回填，任务行仍是权威数据），不无限积压。
 _snapshot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vbio-snapshot")
+_SNAPSHOT_QUEUE_MAX_ENTRIES = 512
+_snapshot_queue_slots = threading.BoundedSemaphore(_SNAPSHOT_QUEUE_MAX_ENTRIES)
+_snapshot_dropped = itertools.count()
+
+
+def _persist_submit_snapshot_bounded(**snapshot_kwargs: Any) -> None:
+    try:
+        _persist_submit_snapshot_async(**snapshot_kwargs)
+    finally:
+        _snapshot_queue_slots.release()
 
 
 def _build_submit_snapshot(gateway: Any, upstream_path: str) -> Dict[str, Any]:
@@ -105,10 +115,21 @@ def forward_submit(gateway: Any, upstream_path: str, action: str) -> Tuple[Respo
                     "extra_snapshot_payload": extra_snapshot_payload,
                 }
                 try:
-                    _snapshot_executor.submit(_persist_submit_snapshot_async, **snapshot_kwargs)
-                except RuntimeError:
-                    # Executor shut down (process exit) — persist synchronously as a fallback.
-                    _persist_submit_snapshot_async(**snapshot_kwargs)
+                    if _snapshot_queue_slots.acquire(blocking=False):
+                        try:
+                            _snapshot_executor.submit(_persist_submit_snapshot_bounded, **snapshot_kwargs)
+                        except RuntimeError:
+                            # 已停机（进程退出）——退回同步写。
+                            _snapshot_queue_slots.release()
+                            _persist_submit_snapshot_async(**snapshot_kwargs)
+                    else:
+                        dropped = next(_snapshot_dropped) + 1
+                        if dropped == 1 or dropped % 200 == 0:
+                            gateway.logger.warning(
+                                "Snapshot queue saturated; dropped %d snapshot(s) so far", dropped
+                            )
+                except Exception:  # noqa: BLE001 — 快照失败不得影响提交
+                    gateway.logger.exception("Submit snapshot persistence failed")
 
         gateway._record_usage(
             token,

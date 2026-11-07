@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -16,10 +17,15 @@ def _now_iso() -> str:
 
 
 class UsageTracker:
+    # 信号量限制积压：PostgREST 变慢时丢弃用量记录（best-effort）并计数，不无限增长。
+    _QUEUE_MAX_ENTRIES = 2048
+
     def __init__(self, postgrest: PostgrestClient, logger: Any) -> None:
         self.postgrest = postgrest
         self.logger = logger
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vbio-usage")
+        self._queue_slots = threading.BoundedSemaphore(self._QUEUE_MAX_ENTRIES)
+        self._dropped = 0
 
     def _persist_usage(self, payload: Dict[str, Any], *, token_id: Optional[str], succeeded: bool) -> None:
         try:
@@ -41,6 +47,8 @@ class UsageTracker:
                 )
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("Failed to record API token usage: %s", exc)
+        finally:
+            self._queue_slots.release()
 
     def record_usage(
         self,
@@ -75,6 +83,16 @@ class UsageTracker:
         }
 
         try:
+            if not self._queue_slots.acquire(blocking=False):
+                self._dropped += 1
+                if self._dropped == 1 or self._dropped % 500 == 0:
+                    self.logger.warning(
+                        "Usage queue saturated; dropped %d usage record(s) so far", self._dropped
+                    )
+                return
+        except ValueError:
+            pass  # 信号量计数异常（防御），视为可用
+        try:
             self._executor.submit(
                 self._persist_usage,
                 payload,
@@ -82,6 +100,8 @@ class UsageTracker:
                 succeeded=bool(succeeded),
             )
         except RuntimeError:
+            # 已停机——退回同步写。
+            self._queue_slots.release()
             self._persist_usage(payload, token_id=token.token_id if token else None, succeeded=bool(succeeded))
 
     def forbidden(
