@@ -488,8 +488,6 @@ def _should_skip_large_result_file(file_name: str) -> bool:
     return (
         lower.startswith("pae_")
         or lower.startswith("pde_")
-        or lower.startswith("pae_data_")
-        or lower.startswith("pde_data_")
         or lower.startswith("plddt_data_")
     )
 
@@ -1374,8 +1372,11 @@ def predict_task(self, predict_args: dict):
             logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
         
         if task_temp_dir and os.path.exists(task_temp_dir):
-            shutil.rmtree(task_temp_dir)
-            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+            try:
+                shutil.rmtree(task_temp_dir)
+                logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+            except OSError as cleanup_exc:
+                logger.warning(f"Task {task_id}: temp dir cleanup failed ({cleanup_exc}).")
 
         if tracker:
             tracker.stop_heartbeat()
@@ -1388,7 +1389,9 @@ def predict_task(self, predict_args: dict):
     # with jitter (prevents GPU-pool thundering herd). Application errors
     # fail fast; acks_late + reject_on_worker_lost handle worker-crash
     # requeue instead.
-    autoretry_for=(ConnectionError, TimeoutError),
+    # redis.exceptions.ConnectionError 覆盖 redis 断连重试；内建 ConnectionError
+    # 与其无继承关系，不能只写内建名
+    autoretry_for=(ConnectionError, TimeoutError, redis.exceptions.ConnectionError),
     retry_backoff=30,
     retry_backoff_max=600,
     retry_jitter=True,
@@ -1682,16 +1685,11 @@ def boltz2score_task(self, score_args: dict):
                 "expected one of score/pose/refine/interface/dock."
             )
         compute_ipsae = coerce_bool(score_args.get('compute_ipsae'), False)
-        use_msa_server = coerce_bool(
-            score_args.get('use_msa_server'),
-            True,
-        )
+        # boltz2score 推理必须走 MSA server（历史开关已失效，恒为 True）
+        use_msa_server = True
         msa_server_url = str(getattr(config, "MSA_SERVER_URL", "") or "").strip()
         if not msa_server_url:
             raise RuntimeError("MSA_SERVER_URL 未配置，无法执行 boltz2score 任务。")
-        if not use_msa_server:
-            logger.info("Task %s: force use_msa_server=True for boltz2score.", task_id)
-        use_msa_server = True
         default_recycling_steps = (
             BOLTZ2SCORE_REFINE_RECYCLING_STEPS
             if structure_refine
@@ -1968,8 +1966,11 @@ def boltz2score_task(self, score_args: dict):
             logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
 
         if task_temp_dir and os.path.exists(task_temp_dir):
-            shutil.rmtree(task_temp_dir)
-            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+            try:
+                shutil.rmtree(task_temp_dir)
+                logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+            except OSError as cleanup_exc:
+                logger.warning(f"Task {task_id}: temp dir cleanup failed ({cleanup_exc}).")
 
         if tracker:
             tracker.stop_heartbeat()

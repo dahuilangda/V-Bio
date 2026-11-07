@@ -102,7 +102,7 @@ def register_lead_opt_halo_routes(
             return jsonify({'error': 'budget_per_round must be within 1-512.'}), 400
 
         queue_info = select_queue_for_capability('lead_opt', priority=str(payload.get('priority') or 'default'))
-        if not queue_info.get('queue'):
+        if not queue_info.get('online'):
             return jsonify({
                 'error': 'No CPU worker is online for the lead_opt capability.',
                 'detail': queue_info,

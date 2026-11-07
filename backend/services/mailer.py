@@ -143,16 +143,10 @@ def send_task_notification(
                 task_kind=task_kind, project_id=project_id)
             return True
         except Exception:
+            # 入队失败不触碰 pending 列表：事件带时间戳无法精确回删，
+            # 残留事件由 marker TTL 自愈；直接走即时发送兜底。
             logger.error("digest enqueue failed for %s; sending directly",
                          to_email, exc_info=True)
-            try:
-                from gpu_manager import get_redis_client
-                client = get_redis_client()
-                client.lrem(f"vbio:notify:pending:{to_email}", 1, event)
-                client.delete(f"vbio:notify:window:{to_email}")
-            except Exception:
-                logger.error("digest enqueue cleanup failed for %s",
-                             to_email, exc_info=True)
     return _send_task_email_direct(
         to_email=to_email, task_id=task_id, state=state,
         task_kind=task_kind, project_id=project_id, detail=detail)

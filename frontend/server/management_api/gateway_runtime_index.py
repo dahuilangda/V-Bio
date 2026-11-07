@@ -11,6 +11,8 @@ from __future__ import annotations
 import time
 from typing import Any, Tuple
 
+import requests
+
 from flask import Response, request
 
 from management_api.runtime_proxy import RuntimeProxyBusyError
@@ -62,6 +64,11 @@ def handle_tasks_runtime_index(gateway: Any) -> Tuple[Response, int]:
         return jsonify(payload), 200
     except RuntimeProxyBusyError:
         return jsonify({"error": "Runtime is busy; retry shortly."}), 429
+    except PermissionError as exc:
+        gateway.logger.warning("runtime index unauthorized: %s", exc)
+        return jsonify({"error": str(exc)}), 403
+    except requests.Timeout:
+        return jsonify({"error": "Runtime API timeout"}), 504
     except Exception:
         gateway.logger.exception("runtime index forward failed")
         return jsonify({"error": "Internal server error"}), 500

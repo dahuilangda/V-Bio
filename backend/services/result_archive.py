@@ -74,7 +74,7 @@ class ResultArchiveService:
                 return name
 
         try:
-            matches = glob.glob(os.path.join(base_dir, f'{task_id}_*.zip'))
+            matches = glob.glob(os.path.join(base_dir, glob.escape(task_id) + '_*.zip'))
             if matches:
                 newest = max(matches, key=os.path.getmtime)
                 return os.path.basename(newest)
