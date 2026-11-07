@@ -141,3 +141,26 @@ pipeline: protenix2dock re-poses and refines against the pocket, Mol-1 runs
 independent co-folding validation, and candidates enter the shortlist only
 when both agree. The full FadA campaign practice is in
 `/data/fada_sez_campaign.zip` (`final_list.txt` and validation records).
+
+### Verification dispatch (deep fusion with V-Bio engines)
+
+RFD4 deliberately ships no oracle of its own in this integration. Every
+design is verified by the engines V-Bio already operates — Mol-1, Protenix,
+AlphaFold3 — through the platform gateway, then scored with the shared
+evaluator (ipTM/ipSAE, LRMSD, iRMSD, contact F1, DockQ, functional-surface
+overlap).
+
+```bash
+python3 scripts/verify_designs.py \
+  --runs-dir /data/rfd4-proteina/runs/<job> \
+  --target-sequence "<receptor seq>" \
+  --token <gateway token> --project-id <project> \
+  --backends mol1,protenix --top 5 --seed 101
+```
+
+Each generated binder is submitted as a co-folding prediction to every
+backend in `--backends`; the manifest lands next to the run as
+`verification_manifest.json`. Scores are compared once the tasks finish
+(poll `/vbio-api/status/<task_id>`), using the campaign evaluator — a design
+enters the shortlist only when engines agree on the binding site and the
+functional-surface overlap clears.
