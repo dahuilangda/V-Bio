@@ -639,6 +639,9 @@ def initialize_gpu_pool(devices_to_use: list[int]):
     """
     根据给定的设备列表，初始化或重置 Redis 中的 GPU 池。
 
+    幂等入口是 ensure_gpu_pool（init 命令实际调用方）：空池才初始化、
+    设备一致跳过、有占用不重置。本函数只被 ensure 在需要重建时调用。
+
     Args:
         devices_to_use (list[int]): 要放入池中的 GPU 设备 ID 列表。
     """
