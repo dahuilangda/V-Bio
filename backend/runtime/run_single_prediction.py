@@ -1423,81 +1423,23 @@ def resolve_low_vram(predict_args: Optional[Dict[str, Any]]) -> bool:
     return coerce_bool((predict_args or {}).get("low_vram"))
 
 
-def collect_gpu_device_group_ids() -> List[int]:
-    """Capture host group IDs owning GPU device files to re-add inside the container."""
-    candidate_nodes = [
-        Path("/dev/nvidiactl"),
-        Path("/dev/nvidia-uvm"),
-        Path("/dev/nvidia-uvm-tools"),
-    ]
-
-    candidate_nodes.extend(sorted(Path("/dev").glob("nvidia[0-9]*")))
-    candidate_nodes.extend(sorted(Path("/dev/dri").glob("renderD*") if Path("/dev/dri").exists() else []))
-
-    group_ids: List[int] = []
-    for node in candidate_nodes:
-        try:
-            stat_result = node.stat()
-        except FileNotFoundError:
-            continue
-        gid = stat_result.st_gid
-        if gid not in group_ids:
-            group_ids.append(gid)
-
-    return group_ids
+from backend.worker.docker_cmd import (
+    collect_gpu_device_group_ids,
+    docker_args_has_flag,
+    make_scoped_container_name,
+    sanitize_docker_extra_args,
+)
 
 
-def sanitize_docker_extra_args(raw_args: list) -> list:
-    """
-    清理 Docker 额外参数，忽略不完整的 --env/-e 标志以免吞掉镜像名称。
-    """
-    sanitized = []
-    i = 0
-
-    while i < len(raw_args):
-        token = raw_args[i]
-
-        if token in ("--env", "-e"):
-            if i + 1 >= len(raw_args):
-                print(f"[WARN] 忽略无效的 Docker 参数: {token} (缺少值)", file=sys.stderr)
-                i += 1
-                continue
-
-            value = raw_args[i + 1]
-            if "=" not in value:
-                print(f"[WARN] 忽略无效的 Docker 参数: {token} {value} (缺少 KEY=VALUE 形式)", file=sys.stderr)
-                i += 2
-                continue
-
-            sanitized.extend([token, value])
-            i += 2
-            continue
-
-        sanitized.append(token)
-        i += 1
-
-    return sanitized
+from backend.runtime.docker_exec import remove_container, run_docker_streaming
 
 
-def docker_args_has_flag(args: List[str], flag: str) -> bool:
-    """Check whether a Docker CLI flag is already present in extra args."""
-    normalized = str(flag or "").strip()
-    if not normalized:
-        return False
-    for token in args:
-        if token == normalized or token.startswith(f"{normalized}="):
-            return True
-    return False
+def _docker_warn(message: str) -> None:
+    print(f"[WARN] {message}", file=sys.stderr)
 
 
 def make_task_scoped_container_name(task_id: Optional[str]) -> Optional[str]:
-    raw_task_id = str(task_id or "").strip()
-    if not raw_task_id:
-        return None
-    token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw_task_id).strip(".-_").lower()
-    if not token:
-        token = hashlib.sha1(raw_task_id.encode("utf-8")).hexdigest()[:12]
-    return f"boltz-af3-{token[:48]}"
+    return make_scoped_container_name(task_id, prefix="boltz-af3")
 
 
 def sanitize_a3m_content(content: str, context: str = "") -> str:
@@ -1841,9 +1783,9 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
     ensure_image(image)
 
     raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
-    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    extra_args = sanitize_docker_extra_args(raw_extra_args, log=_docker_warn)
     runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or record_id).strip()
-    task_container_name = make_task_scoped_container_name(f"{runtime_task_id}-{record_id}-ipsae")
+    task_container_name = make_scoped_container_name(f"{runtime_task_id}-{record_id}-ipsae", prefix="boltz-af3")
 
     docker_command = ["docker", "run", "--rm"]
     if task_container_name:
@@ -1893,17 +1835,7 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
         ]
     )
 
-    if task_container_name:
-        try:
-            subprocess.run(
-                ["docker", "rm", "-f", task_container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=30,
-            )
-        except Exception:
-            pass
+    remove_container(task_container_name)
 
     with log_path.open("w", encoding="utf-8") as logf:
         proc = subprocess.Popen(
@@ -2838,7 +2770,7 @@ def _run_boltz2score_affinity_postprocess(
     ensure_image(image)
 
     raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
-    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    extra_args = sanitize_docker_extra_args(raw_extra_args, log=_docker_warn)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):
         print(
             f"[WARN] 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
@@ -2847,7 +2779,7 @@ def _run_boltz2score_affinity_postprocess(
     shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
 
     runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or affinity_base.name).strip()
-    task_container_name = make_task_scoped_container_name(f"{runtime_task_id}-{archive_prefix}-boltz2score")
+    task_container_name = make_scoped_container_name(f"{runtime_task_id}-{archive_prefix}-boltz2score", prefix="boltz-af3")
     runtime_overridden = any(token == "--runtime" for token in extra_args)
 
     docker_command = ["docker", "run", "--rm"]
@@ -2912,17 +2844,7 @@ def _run_boltz2score_affinity_postprocess(
     docker_command.append(image)
     docker_command.extend(score_cmd)
 
-    if task_container_name:
-        try:
-            subprocess.run(
-                ["docker", "rm", "-f", task_container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=30,
-            )
-        except Exception:
-            pass
+    remove_container(task_container_name)
 
     score_log = affinity_base / "boltz2score.log"
     print(
@@ -4929,7 +4851,7 @@ def run_rfd4_backend(
 
     _stage_rfd4_target(input_dir, template_inputs)
 
-    spec_payload = _yaml.safe_load(yaml_content) or {}
+    spec_payload = yaml.safe_load(yaml_content) or {}
     target_entry = next(
         (s["protein"] for s in spec_payload.get("sequences", [])
          if isinstance(s, dict) and "protein" in s),
@@ -4950,7 +4872,7 @@ def run_rfd4_backend(
         }
     }
     spec_path = input_dir / "rfd4_spec.yaml"
-    spec_path.write_text(_yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+    spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
 
     seed_value = int(seed) if seed is not None else 101
     from backend.worker.docker_cmd import image_and_python
@@ -5044,8 +4966,7 @@ def run_mol1_backend(
 
     image, _ = image_and_python(mol1_image)
     mol1_python = "python3.12"  # Mol-1 镜像内的解释器（deadsnakes 3.12）
-    import uuid as _uuid
-    container_name = f"mol1-predict-{_uuid.uuid4().hex[:12]}"
+    container_name = f"mol1-predict-{uuid.uuid4().hex[:12]}"
     gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
     command = [
         "docker", "run", "--rm", "--name", container_name, "--entrypoint=",
@@ -5123,7 +5044,6 @@ def run_protenix_backend(
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
-    use_msa_server: bool,
     seed: Optional[int] = None,
     msa_mode: str = "auto",
     task_id: Optional[str] = None,
@@ -5274,7 +5194,7 @@ def run_protenix_backend(
     checkpoint_filename = f"{model_name}.pt"
     image = PROTENIX_DOCKER_IMAGE or os.environ.get("P2D_IMAGE", "vbio-protenix-v2-runtime:2.0.0")
     raw_extra_args = shlex.split(PROTENIX_DOCKER_EXTRA_ARGS) if PROTENIX_DOCKER_EXTRA_ARGS else []
-    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    extra_args = sanitize_docker_extra_args(raw_extra_args, log=_docker_warn)
     infer_extra_args = shlex.split(PROTENIX_INFER_EXTRA_ARGS) if PROTENIX_INFER_EXTRA_ARGS else []
     if not model_dir or not os.path.isdir(model_dir):
         raise FileNotFoundError("PROTENIX_MODEL_DIR 未配置或目录不存在，无法运行 Protenix 容器。")
@@ -5311,7 +5231,7 @@ def run_protenix_backend(
         raise
 
     runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
-    task_container_name = make_task_scoped_container_name(runtime_task_id)
+    task_container_name = make_scoped_container_name(runtime_task_id, prefix="boltz-af3")
 
     runtime_overridden = any(token == "--runtime" for token in extra_args)
     docker_command = ["docker", "run", "--rm"]
@@ -5425,38 +5345,11 @@ def run_protenix_backend(
     docker_command.extend(infer_extra_args)
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
-    if task_container_name:
-        try:
-            subprocess.run(
-                ["docker", "rm", "-f", task_container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=30,
-            )
-        except Exception:
-            pass
+    remove_container(task_container_name)
 
     print(f"运行 Protenix Docker: {display_command}", file=sys.stderr)
     protenix_log_path = str(protenix_results_root / "protenix_docker.log")
-    with open(protenix_log_path, "w", encoding="utf-8") as log_file:
-        proc = subprocess.Popen(
-            docker_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        output_tail: List[str] = []
-        if proc.stdout:
-            for line in proc.stdout:
-                log_file.write(line)
-                log_file.flush()
-                print(line, end="", file=sys.stderr)
-                output_tail.append(line)
-                if len(output_tail) > 200:
-                    output_tail.pop(0)
-        return_code = proc.wait()
+    return_code, output_tail_text = run_docker_streaming(docker_command, protenix_log_path)
 
     # Protenix official image runs as root by default; fix ownership on mounted temp dirs
     # so TemporaryDirectory cleanup in host Python can remove them.
@@ -5487,7 +5380,7 @@ def run_protenix_backend(
         )
 
     if return_code != 0:
-        tail_text = "".join(output_tail[-200:])
+        tail_text = output_tail_text
         traceback_text = ""
         try:
             if os.path.isfile(protenix_log_path):
@@ -6352,7 +6245,6 @@ def _extract_peptide_plddts(structure_file) -> list:
     Returns [] on any failure — the proposer treats empty plddts as
     uniform weight (no pLDDT guidance), matching the pre-upgrade path."""
     try:
-        import gemmi
         st = gemmi.read_structure(str(structure_file))
         st.setup_entities()
         chains = sorted(
@@ -6369,8 +6261,7 @@ def _extract_peptide_plddts(structure_file) -> list:
         # Staged PDB writers leave B-factor at 0.0 — fall back to the
         # engine's CIF in the same directory (protenix writes plddt there)
         if plddts and max(plddts) < 0.01:
-            from pathlib import Path as _P
-            for cif in _P(structure_file).parent.glob("*.cif"):
+            for cif in Path(structure_file).parent.glob("*.cif"):
                 try:
                     alt = _extract_peptide_plddts(cif)
                     if alt and max(alt) > 0.01:
@@ -7121,9 +7012,8 @@ def _dpeptide_uploaded_target_structure(predict_args: Dict[str, Any], out_dir: P
         content = entry.get("content_base64") if isinstance(entry, dict) else None
         if not content:
             continue
-        import base64 as _b64
-
-        raw = _b64.b64decode(content)
+    
+        raw = base64.b64decode(content)
         fmt = str(entry.get("format") or "pdb").lower()
         suffix = ".cif" if fmt in ("cif", "mmcif") else ".pdb"
         path = Path(out_dir)
@@ -7291,7 +7181,6 @@ def _dpeptide_predict_target_structure(
         f"      id: A\n"
         f"      sequence: {sequence}\n"
     )
-    import uuid as _uuid
 
     from backend.worker.tasks import predict_task  # same entry used by routes
 
@@ -8029,13 +7918,12 @@ def _dpeptide_prepare_reference_peptide(
     entry = predict_args.get("peptide_structure_input")
     if not isinstance(entry, dict) or not entry.get("content_base64"):
         return None
-    import base64 as _b64
 
     out_dir.mkdir(parents=True, exist_ok=True)
     fmt = str(entry.get("format") or "pdb").lower()
     suffix = ".cif" if fmt in ("cif", "mmcif") else ".pdb"
     path = out_dir / f"reference_peptide{suffix}"
-    path.write_bytes(_b64.b64decode(entry["content_base64"]))
+    path.write_bytes(base64.b64decode(entry["content_base64"]))
 
     st = gemmi.read_structure(str(path))
     st.setup_entities()
@@ -9104,7 +8992,6 @@ def _backbone_intact(cif: Path, min_ca_ca: float = BACKBONE_CA_CA_MIN_A) -> bool
     Guards against backbone crush: clash pushes without an omega-band can
     fold CA(i) onto CA(i+1)    sampler output was a clean helix).
     """
-    import gemmi
     st = gemmi.read_structure(str(cif))
     st.setup_entities()
     for chain in st[0]:
@@ -10646,7 +10533,6 @@ def run_peptide_design_backend(
                 _pocket_residue_letters(pocket_sequence_contacts, base_yaml_data,
                                         target_chain_id))
             if pocket_res:
-                from collections import Counter
                 comp = Counter(pocket_res.upper())
                 n_basic = sum(comp.get(a, 0) for a in "KRH")
                 n_aromatic = sum(comp.get(a, 0) for a in "FYW")
@@ -10656,8 +10542,7 @@ def run_peptide_design_backend(
                 n_acid = max(2, int(seed_len * frac_acid))
                 # aromatic anchor: 2-3 F/Y (hydrophobic contacts)
                 n_aro = min(3, max(1, n_aromatic))
-                import random as _rnd
-                _seed_rng = _rnd.Random(42)
+                _seed_rng = random.Random(42)
                 acid_seed = list("ED" * seed_len)
                 _seed_rng.shuffle(acid_seed)
                 acid_seed = acid_seed[:n_acid]
@@ -12775,7 +12660,7 @@ def run_boltz_backend(
         raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法运行 Boltz2 Docker。")
 
     raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
-    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    extra_args = sanitize_docker_extra_args(raw_extra_args, log=_docker_warn)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):
         print(
             f"[WARN] 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
@@ -12784,7 +12669,7 @@ def run_boltz_backend(
     shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
 
     runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip()
-    task_container_name = make_task_scoped_container_name(runtime_task_id)
+    task_container_name = make_scoped_container_name(runtime_task_id, prefix="boltz-af3")
     runtime_overridden = any(token == "--runtime" for token in extra_args)
 
     docker_command = ["docker", "run", "--rm"]
@@ -12883,45 +12768,15 @@ def run_boltz_backend(
         ]
     )
 
-    if task_container_name:
-        try:
-            subprocess.run(
-                ["docker", "rm", "-f", task_container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=30,
-            )
-        except Exception:
-            pass
+    remove_container(task_container_name)
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
     print(f"运行 Boltz2 Docker: {display_command}", file=sys.stderr)
 
     boltz_log_path = str(results_root / "boltz2_docker.log")
-    with open(boltz_log_path, "w", encoding="utf-8") as log_file:
-        docker_proc = subprocess.Popen(
-            docker_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        output_tail: List[str] = []
-        if docker_proc.stdout:
-            for line in docker_proc.stdout:
-                log_file.write(line)
-                log_file.flush()
-                print(line, end="", file=sys.stderr)
-                output_tail.append(line)
-                if len(output_tail) > 200:
-                    output_tail.pop(0)
-
-        return_code = docker_proc.wait()
+    return_code, tail_text = run_docker_streaming(docker_command, boltz_log_path)
 
     if return_code != 0:
-        tail_text = "".join(output_tail[-200:])
         raise RuntimeError(
             f"Boltz2 Docker run failed with exit code {return_code}. "
             f"{readable_docker_failure_diagnosis(return_code, tail_text)}\n"
@@ -12972,7 +12827,6 @@ def run_alphafold3_backend(
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
-    use_msa_server: bool,
     seed: Optional[int] = None,
     template_payloads: Optional[List[dict]] = None,
     task_id: Optional[str] = None,
@@ -13154,7 +13008,7 @@ try:
     import os as _os
     import json as _json
     from alphafold3.constants import residue_names as _af3_residue_names
-    _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
+    _ccd_overrides = json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
     if isinstance(_ccd_overrides, dict):
         for _ccd, _one in _ccd_overrides.items():
             _ccd = str(_ccd or "").strip().upper()
@@ -13267,7 +13121,7 @@ except Exception:
     database_dir = ALPHAFOLD3_DATABASE_DIR
     image = ALPHAFOLD3_DOCKER_IMAGE or "jurgjn/alphafold3:v3.0.2"
     raw_extra_args = shlex.split(ALPHAFOLD3_DOCKER_EXTRA_ARGS) if ALPHAFOLD3_DOCKER_EXTRA_ARGS else []
-    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    extra_args = sanitize_docker_extra_args(raw_extra_args, log=_docker_warn)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):
         print(
             f"[WARN] 已忽略部分 ALPHAFOLD3_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
@@ -13295,7 +13149,7 @@ except Exception:
     container_cache_dir = "/workspace/af_cache"
     container_colabfold_jobs_dir = "/app/jobs"
     runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
-    task_container_name = make_task_scoped_container_name(runtime_task_id)
+    task_container_name = make_scoped_container_name(runtime_task_id, prefix="boltz-af3")
 
     runtime_overridden = any(token == "--runtime" for token in extra_args)
 
@@ -13396,42 +13250,12 @@ except Exception:
     )
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
-    if task_container_name:
-        try:
-            subprocess.run(
-                ["docker", "rm", "-f", task_container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=30,
-            )
-        except Exception:
-            pass
+    remove_container(task_container_name)
     print(f"运行 AlphaFold3 Docker: {display_command}", file=sys.stderr)
     af3_log_path = str(af3_results_root / "af3_docker.log")
-    with open(af3_log_path, "w", encoding="utf-8") as log_file:
-        docker_proc = subprocess.Popen(
-            docker_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        output_tail: List[str] = []
-        if docker_proc.stdout:
-            for line in docker_proc.stdout:
-                log_file.write(line)
-                log_file.flush()
-                print(line, end="", file=sys.stderr)
-                output_tail.append(line)
-                if len(output_tail) > 200:
-                    output_tail.pop(0)
-
-        return_code = docker_proc.wait()
+    return_code, tail_text = run_docker_streaming(docker_command, af3_log_path)
 
     if return_code != 0:
-        tail_text = "".join(output_tail[-200:])
         print(f"[ERROR] AlphaFold3 Docker 运行失败: {tail_text}", file=sys.stderr)
         raise RuntimeError(
             f"AlphaFold3 Docker run failed with exit code {return_code}. "
@@ -13552,20 +13376,11 @@ def main():
                     or worker_predict_args.pop("ipsae_ligand_chain_id", None)
                     or ""
                 ).strip() or None
-                use_msa_raw = worker_predict_args.get("use_msa_server", True)
-                if isinstance(use_msa_raw, bool):
-                    worker_use_msa_server = use_msa_raw
-                elif isinstance(use_msa_raw, (int, float)):
-                    worker_use_msa_server = bool(use_msa_raw)
-                else:
-                    worker_use_msa_server = str(use_msa_raw).strip().lower() in {"1", "true", "yes", "y"}
-
                 if worker_backend == "alphafold3":
                     run_alphafold3_backend(
                         worker_temp_dir,
                         worker_yaml_content,
                         worker_output_archive_path,
-                        worker_use_msa_server,
                         seed=worker_seed,
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
@@ -13576,7 +13391,6 @@ def main():
                         temp_dir=worker_temp_dir,
                         yaml_content=worker_yaml_content,
                         output_archive_path=worker_output_archive_path,
-                        use_msa_server=worker_use_msa_server,
                         seed=worker_seed,
                         task_id=worker_task_id,
                     )
@@ -13595,7 +13409,6 @@ def main():
                         temp_dir=worker_temp_dir,
                         yaml_content=worker_yaml_content,
                         output_archive_path=worker_output_archive_path,
-                        use_msa_server=worker_use_msa_server,
                         seed=worker_seed,
                         msa_mode=str(worker_predict_args.get("msa_mode") or "auto"),
                         task_id=worker_task_id,
@@ -13775,7 +13588,6 @@ def main():
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
-                    use_msa_server=use_msa_server,
                     seed=seed,
                     msa_mode=str(predict_args.get("msa_mode") or "auto"),
                     task_id=runtime_task_id,
@@ -13788,7 +13600,6 @@ def main():
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
-                    use_msa_server=use_msa_server,
                     seed=seed,
                     task_id=runtime_task_id,
                 )
