@@ -182,9 +182,7 @@ function ProjectTaskRowImpl({
               modifications={row.ligandSequenceModifications}
             />
           ) : (
-            <div className="task-ligand-thumb task-ligand-thumb-empty">
-              <span className="muted small">No ligand</span>
-            </div>
+            <div className="task-ligand-thumb task-ligand-thumb-empty" aria-hidden="true" />
           )}
         </button>
       </td>
