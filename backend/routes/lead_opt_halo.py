@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import sys
+from pathlib import Path
 from typing import Callable
 
 from flask import jsonify, request
@@ -15,6 +17,9 @@ MODES = ("denovo", "fragment", "scaffold_hop")
 def _predict_oracle_meta() -> dict:
     """Import lazily: the API process must not depend on import-order side
     effects for capabilities/ to be on sys.path."""
+    capabilities_root = str(Path(__file__).resolve().parents[2] / "capabilities")
+    if capabilities_root not in sys.path:
+        sys.path.insert(0, capabilities_root)
     from halo.oracle.predict_oracle import PredictOracle
 
     return {
@@ -36,7 +41,11 @@ def register_lead_opt_halo_routes(
     @app.route('/api/lead_optimization/halo_backends', methods=['GET'])
     @require_api_token
     def halo_backends():
-        meta = _predict_oracle_meta()
+        try:
+            meta = _predict_oracle_meta()
+        except Exception as exc:
+            logger.warning('HALO oracle unavailable: %s', exc)
+            return jsonify({'error': 'HALO capability is not installed on this node.'}), 503
         return jsonify({
             'backends': [
                 {'id': b, 'label': b, 'default': b == meta['default']}
@@ -58,7 +67,11 @@ def register_lead_opt_halo_routes(
         if mode not in MODES:
             return jsonify({'error': f"mode must be one of {', '.join(MODES)}."}), 400
 
-        meta = _predict_oracle_meta()
+        try:
+            meta = _predict_oracle_meta()
+        except Exception as exc:
+            logger.warning('HALO oracle unavailable: %s', exc)
+            return jsonify({'error': 'HALO capability is not installed on this node.'}), 503
         backend = str(payload.get('backend') or meta['default']).strip().lower()
         if backend not in meta['supported']:
             return jsonify({
@@ -155,7 +168,11 @@ def register_lead_opt_halo_routes(
             except (TypeError, ValueError):
                 return jsonify({'error': 'seed must be an integer.'}), 400
 
-        result = lead_optimization_halo_task.apply_async(args=[task_args], queue=queue_info['queue'])
+        try:
+            result = lead_optimization_halo_task.apply_async(args=[task_args], queue=queue_info['queue'])
+        except Exception as exc:
+            logger.error('HALO optimize dispatch failed: %s', exc, exc_info=True)
+            return jsonify({'error': 'Failed to queue HALO task. Check the broker and try again.'}), 500
         logger.info('HALO optimize task %s submitted (mode=%s backend=%s queue=%s)', result.id, mode, backend, queue_info['queue'])
         return jsonify({'task_id': result.id, 'mode': mode, 'backend': backend, 'queue': queue_info['queue']}), 202
 

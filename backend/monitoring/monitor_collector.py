@@ -115,6 +115,9 @@ def normalize_celery_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 class MonitorCollector:
+    # 达到次数上限仍无法解码/入库的 stream 消息按死信丢弃，避免阻塞消费循环。
+    MAX_MESSAGE_ATTEMPTS = 5
+
     def __init__(self, store: MonitorStore, redis_client: Any) -> None:
         self.store = store
         self.redis = redis_client
@@ -136,7 +139,7 @@ class MonitorCollector:
         self._events: queue.Queue[dict[str, Any]] = queue.Queue(
             maxsize=max(1_000, int(os.environ.get("VBIO_MONITOR_EVENT_QUEUE_SIZE", "20000")))
         )
-        self._retry: deque[tuple[str, Mapping[Any, Any]]] = deque()
+        self._retry: deque[tuple[str, Mapping[Any, Any], int]] = deque()
         self._stop = threading.Event()
         self._receiver_thread: threading.Thread | None = None
         self._gc_in_progress = False
@@ -220,7 +223,7 @@ class MonitorCollector:
         )
         messages = result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else []
         for message_id, fields in messages:
-            self._retry.append((message_id, fields))
+            self._retry.append((message_id, fields, 0))
 
     def _read_stream(self) -> None:
         result = self.redis.xreadgroup(
@@ -232,7 +235,7 @@ class MonitorCollector:
         )
         for _stream, messages in result or []:
             for message_id, fields in messages:
-                self._retry.append((message_id, fields))
+                self._retry.append((message_id, fields, 0))
 
     def _msa_health_sweep(self) -> None:
         """colabfold 专用 GPU 池饥饿检测：available 空且 in_use 中存在
@@ -317,8 +320,26 @@ class MonitorCollector:
         while not self._stop.is_set():
             try:
                 while self._retry:
-                    message_id, fields = self._retry[0]
-                    self._apply_stream_message(message_id, fields)
+                    message_id, fields, attempts = self._retry[0]
+                    try:
+                        self._apply_stream_message(message_id, fields)
+                    except Exception:
+                        # 队首坏消息不能阻塞整个循环（lease/MSA sweep、GC 调度都在此 try 内）。
+                        if attempts + 1 >= self.MAX_MESSAGE_ATTEMPTS:
+                            stream_id = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
+                            LOGGER.error(
+                                "Dropping undecodable monitor stream entry %s after %d attempts",
+                                stream_id, self.MAX_MESSAGE_ATTEMPTS,
+                            )
+                            try:
+                                self.redis.xack(self.stream_key, self.group, stream_id)
+                            except Exception:
+                                LOGGER.exception("Failed to ack dropped stream entry %s", stream_id)
+                            self._retry.popleft()
+                            continue
+                        self._retry.popleft()
+                        self._retry.append((message_id, fields, attempts + 1))
+                        continue
                     self._retry.popleft()
                 for _index in range(100):
                     try:

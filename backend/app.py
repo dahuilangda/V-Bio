@@ -58,13 +58,11 @@ app.config['MAX_CONTENT_LENGTH'] = config.MAX_UPLOAD_BYTES
 
 @app.before_request
 def _exempt_worker_result_uploads():
-    # Result archives can reach gigabytes (embedded MSA caches) and /upload_result is
-    # called only by authenticated workers, so exempt it. Werkzeug reads the limit
-    # lazily, so clearing it here is per-request.
+    # worker 归档超普通上传上限；按请求设置（app.config 为进程级，并发下有竞态）。
     if request.path.startswith('/upload_result/'):
-        app.config['MAX_CONTENT_LENGTH'] = None
+        request.max_content_length = config.WORKER_RESULT_UPLOAD_MAX_BYTES
     else:
-        app.config['MAX_CONTENT_LENGTH'] = config.MAX_UPLOAD_BYTES
+        request.max_content_length = config.MAX_UPLOAD_BYTES
 
 
 @app.errorhandler(413)

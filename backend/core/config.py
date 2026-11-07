@@ -66,6 +66,10 @@ CELERY_RESULT_BACKEND = REDIS_URL
 # Worker 并发
 # 结构上传（PDB/CIF/SDF/MOL2）的请求体硬上限；Flask 超限直接 413。
 MAX_UPLOAD_BYTES = _parse_int_env("MAX_UPLOAD_BYTES", 64 * 1024 * 1024, minimum=1024*1024)
+# Worker 结果归档上传（/upload_result）的请求体上限，按请求覆盖全局上限。
+WORKER_RESULT_UPLOAD_MAX_BYTES = _parse_int_env(
+    "WORKER_RESULT_UPLOAD_MAX_BYTES", 32 * 1024 * 1024 * 1024, minimum=MAX_UPLOAD_BYTES
+)
 # 是否向客户端回显内部异常详情（默认关闭，避免泄露内部路径/主机名）。
 EXPOSE_ERROR_DETAILS = os.environ.get("EXPOSE_ERROR_DETAILS", "").strip().lower() in {"1", "true", "yes", "on"}
 
