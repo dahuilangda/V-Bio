@@ -893,41 +893,15 @@ export function WorkflowRuntimeSettingsSection({
               }
               disabled={!canEditRuntimeIdentity}
             >
-              {(isAffinityWorkflow
-                ? [
-                    { value: 'boltz', label: 'Boltz-2' }
-                  ]
-                : isPeptideDesignWorkflow
-                  ? (peptideDesignMode !== 'linear'
-                      ? (peptideChirality === 'l'
-                          ? [
-                              { value: 'protenix2dock', label: 'Protenix2Dock' },
-                              { value: 'mol1', label: 'Mol-1 (native)' },
-                              { value: 'protenix', label: 'Protenix (native)' }
-                            ]
-                          : [
-                              { value: 'protenix2dock', label: 'Protenix2Dock' }
-                            ])
-                      : (peptideChirality === 'l'
-                          ? [
-                              { value: 'mol1', label: 'Mol-1 (native)' },
-                              { value: 'protenix2dock', label: 'Protenix2Dock' },
-                              { value: 'rfd4', label: 'RFD4-Proteina (generation)' },
-                              { value: 'protenix', label: 'Protenix (native)' },
-                              { value: 'alphafold3', label: 'AlphaFold3' }
-                            ]
-                          : [
-                              { value: 'protenix2dock', label: 'Protenix2Dock' },
-                              { value: 'alphafold3', label: 'AlphaFold3' }
-                            ]))
-                  : [
-                      { value: 'protenix', label: 'Protenix' },
-                      { value: 'boltz', label: 'Boltz-2' },
-                      { value: 'alphafold3', label: 'AlphaFold3' },
-                      { value: 'mol1', label: 'Mol-1' },
-                      { value: 'rfd4', label: 'RFD4-Proteina' }
-                    ]
-              ).map((option) => (
+              {engineOptionsFor({
+                workflow: isAffinityWorkflow
+                  ? 'virtual_screening'
+                  : isPeptideDesignWorkflow
+                    ? 'peptide_design'
+                    : 'prediction',
+                chirality: isPeptideDesignWorkflow ? (peptideChirality as 'l' | 'd') : undefined,
+                designMode: isPeptideDesignWorkflow ? (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') : undefined,
+              }).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

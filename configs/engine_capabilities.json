@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "engines": {
+    "boltz": {
+      "label": "Boltz-2",
+      "status": "active",
+      "workflows": ["prediction", "virtual_screening", "lead_optimization"],
+      "chirality": ["l", "d"],
+      "design_modes": ["linear"],
+      "features": { "pocket": false, "custom_ccd": true, "msa": true, "ncaa": false }
+    },
+    "alphafold3": {
+      "label": "AlphaFold3",
+      "status": "active",
+      "workflows": ["prediction"],
+      "chirality": ["l", "d"],
+      "design_modes": ["linear"],
+      "features": { "pocket": false, "custom_ccd": false, "msa": true, "ncaa": false }
+    },
+    "protenix": {
+      "label": "Protenix",
+      "status": "active",
+      "workflows": ["prediction", "peptide_design"],
+      "chirality": ["l"],
+      "design_modes": ["linear", "cyclic", "bicyclic"],
+      "features": { "pocket": true, "custom_ccd": true, "msa": true, "ncaa": true }
+    },
+    "protenix2dock": {
+      "label": "Protenix2Dock",
+      "status": "active",
+      "workflows": ["peptide_design", "lead_optimization"],
+      "chirality": ["l", "d"],
+      "design_modes": ["linear", "cyclic", "bicyclic"],
+      "features": { "pocket": true, "custom_ccd": true, "msa": true, "ncaa": true }
+    },
+    "mol1": {
+      "label": "Mol-1",
+      "status": "active",
+      "workflows": ["prediction", "peptide_design"],
+      "chirality": ["l"],
+      "design_modes": ["linear"],
+      "features": { "pocket": false, "custom_ccd": false, "msa": true, "ncaa": true }
+    },
+    "rfd4": {
+      "label": "RFD4-Proteina",
+      "status": "active",
+      "workflows": ["prediction"],
+      "chirality": ["l"],
+      "design_modes": ["linear"],
+      "features": { "pocket": false, "custom_ccd": false, "msa": false, "ncaa": true }
+    },
+    "nesso": {
+      "label": "Nesso",
+      "status": "active",
+      "workflows": ["virtual_screening"],
+      "chirality": [],
+      "design_modes": [],
+      "features": { "pocket": false, "custom_ccd": false, "msa": false, "ncaa": false }
+    },
+    "boltz2dock": {
+      "label": "Boltz2Dock",
+      "status": "deprecated",
+      "workflows": [],
+      "chirality": ["l", "d"],
+      "design_modes": ["linear"],
+      "features": { "pocket": false, "custom_ccd": true, "msa": true, "ncaa": false }
+    },
+    "mol1dock": {
+      "label": "Mol1Dock",
+      "status": "deprecated",
+      "workflows": [],
+      "chirality": ["l", "d"],
+      "design_modes": ["bicyclic"],
+      "features": { "pocket": false, "custom_ccd": false, "msa": true, "ncaa": false }
+    }
+  }
+}

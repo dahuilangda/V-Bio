@@ -363,8 +363,8 @@ def register_prediction_routes(
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
             return jsonify({'error': "Backend 'mol1dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400
-        elif backend not in ['boltz', 'alphafold3', 'protenix', 'nesso', 'rfd4']:
-            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso, protenix2dock, mol1, rfd4."}), 400
+        elif get_engine(backend) is None or get_engine(backend).get('status') != 'active':
+            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: {', '.join(active_engine_ids())}."}), 400
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
         if requested_workflow not in {'prediction', 'peptide_design', 'virtual_screening', 'lead_optimization'}:
             return jsonify({
