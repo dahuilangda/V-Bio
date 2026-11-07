@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
+import { randomBytes, scryptSync } from 'node:crypto';
 
 function getArg(key, fallback = undefined) {
   const idx = process.argv.findIndex((arg) => arg === `--${key}`);
@@ -36,7 +36,18 @@ const restUrl =
     process.env.VITE_SUPABASE_REST_URL ||
     'http://127.0.0.1:54321').replace(/\/$/, '');
 
-const passwordHash = createHash('sha256').update(`${username}::${password}`).digest('hex');
+// 与 vbio_management_api.py 的 scrypt 密码格式一致
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+
+function hashPasswordScrypt(pwd) {
+  const salt = randomBytes(16);
+  const dk = scryptSync(pwd, salt, 32, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
+  return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString('hex')}$${dk.toString('hex')}`;
+}
+
+const passwordHash = hashPasswordScrypt(password);
 
 async function fetchJson(url, init = {}) {
   const res = await fetch(url, init);
