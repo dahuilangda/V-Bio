@@ -84,6 +84,10 @@ export function shouldShowRunNote(state: ProjectTask['task_state'], note: string
   if (normalizedNote === normalizedState) return false;
   const label = taskStateLabel(state);
   if (normalizedNote === normalizeStatusToken(label)) return false;
+  // 成功态的通用文案（如 "Task completed successfully."）与徽章重复，
+  // 不再占一行；错误/进度说明仍然显示
+  if (normalizedState === 'success'
+      && /completed successfully|succeeded/i.test(trimmed)) return false;
   return true;
 }
 
