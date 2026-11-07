@@ -83,7 +83,7 @@ def main() -> None:
             "    id: B\n"
             f"    sequence: {seq}\n")
         for backend in backends:
-            out = post_multipart(
+            response = post_multipart(
                 f"{args.gateway}/predict", args.token,
                 {
                     "project_id": args.project_id,
@@ -94,20 +94,21 @@ def main() -> None:
                     "seed": str(args.seed),
                     "task_name": f"RFD4 verify {backend} {label} {seq[:16]}",
                 }, yaml_path)
-            try:
-                task_id = json.loads(out).get("task_id")
-            except json.JSONDecodeError:
-                task_id = None
+            task_id = response.get("task_id")
             if task_id:
                 manifest["verifications"].append(
                     {"design": label, "sequence": seq, "backend": backend,
                      "task_id": task_id})
                 print(f"{label} {backend} -> {task_id}")
             else:
-                print(f"{label} {backend} REJECTED: {out[:120]}")
+                print(f"{label} {backend} REJECTED: {json.dumps(response)[:120]}")
 
     manifest_path = Path(args.runs_dir) / "verification_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=1))
+    try:
+        manifest_path.write_text(json.dumps(manifest, indent=1))
+    except OSError:  # runs dir owned by the engine container; fall back to cwd
+        manifest_path = Path.cwd() / "verification_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=1))
     print(f"\n{len(manifest['verifications'])} verification tasks; "
           f"manifest: {manifest_path}")
 
