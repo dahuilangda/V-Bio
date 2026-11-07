@@ -282,6 +282,9 @@ RFD4_DOCKER_IMAGE = os.environ.get(
     "RFD4_DOCKER_IMAGE", "rfd4-proteina-engine:cu13"
 )
 RFD4_DATA_DIR = os.environ.get("RFD4_DATA_DIR", "/data/rfd4-proteina")
+RFD4_NUM_DESIGNS = int(os.environ.get("RFD4_NUM_DESIGNS", "2") or "2")
+# 覆盖默认 binder contig（默认 "12-22, /0, A1-<靶标长度>"）
+RFD4_CONTIG = os.environ.get("RFD4_CONTIG", "")
 PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
 PROTENIX_SOURCE_DIR = os.environ.get(
     "PROTENIX_SOURCE_DIR",

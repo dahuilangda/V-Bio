@@ -2,6 +2,7 @@
 import sys
 import os
 import json
+import uuid
 import tempfile
 import shutil
 import traceback
@@ -77,6 +78,8 @@ from backend.core.config import (
     MOL1_DOCKER_IMAGE,
     RFD4_DOCKER_IMAGE,
     RFD4_DATA_DIR,
+    RFD4_NUM_DESIGNS,
+    RFD4_CONTIG,
     PROTENIX_USE_HOST_USER,
     PROTENIX_CONTAINER_APP_DIR,
     PROTENIX_CONTAINER_MODEL_DIR,
@@ -4863,19 +4866,48 @@ def create_protenix_archive(
         raise RuntimeError(f"Failed to create Protenix archive: {exc}") from exc
 
 
+def _stage_rfd4_target(input_dir: Path, template_inputs: Optional[List[dict]]) -> Path:
+    """落盘 RFD4 靶标结构。RFD4 是生成引擎，必须有带坐标的靶标输入：
+    优先取上传结构（首个模板），PDB 上传转 mmCIF，其余格式原样透传。"""
+    for idx, template in enumerate(template_inputs or []):
+        content_b64 = template.get("content_base64")
+        if not content_b64:
+            continue
+        try:
+            raw = base64.b64decode(content_b64)
+        except Exception as exc:
+            raise ValueError(f"靶标结构解码失败: {exc}") from exc
+        target_path = input_dir / "target.cif"
+        fmt = str(template.get("format") or "").lower()
+        suffix = Path(str(template.get("file_name") or f"target_{idx}")).suffix.lower()
+        if fmt == "pdb" or suffix == ".pdb":
+            structure = gemmi.read_structure_string(raw.decode("utf-8", errors="replace"))
+            structure.setup_entities()
+            structure.remove_alternative_conformations()
+            structure.remove_ligands_and_waters()
+            structure.setup_entities()
+            structure.make_mmcif_document().write_file(str(target_path))
+        else:
+            target_path.write_bytes(raw)
+        return target_path
+    raise ValueError(
+        "RFD4 生成任务需要靶标坐标：请上传靶标结构（template_files），"
+        "或先提交预测任务再将产物结构作为输入。")
+
+
 def run_rfd4_backend(
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
+    template_inputs: Optional[List[dict]] = None,
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
 ) -> None:
-    """RFD4-Proteina generation backend driven by a condition YAML.
+    """RFD4-Proteina generation backend.
 
-    sequences[0] in the input yaml is the target protein (chain A);
-    constraints carry pocket/motif conditioning. Generated CIFs are packed
-    into the result archive and a structure summary lands in summary.json
-    for the frontend.
+    靶标坐标来自上传结构（template_inputs），yaml 第一个 protein 链用于
+    推导 contig 长度；RFD4_CONTIG 可整体覆盖 contig。产物按 task 隔离在
+    RFD4_DATA_DIR/runs/<task>，避免并发任务互覆。
     """
     import yaml as _yaml
 
@@ -4884,14 +4916,13 @@ def run_rfd4_backend(
     print("Using RFD4-Proteina backend", file=sys.stderr)
 
     results_root = _resolve_backend_results_root("rfd4", task_id, temp_dir)
-    work_root = str(_resolve_backend_work_root(results_root))
-    input_dir = os.path.join(work_root, "input")
-    output_dir = os.path.join(results_root, "output")
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+    work_root = _resolve_backend_work_root(results_root)
+    input_dir = work_root / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (results_root / "output").mkdir(parents=True, exist_ok=True)
 
-    # Condition spec: the target sequence comes from the first protein
-    # chain in the design yaml (the model scaffolds against it).
+    _stage_rfd4_target(input_dir, template_inputs)
+
     spec_payload = _yaml.safe_load(yaml_content) or {}
     target_entry = next(
         (s["protein"] for s in spec_payload.get("sequences", [])
@@ -4900,20 +4931,20 @@ def run_rfd4_backend(
     )
     if target_entry is None:
         raise ValueError("RFD4 生成任务需要在 yaml 中提供靶点蛋白链。")
+    target_length = len(str(target_entry.get("sequence", "")))
     spec = {
         "binder": {
             "input": "/workspace/input/target.cif",
-            "contig": os.environ.get("RFD4_CONTIG", "12-22, /0, A1-"
-                                     + str(len(str(target_entry.get("sequence", ""))))),
+            "contig": str(RFD4_CONTIG or "").strip()
+                      or f"12-22, /0, A1-{target_length}",
             "conditions": {
                 "C_CRDGRP": {"1": [{"select": "sel('A/*/*/[N,CA,C,O]')"}]},
                 "C_SEQ": {"true": [{"select": "sel('A')"}]},
             },
         }
     }
-    spec_path = os.path.join(input_dir, "rfd4_spec.yaml")
-    with open(spec_path, "w", encoding="utf-8") as handle:
-        _yaml.safe_dump(spec, handle, sort_keys=False)
+    spec_path = input_dir / "rfd4_spec.yaml"
+    spec_path.write_text(_yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
 
     seed_value = int(seed) if seed is not None else 101
     from backend.worker.docker_cmd import image_and_python
@@ -4921,6 +4952,7 @@ def run_rfd4_backend(
     image, _ = image_and_python(rfd4_image)
     gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
     container_name = f"rfd4-generate-{uuid.uuid4().hex[:12]}"
+    run_token = _safe_runtime_token(task_id or Path(temp_dir).name)
     command = [
         "docker", "run", "--rm", "--name", container_name,
         "--runtime", "nvidia", "--gpus", gpu_arg,
@@ -4928,15 +4960,13 @@ def run_rfd4_backend(
         "-e", "HF_ENDPOINT=https://hf-mirror.com",
         "-v", f"{RFD4_DATA_DIR}/hf_cache:/workspace/hf_cache",
         "-v", f"{RFD4_DATA_DIR}/runs:/workspace/runs",
-        "-v", f"{RFD4_DATA_DIR}/examples:/workspace/examples:ro",
-        "-v", f"{spec_path}:/workspace/rfd4_spec.yaml:ro",
-        "-v", f"{RFD4_DATA_DIR}/runs:/workspace/runs",
+        "-v", f"{input_dir}:/workspace/input:ro",
         "-w", "/workspace",
         "--entrypoint", "python3",
-        rfd4_image, "/app/rfd4_generate.py",
-        "--spec", "/workspace/rfd4_spec.yaml",
-        "--out-dir", "/workspace/runs/generation",
-        "--num-designs", "2",
+        image, "/app/rfd4_generate.py",
+        "--spec", "/workspace/input/rfd4_spec.yaml",
+        "--out-dir", f"/workspace/runs/{run_token}",
+        "--num-designs", str(RFD4_NUM_DESIGNS),
         "--seed", str(seed_value),
         "--timeout-min", "120",
     ]
@@ -4945,29 +4975,29 @@ def run_rfd4_backend(
     if proc.returncode != 0:
         raise RuntimeError(f"rfd4-generate exited {proc.returncode}")
 
-    # Archive: the engine writes cif/summary under
-    # RFD4_DATA_DIR/runs/generation — same path inside and outside the
-    # container via the RFD4_DATA_DIR mount — so collect from there.
-    archive_root = os.path.join(work_root, "archive")
-    os.makedirs(archive_root, exist_ok=True)
-    engine_out_dir = os.path.join(RFD4_DATA_DIR, "runs", "generation")
-    for src in glob.glob(os.path.join(engine_out_dir, "**", "*.cif"), recursive=True):
-        rel = os.path.relpath(src, output_dir)
-        dst = os.path.join(archive_root, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
+    # 引擎产物经 RFD4_DATA_DIR/runs 挂载落在宿主侧同名目录，直接收集。
+    archive_root = work_root / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    engine_out_dir = Path(RFD4_DATA_DIR) / "runs" / run_token
+    for src in engine_out_dir.rglob("*.cif"):
+        dst = archive_root / src.relative_to(engine_out_dir)
+        dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-    summary_src = os.path.join(engine_out_dir, "summary.json")
-    if os.path.exists(summary_src):
-        shutil.copy2(summary_src, os.path.join(archive_root, "summary.json"))
-    archive_target = output_archive_path
-    if os.path.exists(archive_target):
-        os.remove(archive_target)
-    with zipfile.ZipFile(archive_target, "w", zipfile.ZIP_DEFLATED) as zf:
+    if not any(archive_root.rglob("*.cif")):
+        raise RuntimeError(
+            f"RFD4 生成未产出结构: {engine_out_dir} 不存在或为空"
+            "（检查 worker 容器是否挂载 RFD4_DATA_DIR）")
+    summary_src = engine_out_dir / "summary.json"
+    if summary_src.exists():
+        shutil.copy2(summary_src, archive_root / "summary.json")
+    if os.path.exists(output_archive_path):
+        os.remove(output_archive_path)
+    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _dirs, files in os.walk(archive_root):
             for file_name in files:
                 file_path = os.path.join(root, file_name)
                 zf.write(file_path, os.path.relpath(file_path, archive_root))
-    print(f"RFD4 generation archive written: {archive_target}", file=sys.stderr)
+    print(f"RFD4 generation archive written: {output_archive_path}", file=sys.stderr)
 
 
 def run_mol1_backend(
@@ -13544,6 +13574,8 @@ def main():
                         temp_dir=worker_temp_dir,
                         yaml_content=worker_yaml_content,
                         output_archive_path=worker_output_archive_path,
+                        template_inputs=worker_predict_args.get("template_inputs")
+                        if isinstance(worker_predict_args.get("template_inputs"), list) else None,
                         seed=worker_seed,
                         task_id=worker_task_id,
                     )
@@ -13754,6 +13786,7 @@ def main():
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
+                    template_inputs=template_inputs if isinstance(template_inputs, list) else None,
                     seed=seed,
                     task_id=runtime_task_id,
                 )

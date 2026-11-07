@@ -134,6 +134,25 @@ In-container pip needs network; inject proxy env vars
   candidates crash in refine when those residues get dropped and anchors
   misalign.
 
+## Platform worker
+
+RFD4 runs as a platform GPU capability (queue `cap.rfd4.default`): `POST /predict`
+with `backend=rfd4`, workflow `prediction`, and the target structure uploaded via
+`template_files` (PDB is converted to mmCIF; sequence-only submissions are
+rejected — generation needs coordinates). Generated CIFs and `summary.json`
+land in the standard result archive.
+
+```bash
+cd deploy/docker
+docker compose -f DOCKER_STACK_WORKER_GPU_CAPS.compose.yml \
+  --env-file DOCKER_STACK_WORKER_GPU_CAPS.env --profile rfd4 up -d gpu-worker-rfd4
+```
+
+Worker env keys: `RFD4_DOCKER_IMAGE`, `RFD4_DATA_DIR`, `RFD4_NUM_DESIGNS`,
+`RFD4_CONTIG` (full contig override), plus the common `MAX_CONCURRENT_TASKS_RFD4`
+/ `GPU_DEVICE_IDS_RFD4`. The engine writes runs under `RFD4_DATA_DIR/runs/<task>`
+so concurrent tasks never collide.
+
 ## Platform pipeline hand-off
 
 Generated structures (mmCIF) feed directly into the existing verification
