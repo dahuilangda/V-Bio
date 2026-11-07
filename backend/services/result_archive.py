@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -57,31 +58,48 @@ class ResultArchiveService:
         self.get_redis_client = get_redis_client_fn
         self._compact_metrics_lock = threading.Lock()
         self._compact_metrics_cache: Dict[str, Dict[str, Any]] = {}
+        # task_id -> (archive_name|None, expires_at)；正/负结果统一短缓存
+        self._archive_cache: Dict[str, tuple] = {}
+        self.ARCHIVE_CACHE_TTL_SECONDS = 5.0
 
     def find_result_archive(self, task_id: str) -> Optional[str]:
         base_dir = self.app.config.get('UPLOAD_FOLDER')
         if not base_dir or not os.path.isdir(base_dir):
             return None
 
+        # 状态轮询对同一 task 反复解析归档；正/负结果都做短 TTL 缓存，
+        # 避免 glob 兜底在批次轮询下放大为全目录扫描。归档在任务完成时
+        # 一次性出现，短 TTL 不影响可见性。
+        now = time.monotonic()
+        cached = self._archive_cache.get(task_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+
         candidates = [
             f'{task_id}_results.zip',
             f'{task_id}_affinity_results.zip',
             f'{task_id}_lead_optimization_results.zip',
         ]
+        resolved = None
         for name in candidates:
             candidate_path = os.path.join(base_dir, name)
             if os.path.exists(candidate_path):
-                return name
+                resolved = name
+                break
 
-        try:
-            matches = glob.glob(os.path.join(base_dir, glob.escape(task_id) + '_*.zip'))
-            if matches:
-                newest = max(matches, key=os.path.getmtime)
-                return os.path.basename(newest)
-        except Exception as exc:
-            self.logger.warning('Failed to scan results directory for task %s: %s', task_id, exc)
+        if resolved is None:
+            try:
+                matches = glob.glob(os.path.join(base_dir, glob.escape(task_id) + '_*.zip'))
+                if matches:
+                    resolved = os.path.basename(max(matches, key=os.path.getmtime))
+            except Exception as exc:
+                self.logger.warning('Failed to scan results directory for task %s: %s', task_id, exc)
 
-        return None
+        self._archive_cache[task_id] = (resolved, now + self.ARCHIVE_CACHE_TTL_SECONDS)
+        if len(self._archive_cache) > 4096:  # 有界：批次轮询下的键空间可控
+            for stale_key in list(self._archive_cache)[:1024]:
+                self._archive_cache.pop(stale_key, None)
+        return resolved
 
     def resolve_result_archive_path(self, task_id: str) -> tuple[str, str]:
         directory = self.app.config.get('UPLOAD_FOLDER')

@@ -6,6 +6,9 @@ import re
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+
+# /status/batch 专用常驻线程池：每请求新建池会反复抖动线程
+_STATUS_BATCH_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="status-batch")
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from celery.result import AsyncResult
@@ -618,8 +621,8 @@ def register_task_routes(
         if len(trimmed_task_ids) == 1:
             statuses = [_compact(_status_or_error(trimmed_task_ids[0]))]
         else:
-            with ThreadPoolExecutor(max_workers=min(16, len(trimmed_task_ids))) as pool:
-                statuses = [_compact(s) for s in pool.map(_status_or_error, trimmed_task_ids)]
+            # 模块级常驻池：轮询高频，逐请求建池只会增加线程抖动
+            statuses = [_compact(s) for s in _STATUS_BATCH_POOL.map(_status_or_error, trimmed_task_ids)]
         return jsonify({'statuses': statuses})
 
     @app.route('/results/<task_id>', methods=['GET'])
