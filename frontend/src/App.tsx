@@ -20,6 +20,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ de
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
 const JwtClientsPage = lazy(() => import('./pages/JwtClientsPage').then((m) => ({ default: m.JwtClientsPage })));
 const AdminMonitorPage = lazy(() => import('./pages/AdminMonitorPage').then((m) => ({ default: m.AdminMonitorPage })));
+const ApiAccessPage = lazy(() => import('./pages/ApiAccessPage').then((m) => ({ default: m.ApiAccessPage })));
 
 function ShellPage({ children }: { children: JSX.Element }) {
   return <AppShell>{children}</AppShell>;
@@ -102,7 +103,12 @@ export default function App() {
         path="/api-access"
         element={
           <ProtectedRoute>
-            <Navigate to="/projects" replace />
+            <ShellPage>
+              <Suspense fallback={<RouteSkeleton />}>
+                {/* 全局视图：API 文档与用量统计；项目入口走任务页内嵌视图 */}
+                <ApiAccessPage />
+              </Suspense>
+            </ShellPage>
           </ProtectedRoute>
         }
       />

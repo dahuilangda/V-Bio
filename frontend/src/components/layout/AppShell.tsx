@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
-import { Activity, ChevronDown, FlaskConical, FolderKanban, KeyRound, LogOut, Menu, Settings, Share2, Users, X } from 'lucide-react';
+import { Activity, Braces, ChevronDown, FlaskConical, FolderKanban, KeyRound, LogOut, Menu, Settings, Share2, Users, X } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 import { getAvatarOverride } from '../../utils/profilePrefs';
 
@@ -46,7 +46,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <FlaskConical size={18} />
             <span>V-Bio</span>
           </Link>
-          <nav className="top-nav-links" aria-label="Primary">
+          <nav id="primary-nav-links" className="top-nav-links" aria-label="Primary">
             <NavLink to="/projects" className="top-link" onClick={() => setMobileNavOpen(false)}>
               <FolderKanban size={16} />
               <span>Projects</span>
@@ -54,6 +54,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <NavLink to="/shares" className="top-link" onClick={() => setMobileNavOpen(false)}>
               <Share2 size={16} />
               <span>Shares</span>
+            </NavLink>
+            <NavLink to="/api-access" className="top-link" onClick={() => setMobileNavOpen(false)}>
+              <Braces size={16} />
+              <span>API</span>
             </NavLink>
             {session?.isSuperAdmin && (
               <>
