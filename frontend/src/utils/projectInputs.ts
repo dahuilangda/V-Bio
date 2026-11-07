@@ -745,7 +745,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
     : (typeof rawObj.peptide_pocket_residues === 'string' ? String(rawObj.peptide_pocket_residues).trim() : '');
   const peptidePocketBox = normalizeIntegerOption(
     raw.peptidePocketBox ?? rawObj.peptide_pocket_box,
-    4, 40, 6
+    6, 4, 40
   );
   const peptideBicyclicCys3Pos = peptideBicyclicFixTerminalCys
     ? effectiveBinderLength
@@ -986,7 +986,12 @@ function readStore(): Record<string, ProjectInputConfig> {
 }
 
 function writeStore(data: Record<string, ProjectInputConfig>): void {
-  localStorage.setItem(COMPONENT_KEY, JSON.stringify(data));
+  // 配额异常不外抛：调用方处于删除/清理流程。
+  try {
+    localStorage.setItem(COMPONENT_KEY, JSON.stringify(data));
+  } catch {
+    // 存储满或被禁用时以内存态为准
+  }
 }
 
 function readSessionIdentityForStorage(): string {
@@ -1111,7 +1116,12 @@ function readUiStore(): Record<string, ProjectUiState> {
 }
 
 function writeUiStore(data: Record<string, ProjectUiState>): void {
-  localStorage.setItem(UI_STATE_KEY, JSON.stringify(data));
+  // 同 writeStore：配额异常不外抛。
+  try {
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(data));
+  } catch {
+    // 存储满或被禁用时以内存态为准
+  }
 }
 
 function resolveTemplateContent(value: unknown, pool: Record<string, string>): string {

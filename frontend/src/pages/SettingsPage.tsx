@@ -68,6 +68,7 @@ export function SettingsPage() {
       const updated = toAppUser(
         await updateProfile({
           name: displayName.trim(),
+          email: email.trim() || undefined,
           avatar_url: avatar || undefined
         })
       );

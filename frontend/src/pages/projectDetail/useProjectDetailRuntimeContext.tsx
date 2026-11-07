@@ -888,8 +888,8 @@ export function useProjectDetailRuntimeContext() {
       });
     };
 
-    // If the focused row already carries full component data (from the list fetch), merge now.
-    if (focusedRow && Array.isArray((focusedRow as ProjectTask).components) && (focusedRow as ProjectTask).components.length >= 0 && hasStoredTaskInputOptions(focusedRow as ProjectTask)) {
+    // 行内已带组件数据才直接合并（>0：空数组不算完整数据）。
+    if (focusedRow && Array.isArray((focusedRow as ProjectTask).components) && (focusedRow as ProjectTask).components.length > 0 && hasStoredTaskInputOptions(focusedRow as ProjectTask)) {
       applyTaskSnapshot(focusedRow as ProjectTask);
       return;
     }

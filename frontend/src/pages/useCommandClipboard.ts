@@ -20,10 +20,13 @@ export function useCommandClipboard(options: UseCommandClipboardOptions = {}) {
   const [copiedActionId, setCopiedActionId] = useState('');
   const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>(readCommandHistoryFromStorage);
   const copiedResetTimerRef = useRef<number | null>(null);
+  // 经 ref 读取最新 options：空依赖闭包会把首帧上下文写进所有历史条目。
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   const rememberCommandHistory = useCallback((label: string, command: string) => {
     setCommandHistory((prev) => {
-      const ctx = options.buildEntryContext?.() ?? ({} as Partial<CommandHistoryEntry>);
+      const ctx = optionsRef.current.buildEntryContext?.() ?? ({} as Partial<CommandHistoryEntry>);
       const entry: CommandHistoryEntry = {
         id: typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : `hist_${Date.now()}`,
         createdAt: new Date().toISOString(),
@@ -57,7 +60,7 @@ export function useCommandClipboard(options: UseCommandClipboardOptions = {}) {
     }
     if (!copied) copied = fallbackCopyText(text);
     if (!copied) {
-      options.onError?.('Copy failed. Clipboard permission may be blocked in this context.');
+      optionsRef.current.onError?.('Copy failed. Clipboard permission may be blocked in this context.');
       return;
     }
     if (historyLabel) rememberCommandHistory(historyLabel, text);
@@ -68,8 +71,8 @@ export function useCommandClipboard(options: UseCommandClipboardOptions = {}) {
         setCopiedActionId((prev) => (prev === copyId ? '' : prev));
       }, 1200);
     }
-    options.onSuccess?.(okMessage);
-  }, [options.onError, options.onSuccess, rememberCommandHistory]);
+    optionsRef.current.onSuccess?.(okMessage);
+  }, [rememberCommandHistory]);
 
   const clearHistory = useCallback(() => {
     setCommandHistory([]);

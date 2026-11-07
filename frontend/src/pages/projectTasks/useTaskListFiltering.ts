@@ -186,6 +186,7 @@ export function useTaskListFiltering(
     setSortKey('submitted');
     setSortDirection('desc');
     setTaskSearch('');
+    setTaskSearchRaw('');
     setStateFilter('all');
     setWorkflowFilter('all');
     setBackendFilter('all');

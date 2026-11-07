@@ -711,7 +711,8 @@ export function ProjectTasksPage() {
         />
       )}
 
-      {error && workspaceView === 'tasks' && <div className="alert error">{error}</div>}
+      {/* 两个子视图共用错误横幅 */}
+      {error && <div className="alert error">{error}</div>}
 
       {workspaceView === 'api' && supportsApiAccess ? (
         <Suspense fallback={<RouteSkeleton />}>

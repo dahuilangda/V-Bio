@@ -67,10 +67,15 @@ export function UsersPage() {
 
   const toggleAdmin = async (user: AppUser) => {
     if (isSuperAdminIdentity(user.username, user.email) || busyUserId) return;
+    const verb = user.is_admin ? 'revoke admin from' : 'grant admin to';
+    if (!window.confirm(`Are you sure you want to ${verb} "${user.username}"?`)) return;
     setBusyUserId(user.id);
+    setError(null);
     try {
       const next = await adminUpdateUser(user.id, { is_admin: !user.is_admin });
       setUsers((prev) => prev.map((u) => (u.id === user.id ? toAppUser(next) : u)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update the user.');
     } finally {
       setBusyUserId(null);
     }
@@ -79,10 +84,17 @@ export function UsersPage() {
   const resetPassword = async (user: AppUser) => {
     const value = window.prompt(`Enter a new password for ${user.username}`);
     if (!value || busyUserId) return;
+    if (value.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
     setBusyUserId(user.id);
+    setError(null);
     try {
       const next = await adminUpdateUser(user.id, { password: value });
       setUsers((prev) => prev.map((u) => (u.id === user.id ? toAppUser(next) : u)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset the password.');
     } finally {
       setBusyUserId(null);
     }
@@ -92,9 +104,12 @@ export function UsersPage() {
     if (isSuperAdminIdentity(user.username, user.email) || busyUserId) return;
     if (!window.confirm(`Delete user "${user.username}"?`)) return;
     setBusyUserId(user.id);
+    setError(null);
     try {
       const next = await adminUpdateUser(user.id, { deleted_at: new Date().toISOString() });
       setUsers((prev) => prev.filter((u) => u.id !== next.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete the user.');
     } finally {
       setBusyUserId(null);
     }

@@ -638,6 +638,8 @@ export function ProjectsPage() {
     setCancellingProjectId(project.id);
     try {
       await cancelProjectRuntimeTasks(project.id);
+    } catch {
+      // 失败经 hook 的 error 横幅展示，避免 unhandled rejection。
     } finally {
       setCancellingProjectId(null);
     }

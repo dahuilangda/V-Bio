@@ -165,6 +165,7 @@ export async function forgotPassword(identifier: string): Promise<void> {
   // Anti-enumeration: the backend answers identically whether or not the account exists.
   const res = await requestManagement('/vbio-api/auth/forgot-password', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ identifier })
   });
   if (!res.ok) {
@@ -175,6 +176,7 @@ export async function forgotPassword(identifier: string): Promise<void> {
 export async function resetPassword(token: string, password: string): Promise<void> {
   const res = await requestManagement('/vbio-api/auth/reset-password', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ token, password })
   });
   const body = await res.json().catch(() => ({}));
