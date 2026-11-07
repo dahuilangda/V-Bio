@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 import yaml
 from flask import jsonify, request
 from rdkit import Chem
+from backend.core.engine_capabilities import active_engine_ids, get_engine
 from backend.runtime.nesso_backend import normalize_nesso_screening_input_yaml
 from backend.runtime.screening_library import merge_screening_compounds_file_into_yaml
 
