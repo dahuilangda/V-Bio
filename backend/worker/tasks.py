@@ -26,6 +26,12 @@ from backend.core.celery_app import celery_app
 from backend.monitoring.event_transport import publish_task_heartbeat, publish_task_status
 from backend.services.common_utils import coerce_bool
 from backend.scheduling.capability_router import parse_capability_queue
+from backend.worker.docker_cmd import (
+    collect_gpu_device_group_ids,
+    docker_args_has_flag,
+    make_task_container_name,
+    sanitize_docker_extra_args,
+)
 from gpu_manager import (
     acquire_gpu,
     release_gpu,
@@ -301,63 +307,6 @@ def _format_subprocess_failure(task_label: str, task_id: str, returncode: int, s
     )
 
 
-def _sanitize_docker_extra_args(raw_args: list[str]) -> list[str]:
-    """Drop malformed -e/--env tokens to avoid breaking docker image resolution."""
-    sanitized: list[str] = []
-    index = 0
-    while index < len(raw_args):
-        token = raw_args[index]
-        if token in {"--env", "-e"}:
-            if index + 1 >= len(raw_args):
-                logger.warning("Ignore malformed docker arg %s without value.", token)
-                index += 1
-                continue
-            value = raw_args[index + 1]
-            if "=" not in value:
-                logger.warning("Ignore malformed docker env arg %s %s (expect KEY=VALUE).", token, value)
-                index += 2
-                continue
-            sanitized.extend([token, value])
-            index += 2
-            continue
-        sanitized.append(token)
-        index += 1
-    return sanitized
-
-
-def _collect_gpu_device_group_ids() -> list[int]:
-    """Collect host group ids for NVIDIA device files so docker can read GPU nodes."""
-    candidate_nodes = [
-        Path("/dev/nvidiactl"),
-        Path("/dev/nvidia-uvm"),
-        Path("/dev/nvidia-uvm-tools"),
-    ]
-    candidate_nodes.extend(sorted(Path("/dev").glob("nvidia[0-9]*")))
-    if Path("/dev/dri").exists():
-        candidate_nodes.extend(sorted(Path("/dev/dri").glob("renderD*")))
-
-    group_ids: list[int] = []
-    for node in candidate_nodes:
-        try:
-            stat_result = node.stat()
-        except FileNotFoundError:
-            continue
-        gid = stat_result.st_gid
-        if gid not in group_ids:
-            group_ids.append(gid)
-    return group_ids
-
-
-def _make_task_container_name(task_id: str, runtime_label: str) -> str:
-    token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(task_id or "").strip()).strip(".-_").lower()
-    if not token:
-        token = "task"
-    runtime_token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(runtime_label or "runtime")).strip(".-_").lower()
-    if not runtime_token:
-        runtime_token = "runtime"
-    return f"vbio-{runtime_token}-{token[:40]}"
-
-
 def _terminate_task_container(container_name: str) -> None:
     if not container_name:
         return
@@ -400,16 +349,6 @@ def _terminate_task_containers_by_task_id(task_id: str) -> None:
         logger.debug("Task %s: Failed to cleanup runtime containers by label: %s", task_token, exc)
 
 
-def _docker_args_has_flag(args: list[str], flag: str) -> bool:
-    normalized = str(flag or "").strip()
-    if not normalized:
-        return False
-    for token in args:
-        if token == normalized or token.startswith(f"{normalized}="):
-            return True
-    return False
-
-
 def _build_gpu_docker_python_command(
     *,
     task_id: str,
@@ -423,18 +362,18 @@ def _build_gpu_docker_python_command(
         raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法启动 Docker 任务。")
 
     raw_extra_args = shlex.split(str(getattr(config, "BOLTZ2_DOCKER_EXTRA_ARGS", "") or ""))
-    extra_args = _sanitize_docker_extra_args(raw_extra_args)
+    extra_args = sanitize_docker_extra_args(raw_extra_args, log=logger.warning)
     runtime_overridden = any(token == "--runtime" for token in extra_args)
     shm_size = str(getattr(config, "BOLTZ2_DOCKER_SHM_SIZE", "16g") or "").strip()
 
-    container_name = _make_task_container_name(task_id, runtime_label)
+    container_name = make_task_container_name(task_id, runtime_label)
     command = ["docker", "run", "--rm"]
     command.extend(["--name", container_name])
     command.extend(["--label", f"boltz.task_id={task_id}"])
     command.extend(["--label", f"boltz.runtime={runtime_label}"])
     if not runtime_overridden:
         command.extend(["--runtime", "nvidia"])
-    if shm_size and not _docker_args_has_flag(extra_args, "--shm-size") and not _docker_args_has_flag(extra_args, "--ipc"):
+    if shm_size and not docker_args_has_flag(extra_args, "--shm-size") and not docker_args_has_flag(extra_args, "--ipc"):
         command.extend(["--shm-size", shm_size])
     command.extend(["--gpus", f"device={int(gpu_id)}"])
     command.extend(["--volume", f"{task_temp_dir}:{task_temp_dir}"])
@@ -465,7 +404,7 @@ def _build_gpu_docker_python_command(
             logger.warning("Task %s: could not prepare MSA cache dir %s; using container default.", task_id, msa_cache_host)
 
     command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
-    for gid in _collect_gpu_device_group_ids():
+    for gid in collect_gpu_device_group_ids():
         command.extend(["--group-add", str(gid)])
 
     command.extend(extra_args)

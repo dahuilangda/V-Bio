@@ -4,13 +4,15 @@ builders compose on top."""
 
 from __future__ import annotations
 
+import hashlib
+import re
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 from backend.core import config
-from backend.worker import tasks as _tasks
 
 REPO_MOUNT_CONTAINER = "/workspace/vbio"
 
@@ -18,6 +20,81 @@ REPO_MOUNT_CONTAINER = "/workspace/vbio"
 # pull(数秒到数分钟,registry 不可达时更久),期间 GPU 租约被空占,最终报出的
 # exit 125 对用户不可读。预检把这类失败收敛为亚秒级、带构建指引的业务错误。
 IMAGE_PRECHECK_TIMEOUT_SECONDS = 30
+
+
+def sanitize_docker_extra_args(raw_args: list, log=None) -> list:
+    """Drop malformed -e/--env tokens to avoid breaking docker image resolution."""
+    sanitized: list = []
+    index = 0
+    while index < len(raw_args):
+        token = raw_args[index]
+        if token in {"--env", "-e"}:
+            if index + 1 >= len(raw_args):
+                if log:
+                    log(f"Ignore malformed docker arg {token} without value.")
+                index += 1
+                continue
+            value = raw_args[index + 1]
+            if "=" not in value:
+                if log:
+                    log(f"Ignore malformed docker env arg {token} {value} (expect KEY=VALUE).")
+                index += 2
+                continue
+            sanitized.extend([token, value])
+            index += 2
+            continue
+        sanitized.append(token)
+        index += 1
+    return sanitized
+
+
+def collect_gpu_device_group_ids() -> list:
+    """Host group ids owning NVIDIA/DRI device files, re-added inside containers."""
+    candidate_nodes = [
+        Path("/dev/nvidiactl"),
+        Path("/dev/nvidia-uvm"),
+        Path("/dev/nvidia-uvm-tools"),
+    ]
+    candidate_nodes.extend(sorted(Path("/dev").glob("nvidia[0-9]*")))
+    if Path("/dev/dri").exists():
+        candidate_nodes.extend(sorted(Path("/dev/dri").glob("renderD*")))
+
+    group_ids: list = []
+    for node in candidate_nodes:
+        try:
+            group_ids.append(node.stat().st_gid)
+        except OSError:
+            continue
+    return list(dict.fromkeys(group_ids))
+
+
+def docker_args_has_flag(args: list, flag: str) -> bool:
+    """Check whether a Docker CLI flag is already present in extra args."""
+    normalized = str(flag or "").strip()
+    if not normalized:
+        return False
+    return any(tok == normalized or tok.startswith(f"{normalized}=") for tok in args)
+
+
+def make_task_container_name(task_id: str, runtime_label: str = "runtime") -> str:
+    token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(task_id or "").strip()).strip(".-_").lower()
+    if not token:
+        token = "task"
+    runtime_token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(runtime_label or "runtime")).strip(".-_").lower()
+    if not runtime_token:
+        runtime_token = "runtime"
+    return f"vbio-{runtime_token}-{token[:40]}"
+
+
+def make_scoped_container_name(task_id: str, prefix: str, max_len: int = 48) -> Optional[str]:
+    """Container name scoped to a task id; None when the task id is empty."""
+    raw = str(task_id or "").strip()
+    if not raw:
+        return None
+    token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw).strip(".-_").lower()
+    if not token:
+        token = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{token[:max_len]}"
 
 
 def readable_docker_failure_diagnosis(return_code: int, tail_text: str) -> str:
@@ -85,9 +162,9 @@ def build_task_docker_skeleton(
 ) -> tuple[list[str], str]:
     """Return (partial command, container_name) with common flags applied;
     the caller appends image, engine volumes/env, and argv."""
-    container_name = _tasks._make_task_container_name(task_id, runtime_label)
+    container_name = make_task_container_name(task_id, runtime_label)
     raw_extra = shlex.split(str(getattr(config, "PROTENIX_DOCKER_EXTRA_ARGS", "") or ""))
-    extra_args = _tasks._sanitize_docker_extra_args(raw_extra)
+    extra_args = sanitize_docker_extra_args(raw_extra)
     runtime_overridden = any(tok == "--runtime" for tok in extra_args)
 
     command = ["docker", "run", "--rm", "--name", container_name]
@@ -96,8 +173,8 @@ def build_task_docker_skeleton(
     if not runtime_overridden:
         command.extend(["--runtime", "nvidia"])
     if (shm_size
-            and not _tasks._docker_args_has_flag(extra_args, "--shm-size")
-            and not _tasks._docker_args_has_flag(extra_args, "--ipc")):
+            and not docker_args_has_flag(extra_args, "--shm-size")
+            and not docker_args_has_flag(extra_args, "--ipc")):
         command.extend(["--shm-size", shm_size])
     command.extend(["--gpus", f"device={int(gpu_id)}"])
 
