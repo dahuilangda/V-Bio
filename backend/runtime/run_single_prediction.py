@@ -11747,6 +11747,8 @@ def run_peptide_design_backend(
             # initial composite uses the native pose's pocket contact and is
             # recomputed once the refined report exists.
             _native_structure = _select_primary_structure_file(result_dir)
+            # 先于 interface 计分解析，避免首候选 NameError、后续候选读到上一候选残留值。
+            structure_file = _native_structure
             native_pocket_min = None
             if pocket_sequence_contacts and _native_structure is not None:
                 try:
@@ -11805,7 +11807,6 @@ def run_peptide_design_backend(
                     pair_iptm_formula = "binder_avg_plddt_developability_only"
             else:
                 composite_score = None
-            structure_file = _select_primary_structure_file(result_dir)
 
             # D-route (chirality=d): stage the candidate's isolated conformer
             # against the prepared D-target at the user pocket, then dispatch
@@ -13019,7 +13020,7 @@ try:
     if isinstance(_ccd_overrides, dict):
         for _ccd, _one in _ccd_overrides.items():
             _ccd = str(_ccd or "").strip().upper()
-            _one = str(_one or "").strip.upper()[:1]
+            _one = str(_one or "").strip().upper()[:1]
             if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
                 _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
 except Exception as _exc:
@@ -13398,6 +13399,7 @@ def main():
                         temp_dir=worker_temp_dir,
                         yaml_content=worker_yaml_content,
                         output_archive_path=worker_output_archive_path,
+                        use_msa_server=bool(worker_predict_args.get("use_msa_server", False)),
                         seed=worker_seed,
                         task_id=worker_task_id,
                     )
@@ -13512,7 +13514,7 @@ def main():
             use_msa_server = bool(use_msa_raw)
         else:
             use_msa_server = str(use_msa_raw).strip().lower() in {"1", "true", "yes", "y"}
-        if backend in {"boltz", "alphafold3", "protenix"}:
+        if backend in {"boltz", "alphafold3", "protenix", "mol1"}:
             use_msa_server = infer_use_msa_server_from_yaml_text(yaml_content)
             predict_args["use_msa_server"] = use_msa_server
             if use_msa_server:
@@ -13570,7 +13572,6 @@ def main():
                     temp_dir,
                     processed_yaml,
                     output_archive_path,
-                    use_msa_server,
                     seed=seed,
                     template_payloads=af3_template_payloads,
                     task_id=runtime_task_id,
@@ -13607,6 +13608,7 @@ def main():
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
+                    use_msa_server=use_msa_server,
                     seed=seed,
                     task_id=runtime_task_id,
                 )
