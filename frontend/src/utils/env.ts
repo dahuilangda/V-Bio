@@ -57,10 +57,16 @@ const resolvedSupabaseRestUrl =
     ? supabaseConfigured
     : '/supabase';
 
+// 不再内置兜底 token：缺失即置空，dev 下告警提示。
+const resolvedApiToken = import.meta.env.VITE_API_TOKEN?.trim() || '';
+if (!resolvedApiToken && import.meta.env.DEV) {
+  console.warn('[env] VITE_API_TOKEN is not set; API requests will be unauthenticated.');
+}
+
 export const ENV = {
   apiBaseUrl: resolvedApiBaseUrl,
   managementApiBaseUrl: resolvedManagementApiBaseUrl,
-  apiToken: import.meta.env.VITE_API_TOKEN?.trim() || 'development-api-token',
+  apiToken: resolvedApiToken,
   superAdminUsernames: import.meta.env.VITE_SUPER_ADMIN_USERNAMES?.trim() || '',
   superAdminEmails: import.meta.env.VITE_SUPER_ADMIN_EMAILS?.trim() || '',
   supabaseRestUrl: resolvedSupabaseRestUrl,

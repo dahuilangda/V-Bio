@@ -844,22 +844,26 @@ export async function listProjectTasksForList(
     'created_at',
     'updated_at'
   ].join(',');
-  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+  const rowsQuery = {
     select: selectFields,
     project_id: `eq.${projectId}`,
     ...(taskIdFilter ? { id: taskIdFilter } : {}),
     order: 'created_at.desc',
     ...paginationQuery
-  });
-  const detailRows = includeComponents
-    ? await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
-        select: 'id,components',
-        project_id: `eq.${projectId}`,
-        ...(taskIdFilter ? { id: taskIdFilter } : {}),
-        order: 'created_at.desc',
-        ...paginationQuery
-      })
-    : [];
+  } as const;
+  // 两个独立查询并行，降低列表首屏延迟。
+  const [rows, detailRows] = await Promise.all([
+    request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, rowsQuery),
+    includeComponents
+      ? request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+          select: 'id,components',
+          project_id: `eq.${projectId}`,
+          ...(taskIdFilter ? { id: taskIdFilter } : {}),
+          order: 'created_at.desc',
+          ...paginationQuery
+        })
+      : Promise.resolve([] as Array<Partial<ProjectTask>>)
+  ]);
   const detailById = new Map(
     detailRows
       .map((row) => [String(row.id || '').trim(), row] as const)

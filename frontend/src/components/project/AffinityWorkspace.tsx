@@ -525,7 +525,9 @@ export function AffinityResultsWorkspace({
         <section className="structure-panel structure-panel--results-compact">
           {hasStructure ? (
             <MolstarViewer
-              key={`affinity-results-viewer:${viewerColorMode}:${selectedLigandChainId || '-'}:${selectedTargetChainId || '-'}`}
+              // key 只编码结构标识：colorMode/chain focus 走响应式 recolor 路径，
+              // 进 key 会导致每次 AF/Std 切换整体重建 WebGL viewer。
+              key={`affinity-results-viewer:${structureText.length}:${structureText.slice(-64)}`}
               structureText={structureText}
               format={structureFormat}
               colorMode={viewerColorMode}

@@ -69,6 +69,7 @@ export function useLeadOptHaloRun({
   const [error, setError] = useState('');
   const pollTimerRef = useRef<number | null>(null);
   const runningRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -77,7 +78,14 @@ export function useLeadOptHaloRun({
     }
   }, []);
 
-  useEffect(() => stopPolling, [stopPolling]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // 清定时器不够：在途 poll() 返回后会续排，需 mounted 守卫中断链路。
+      mountedRef.current = false;
+      stopPolling();
+    };
+  }, [stopPolling]);
 
   const finishRun = useCallback(() => {
     runningRef.current = false;
@@ -96,6 +104,7 @@ export function useLeadOptHaloRun({
       }
       try {
         const status = await fetchLeadOptimizationHaloStatus(taskId);
+        if (!mountedRef.current) return;
         const state = String(status.state || '').toLowerCase();
         const haloEvent = status.info?.payload?.halo || null;
         if (haloEvent) {
@@ -142,14 +151,18 @@ export function useLeadOptHaloRun({
           }
           setRunState({ progress: null, candidates, roundsLog, mode, backend });
           finishRun();
-          await onTaskCompleted({ taskId, candidates, roundsLog, roundsCompleted, totalRounds, mode, backend });
+          if (mountedRef.current) {
+            await onTaskCompleted({ taskId, candidates, roundsLog, roundsCompleted, totalRounds, mode, backend });
+          }
           return;
         }
         if (TERMINAL_BAD.has(state)) {
           const details = String(status.info?.details || '').trim();
           setError(details || `Optimization failed (${state}).`);
           finishRun();
-          await onTaskFailed({ taskId, error: details || `Optimization failed (${state}).` });
+          if (mountedRef.current) {
+            await onTaskFailed({ taskId, error: details || `Optimization failed (${state}).` });
+          }
           return;
         }
       } catch (pollError) {
@@ -161,7 +174,7 @@ export function useLeadOptHaloRun({
           return;
         }
       }
-      if (!runningRef.current) return;
+      if (!runningRef.current || !mountedRef.current) return;
       pollTimerRef.current = window.setTimeout(() => {
         void poll(taskId, deadline);
       }, POLL_INTERVAL_MS);

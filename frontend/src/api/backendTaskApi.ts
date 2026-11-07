@@ -155,6 +155,7 @@ export async function getTaskStatuses(taskIds: string[]): Promise<Record<string,
   if (normalizedTaskIds.length === 0) return {};
   const byTaskId: Record<string, TaskStatusResponse> = {};
   const pendingLookups: Array<Promise<void>> = [];
+  const failedTaskIds: string[] = [];
 
   for (const taskId of normalizedTaskIds) {
     const cached = readCachedTaskStatus(taskId);
@@ -167,12 +168,23 @@ export async function getTaskStatuses(taskIds: string[]): Promise<Record<string,
         .then((status) => {
           byTaskId[taskId] = status;
         })
-        .catch(() => undefined)
+        .catch(() => {
+          // 批量失败不静默：记入 failedTaskIds 供日志说明列表为何陈旧。
+          failedTaskIds.push(taskId);
+        })
     );
   }
 
   if (pendingLookups.length > 0) {
     await Promise.all(pendingLookups);
+  }
+  if (failedTaskIds.length > 0) {
+    console.warn(
+      `[taskStatus] ${failedTaskIds.length}/${normalizedTaskIds.length} status lookup(s) failed; ` +
+        'active tasks keep their last known state: ' +
+        failedTaskIds.slice(0, 8).join(', ') +
+        (failedTaskIds.length > 8 ? ` …(+${failedTaskIds.length - 8})` : '')
+    );
   }
 
   return byTaskId;

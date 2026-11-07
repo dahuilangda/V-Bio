@@ -33,9 +33,18 @@ function managementSessionHeader(): string | null {
   }
 }
 
+export { managementSessionHeader };
+
 export async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = BACKEND_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // 内部 controller 兜底超时，外部 signal 手动转发（AbortSignal.any 兼容性不足）。
+  const external = init.signal;
+  const onExternalAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) onExternalAbort();
+    else external.addEventListener('abort', onExternalAbort);
+  }
   try {
     const method = String(init.method || 'GET').toUpperCase();
     const cacheMode: RequestCache | undefined = init.cache ?? (method === 'GET' ? 'no-store' : undefined);
@@ -46,11 +55,13 @@ export async function fetchWithTimeout(url: string, init: RequestInit = {}, time
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
+      if (external?.aborted) throw error; // 调用方主动取消，原样抛出
       throw new Error(`Backend request timeout after ${timeoutMs}ms for ${url}`);
     }
     throw error;
   } finally {
     clearTimeout(timer);
+    if (external) external.removeEventListener('abort', onExternalAbort);
   }
 }
 

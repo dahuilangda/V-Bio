@@ -26,7 +26,11 @@ export function loadScript(src: string): Promise<void> {
       script.dataset.loaded = 'true';
       resolve();
     };
-    script.onerror = () => reject(new Error(`Script load failed: ${src}`));
+    script.onerror = () => {
+      // 失败不缓存，允许会话内重试。
+      loaded.delete(src);
+      reject(new Error(`Script load failed: ${src}`));
+    };
     document.head.appendChild(script);
   });
 

@@ -665,6 +665,7 @@ export function ProjectCopilotModal({
       }
     })();
     return () => { cancelled = true; };
+    // messages.length 为刻意保留：服务端在终端态持久化 goal，回合后需重读。
   }, [currentUserId, activeSessionId, messages.length]);
   const activeGoalRef = useRef<CopilotActiveGoal | null>(activeGoal);
   activeGoalRef.current = activeGoal;
@@ -855,9 +856,7 @@ export function ProjectCopilotModal({
     writeStoredCopilotDraftLocal(draftScope, value);
     flushDraftToDb(value);
   }, [draftScope, flushDraftToDb]);
-  useEffect(() => {
-    return draftStore.subscribe((value) => persistCopilotDraft(value));
-  }, [draftStore, persistCopilotDraft]);
+  // 不在此处订阅 draftStore：CopilotComposer 已订阅并回调，重复订阅导致按键双写。
   useEffect(() => () => {
     // Flush the pending write on unmount so a stale DB draft can't resurrect.
     const pending = draftPersistPendingRef.current;

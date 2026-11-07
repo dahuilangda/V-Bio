@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { AuthLoginInput, AuthRegisterInput, Session } from '../types/models';
 import {
   clearSession,
@@ -69,16 +69,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSession(refreshed);
   };
 
+  const managementRefreshInFlightRef = useRef<Promise<string> | null>(null);
   const ensureManagementSession = async (): Promise<string | null> => {
     if (!session?.managementToken) return null;
     if (!managementSessionNeedsRefresh(session.managementToken)) {
       return session.managementToken;
     }
-    const managementToken = await renewManagementSession(session.managementToken);
-    const refreshed = { ...session, managementToken };
-    saveSession(refreshed);
-    setSession(refreshed);
-    return managementToken;
+    // 并发调用共用一次刷新，避免双刷新在新旧 token 轮换下 401。
+    if (managementRefreshInFlightRef.current) {
+      return managementRefreshInFlightRef.current;
+    }
+    const inFlight = (async () => {
+      const managementToken = await renewManagementSession(session.managementToken as string);
+      const refreshed = { ...session, managementToken };
+      saveSession(refreshed);
+      setSession(refreshed);
+      return managementToken;
+    })().finally(() => {
+      managementRefreshInFlightRef.current = null;
+    });
+    managementRefreshInFlightRef.current = inFlight;
+    return inFlight;
   };
 
   const value = useMemo<AuthContextValue>(
