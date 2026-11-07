@@ -60,7 +60,6 @@ def main() -> None:
     ap.add_argument("--project-id", required=True)
     ap.add_argument("--backends", default="mol1,protenix",
                     help="comma-separated verification backends (default: mol1,protenix)")
-    ap.add_argument("--top", type=int, default=5, help="designs per backend")
     ap.add_argument("--seed", type=int, default=101)
     args = ap.parse_args()
 
@@ -106,8 +105,11 @@ def main() -> None:
     manifest_path = Path(args.runs_dir) / "verification_manifest.json"
     try:
         manifest_path.write_text(json.dumps(manifest, indent=1))
-    except OSError:  # runs dir owned by the engine container; fall back to cwd
-        manifest_path = Path.cwd() / "verification_manifest.json"
+    except OSError:
+        # runs dir owned by the engine container; fall back to cwd, one file
+        # per run dir so consecutive dispatches do not overwrite each other
+        manifest_path = Path.cwd() / (
+            f"verification_manifest_{Path(args.runs_dir).name}.json")
         manifest_path.write_text(json.dumps(manifest, indent=1))
     print(f"\n{len(manifest['verifications'])} verification tasks; "
           f"manifest: {manifest_path}")
