@@ -205,12 +205,14 @@ export function useProjectTasksWorkspaceContext({
     >();
     const rows = sanitizeTaskRows(tasks).map((task) => {
       const taskRowId = String(task.id || '').trim();
-      const cacheKey = baseCacheKey + '|' + readTaskRowRuntimeCacheSignature(task);
       const cached = taskRowCacheRef.current.get(taskRowId);
-      if (cached && cached.taskRef === task && cached.cacheKey === cacheKey) {
+      // 引用未变时直接命中缓存：签名含多次 JSON.stringify，
+      // 千行项目每 tick 全量计算是主线程热点
+      if (cached && cached.taskRef === task && cached.cacheKey.startsWith(baseCacheKey)) {
         nextCache.set(taskRowId, cached);
         return cached.row;
       }
+      const cacheKey = baseCacheKey + '|' + readTaskRowRuntimeCacheSignature(task);
 
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const resolvedWorkflow = resolveTaskWorkflowKey(task, project?.task_type || '');

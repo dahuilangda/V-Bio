@@ -319,13 +319,7 @@ export function useProjectTaskRowActions({
         );
       }
       if (runtimeState === 'QUEUED' || runtimeState === 'RUNNING') {
-        if (!runtimeTaskId) {
-          throw new Error(
-            runtimeState === 'RUNNING'
-              ? 'Task is running but task_id is missing; cannot stop backend task, deletion is blocked.'
-              : 'Task is queued but task_id is missing; cannot cancel backend task, deletion is blocked.'
-          );
-        }
+        // runtimeTaskId 已在前置守卫保证非空
         const terminateResult = await terminateBackendTask(runtimeTaskId);
         if (terminateResult.terminated !== true) {
           throw new Error(
