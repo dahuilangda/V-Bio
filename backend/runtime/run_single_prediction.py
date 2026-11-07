@@ -5066,6 +5066,9 @@ def run_mol1_backend(
     ]
     if not use_msa_server:
         command.append("--no-msa")
+    if str(os.environ.get("MOL1_ATOM_CONFIDENCE", "")).strip().lower() in ("1", "true", "yes"):
+        # 输出 token/原子级置信（含 PAE），供 ipSAE 等后处理使用；归档体积显著增大
+        command.append("--atom-confidence")
     print(f"Mol-1 docker: {shlex.join(command)}", file=sys.stderr)
     started = time.time()
     completed = subprocess.run(command, check=False)
