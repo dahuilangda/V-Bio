@@ -1876,13 +1876,11 @@ class CopilotAssistant:
         goal_text = str((active_goal or {}).get("goal_text") or "").strip()
         if goal_text:
             goal_state = str((active_goal or {}).get("state") or "").strip()
-            goal_line = (
+            active_goal_line = (
                 f"ACTIVE GOAL: {goal_text}"
                 + (f" [state: {goal_state}]" if goal_state else "")
                 + "\n"
             )
-            if goal_steps_progress:
-                goal_line += f"{goal_steps_progress}\n"
         context_block = (
             active_goal_line
             + f"context_type: {normalized_context}\n"
