@@ -82,11 +82,13 @@ def _merge_prediction_properties_into_yaml(
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True), True
 
 
-def _yaml_has_ligand_annotation(yaml_content: str) -> bool:
-    try:
-        data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return False
+def _yaml_has_ligand_annotation(yaml_content: str, payload: Optional[dict] = None) -> bool:
+    data = payload
+    if data is None:
+        try:
+            data = yaml.safe_load(yaml_content) or {}
+        except Exception:
+            return False
     if not isinstance(data, dict):
         return False
 
@@ -114,17 +116,18 @@ def _yaml_has_ligand_annotation(yaml_content: str) -> bool:
     return False
 
 
-def _validate_yaml_ligands(yaml_content: str) -> Optional[str]:
+def _validate_yaml_ligands(yaml_content: str, payload: Optional[dict] = None) -> Optional[str]:
     """Reject ligand SMILES that cannot be processed.
 
     Bare ions are translated to CCD before validation; remaining failures
     (unparseable SMILES, disconnected salts) are input errors.
     """
-    data = None
-    try:
-        data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return None
+    data = payload
+    if data is None:
+        try:
+            data = yaml.safe_load(yaml_content) or {}
+        except Exception:
+            return None
     if not isinstance(data, dict):
         return None
     sequences = data.get('sequences')
@@ -279,6 +282,20 @@ def register_prediction_routes(
             logger.exception('Failed to read yaml_file from request: %s. Client IP: %s', exc, request.remote_addr)
             return jsonify({'error': f'Failed to read yaml_file: {exc}'}), 400
 
+        # 同一请求多处校验共用一次解析；内容被改写（properties 合并、
+        # 化合物合并）后刷新，避免同一 yaml 反复 safe_load
+        yaml_payload: Optional[dict] = None
+
+        def _refresh_payload() -> None:
+            nonlocal yaml_payload
+            try:
+                parsed = yaml.safe_load(yaml_content)
+            except Exception:
+                yaml_payload = None
+                return
+            yaml_payload = parsed if isinstance(parsed, dict) else None
+
+        _refresh_payload()
         request_properties = _parse_prediction_properties(request.form.get('properties'))
         if request.form.get('properties') and request_properties is None:
             return jsonify({'error': "Invalid 'properties' form field. Expected a JSON object."}), 400
@@ -288,6 +305,7 @@ def register_prediction_routes(
                     yaml_content,
                     request_properties,
                 )
+                _refresh_payload()
                 if properties_merged:
                     logger.info(
                         'Merged explicit prediction properties into yaml_file for client %s.',
@@ -298,7 +316,7 @@ def register_prediction_routes(
                 return jsonify({'error': f"Failed to merge 'properties' into yaml_file: {exc}"}), 400
 
         require_ipsae = parse_bool(request.form.get('require_ipsae'), False)
-        if require_ipsae and not _yaml_has_ligand_annotation(yaml_content):
+        if require_ipsae and not _yaml_has_ligand_annotation(yaml_content, payload=yaml_payload):
             return jsonify({
                 'error': "IPSAE requested but yaml_file does not declare ligand/binder chain. Provide properties.target and properties.ligand/binder.",
             }), 400
@@ -346,10 +364,13 @@ def register_prediction_routes(
                 return jsonify({'error': "Backend 'protenix2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
             backend = 'protenix2dock'
         elif backend in {'mol1', 'mol-1'}:
-            try:
-                _y = yaml.safe_load(yaml_content) or {}
-            except yaml.YAMLError as exc:
-                return jsonify({'error': f'Invalid YAML: {exc}'}), 400
+            if yaml_payload is None:
+                try:
+                    yaml.safe_load(yaml_content)
+                except yaml.YAMLError as exc:
+                    return jsonify({'error': f'Invalid YAML: {exc}'}), 400
+                return jsonify({'error': 'Invalid YAML: payload must be a mapping.'}), 400
+            _y = yaml_payload
             _opts_raw = request.form.get('peptide_design_options') or ''
             try:
                 _opts = json.loads(_opts_raw) if _opts_raw else {}
@@ -402,10 +423,11 @@ def register_prediction_routes(
             try:
                 # Library files replace inline compounds here; validation stays in the normalizer.
                 yaml_content = merge_screening_compounds_file_into_yaml(yaml_content, compounds_text)
+                _refresh_payload()
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
 
-        ligand_error = _validate_yaml_ligands(yaml_content)
+        ligand_error = _validate_yaml_ligands(yaml_content, payload=yaml_payload)
         if ligand_error:
             logger.warning("Rejected prediction submit: %s. Client IP: %s", ligand_error, request.remote_addr)
             return jsonify({'error': ligand_error}), 400

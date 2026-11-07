@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 import hmac
 import os
 from dataclasses import dataclass
@@ -71,6 +72,11 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
 class AuthService:
     def __init__(self, postgrest: PostgrestClient) -> None:
         self.postgrest = postgrest
+        self._token_cache: dict = {}
+
+    # token 鉴权结果短 TTL 缓存：每个网关请求一次 PostgREST 往返是读路径
+    # 的串行延迟大头。撤销/停用最多延迟一个 TTL 周期生效。
+    TOKEN_CACHE_TTL_SECONDS = 30.0
 
     def validate_token(self, token_plain: str) -> TokenContext:
         if not token_plain:
@@ -79,6 +85,14 @@ class AuthService:
             return PLATFORM_TOKEN_CONTEXT
 
         token_hash = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
+        now = time.monotonic()
+        cached = self._token_cache.get(token_hash)
+        if cached is not None:
+            ctx, expires_at = cached
+            if now < expires_at:
+                return ctx
+            self._token_cache.pop(token_hash, None)
+
         rows = self.postgrest.request(
             "GET",
             "api_tokens",
@@ -101,7 +115,7 @@ class AuthService:
         if expires_at and expires_at <= datetime.now(timezone.utc):
             raise PermissionError("API token expired")
 
-        return TokenContext(
+        context = TokenContext(
             token_id=str(row.get("id") or ""),
             user_id=str(row.get("user_id") or ""),
             name=str(row.get("name") or ""),
@@ -110,6 +124,12 @@ class AuthService:
             allow_delete=bool(row.get("allow_delete", False)),
             allow_cancel=bool(row.get("allow_cancel", False)),
         )
+        self._token_cache[token_hash] = (
+            context, time.monotonic() + self.TOKEN_CACHE_TTL_SECONDS)
+        if len(self._token_cache) > 2048:
+            for stale in list(self._token_cache)[:512]:
+                self._token_cache.pop(stale, None)
+        return context
 
     def ensure_project_exists(self, project_id: str) -> None:
         rows = self.postgrest.request(
