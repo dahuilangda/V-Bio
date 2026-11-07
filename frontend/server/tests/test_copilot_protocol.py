@@ -691,20 +691,23 @@ class CopilotHarnessContractTests(unittest.TestCase):
 
     def test_abort_skips_the_model_call(self) -> None:
         # A pre-set abort must short-circuit before any model call (no canned responses provided).
+        # Graceful user-stop: the turn ends through terminal selection ("aborted by user" issue)
+        # instead of raising — raising bypassed the terminal copy and surfaced a raw SSE error.
         session = StubSession([])
         assistant = self.assistant(session)
         abort = threading.Event()
         abort.set()
-        with self.assertRaisesRegex(RuntimeError, "aborted"):
-            assistant.plan_turn(
-                context_type="workspace",
-                context_payload={},
-                user_id="user",
-                username="user",
-                content="hi",
-                abort=abort,
-            )
+        result = assistant.plan_turn(
+            context_type="workspace",
+            context_payload={},
+            user_id="user",
+            username="user",
+            content="hi",
+            abort=abort,
+        )
         self.assertEqual(len(session.posts), 0)
+        self.assertNotEqual(result.get("state"), "complete")
+        self.assertIn("Stopped at your request", result.get("content") or "")
 
     def test_repeated_audit_rejection_stops_without_exhausting_round_budget(self) -> None:
         invalid_turn = json.dumps(

@@ -589,7 +589,9 @@ class ObservationSummaryTests(unittest.TestCase):
 
     def test_pathologically_long_field_is_bounded_not_dropped(self) -> None:
         # A giant field is capped (context safety) but still substantial — never reduced to a 50-char preview.
-        sequence = "M" * 6000
+        from management_api.copilot import MAX_OBSERVATION_LONG_CHARS
+
+        sequence = "M" * (MAX_OBSERVATION_LONG_CHARS + 2000)
         observations = {
             "uniprot.resolve:0": {
                 "ok": True,
@@ -600,9 +602,24 @@ class ObservationSummaryTests(unittest.TestCase):
         summary = CopilotAssistant._summarize_observations(observations)
         # pi/Anthropic truncation rule: the marker must not just report size — it must STEER
         # the planner to the sanctioned way of using the full value ($fromObservation).
-        self.assertIn("[truncated at 4000 of 6000 chars", summary)
+        self.assertIn(f"[truncated at {MAX_OBSERVATION_LONG_CHARS} of {len(sequence)} chars", summary)
         self.assertIn("consume it via $fromObservation", summary)
         self.assertGreater(summary.count("M"), 1000)
+
+    def test_long_field_below_cap_is_rendered_in_full(self) -> None:
+        # Below MAX_OBSERVATION_LONG_CHARS the authoritative field is passed through untruncated —
+        # the cap only guards against pathological sizes.
+        sequence = "M" * 6000
+        observations = {
+            "uniprot.resolve:0": {
+                "ok": True,
+                "skill": "uniprot.resolve",
+                "values": [{"results": [{"accession": "X", "sequence": sequence}]}],
+            }
+        }
+        summary = CopilotAssistant._summarize_observations(observations)
+        self.assertIn(f"sequence={sequence}", summary)
+        self.assertNotIn("truncated", summary)
 
 
 if __name__ == "__main__":
@@ -879,6 +896,9 @@ class ContextBudgetTests(unittest.TestCase):
                 "median_delta": -0.4 + (index % 13) * 0.05,
                 "properties": {"molecular_weight": 220.1 + index, "logp": 2.1, "tpsa": 46.3},
                 "property_deltas": {"mw": 12.5, "logp": -0.3, "tpsa": 0.0},
+                # Near the per-string cap so the composed payload genuinely exceeds the
+                # total budget even after default per-item truncation (the regression premise).
+                "esm_embedding_preview": "0.0123," * 233,
                 "final_highlight_atom_indices": list(range(12)),
             }
             for index in range(candidate_rows)
@@ -892,13 +912,14 @@ class ContextBudgetTests(unittest.TestCase):
                 "ligandPlddt": 84.0,
                 "ligandAtomPlddts": [80.0 + (i % 15) for i in range(256)],
                 "ligandRenderAtomPlddts": [81.0 + (i % 13) for i in range(256)],
+                "esm_embedding_preview": "0.0456," * 233,
                 "updatedAt": 1700000000 + index,
             }
-            for index in range(80)
+            for index in range(candidate_rows)
         }
         transform_rows = [
             {"smiles": c["smiles"], "env": "c1ccccc1", "stats": {"pairs": 4, "median": -0.3}}
-            for c in candidates[:80]
+            for c in candidates[:candidate_rows]
         ]
         return {
             "page": {"contextType": "task_detail", "workflowKey": "lead_optimization"},

@@ -320,6 +320,7 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(result["content"], "15 步调研全部完成,共解析 15 条序列。")
 
     def test_requests_stay_under_the_hard_cap(self):
+        from management_api.copilot import MAX_MODEL_MESSAGE_CHARS
         steps = [{"description": f"阶段 {i + 1}"} for i in range(15)]
         scripted: List[Any] = [turn("计划。", goal_steps=steps)]
         for i in range(14):
@@ -336,21 +337,21 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(result["state"], "complete")
         for request in session.requests:
             total = sum(len(str(m.get("content") or "")) for m in request["json"]["messages"])
-            self.assertLessEqual(total, 64000, "every outbound request must fit the hard context cap")
+            self.assertLessEqual(total, MAX_MODEL_MESSAGE_CHARS, "every outbound request must fit the hard context cap")
 
     def test_compaction_elides_history_but_keeps_ledger(self):
-        # When compaction fires, elided feedback rounds are replaced by a pointer, and the
-        # latest feedback (kept verbatim) carries the observation ledger with every value.
+        # 压缩触发后旧 feedback 替换为指针，最近一份保留账本；尺寸相对软上限构造，常量漂移后仍可触发。
         from management_api.copilot import CONTEXT_SOFT_LIMIT_CHARS
+        feedback_body = "F" * 150_000
         messages = [{"role": "system", "content": "P" * 20000}] + [
-            {"role": "system", "content": f"feedback {i} " + "F" * 12000} for i in range(4)
+            {"role": "system", "content": f"feedback {i} " + feedback_body} for i in range(4)
         ]
         assistant, _ = make_assistant([])
         compacted = assistant._compact_for_send(messages)
         total = sum(len(str(m.get("content") or "")) for m in compacted)
         self.assertLess(total, CONTEXT_SOFT_LIMIT_CHARS)
         self.assertTrue(any("elided" in str(m.get("content")) for m in compacted))
-        # The most recent feedback survives verbatim; the opening prompt survives.
+        # 开场 prompt 原样保留，最近 feedback 受单条上限约束。
         self.assertEqual(compacted[0]["content"], "P" * 20000)
         self.assertTrue(any(str(m.get("content")).startswith("feedback 3") for m in compacted))
 
@@ -359,14 +360,15 @@ class ContextCompactionTests(unittest.TestCase):
             "a1": {"ok": True, "skill": "chembl.bioactivity", "values": [
                 {"results": [{"target": "COX1", "activityType": "IC50", "value": 5.0, "units": "nM"}]}]},
             "a2": {"ok": True, "skill": "uniprot.resolve", "values": [
-                {"accession": "P00533", "sequence": "M" * 500}]},
+                {"accession": "P00533", "sequence": "M" * 5000}]},
         }
         ledger = _observation_ledger(observations)
         self.assertIn("a1", ledger)
         self.assertIn("target=COX1", ledger)
         self.assertIn("accession=P00533", ledger)
-        # Long fields are capped tight in the ledger.
-        self.assertLess(len(ledger), 500)
+        # 单条记录渲染有 400 字符硬预算，超长字段只保留头部。
+        self.assertNotIn("M" * 401, ledger)
+        self.assertLess(len(ledger), 1200)
 
 
 # --------------------------------------------------------------------------- #
