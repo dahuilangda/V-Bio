@@ -683,6 +683,18 @@ def register_prediction_routes(
             predict_args['template_inputs'] = template_inputs
         if custom_ccd_molecules:
             predict_args['custom_ccd_molecules'] = custom_ccd_molecules
+        if backend == 'rfd4':
+            # rfd4_spec: 完整条件 spec 透传（motif 条件化生成）；
+            # 缺省时由 runtime 按靶标自动生成固定 binder spec
+            rfd4_spec = str(request.form.get('rfd4_spec') or '').strip()
+            if rfd4_spec:
+                try:
+                    parsed = yaml.safe_load(rfd4_spec)
+                except yaml.YAMLError as exc:
+                    return jsonify({'error': f'Invalid rfd4_spec: {exc}'}), 400
+                if not isinstance(parsed, dict) or not parsed:
+                    return jsonify({'error': 'rfd4_spec must be a YAML mapping.'}), 400
+                predict_args['rfd4_spec'] = rfd4_spec
 
         # Consume quota only after validation; 400-rejected submits must not burn units.
         quota_response = _check_tenant_quota(tenant_id)

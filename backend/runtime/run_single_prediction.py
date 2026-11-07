@@ -4828,6 +4828,7 @@ def run_rfd4_backend(
     yaml_content: str,
     output_archive_path: str,
     template_inputs: Optional[List[dict]] = None,
+    rfd4_spec: Optional[str] = None,
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
 ) -> None:
@@ -4860,19 +4861,25 @@ def run_rfd4_backend(
     if target_entry is None:
         raise ValueError("RFD4 生成任务需要在 yaml 中提供靶点蛋白链。")
     target_length = len(str(target_entry.get("sequence", "")))
-    spec = {
-        "binder": {
-            "input": "/workspace/input/target.cif",
-            "contig": str(RFD4_CONTIG or "").strip()
-                      or f"12-22, /0, A1-{target_length}",
-            "conditions": {
-                "C_CRDGRP": {"1": [{"select": "sel('A/*/*/[N,CA,C,O]')"}]},
-                "C_SEQ": {"true": [{"select": "sel('A')"}]},
-            },
+    if rfd4_spec:
+        # 任务级 spec 透传（motif 条件化等）；spec 的 input 必须引用
+        # /workspace/input/target.cif（已落盘的上传靶标）
+        spec_text = str(rfd4_spec)
+    else:
+        spec = {
+            "binder": {
+                "input": "/workspace/input/target.cif",
+                "contig": str(RFD4_CONTIG or "").strip()
+                          or f"12-22, /0, A1-{target_length}",
+                "conditions": {
+                    "C_CRDGRP": {"1": [{"select": "sel('A/*/*/[N,CA,C,O]')"}]},
+                    "C_SEQ": {"true": [{"select": "sel('A')"}]},
+                },
+            }
         }
-    }
+        spec_text = yaml.safe_dump(spec, sort_keys=False)
     spec_path = input_dir / "rfd4_spec.yaml"
-    spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+    spec_path.write_text(spec_text, encoding="utf-8")
 
     seed_value = int(seed) if seed is not None else 101
     from backend.worker.docker_cmd import image_and_python
@@ -13609,6 +13616,7 @@ def main():
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
                     template_inputs=template_inputs if isinstance(template_inputs, list) else None,
+                    rfd4_spec=predict_args.get("rfd4_spec"),
                     seed=seed,
                     task_id=runtime_task_id,
                 )
