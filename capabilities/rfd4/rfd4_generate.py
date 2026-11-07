@@ -59,18 +59,13 @@ def _resolve_spec(spec: Path, out_dir: Path) -> Path:
     """Resolve relative input paths in the condition spec to absolute
     paths and write a resolved copy.
 
-    Hydra switches cwd at runtime, breaking relative input paths in
-    the spec; absolute paths are immune. """
+    Hydra switches cwd at runtime, breaking relative input paths in the
+    spec; absolute paths are immune. `input` may be a single path or a
+    list (upstream combines list entries into one structure).
+    """
     import yaml
 
-    data = yaml.safe_load(spec.read_text())
-    spec_dir = spec.resolve().parent
-    for design in data.values():
-        if not isinstance(design, dict):
-            continue
-        raw = design.get("input")
-        if not raw:
-            continue
+    def resolve_one(raw: str) -> str:
         input_path = Path(raw)
         if input_path.is_absolute():
             resolved = input_path
@@ -81,7 +76,20 @@ def _resolve_spec(spec: Path, out_dir: Path) -> Path:
         if not resolved.exists():
             raise FileNotFoundError(
                 f"spec input not found: {raw} (resolved to {resolved})")
-        design["input"] = str(resolved)
+        return str(resolved)
+
+    data = yaml.safe_load(spec.read_text())
+    spec_dir = spec.resolve().parent
+    for design in data.values():
+        if not isinstance(design, dict):
+            continue
+        raw = design.get("input")
+        if not raw:
+            continue
+        if isinstance(raw, list):
+            design["input"] = [resolve_one(item) for item in raw]
+        else:
+            design["input"] = resolve_one(raw)
     resolved = out_dir / (spec.stem + "_resolved" + spec.suffix)
     out_dir.mkdir(parents=True, exist_ok=True)
     resolved.write_text(yaml.safe_dump(data, sort_keys=False))
