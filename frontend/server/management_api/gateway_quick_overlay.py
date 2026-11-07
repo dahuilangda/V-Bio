@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -21,22 +20,9 @@ def handle_lead_optimization_pocket_overlay(gateway: Any) -> Tuple[Response, int
         raw_project_id = str(payload.get("project_id") or request.args.get("project_id") or "").strip()
         project_id = raw_project_id or None
         token_plain = (request.headers.get("X-API-Token") or "").strip()
-        runtime_token = str(getattr(getattr(gateway, "runtime_proxy", None), "runtime_api_token", "") or "").strip()
-        backend_token = str(os.environ.get("BOLTZ_API_TOKEN", "") or "").strip()
-        runtime_env_token = str(os.environ.get("VBIO_RUNTIME_API_TOKEN", "") or "").strip()
-        trusted_tokens = {token for token in (runtime_token, backend_token, runtime_env_token) if token}
-        using_runtime_token = bool(
-            token_plain
-            and token_plain in trusted_tokens
-            and request.remote_addr in {"127.0.0.1", "::1"}
-        )
-        if using_runtime_token:
-            # Allow trusted runtime token for local UI utility routes (no project DB auth dependency).
-            effective_project_id = project_id
-            token = None
-        else:
-            token = gateway._authorize_quick_project_action(token_plain, project_id, require_submit=True)
-            effective_project_id = project_id or token.project_id
+        # 不设 loopback 捷径：反代下 remote_addr 恒为 127.0.0.1，会构成跨项目越权。
+        token = gateway._authorize_quick_project_action(token_plain, project_id, require_submit=True)
+        effective_project_id = project_id or token.project_id
 
         complex_structure_text = str(payload.get("complex_structure_text") or "").strip()
         complex_structure_format = str(payload.get("complex_structure_format") or "cif").strip().lower()
