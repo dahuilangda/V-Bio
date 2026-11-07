@@ -1,10 +1,8 @@
 """Engine capability matrix loader.
 
-The canonical matrix lives in configs/engine_capabilities.json; the embedded
-copy below mirrors it for containers that cannot read the repo path. A
-contract test asserts the embedded dict matches the JSON file, so the two
-cannot drift. Extending an engine or adding one means editing the JSON and
-refreshing EMBEDDED_ENGINES (tests enforce the schema).
+Single source of truth: configs/engine_capabilities.json at the repo root.
+Frontend imports the same file; this module is the backend reader. The file
+must exist — a missing matrix is a deployment error, not a fallback case.
 """
 from __future__ import annotations
 
@@ -13,70 +11,16 @@ from pathlib import Path
 
 MATRIX_PATH = Path(__file__).resolve().parents[2] / "configs" / "engine_capabilities.json"
 
-EMBEDDED_ENGINES: dict = {
-    "boltz": {
-        "label": "Boltz-2", "status": "active",
-        "workflows": ["prediction", "virtual_screening", "lead_optimization"],
-        "chirality": ["l", "d"], "design_modes": ["linear"],
-        "features": {"pocket": False, "custom_ccd": True, "msa": True, "ncaa": False},
-    },
-    "alphafold3": {
-        "label": "AlphaFold3", "status": "active",
-        "workflows": ["prediction"],
-        "chirality": ["l", "d"], "design_modes": ["linear"],
-        "features": {"pocket": False, "custom_ccd": False, "msa": True, "ncaa": False},
-    },
-    "protenix": {
-        "label": "Protenix", "status": "active",
-        "workflows": ["prediction", "peptide_design"],
-        "chirality": ["l"], "design_modes": ["linear", "cyclic", "bicyclic"],
-        "features": {"pocket": True, "custom_ccd": True, "msa": True, "ncaa": True},
-    },
-    "protenix2dock": {
-        "label": "Protenix2Dock", "status": "active",
-        "workflows": ["peptide_design", "lead_optimization"],
-        "chirality": ["l", "d"], "design_modes": ["linear", "cyclic", "bicyclic"],
-        "features": {"pocket": True, "custom_ccd": True, "msa": True, "ncaa": True},
-    },
-    "mol1": {
-        "label": "Mol-1", "status": "active",
-        "workflows": ["prediction", "peptide_design"],
-        "chirality": ["l"], "design_modes": ["linear"],
-        "features": {"pocket": False, "custom_ccd": False, "msa": True, "ncaa": True},
-    },
-    "rfd4": {
-        "label": "RFD4-Proteina", "status": "active",
-        "workflows": ["prediction"],
-        "chirality": ["l"], "design_modes": ["linear"],
-        "features": {"pocket": False, "custom_ccd": False, "msa": False, "ncaa": True},
-    },
-    "nesso": {
-        "label": "Nesso", "status": "active",
-        "workflows": ["virtual_screening"],
-        "chirality": [], "design_modes": [],
-        "features": {"pocket": False, "custom_ccd": False, "msa": False, "ncaa": False},
-    },
-    "boltz2dock": {
-        "label": "Boltz2Dock", "status": "deprecated",
-        "workflows": [],
-        "chirality": ["l", "d"], "design_modes": ["linear"],
-        "features": {"pocket": False, "custom_ccd": True, "msa": True, "ncaa": False},
-    },
-    "mol1dock": {
-        "label": "Mol1Dock", "status": "deprecated",
-        "workflows": [],
-        "chirality": ["l", "d"], "design_modes": ["bicyclic"],
-        "features": {"pocket": False, "custom_ccd": False, "msa": True, "ncaa": False},
-    },
-}
-
 
 def _load() -> dict:
-    try:
-        data = json.loads(MATRIX_PATH.read_text())
-        return data.get("engines", EMBEDDED_ENGINES)
-    except (OSError, ValueError):
-        return EMBEDDED_ENGINES
+    if not MATRIX_PATH.is_file():
+        raise FileNotFoundError(
+            f"引擎能力矩阵缺失: {MATRIX_PATH} — 部署不完整，拒绝启动")
+    data = json.loads(MATRIX_PATH.read_text())
+    engines = data.get("engines")
+    if not engines:
+        raise ValueError(f"引擎能力矩阵为空: {MATRIX_PATH}")
+    return engines
 
 
 ENGINES = _load()
