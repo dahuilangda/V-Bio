@@ -50,10 +50,6 @@ def _session_user(postgrest) -> Optional[Dict[str, Any]]:
         rows = postgrest.request("GET", "app_users", query={"username": f"eq.{username}", "limit": "1"})
         if rows:
             return _reject_stale_session(rows[0], claims)
-    if username:
-        rows = postgrest.request("GET", "app_users", query={"username": f"eq.{username}", "limit": "1"})
-        if rows:
-            return rows[0]
     return None
 
 
