@@ -1,5 +1,5 @@
-import { CircleAlert } from 'lucide-react';
 import { useMemo } from 'react';
+import { InfoTip } from '../common/InfoTip';
 import {
   readIpsaeDomMetric,
   readLigandIpsaeMaxMetric,
@@ -441,15 +441,11 @@ function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: st
 }
 
 function renderHelp(label: string, description: string) {
+  // InfoTip 支持键盘聚焦与 role="tooltip"。
   return (
     <span className="metric-label">
       {label}
-      <span className="metric-help-wrap">
-        <span className="metric-help" aria-label={description}>
-          <CircleAlert size={13} />
-        </span>
-        <span className="metric-tooltip">{description}</span>
-      </span>
+      <InfoTip text={description} />
     </span>
   );
 }

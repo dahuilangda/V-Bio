@@ -257,7 +257,14 @@ export function CopilotPanelShell({
           />
         )}
 
-        <div className="copilot-messages" ref={scrollRef as RefObject<HTMLDivElement>} onScroll={onMessagesScroll}>
+        <div
+          className="copilot-messages"
+          ref={scrollRef as RefObject<HTMLDivElement>}
+          onScroll={onMessagesScroll}
+          role="log"
+          aria-live="polite"
+          aria-label="Conversation"
+        >
           {isLoading ? (
             <div className="copilot-empty">
               <LoaderCircle size={16} className="spin" />
