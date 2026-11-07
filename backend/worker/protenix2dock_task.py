@@ -90,7 +90,7 @@ def _build_protenix2dock_command(
         command.extend(["--volume", f"{affinity_ckpt}:{affinity_ckpt}:ro"])
         command.extend(["--env", f"PROTENIX_AFFINITY_CKPT={affinity_ckpt}"])
 
-    command.extend(_tasks._sanitize_docker_extra_args(shlex.split(
+    command.extend(docker_cmd.sanitize_docker_extra_args(shlex.split(
         str(getattr(config, "PROTENIX_DOCKER_EXTRA_ARGS", "") or "")
     )))
     image, python_bin = docker_cmd.image_and_python()
@@ -293,7 +293,8 @@ def protenix2dock_task(self, score_args: dict):
             if _time.time() > hard_deadline:
                 process.kill()
                 _tasks._terminate_task_container(container_name)
-                raise TimeoutError(
+                # 终态超时，避免被 autoretry_for 的 TimeoutError 整任务重跑。
+                raise _tasks.SubprocessHardTimeout(
                     f"protenix2dock task {task_id} exceeded {_tasks.SUBPROCESS_TIMEOUT}s."
                 )
         process.wait()

@@ -1,5 +1,6 @@
 import redis
 import os
+import signal
 import sys
 import traceback
 import tempfile
@@ -808,6 +809,26 @@ def _communicate_with_optional_timeout(process: subprocess.Popen, timeout_second
     return process.communicate(timeout=timeout_seconds)
 
 
+class SubprocessHardTimeout(RuntimeError):
+    """子进程超时：终态，不可重试（勿用 builtin TimeoutError，会被 autoretry 重跑 GPU 任务）。"""
+
+
+def _kill_process_group(process: subprocess.Popen, grace_seconds: int = 30) -> tuple[str, str]:
+    """SIGKILL 整个进程组并排空管道（孙进程继承 stdio，只杀直接子进程会挂住 communicate）。"""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        return process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        # 管道仍被不可杀死的后代持有，放弃读取以免挂死。
+        return "", ""
+
+
 
 
 def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
@@ -1202,8 +1223,7 @@ def predict_task(self, predict_args: dict):
         try:
             stdout, stderr = _communicate_with_optional_timeout(process, subprocess_timeout)
         except subprocess.TimeoutExpired as e:
-            process.kill()
-            stdout, stderr = process.communicate()
+            stdout, stderr = _kill_process_group(process)
             revoked_summary = None
             if is_peptide_design:
                 revoked_summary = _revoke_registered_peptide_subtasks(task_id, terminate=True)
@@ -1223,7 +1243,7 @@ def predict_task(self, predict_args: dict):
                 )
             logger.error(error_message)
             tracker.update_status("timeout", f"Process timeout after {subprocess_timeout}s")
-            raise TimeoutError(error_message) from e
+            raise SubprocessHardTimeout(error_message) from e
         finally:
             progress_stop_event.set()
             if progress_thread and progress_thread.is_alive():
@@ -1289,6 +1309,19 @@ def predict_task(self, predict_args: dict):
         raise
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        # 父任务失败时撤销已排队候选，避免空跑 GPU 推理。
+        if is_peptide_design:
+            try:
+                revoked = _revoke_registered_peptide_subtasks(task_id, terminate=True)
+                if revoked and (
+                    revoked.get("found") or revoked.get("revoked") or revoked.get("failed")
+                ):
+                    logger.warning(
+                        f"Task {task_id}: revoked peptide subtasks after parent failure: "
+                        f"{json.dumps(revoked, ensure_ascii=False)}"
+                    )
+            except Exception as revoke_exc:
+                logger.warning(f"Task {task_id}: peptide subtask revocation failed: {revoke_exc}")
         if tracker:
             tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
         self.update_state(state='FAILURE', meta=_build_failure_meta(e))
@@ -1459,14 +1492,19 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     try:
         stdout, stderr = _communicate_with_optional_timeout(process, PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
-        process.kill()
-        stdout, stderr = process.communicate()
-        raise TimeoutError(
+        stdout, stderr = _kill_process_group(process)
+        # 勿抛 builtin TimeoutError：autoretry_for 会把它当瞬时故障整跑重试。
+        raise SubprocessHardTimeout(
             f"Peptide candidate task {task_id} timed out after {PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT}s.\n"
             f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
             f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
         ) from exc
     finally:
+        # 清理被杀进程组遗留的容器，避免与重试容器争抢 GPU。
+        try:
+            _terminate_task_containers_by_task_id(task_id)
+        except Exception:
+            pass
         if candidate_lock_held:
             # Release on EVERY exit of the subprocess wait (success, failure,
             # timeout→retry): the retry must be able to start fresh, while the
