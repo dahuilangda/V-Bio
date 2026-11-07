@@ -3696,6 +3696,13 @@ def request_msa_from_server(
             _release_active_msa_ticket(ticket_id)
         return None
 
+def _write_a3m_atomic(output_path: str, content: str) -> None:
+    tmp_path = f"{output_path}.tmp.{os.getpid()}"
+    with open(tmp_path, 'w') as f:
+        f.write(content)
+    os.replace(tmp_path, output_path)
+
+
 def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
     """
     将 MSA 结果保存到文件
@@ -3708,11 +3715,11 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
         是否成功保存
     """
     try:
-        # 根据结果格式保存为 A3M 文件
+        # 根据结果格式保存为 A3M 文件（tmp + os.replace 原子落盘，
+        # 避免并发读者读到半截缓存）
         if msa_result.get('a3m_content'):
             sanitized_content = sanitize_a3m_content(msa_result['a3m_content'], context=output_path)
-            with open(output_path, 'w') as f:
-                f.write(sanitized_content)
+            _write_a3m_atomic(output_path, sanitized_content)
             return True
         elif 'entries' in msa_result:
             buffer = []
@@ -3723,8 +3730,7 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
                     buffer.append(f">{name}\n{sequence}\n")
 
             sanitized_content = sanitize_a3m_content(''.join(buffer), context=output_path)
-            with open(output_path, 'w') as f:
-                f.write(sanitized_content)
+            _write_a3m_atomic(output_path, sanitized_content)
             return True
         else:
             print(f"[ERROR] MSA 结果格式不支持: {msa_result.keys()}", file=sys.stderr)
@@ -8850,6 +8856,8 @@ def _dpeptide_collect_refine(
     keep_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(staged_path, keep_dir / "staged.pdb")
     structure_dir = Path(str(metrics.get("structure_dir") or ""))
+    if not str(structure_dir):
+        raise RuntimeError("metrics.structure_dir missing; cannot locate confidence files")
     scored = []
     for conf_json in sorted(structure_dir.glob("confidence_*_model_*.json")):
         payload = json.loads(conf_json.read_text())
@@ -13149,7 +13157,7 @@ try:
     _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
     if isinstance(_ccd_overrides, dict):
         for _ccd, _one in _ccd_overrides.items():
-            _ccd = str(_ccd or "").strip.upper()
+            _ccd = str(_ccd or "").strip().upper()
             _one = str(_one or "").strip.upper()[:1]
             if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
                 _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
@@ -13241,7 +13249,7 @@ try:
                 for idx, arg in enumerate(safe_args):
                     if _looks_like_mmcif_text(arg):
                         safe_args[idx] = _ensure_release_date_in_mmcif_text(arg)
-                for key, value in list(safe_kwargs.items):
+                for key, value in list(safe_kwargs.items()):
                     if _looks_like_mmcif_text(value):
                         safe_kwargs[key] = _ensure_release_date_in_mmcif_text(value)
             except Exception:

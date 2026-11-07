@@ -89,9 +89,10 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
                     "updated_at = NOW() "
                     "WHERE task_id = %s AND task_id <> '' "
                     "AND task_state NOT IN ('SUCCESS', 'FAILURE', 'REVOKED')",
-                    (submitted_at, submitted_at, structure_name, task_id),
+                    (submitted_at, submitted_at, structure_name, structure_name, task_id),
                 )
-        if cur.rowcount == 0:
+                updated = cur.rowcount
+        if updated == 0:
             logger_.info(
                 "terminal sync updated 0 rows (row already terminal), task %s skipped", task_id)
         else:

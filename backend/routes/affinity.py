@@ -202,20 +202,23 @@ def register_affinity_routes(
         from backend.worker.affinity_train_task import affinity_train_task
 
         payload = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
-        train_args = {
-            'index_csv': str(payload.get('index_csv') or '').strip() or None,
-            'val_csv': str(payload.get('val_csv') or '').strip() or None,
-            'work_dir': str(payload.get('work_dir') or '').strip() or None,
-            'epochs': int(payload.get('epochs') or 1),
-            'rel_weight': float(payload.get('rel_weight') or 2.0),
-            'msa_prob': float(payload.get('msa_prob') or 0.0),
-            'lr': float(payload.get('lr') or 1e-4),
-            'resume_ckpt': str(payload.get('resume_ckpt') or '').strip() or None,
-            'ckpt_every': int(payload.get('ckpt_every') or 0),
-            'num_blocks': int(payload.get('num_blocks') or 2),
-            'dropout': float(payload.get('dropout') or 0.1),
-            'timeout_seconds': int(payload.get('timeout_seconds') or 0),
-        }
+        try:
+            train_args = {
+                'index_csv': str(payload.get('index_csv') or '').strip() or None,
+                'val_csv': str(payload.get('val_csv') or '').strip() or None,
+                'work_dir': str(payload.get('work_dir') or '').strip() or None,
+                'epochs': int(payload.get('epochs') or 1),
+                'rel_weight': float(payload.get('rel_weight') or 2.0),
+                'msa_prob': float(payload.get('msa_prob') or 0.0),
+                'lr': float(payload.get('lr') or 1e-4),
+                'resume_ckpt': str(payload.get('resume_ckpt') or '').strip() or None,
+                'ckpt_every': int(payload.get('ckpt_every') or 0),
+                'num_blocks': int(payload.get('num_blocks') or 2),
+                'dropout': float(payload.get('dropout') or 0.1),
+                'timeout_seconds': int(payload.get('timeout_seconds') or 0),
+            }
+        except (TypeError, ValueError) as exc:
+            return jsonify({'error': f'Invalid numeric parameter: {exc}'}), 400
         priority = (payload.get('priority') or 'default').lower()
         if priority not in ('high', 'default'):
             priority = 'default'
