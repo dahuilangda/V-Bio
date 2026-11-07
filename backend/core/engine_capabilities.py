@@ -30,22 +30,7 @@ def get_engine(backend: str) -> dict | None:
     return ENGINES.get(str(backend or "").strip().lower())
 
 
-def is_active(backend: str) -> bool:
-    engine = get_engine(backend)
-    return bool(engine) and engine.get("status") == "active"
-
 
 def active_engine_ids() -> list[str]:
     return sorted(k for k, v in ENGINES.items() if v.get("status") == "active")
 
-
-def supports(backend: str, workflow: str | None = None,
-             feature: str | None = None) -> bool:
-    engine = get_engine(backend)
-    if not engine or engine.get("status") != "active":
-        return False
-    if workflow and workflow not in engine.get("workflows", []):
-        return False
-    if feature and not engine.get("features", {}).get(feature, False):
-        return False
-    return True

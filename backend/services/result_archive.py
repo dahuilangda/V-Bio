@@ -747,9 +747,8 @@ class ResultArchiveService:
             self.logger.warning('Failed to fetch tracker status for task %s: %s', task_id, exc)
             return None, None
 
-    @staticmethod
-    def _normalize_01_or_100(value: float) -> float:
-        return value * 100.0 if value <= 1.0 else value
+    # 历史别名：与 _normalize_plddt_value 同实现，保留调用点不动
+    _normalize_01_or_100 = _normalize_plddt_value
 
     def _extract_off_diagonal_extreme(self, value: Any, *, pick: str) -> Optional[float]:
         best: Optional[float] = None
