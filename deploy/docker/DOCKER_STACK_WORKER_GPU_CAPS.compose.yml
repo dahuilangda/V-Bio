@@ -23,6 +23,7 @@ x-gpu-worker-base: &gpu_worker_base
     - ${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}:${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}
     - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
     - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
+    - ${RFD4_DATA_DIR:-/data/rfd4-proteina}:${RFD4_DATA_DIR:-/data/rfd4-proteina}
     - ${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}:${BOLTZ_MSA_CACHE_DIR:-/data/boltz_msa_cache}
   command: >-
     bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint gpu-worker"
@@ -100,6 +101,15 @@ services:
       GPU_WORKER_CAPABILITIES: "protenix,mol1"
       MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_PROTENIX:--1}"
       GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_PROTENIX:-}"
+
+  gpu-worker-rfd4:
+    <<: *gpu_worker_base
+    profiles: ["rfd4"]
+    container_name: vbio-gpu-worker-rfd4
+    environment:
+      GPU_WORKER_CAPABILITIES: "rfd4"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_RFD4:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_RFD4:-}"
 
   gpu-worker-nesso:
     <<: *gpu_worker_base
