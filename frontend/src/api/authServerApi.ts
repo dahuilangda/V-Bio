@@ -133,6 +133,7 @@ export async function createApiToken(input: {
   allow_submit?: boolean;
   allow_delete?: boolean;
   allow_cancel?: boolean;
+  expires_in_days?: number;
 }): Promise<{ token: ApiTokenRow; token_plain: string }> {
   const res = await authedFetch('/vbio-api/tokens', { method: 'POST', body: JSON.stringify(input) });
   if (!res.ok) throw new Error(await readError(res, 'Failed to create token'));

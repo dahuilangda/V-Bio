@@ -9,6 +9,7 @@ import { Check, ChevronLeft, ChevronRight, Copy, LoaderCircle, Plus, Search, Shi
 import { Field } from '../components/common/Field';
 import type { ModalDialogProps } from '../components/ui/useModalDialog';
 import type { ApiToken, Project } from '../types/models';
+import { formatDateTime } from '../utils/date';
 import './ApiTokenRegistryModal.css';
 
 interface ApiTokenRegistryModalProps {
@@ -260,6 +261,11 @@ export function ApiTokenRegistryModal({
                             <span className={`api-token-status-chip ${token.is_active ? 'active' : 'revoked'}`}>
                               {token.is_active ? 'Active' : 'Revoked'}
                             </span>
+                            {token.expires_at && (
+                              <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
+                                exp. {formatDateTime(token.expires_at)}
+                              </span>
+                            )}
                           </td>
                           <td>
                             <div className="api-token-actions">

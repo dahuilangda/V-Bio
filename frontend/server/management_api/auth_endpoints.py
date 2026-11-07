@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import jsonify, request
@@ -305,6 +306,18 @@ def handle_create_token(gateway) -> Tuple[Any, int]:
     except PermissionError:
         return jsonify({"error": "Project not found."}), 404
 
+    # 可选过期：auth_service 已按 expires_at 拒绝过期 token。
+    expires_in_days_raw = payload.get("expires_in_days")
+    expires_at_iso: Optional[str] = None
+    if expires_in_days_raw is not None and str(expires_in_days_raw).strip() != "":
+        try:
+            expires_in_days = int(expires_in_days_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "expires_in_days must be an integer number of days."}), 400
+        if expires_in_days <= 0 or expires_in_days > 3650:
+            return jsonify({"error": "expires_in_days must be between 1 and 3650."}), 400
+        expires_at_iso = (datetime.now(timezone.utc) + timedelta(days=expires_in_days)).isoformat()
+
     token_plain = f"vbio_{secrets.token_urlsafe(32)}"
     token_hash = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
     created = gateway.auth_service.postgrest.request(
@@ -318,6 +331,7 @@ def handle_create_token(gateway) -> Tuple[Any, int]:
             "allow_submit": bool(payload.get("allow_submit", True)),
             "allow_delete": bool(payload.get("allow_delete", False)),
             "allow_cancel": bool(payload.get("allow_cancel", True)),
+            "expires_at": expires_at_iso,
             "is_active": True,
         },
         query={"select": _TOKEN_FIELDS},

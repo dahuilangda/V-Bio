@@ -137,7 +137,7 @@ export function ApiAccessPage() {
   const [registryOpen, setRegistryOpen] = useState(false);
   const [registryScopeProjectId, setRegistryScopeProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [, setSuccess] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -482,13 +482,17 @@ export function ApiAccessPage() {
         throw new Error('Please select a project.');
       }
       const label = newTokenName.trim() || shortUuidLike();
+      const expiryDays = Number(newTokenExpiresDays);
       // server-side mint: the plaintext is returned once, only the sha256 hash is stored
       const minted = await createApiTokenServer({
         name: label,
         project_id: selectedProjectId,
         allow_submit: allowSubmit,
         allow_delete: allowDelete,
-        allow_cancel: allowCancel
+        allow_cancel: allowCancel,
+        ...(newTokenExpiresDays.trim() !== '' && Number.isFinite(expiryDays) && expiryDays > 0
+          ? { expires_in_days: Math.floor(expiryDays) }
+          : {})
       });
       const plain = minted.token_plain;
       // attach the plaintext to the in-memory row for this session only; a reload clears it
@@ -1706,6 +1710,34 @@ ${submitTaskIdCapture}`;
             onClick={() => setError(null)}
             aria-label="Dismiss error"
             style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {success && (
+        <div
+          role="status"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            padding: '10px 14px',
+            marginBottom: 12,
+            background: '#f0fdf4',
+            border: '1px solid #bbf7d0',
+            borderRadius: 6,
+            color: '#166534',
+            fontSize: 13
+          }}
+        >
+          <span>{success}</span>
+          <button
+            type="button"
+            onClick={() => setSuccess(null)}
+            aria-label="Dismiss notification"
+            style={{ background: 'none', border: 'none', color: '#166534', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
           >
             ×
           </button>
