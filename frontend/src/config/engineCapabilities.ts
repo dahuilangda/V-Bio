@@ -3,7 +3,7 @@
  * 这里直接导入该文件，前后端共用同一份数据（契约测试防漂移）。
  * 新增/调整引擎只改 configs JSON，选项列表自动跟随。
  */
-import matrix from '../../../../configs/engine_capabilities.json';
+import matrix from '../../../configs/engine_capabilities.json';
 
 export type WorkflowKey =
   | 'prediction'

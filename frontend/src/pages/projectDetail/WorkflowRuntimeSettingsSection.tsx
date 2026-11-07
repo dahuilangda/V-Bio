@@ -7,6 +7,7 @@ import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
+import { engineOptionsFor } from '../../config/engineCapabilities';
 import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
@@ -901,7 +902,7 @@ export function WorkflowRuntimeSettingsSection({
                     : 'prediction',
                 chirality: isPeptideDesignWorkflow ? (peptideChirality as 'l' | 'd') : undefined,
                 designMode: isPeptideDesignWorkflow ? (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') : undefined,
-              }).map((option) => (
+              }).map((option: { value: string; label: string }) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

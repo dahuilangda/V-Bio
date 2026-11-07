@@ -464,8 +464,10 @@ export function ProjectTasksPage() {
       setShowAdvancedFilters(false);
       return;
     }
-    if (action.id === 'tasks:failure') setStateFilter('FAILURE');
-    if (action.id === 'tasks:failure') return;
+    if (action.id === 'tasks:failure') {
+      setStateFilter('FAILURE');
+      return;
+    }
     if (action.id === 'tasks:running') {
       setStateFilter('RUNNING');
       return;

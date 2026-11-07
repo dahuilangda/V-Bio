@@ -279,15 +279,6 @@ function collectPendingRuntimeTaskIds(taskRows: ProjectTask[]): Set<string> {
   );
 }
 
-// Avoid re-serializing the (referentially-stable) current state on every hydration tick: cache its
-// JSON signature keyed on the source reference, recomputing only when the source actually changes.
-function memoSignature<S, V>(source: S, value: V, cache: { source: S | null; sig: string }): string {
-  if (cache.source === source) return cache.sig;
-  const sig = JSON.stringify(value);
-  cache.source = source;
-  cache.sig = sig;
-  return sig;
-}
 
 export function useProjectTasksDataLoader({
   projectId,
@@ -318,8 +309,6 @@ export function useProjectTasksDataLoader({
   const tasksRef = useRef<ProjectTask[]>([]);
   const runtimeStatusPollCursorRef = useRef(0);
   const leadOptStatusPollCursorRef = useRef(0);
-  const currentProjectSigRef = useRef<{ source: Project | null; sig: string }>({ source: null, sig: '' });
-  const currentRowsSigRef = useRef<{ source: ProjectTask[] | null; sig: string }>({ source: null, sig: '' });
   const taskListAccessContextRef = useRef<TaskListAccessContext | null>(null);
   const detailHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
@@ -785,8 +774,15 @@ export function useProjectTasksDataLoader({
         // row deleted meanwhile must not ride the hydration write back in.
         const nextRows = dropDeletedTaskRows(sanitizeTaskRows(hydrated.taskRows));
         const nextProject = hydrated.project;
-        const projectChanged = JSON.stringify(nextProject) !== memoSignature(projectRef.current, projectRef.current, currentProjectSigRef.current);
-        const rowsChanged = JSON.stringify(nextRows) !== memoSignature(tasksRef.current, currentRows, currentRowsSigRef.current);
+        // 轻量签名比对（id:state:updated_at 拼接），避免每 tick 对含
+        // confidence 大对象的整表做 JSON.stringify
+        const projectChanged = String(nextProject.updated_at || '') !== String(projectRef.current?.updated_at || '');
+        const rowsChanged = nextRows.length !== tasksRef.current.length
+            || nextRows.some((row, i) => {
+                const prev = tasksRef.current[i];
+                return !prev || prev.id !== row.id || prev.task_state !== row.task_state
+                    || prev.updated_at !== row.updated_at;
+            });
         if (!projectChanged && !rowsChanged) return;
         setProject(nextProject);
         // Functional merge: concurrent pagination may have added rows while the

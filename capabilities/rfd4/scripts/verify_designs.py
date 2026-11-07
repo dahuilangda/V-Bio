@@ -21,9 +21,6 @@ AA3_TO_AA1 = {
     "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
     "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
 }
-BACKENDS = ("mol1", "protenix")
-
-
 def binder_from_cif(path: Path) -> str:
     import gemmi
 
@@ -55,7 +52,8 @@ def main() -> None:
     ap.add_argument("--runs-dir", required=True,
                     help="RFD4 generation output dir (contains inference_samples)")
     ap.add_argument("--target-sequence", required=True)
-    ap.add_argument("--gateway", default="http://172.17.3.200:5173/vbio-api")
+    ap.add_argument("--gateway", default=os.environ.get(
+        "VBIO_GATEWAY_URL", "http://172.17.3.200:5173/vbio-api"))
     ap.add_argument("--token", required=True)
     ap.add_argument("--project-id", required=True)
     ap.add_argument("--backends", default="mol1,protenix",

@@ -107,6 +107,11 @@ function normalizeVisibleMetricColumns(value: unknown): TaskMetricColumnKey[] {
   return DEFAULT_VISIBLE_METRIC_COLUMNS.filter((item) => normalized.includes(item));
 }
 
+const EMPTY_SEARCH_MATCHES: Record<string, boolean> = {};
+
+// 结构搜索的行集合签名：id 序列拼接；tick 引起的状态字段变化不改变签名
+const rowSetSignatureOf = (rows: TaskListRow[]): string => rows.map((row) => String(row.task.id || '')).join('|');
+
 export function useTaskListFiltering(
   taskRows: TaskListRow[],
   options?: UseTaskListFilteringOptions
@@ -120,7 +125,9 @@ export function useTaskListFiltering(
   }, [options?.storageScope]);
   const [sortKey, setSortKey] = useState<SortKey>('submitted');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [taskSearchRaw, setTaskSearchRaw] = useState('');
   const [taskSearch, setTaskSearch] = useState('');
+
   const [stateFilter, setStateFilter] = useState<'all' | ProjectTask['task_state']>('all');
   const [workflowFilter, setWorkflowFilter] = useState<TaskWorkflowFilter>('all');
   const [backendFilter, setBackendFilter] = useState<'all' | string>('all');
@@ -170,7 +177,7 @@ export function useTaskListFiltering(
     setMaxPae('');
     setStructureSearchMode('exact');
     setStructureSearchQuery('');
-    setStructureSearchMatches({});
+    setStructureSearchMatches(EMPTY_SEARCH_MATCHES);
     setStructureSearchError(null);
   }, []);
 
@@ -191,7 +198,7 @@ export function useTaskListFiltering(
     setMaxPae('');
     setStructureSearchMode('exact');
     setStructureSearchQuery('');
-    setStructureSearchMatches({});
+    setStructureSearchMatches(EMPTY_SEARCH_MATCHES);
     setStructureSearchLoading(false);
     setStructureSearchError(null);
     setVisibleMetricColumns(DEFAULT_VISIBLE_METRIC_COLUMNS);
@@ -290,6 +297,17 @@ export function useTaskListFiltering(
     setTaskSearch(value);
   }, []);
 
+  // 输入即时回显（taskSearchRaw），250ms 后才推进重过滤链
+  const searchDebounceRef = useRef<number | undefined>(undefined);
+  const debouncedSetTaskSearch = useCallback<Dispatch<SetStateAction<string>>>((value) => {
+    setTaskSearchRaw(typeof value === 'string' ? value : value(taskSearchRaw));
+    window.clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = window.setTimeout(() => {
+      const pending = typeof value === 'string' ? value : value(taskSearchRaw);
+      setTaskSearchWithPageReset(pending);
+    }, 250);
+  }, []);
+
   const setStateFilterWithPageReset = useCallback<Dispatch<SetStateAction<'all' | ProjectTask['task_state']>>>((value) => {
     setPage(1);
     setStateFilter(value);
@@ -379,11 +397,15 @@ export function useTaskListFiltering(
       visibleMetricColumns,
       pageSize
     };
-    try {
-      window.localStorage.setItem(taskFiltersStorageKey, JSON.stringify(snapshot));
-    } catch {
-      // ignore storage quota errors
-    }
+    // 300ms 防抖：搜索每个按键都会走到这里，避免高频同步序列化写盘
+    const persistTimer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(taskFiltersStorageKey, JSON.stringify(snapshot));
+      } catch {
+        // ignore storage quota errors
+      }
+    }, 300);
+    return () => window.clearTimeout(persistTimer);
   }, [
     taskFiltersStorageKey,
     filtersHydrated,
@@ -412,7 +434,7 @@ export function useTaskListFiltering(
     if (!query) {
       setStructureSearchLoading(false);
       setStructureSearchError(null);
-      setStructureSearchMatches({});
+      setStructureSearchMatches(EMPTY_SEARCH_MATCHES);
       return;
     }
 
@@ -478,7 +500,7 @@ export function useTaskListFiltering(
       } catch (err) {
         if (!cancelled) {
           setStructureSearchError(err instanceof Error ? err.message : 'Structure search failed.');
-          setStructureSearchMatches({});
+          setStructureSearchMatches(EMPTY_SEARCH_MATCHES);
         }
       } finally {
         if (!cancelled) {
@@ -491,7 +513,9 @@ export function useTaskListFiltering(
     return () => {
       cancelled = true;
     };
-  }, [taskRows, structureSearchMode, structureSearchQuery]);
+    // 行集合签名：轮询 tick 常只更新状态字段，行数与 id 集不变时跳过重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowSetSignatureOf(taskRows), structureSearchMode, structureSearchQuery]);
 
   const filteredRows = useMemo(() => {
     const query = taskSearch.trim().toLowerCase();
@@ -658,7 +682,6 @@ export function useTaskListFiltering(
   return {
     sortKey,
     sortDirection,
-    taskSearch,
     stateFilter,
     workflowFilter,
     backendFilter,
@@ -684,7 +707,8 @@ export function useTaskListFiltering(
     currentPage,
     setSortKey: setSortKeyWithPageReset,
     setSortDirection: setSortDirectionWithPageReset,
-    setTaskSearch: setTaskSearchWithPageReset,
+    taskSearch: taskSearchRaw,
+    setTaskSearch: debouncedSetTaskSearch,
     setStateFilter: setStateFilterWithPageReset,
     setWorkflowFilter: setWorkflowFilterWithPageReset,
     setBackendFilter: setBackendFilterWithPageReset,
