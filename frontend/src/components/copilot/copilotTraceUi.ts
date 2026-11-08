@@ -193,6 +193,16 @@ export function readPlanProgress(steps: CopilotTraceStep[]): CopilotPlanProgress
   return base;
 }
 
+/** 校验随消息持久化的计划进度（planner_plan 元数据）。 */
+export function readPlan(value: unknown): CopilotPlanProgress | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const steps = Array.isArray(raw.steps) ? raw.steps.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  if (steps.length < 2) return null;
+  const current = Number(raw.current);
+  return { steps, current: Number.isInteger(current) ? Math.min(Math.max(0, current), steps.length) : 0 };
+}
+
 // ---- action receipts ----------------------------------------------------
 // Receipts the backend attaches when a plan action is applied/cancelled/fails;
 // the message cards style failures and the modal filters resolved actions.

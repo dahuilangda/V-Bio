@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ProjectCopilotMessage } from '../../types/models';
-import { collectCopilotMemory, formatTraceStep, readPlanProgress, readPlannerTrace, readSessionId } from './copilotTraceUi';
+import { collectCopilotMemory, formatTraceStep, readPlan, readPlanProgress, readPlannerTrace, readSessionId } from './copilotTraceUi';
 
 function msg(role: ProjectCopilotMessage['role'], sessionId: string, observations?: unknown[]): ProjectCopilotMessage {
   return {
@@ -132,5 +132,18 @@ describe('readPlanProgress', () => {
     expect(
       readPlanProgress([{ round: 0, event: 'outline', detail: { steps: ['仅一步'] } }] as never)
     ).toBeNull();
+  });
+});
+
+describe('readPlan', () => {
+  it('validates persisted planner_plan metadata', () => {
+    expect(readPlan({ steps: ['a', 'b', 'c'], current: 2, done: false })).toEqual({
+      steps: ['a', 'b', 'c'],
+      current: 2
+    });
+    expect(readPlan({ steps: ['only'], current: 1 })).toBeNull();
+    expect(readPlan(null)).toBeNull();
+    expect(readPlan('plan')).toBeNull();
+    expect(readPlan({ steps: ['a', 'b'], current: 9 }).current).toBe(2);
   });
 });

@@ -1155,7 +1155,8 @@ export function ProjectCopilotModal({
             planner_state: turn.state,
             planner_questions: turn.questions,
             planner_trace: turn.trace,
-            planner_observations: turn.observations
+            planner_observations: turn.observations,
+            planner_plan: turn.plan
           }
         });
       } catch {
@@ -1179,7 +1180,8 @@ export function ProjectCopilotModal({
             planner_state: turn.state,
             planner_questions: turn.questions,
             planner_trace: turn.trace,
-            planner_observations: turn.observations
+            planner_observations: turn.observations,
+            planner_plan: turn.plan
           }
         };
       }

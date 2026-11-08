@@ -10,8 +10,29 @@ import remarkGfm from 'remark-gfm';
 import { parseCopilotQuestions } from '../../api/copilotApi';
 import type { CopilotPlannerQuestion, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
-import { formatTraceStep, readPlannerTrace, readActionResolutions } from './copilotTraceUi';
+import { formatTraceStep, readPlan, readPlannerTrace, readActionResolutions, type CopilotPlanProgress } from './copilotTraceUi';
 import './CopilotMessageCards.css';
+
+export function PlanProgressList({ plan }: { plan: CopilotPlanProgress }) {
+  return (
+    <ol className="copilot-plan-progress" aria-label="Plan progress">
+      {plan.steps.map((step, index) => {
+        const isDone = index < plan.current;
+        const isCurrent = index === plan.current;
+        return (
+          <li
+            key={`${index}-${step.slice(0, 32)}`}
+            className={`copilot-plan-step${isDone ? ' is-done' : ''}${isCurrent ? ' is-current' : ''}`}
+            aria-current={isCurrent ? 'step' : undefined}
+          >
+            <span className="copilot-plan-step-mark" aria-hidden="true">{isDone ? '✓' : isCurrent ? '▶' : '○'}</span>
+            <span className="copilot-plan-step-text">{step}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
 
 function author(message: ProjectCopilotMessage): string {
   if (message.role === 'assistant') return 'V-Bio Copilot';
@@ -345,6 +366,7 @@ export const CopilotMessageItem = memo(function CopilotMessageItem({
   );
   const plannerState = String(metadata?.planner_state || '').trim();
   const showQuestions = plannerState === 'needs_input' && questions.length > 0;
+  const plan = readPlan(metadata?.planner_plan);
   // Retrieved records from read skills, shown even when the message only summarizes them.
   const observations = useMemo(
     () => (message.role === 'assistant' ? readObservationRecords(metadata?.planner_observations) : []),
@@ -362,6 +384,7 @@ export const CopilotMessageItem = memo(function CopilotMessageItem({
       <div className="copilot-message-body">
         <CopilotMarkdown content={message.content} />
       </div>
+      {plan ? <PlanProgressList plan={plan} /> : null}
       {showObservations ? <CopilotObservationCard records={observations} /> : null}
       {showQuestions ? (
         <CopilotQuestionCard questions={questions} isDisabled={isDisabled} onAnswer={onAnswerQuestion} />

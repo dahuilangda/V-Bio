@@ -2,35 +2,14 @@
  * In-flight assistant bubble — meta, plan checklist, steering inserts, live trace.
  */
 import { formatDateTime } from '../../utils/date';
-import { CopilotThinkingCard } from './CopilotMessageCards';
-import { readPlanProgress, type CopilotPlanProgress } from './copilotTraceUi';
+import { CopilotThinkingCard, PlanProgressList } from './CopilotMessageCards';
+import { readPlanProgress } from './copilotTraceUi';
 
 interface CopilotStreamingBubbleProps {
   isSending: boolean;
   streamStartedAt: string;
   steeredTurnTexts: string[];
   liveTrace: Parameters<typeof CopilotThinkingCard>[0]['steps'];
-}
-
-function PlanProgressList({ progress }: { progress: CopilotPlanProgress }) {
-  return (
-    <ol className="copilot-plan-progress" aria-label="Plan progress">
-      {progress.steps.map((step, index) => {
-        const isDone = index < progress.current;
-        const isCurrent = index === progress.current;
-        return (
-          <li
-            key={`${index}-${step.slice(0, 32)}`}
-            className={`copilot-plan-step${isDone ? ' is-done' : ''}${isCurrent ? ' is-current' : ''}`}
-            aria-current={isCurrent ? 'step' : undefined}
-          >
-            <span className="copilot-plan-step-mark" aria-hidden="true">{isDone ? '✓' : isCurrent ? '▶' : '○'}</span>
-            <span className="copilot-plan-step-text">{step}</span>
-          </li>
-        );
-      })}
-    </ol>
-  );
 }
 
 export function CopilotStreamingBubble(p: CopilotStreamingBubbleProps) {
@@ -43,7 +22,7 @@ export function CopilotStreamingBubble(p: CopilotStreamingBubbleProps) {
         <span>{formatDateTime(p.streamStartedAt)}</span>
       </div>
       <div className="copilot-message-body copilot-thinking" />
-      {progress ? <PlanProgressList progress={progress} /> : null}
+      {progress ? <PlanProgressList plan={progress} /> : null}
       {p.steeredTurnTexts.length > 0 ? (
         <div className="copilot-steered-list" aria-label="Inserted steering messages">
           {p.steeredTurnTexts.map((text, index) => (
