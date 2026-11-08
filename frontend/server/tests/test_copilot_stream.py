@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
 
 class SteeringTests(unittest.TestCase):
-    """pi steering alignment: interjections queue per in-flight turn and drain between rounds."""
+    """Interjections queue per in-flight turn and drain between rounds."""
 
     def test_submit_and_drain(self):
         from management_api.copilot_stream import register_steering as _register_steering, _unregister_steering, submit_steering

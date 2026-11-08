@@ -627,7 +627,7 @@ if __name__ == "__main__":
 
 
 class TokenLimitTruncationTests(unittest.TestCase):
-    """pi alignment: a length-truncated response is NEVER trusted, even when its JSON parses.
+    """A length-truncated response is NEVER trusted, even when its JSON parses.
 
     A response cut by the output token limit can yield tool arguments that parse but are
     silently incomplete mid-value — executing them is the worst outcome. The harness fails the
@@ -993,7 +993,7 @@ class ContextBudgetTests(unittest.TestCase):
 
 
 class ToolErrorPhilosophyTests(unittest.TestCase):
-    """pi alignment: a tool's EVERY failure mode is a model-visible ok=False result.
+    """A tool's every failure mode is a model-visible ok=False result.
 
     pi's agent loop wraps prepare/execute/afterToolCall in createErrorToolResult and never
     breaks the loop on a tool error. The copilot's wave executor already converted raised

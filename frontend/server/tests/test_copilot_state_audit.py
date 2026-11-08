@@ -995,7 +995,7 @@ class UnresolvedCandidatesGuardTests(unittest.TestCase):
 
 
 class GracefulPressureExitTests(unittest.TestCase):
-    """pi shouldStopAfterTurn alignment: a turn that hits its wall-clock/round budget AFTER
+    """A turn that hits its wall-clock/round budget AFTER
     accumulating confirmation actions exits through await_confirmation with a deterministic
     progress note — never "could not settle on a plan" over salvageable work."""
 
