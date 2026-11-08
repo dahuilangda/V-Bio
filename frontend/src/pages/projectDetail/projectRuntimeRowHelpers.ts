@@ -23,6 +23,10 @@ export function normalizeAffinityMode(value: unknown): AffinityScoringMode {
   return 'dock';
 }
 
+// 行签名按对象身份缓存：轮询 merge 在未变化时保留旧行引用（见 mergeTaskRuntimeFields），
+// 同一行对象不重复做 lead-opt properties 的深读取。
+const rowRuntimeSignatureCache = new WeakMap<object, string>();
+
 export function buildTaskRuntimeSignature(
   rows: Array<{
     id?: string | null;
@@ -39,6 +43,9 @@ export function buildTaskRuntimeSignature(
 ): string {
   return rows
     .map((row) => {
+      const rowRef = row as unknown as object;
+      const cachedSignature = rowRuntimeSignatureCache.get(rowRef);
+      if (cachedSignature !== undefined) return cachedSignature;
       const summary = readLeadOptTaskSummary(row as any);
       const properties = asObjectRecord((row as any).properties);
       const leadOptList = asObjectRecord(properties.lead_opt_list);
@@ -64,7 +71,9 @@ export function buildTaskRuntimeSignature(
         predictionCount,
         referencePredictionCount
       ].join('~');
-      return `${String(row.id || '').trim()}|${String(row.task_id || '').trim()}|${String(row.task_state || '').trim()}|${String(row.status_text || '').trim()}|${String(row.error_text || '').trim()}|${String(row.updated_at || '').trim()}|${String(row.completed_at || '').trim()}|${Number.isFinite(Number(row.duration_seconds)) ? Number(row.duration_seconds) : ''}|${leadOptSignature}`;
+      const signature = `${String(row.id || '').trim()}|${String(row.task_id || '').trim()}|${String(row.task_state || '').trim()}|${String(row.status_text || '').trim()}|${String(row.error_text || '').trim()}|${String(row.updated_at || '').trim()}|${String(row.completed_at || '').trim()}|${Number.isFinite(Number(row.duration_seconds)) ? Number(row.duration_seconds) : ''}|${leadOptSignature}`;
+      rowRuntimeSignatureCache.set(rowRef, signature);
+      return signature;
     })
     .join('\n');
 }

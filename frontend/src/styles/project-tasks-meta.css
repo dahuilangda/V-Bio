@@ -51,7 +51,7 @@
   width: min(320px, 100%);
   max-width: 100%;
   border: 1px solid #b9cdc2;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 3px 8px;
   font-size: var(--text-sm);
   font-weight: 700;

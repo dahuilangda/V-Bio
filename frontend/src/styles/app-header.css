@@ -8,7 +8,7 @@
   text-decoration: none;
   color: var(--muted);
   padding: 8px 10px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-weight: 500;
   font-size: var(--text-md);
 }
@@ -30,11 +30,11 @@
   height: 38px;
   flex: 0 0 auto;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
-  transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+  transition: color 0.16s ease, background-color 0.16s ease, border-color var(--dur) var(--ease);
 }
 .nav-hamburger:hover {
   color: #1f4f3f;
@@ -63,7 +63,7 @@
   cursor: pointer;
   font: inherit;
   color: inherit;
-  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  transition: background 0.16s ease, border-color 0.16s ease, box-shadow var(--dur) var(--ease);
 }
 .user-chip-button:hover {
   background: #edf6f0;
@@ -79,7 +79,7 @@
 }
 .user-chip-caret {
   color: #5b7769;
-  transition: transform 0.16s ease;
+  transition: transform var(--dur) var(--ease);
 }
 .user-chip-caret.open {
   transform: rotate(180deg);
@@ -90,7 +90,7 @@
   top: calc(100% + 8px);
   min-width: 172px;
   border: 1px solid #d3e1d9;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
   box-shadow: 0 12px 30px rgba(26, 56, 43, 0.14);
   overflow: hidden;

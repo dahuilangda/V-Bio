@@ -61,7 +61,7 @@
 }
 
 .shares-project-toggle > svg {
-  transition: transform 0.12s ease;
+  transition: transform var(--dur) var(--ease);
 }
 
 .shares-project-toggle.is-collapsed > svg {
@@ -94,7 +94,7 @@
 
 .shares-item-card {
   border: 1px solid #e0e9e3;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: linear-gradient(180deg, #fbfdfb 0%, #f7fbf8 100%);
   padding: 8px 10px;
   display: grid;
@@ -221,7 +221,7 @@
   font-weight: 700;
   cursor: pointer;
   box-shadow: 0 1px 0 #edf4ef inset;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color var(--dur) var(--ease);
 }
 
 .share-mini-toggle-btn:hover:not(:disabled) {

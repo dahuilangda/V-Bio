@@ -20,7 +20,7 @@
 }
 .project-filter-field {
   border: 1px solid #d8e4dd;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #f8fcf9;
   height: 40px;
   display: inline-flex;
@@ -67,7 +67,7 @@
 }
 .advanced-filter-field {
   border: 1px solid #d8e4dd;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   min-height: 70px;
   padding: 7px 9px;
@@ -87,7 +87,7 @@
 .advanced-filter-field select,
 .advanced-filter-field input {
   border: 1px solid #dbe5df;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fdfefe;
   min-height: 32px;
   padding: 6px 10px;
@@ -188,7 +188,7 @@
 }
 .project-table-wrap {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
 }
 .project-table {
@@ -259,7 +259,7 @@
   width: min(340px, 100%);
   max-width: 100%;
   border: 1px solid #b9cdc2;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 4px 9px;
   font-size: var(--text-sm);
   font-weight: 600;
@@ -424,7 +424,7 @@
 }
 .project-card {
   border: 1px solid #d6e4dc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 12px 14px;
   background: #fff;
   display: flex;
@@ -505,7 +505,7 @@
 }
 .workflow-card {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fbfdfb;
   padding: 10px;
   display: grid;
@@ -524,7 +524,7 @@
 .workflow-card-icon {
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   border: 1px solid #d0dfd4;
   display: inline-flex;
   align-items: center;

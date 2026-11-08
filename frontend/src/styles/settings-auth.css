@@ -39,7 +39,7 @@
   margin-top: 10px;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #f7fbf8;
   display: grid;
   gap: 8px;
@@ -117,7 +117,7 @@
   width: min(480px, 100%);
   background: #fff;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 24px;
   display: grid;
   gap: 14px;
@@ -179,7 +179,7 @@
   background: transparent;
   cursor: col-resize;
   opacity: 0.72;
-  transition: opacity 0.16s ease;
+  transition: opacity var(--dur) var(--ease);
   touch-action: none;
 }
 
@@ -193,7 +193,7 @@
   transform: translateX(-50%);
   background: rgba(138, 161, 148, 0.34);
   border-radius: 999px;
-  transition: width 0.16s ease, background 0.16s ease;
+  transition: width 0.16s ease, background var(--dur) var(--ease);
 }
 
 .mmp-life-upload-resizable .panel-resizer:hover,
@@ -222,7 +222,7 @@
   min-width: 32px;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0;
 }
 
@@ -317,7 +317,7 @@
 .mmp-life-list-toolbar .icon-btn {
   min-width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 0;
   margin: 0;
 }

@@ -58,7 +58,7 @@
 
 .metric-item {
   border: 1px solid #e3ebe6;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fff;
   padding: 8px 9px;
 }
@@ -122,7 +122,7 @@
   min-width: 210px;
   max-width: 320px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   border: 1px solid #d6e2da;
   background: #fdfefe;
   color: #334f41;
@@ -132,7 +132,7 @@
   opacity: 0;
   pointer-events: none;
   z-index: 6;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease, transform var(--dur) var(--ease);
 }
 
 .metric-help-wrap:hover .metric-tooltip {
@@ -177,7 +177,7 @@
 .confidence-pair-block {
   margin-top: 10px;
   border: 1px solid #e0e8e3;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   overflow: hidden;
 }
@@ -259,7 +259,7 @@
 .metric-table-wrap {
   margin-top: 10px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   overflow: auto;
   background: #fff;
 }

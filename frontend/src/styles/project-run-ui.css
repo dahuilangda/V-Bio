@@ -10,7 +10,7 @@
   z-index: 40;
   min-width: 160px;
   border: 1px solid #d9e5dd;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   box-shadow: 0 8px 20px rgba(23, 44, 35, 0.12);
   padding: 4px;
@@ -21,7 +21,7 @@
 .run-action-item {
   width: 100%;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   text-align: left;
@@ -101,7 +101,7 @@
   z-index: 68;
   width: min(388px, calc(100vw - 24px));
   min-height: 48px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   border: 1px solid #d4e3da;
   background: #ffffff;
   box-shadow: 0 8px 18px rgba(20, 49, 37, 0.11);
@@ -176,7 +176,7 @@
   cursor: pointer;
   justify-content: center;
   box-shadow: 0 10px 24px rgba(19, 45, 34, 0.2);
-  transition: box-shadow 0.12s ease, opacity 0.12s ease, background 0.12s ease;
+  transition: box-shadow 0.12s ease, opacity 0.12s ease, background var(--dur) var(--ease);
   animation: runFabIn 0.12s ease-out;
 }
 

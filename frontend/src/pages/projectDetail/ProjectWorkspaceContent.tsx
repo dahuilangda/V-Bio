@@ -1,4 +1,4 @@
-import { Suspense, lazy, type FormEvent, type ReactNode } from 'react';
+import { memo, Suspense, lazy, type FormEvent, type ReactNode } from 'react';
 import { ProjectBasicsMetadataForm } from '../../components/project/ProjectBasicsMetadataForm';
 import type { ProjectResultsSectionProps } from '../../components/project/ProjectResultsSection';
 import type { AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
@@ -11,12 +11,12 @@ import type { WorkspaceTab } from './workspaceTypes';
 // A project renders exactly ONE workflow section, and the results section only
 // mounts on the results tab — so each of these heavy subtrees loads on first
 // render instead of weighing down the detail-page bundle for every project.
-const ProjectResultsSection = lazy(() => import('../../components/project/ProjectResultsSection').then((m) => ({ default: m.ProjectResultsSection })));
-const AffinityWorkflowSection = lazy(() => import('./AffinityWorkflowSection').then((m) => ({ default: m.AffinityWorkflowSection })));
-const LeadOptimizationWorkflowSection = lazy(() => import('./LeadOptimizationWorkflowSection').then((m) => ({ default: m.LeadOptimizationWorkflowSection })));
-const PredictionWorkflowSection = lazy(() => import('./PredictionWorkflowSection').then((m) => ({ default: m.PredictionWorkflowSection })));
-const VirtualScreeningWorkflowSection = lazy(() => import('./VirtualScreeningWorkflowSection').then((m) => ({ default: m.VirtualScreeningWorkflowSection })));
-const WorkflowRuntimeSettingsSection = lazy(() => import('./WorkflowRuntimeSettingsSection').then((m) => ({ default: m.WorkflowRuntimeSettingsSection })));
+const ProjectResultsSection = memo(lazy(() => import('../../components/project/ProjectResultsSection').then((m) => ({ default: m.ProjectResultsSection }))))
+const AffinityWorkflowSection = memo(lazy(() => import('./AffinityWorkflowSection').then((m) => ({ default: m.AffinityWorkflowSection }))));
+const LeadOptimizationWorkflowSection = memo(lazy(() => import('./LeadOptimizationWorkflowSection').then((m) => ({ default: m.LeadOptimizationWorkflowSection }))));
+const PredictionWorkflowSection = memo(lazy(() => import('./PredictionWorkflowSection').then((m) => ({ default: m.PredictionWorkflowSection }))));
+const VirtualScreeningWorkflowSection = memo(lazy(() => import('./VirtualScreeningWorkflowSection').then((m) => ({ default: m.VirtualScreeningWorkflowSection }))));
+const WorkflowRuntimeSettingsSection = memo(lazy(() => import('./WorkflowRuntimeSettingsSection').then((m) => ({ default: m.WorkflowRuntimeSettingsSection }))));
 
 function SectionSuspense({ children }: { children: ReactNode }) {
   return <Suspense fallback={<div className="workflow-note" role="status" aria-live="polite">Loading workspace...</div>}>{children}</Suspense>;

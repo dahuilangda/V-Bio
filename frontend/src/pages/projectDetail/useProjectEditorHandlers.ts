@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type {
   AffinityDockPocket,
@@ -119,280 +120,280 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
   setProteinTemplates,
   filterConstraintsByBackend
 }: UseProjectEditorHandlersParams<TDraft>): UseProjectEditorHandlersResult {
-  const handlePredictionComponentsChange = (components: InputComponent[]) => {
+  const handlePredictionComponentsChange = useCallback((components: InputComponent[]) => {
     handlePredictionComponentsChangeAction({
       components,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handlePredictionProteinTemplateChange = (componentId: string, upload: ProteinTemplateUpload | null) => {
+  const handlePredictionProteinTemplateChange = useCallback((componentId: string, upload: ProteinTemplateUpload | null) => {
     handlePredictionProteinTemplateChangeAction({
       componentId,
       upload,
       setPickedResidue,
       setProteinTemplates
     });
-  };
+  }, [setPickedResidue, setProteinTemplates]);
 
-  const handlePredictionTemplateResiduePick = (pick: MolstarResiduePick) => {
+  const handlePredictionTemplateResiduePick = useCallback((pick: MolstarResiduePick) => {
     handlePredictionTemplateResiduePickAction({
       pick,
       setPickedResidue
     });
-  };
+  }, [setPickedResidue]);
 
-  const handleRuntimeBackendChange = (backend: string) => {
+  const handleRuntimeBackendChange = useCallback((backend: string) => {
     handleRuntimeBackendChangeAction({
       backend,
       isPeptideDesignWorkflow,
       setDraft,
       filterConstraintsByBackend
     });
-  };
+  }, [filterConstraintsByBackend, isPeptideDesignWorkflow, setDraft]);
 
-  const handleRuntimeSeedChange = (seed: number | null) => {
+  const handleRuntimeSeedChange = useCallback((seed: number | null) => {
     handleRuntimeSeedChangeAction({
       seed,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimeRfd4SpecChange = (value: string) => {
+  const handleRuntimeRfd4SpecChange = useCallback((value: string) => {
     handleRuntimeRfd4SpecChangeAction({ value, setDraft });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptidePocketFieldChange = (
+  const handleRuntimePeptidePocketFieldChange = useCallback((
     field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox',
     value: string | number | null
   ) => {
     handleRuntimePeptidePocketFieldChangeAction({ field, value, setDraft });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideDockPocketChange = (pocket: AffinityDockPocket | null) => {
+  const handleRuntimePeptideDockPocketChange = useCallback((pocket: AffinityDockPocket | null) => {
     handleRuntimePeptideDockPocketChangeAction({ pocket, setDraft });
-  };
+  }, [setDraft]);
 
-  const handleRuntimeLeadOptOptionChange = (
+  const handleRuntimeLeadOptOptionChange = useCallback((
     key: 'leadOptMode' | 'leadOptBackend' | 'leadOptRounds' | 'leadOptBudgetPerRound' | 'leadOptScaffoldHopRatio'
       | 'leadOptPocketCenter' | 'leadOptReferenceSmiles' | 'leadOptKeepFragmentSmiles' | 'leadOptEditAtomIndices',
     value: string | number | null
   ) => {
     handleRuntimeLeadOptOptionChangeAction({ key, value, setDraft });
-  };
+  }, [setDraft]);
 
-  const handleRuntimeLeadOptDockPocketChange = (pocket: AffinityDockPocket | null) => {
+  const handleRuntimeLeadOptDockPocketChange = useCallback((pocket: AffinityDockPocket | null) => {
     handleRuntimeLeadOptDockPocketChangeAction({ pocket, setDraft });
-  };
+  }, [setDraft]);
 
-  const handleRuntimeLowVramChange = (lowVram: boolean) => {
+  const handleRuntimeLowVramChange = useCallback((lowVram: boolean) => {
     handleRuntimeLowVramChangeAction({
       lowVram,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideDesignModeChange = (mode: 'linear' | 'cyclic' | 'bicyclic') => {
+  const handleRuntimePeptideDesignModeChange = useCallback((mode: 'linear' | 'cyclic' | 'bicyclic') => {
     handleRuntimePeptideDesignModeChangeAction({
       peptideDesignMode: mode,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideChiralityChange = (chirality: 'l' | 'd') => {
+  const handleRuntimePeptideChiralityChange = useCallback((chirality: 'l' | 'd') => {
     handleRuntimePeptideChiralityChangeAction({
       peptideChirality: chirality,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideStructureModeChange = (
+  const handleRuntimePeptideStructureModeChange = useCallback((
     structureMode: 'auto' | 'helix' | 'hairpin' | 'strand_loop'
   ) => {
     handleRuntimePeptideStructureModeChangeAction({
       peptideStructureMode: structureMode,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideStructureUploadChange = (upload: {
+  const handleRuntimePeptideStructureUploadChange = useCallback((upload: {
     fileName: string; format: 'pdb' | 'cif'; content: string; chainId: string;
   } | null) => {
     handleRuntimePeptideStructureUploadChangeAction({ upload, setDraft });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBinderLengthChange = (value: number) => {
+  const handleRuntimePeptideBinderLengthChange = useCallback((value: number) => {
     handleRuntimePeptideBinderLengthChangeAction({
       peptideBinderLength: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideLengthRange = (min: number, max: number) => {
+  const handleRuntimePeptideLengthRange = useCallback((min: number, max: number) => {
     handleRuntimePeptideLengthRangeAction({
       peptideLengthMin: min,
       peptideLengthMax: max,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideUseInitialSequenceChange = (value: boolean) => {
+  const handleRuntimePeptideUseInitialSequenceChange = useCallback((value: boolean) => {
     handleRuntimePeptideUseInitialSequenceChangeAction({
       peptideUseInitialSequence: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideInitialSequenceChange = (value: string) => {
+  const handleRuntimePeptideInitialSequenceChange = useCallback((value: string) => {
     handleRuntimePeptideInitialSequenceChangeAction({
       peptideInitialSequence: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideSequenceMaskChange = (value: string) => {
+  const handleRuntimePeptideSequenceMaskChange = useCallback((value: string) => {
     handleRuntimePeptideSequenceMaskChangeAction({
       peptideSequenceMask: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideExcludedAasChange = (value: string[]) => {
+  const handleRuntimePeptideExcludedAasChange = useCallback((value: string[]) => {
     handleRuntimePeptideExcludedAasChangeAction({
       peptideExcludedAAs: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideFixedModificationsChange = (value: { position: number; ccd: string }[]) => {
+  const handleRuntimePeptideFixedModificationsChange = useCallback((value: { position: number; ccd: string }[]) => {
     handleRuntimePeptideFixedModificationsChangeAction({
       peptideFixedModifications: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideIterationsChange = (value: number) => {
+  const handleRuntimePeptideIterationsChange = useCallback((value: number) => {
     handleRuntimePeptideIterationsChangeAction({
       peptideIterations: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptidePopulationSizeChange = (value: number) => {
+  const handleRuntimePeptidePopulationSizeChange = useCallback((value: number) => {
     handleRuntimePeptidePopulationSizeChangeAction({
       peptidePopulationSize: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideEliteSizeChange = (value: number) => {
+  const handleRuntimePeptideEliteSizeChange = useCallback((value: number) => {
     handleRuntimePeptideEliteSizeChangeAction({
       peptideEliteSize: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideResiduePoolChange = (value: PeptideResiduePoolSelection[]) => {
+  const handleRuntimePeptideResiduePoolChange = useCallback((value: PeptideResiduePoolSelection[]) => {
     handleRuntimePeptideResiduePoolChangeAction({
       peptideResiduePool: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideNonNaturalRangeChange = (min: number, max: number) => {
+  const handleRuntimePeptideNonNaturalRangeChange = useCallback((min: number, max: number) => {
     handleRuntimePeptideNonNaturalRangeChangeAction({
       min,
       max,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicLinkerCcdChange = (value: 'SEZ' | '29N' | 'BS3') => {
+  const handleRuntimePeptideBicyclicLinkerCcdChange = useCallback((value: 'SEZ' | '29N' | 'BS3') => {
     handleRuntimePeptideBicyclicLinkerCcdChangeAction({
       peptideBicyclicLinkerCcd: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicCysPositionModeChange = (value: 'auto' | 'manual') => {
+  const handleRuntimePeptideBicyclicCysPositionModeChange = useCallback((value: 'auto' | 'manual') => {
     handleRuntimePeptideBicyclicCysPositionModeChangeAction({
       peptideBicyclicCysPositionMode: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicFixTerminalCysChange = (value: boolean) => {
+  const handleRuntimePeptideBicyclicFixTerminalCysChange = useCallback((value: boolean) => {
     handleRuntimePeptideBicyclicFixTerminalCysChangeAction({
       peptideBicyclicFixTerminalCys: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicIncludeExtraCysChange = (value: boolean) => {
+  const handleRuntimePeptideBicyclicIncludeExtraCysChange = useCallback((value: boolean) => {
     handleRuntimePeptideBicyclicIncludeExtraCysChangeAction({
       peptideBicyclicIncludeExtraCys: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicCys1PosChange = (value: number) => {
+  const handleRuntimePeptideBicyclicCys1PosChange = useCallback((value: number) => {
     handleRuntimePeptideBicyclicCys1PosChangeAction({
       peptideBicyclicCys1Pos: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicCysLayoutChange = (value: 'auto' | 'ring' | 'ratio' | 'absolute') => {
+  const handleRuntimePeptideBicyclicCysLayoutChange = useCallback((value: 'auto' | 'ring' | 'ratio' | 'absolute') => {
     handleRuntimePeptideBicyclicCysLayoutChangeAction({
       peptideBicyclicCysLayout: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicRingChange = (ring1: number, ring2: number) => {
+  const handleRuntimePeptideBicyclicRingChange = useCallback((ring1: number, ring2: number) => {
     handleRuntimePeptideBicyclicRingChangeAction({
       peptideBicyclicRing1: ring1,
       peptideBicyclicRing2: ring2,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicRatioChange = (pct1: number, pct2: number, pct3?: number) => {
+  const handleRuntimePeptideBicyclicRatioChange = useCallback((pct1: number, pct2: number, pct3?: number) => {
     handleRuntimePeptideBicyclicRatioChangeAction({
       peptideBicyclicRatio1: pct1,
       peptideBicyclicRatio2: pct2,
       peptideBicyclicRatio3: pct3,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicCys2PosChange = (value: number) => {
+  const handleRuntimePeptideBicyclicCys2PosChange = useCallback((value: number) => {
     handleRuntimePeptideBicyclicCys2PosChangeAction({
       peptideBicyclicCys2Pos: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicCys3PosChange = (value: number) => {
+  const handleRuntimePeptideBicyclicCys3PosChange = useCallback((value: number) => {
     handleRuntimePeptideBicyclicCys3PosChangeAction({
       peptideBicyclicCys3Pos: value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleTaskNameChange = (value: string) => {
+  const handleTaskNameChange = useCallback((value: string) => {
     handleTaskNameChangeAction({
       value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
-  const handleTaskSummaryChange = (value: string) => {
+  const handleTaskSummaryChange = useCallback((value: string) => {
     handleTaskSummaryChangeAction({
       value,
       setDraft
     });
-  };
+  }, [setDraft]);
 
   return {
     handlePredictionComponentsChange,

@@ -281,6 +281,10 @@ export function useProjectDetailRuntimeContext() {
   const isAffinityWorkflow = workflowKey === 'affinity';
   const isLeadOptimizationWorkflow = workflowKey === 'lead_optimization';
   const runtimePollingSignature = useMemo(() => buildRuntimePollingSignature(projectTasks), [projectTasks]);
+  // 轮询 effect 不依赖签名本身：签名每 tick 都会变（leadopt 评分推进），作为 deps 会
+  // 反复重建调度器并把变更检测基线清零。effect 内经 ref 读最新值即可。
+  const runtimePollingSignatureRef = useRef(runtimePollingSignature);
+  runtimePollingSignatureRef.current = runtimePollingSignature;
   const runtimePollingSummary = useMemo(() => {
     let hasRuntimeTasks = false;
     let hasRunning = false;
@@ -729,7 +733,6 @@ export function useProjectDetailRuntimeContext() {
     location.search,
     project?.id,
     project?.task_id,
-    runtimePollingSignature,
     runtimePollingSummary.hasQueued,
     runtimePollingSummary.hasRunning,
     runtimePollingSummary.hasRuntimeTasks,

@@ -39,7 +39,7 @@
   min-width: 180px;
   max-width: 300px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   border: 1px solid #d6e2da;
   background: #fdfefe;
   color: #334f41;
@@ -52,7 +52,7 @@
   opacity: 0;
   pointer-events: none;
   z-index: 20;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease, transform var(--dur) var(--ease);
 }
 
 .info-tip-bubble--start {

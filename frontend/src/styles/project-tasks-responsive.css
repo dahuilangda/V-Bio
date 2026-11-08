@@ -38,7 +38,7 @@
 
 .task-card {
   border: 1px solid #d6e4dc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 12px 14px;
   background: #fff;
   display: flex;

@@ -81,7 +81,7 @@
   justify-content: space-between;
   gap: 8px;
   border: 1px solid #d7e4dc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #f8fcf9;
   padding: 8px 10px;
   font-size: var(--text-xs);
@@ -102,7 +102,7 @@
   gap: 7px;
   padding: 10px;
   scroll-margin-top: 108px;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background var(--dur) var(--ease);
 }
 
 .component-card.component-tone-green {
@@ -135,7 +135,7 @@
 
 .component-card-summary {
   border: 1px dashed rgba(125, 146, 134, 0.34);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 7px 9px;
   background: rgba(255, 255, 255, 0.64);
 }
@@ -311,7 +311,7 @@
   display: grid;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 10px;
   background: rgba(255, 255, 255, 0.58);
 }
@@ -383,7 +383,7 @@
   align-items: end;
   padding: 8px;
   border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.72);
 }
 
@@ -570,7 +570,7 @@
   gap: 4px;
   padding: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.52);
 }
 
@@ -587,7 +587,7 @@
   color: var(--text);
   font-size: 12px;
   line-height: 1;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color var(--dur) var(--ease);
 }
 
 .protein-sequence-residue:disabled {
@@ -709,7 +709,7 @@
   place-items: center;
   min-height: 180px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.8);
   overflow: hidden;
 }
@@ -745,7 +745,7 @@
   max-width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.68);
   overflow: hidden;
 }

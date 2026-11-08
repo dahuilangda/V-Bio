@@ -16,7 +16,7 @@
 
 .molstar-host {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
   position: relative;
   width: 100%;
@@ -30,7 +30,7 @@
   .molstar-host {
     height: clamp(320px, 50vh, 480px);
     min-height: 320px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
   }
 
   /* Mol*'s "standard" layout reserves fixed-width regions for left/right panels even when
@@ -244,7 +244,7 @@
 
 .overview-ligand-sequence {
   border: 1px solid #e7efe9;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fff;
   min-height: 150px;
   padding: 8px 6px 6px;
@@ -386,7 +386,7 @@
 
 .ligand-prop-item {
   border: 1px solid #dfeae3;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 6px;
   background: #fff;
   display: grid;
@@ -410,7 +410,7 @@
 
 .ligand-prop-empty {
   border: 1px dashed #c7d8cc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fff;
   color: var(--muted);
   font-size: var(--text-xs);
@@ -420,7 +420,7 @@
 
 .ligand-radar-shell {
   border: 1px solid #dfeae3;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: linear-gradient(180deg, #f8fcfa 0%, #f4faf7 100%);
   padding: 8px;
   display: grid;
@@ -501,7 +501,7 @@
 
 .ligand-preview-svg-wrap {
   border: 1px solid #e7efe9;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fff;
   min-height: 150px;
   overflow: hidden;
@@ -529,7 +529,7 @@
 
 .ligand-preview-empty {
   border: 1px dashed #c7d8cc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fff;
   color: var(--muted);
   font-size: var(--text-sm);
@@ -566,7 +566,7 @@
 .jsme-editor-container {
   width: 100%;
   min-width: 0;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
 }
 
 .jsme-mount {
@@ -575,7 +575,7 @@
   min-width: 0;
   min-height: 0;
   max-width: 100%;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   overflow: visible;
 }
 

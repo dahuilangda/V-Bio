@@ -28,6 +28,12 @@
 
   /* Fluid type scale (phone to wide desktop). */
   --text-2xs: clamp(11.5px, 0.66rem + 0.1vw, 12px);
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --dur-fast: 0.12s;
+  --dur: 0.16s;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
   --text-xs: clamp(11.5px, 0.72rem + 0.12vw, 12px);
   --text-sm: clamp(12.5px, 0.78rem + 0.15vw, 13px);
   --text-md: clamp(13.5px, 0.84rem + 0.2vw, 14.5px);
@@ -151,7 +157,7 @@ h3 {
   text-decoration: none;
   color: var(--muted);
   padding: 8px 10px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-weight: 500;
   font-size: var(--text-md);
 }
@@ -396,7 +402,7 @@ h3 {
 
 .advanced-filter-panel {
   border: 1px solid #dbe8e1;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(180deg, #f8fcf9 0%, #f5faf7 100%);
   padding: 10px;
   display: grid;
@@ -503,7 +509,7 @@ select {
   width: 100%;
   border: 1px solid var(--line);
   background: #fff;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   color: var(--text);
   font: inherit;
@@ -593,7 +599,7 @@ select:focus {
 
 .input-wrap {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   display: flex;
   align-items: center;
@@ -613,7 +619,7 @@ select:focus {
 
 .btn {
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   padding: 10px 14px;
   font: inherit;
@@ -621,7 +627,7 @@ select:focus {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  transition: background 0.15s ease, transform 0.05s ease, box-shadow 0.15s ease;
+  transition: background var(--dur) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur) var(--ease);
   font-size: var(--text-md);
   line-height: var(--lh-tight);
 }
@@ -801,7 +807,7 @@ select:focus {
 .empty-state {
   border: 1px dashed var(--line);
   padding: 22px 18px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   color: var(--muted);
   background: #f8fbf9;
   display: grid;
@@ -814,8 +820,23 @@ select:focus {
   color: #9db8aa;
 }
 
+/* 全局旋转动画：所有 spinner 统一走这里（各面板不再自带 keyframes）。 */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+.spinning {
+  animation: spin 0.9s linear infinite;
+}
+
 .alert {
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   font-size: var(--text-md);
 }
@@ -841,7 +862,7 @@ select:focus {
 .icon-btn {
   border: 1px solid var(--line);
   background: #fff;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   min-width: 28px;
   height: 28px;
   display: inline-flex;
@@ -1319,7 +1340,7 @@ select:focus {
 
   .top-nav.nav-open .top-nav-links .top-link {
     padding: 11px 12px;
-    border-radius: 10px;
+    border-radius: var(--radius-md);
   }
 
 
@@ -1395,7 +1416,7 @@ select:focus {
 
   .panel {
     padding: 10px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
   }
 
   /* Workspace stepper: collapse to a compact horizontal row at the top */
@@ -1572,7 +1593,7 @@ button.peptide-residue-config-head {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid #e1ebe6;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f7fbf9;
   cursor: pointer;
   font: inherit;

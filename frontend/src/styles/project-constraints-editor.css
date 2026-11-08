@@ -18,7 +18,7 @@
 
 .component-template-inline {
   border: 1px solid #d7e4dc;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #f8fcf9;
   padding: 8px;
   display: grid;
@@ -208,7 +208,7 @@
 
 .constraint-viewer-empty {
   border: 1px dashed #c7d8cc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   min-height: 260px;
   padding: 14px;
   display: grid;
@@ -280,7 +280,7 @@
 
 .constraint-chain-picker {
   border: 1px solid #d7e4dc;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
   padding: 12px;
   display: grid;
@@ -306,7 +306,7 @@
   color: #2f4438;
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background var(--dur) var(--ease);
 }
 
 .constraint-chain-tab:hover {
@@ -338,7 +338,7 @@
 
 .constraint-chain-placeholder {
   border: 1px dashed #c7d8cc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 28px 16px;
   text-align: center;
   line-height: 1.5;
@@ -347,7 +347,7 @@
 
 .constraint-sequence-picker {
   border: 1px solid #d7e4dc;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
   min-height: 420px;
   padding: 12px;
@@ -404,12 +404,12 @@
   gap: 8px;
   padding: 10px 12px;
   border: 1px dashed #9abbaa;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f8fbf9;
   color: #2f4438;
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: border-color 0.16s ease, background 0.16s ease;
+  transition: border-color 0.16s ease, background var(--dur) var(--ease);
 }
 
 .constraint-chain-select-btn:hover:not(:disabled) {
@@ -438,7 +438,7 @@
   min-width: 0;
   min-height: 38px;
   border: 1px solid #d9e6df;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f8fbf9;
   color: #2f4438;
   display: grid;
@@ -447,7 +447,7 @@
   justify-items: center;
   padding: 3px 2px 4px;
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background var(--dur) var(--ease);
 }
 
 .constraint-sequence-residue:hover:not(:disabled) {
@@ -506,7 +506,7 @@
 
 .constraint-2d-panel {
   border: 1px solid #d9e6df;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fbfdfb;
   min-width: 0;
   overflow: hidden;
@@ -599,7 +599,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background var(--dur) var(--ease);
 }
 
 .constraint-residue-atom:hover:not(:disabled) {
@@ -635,11 +635,11 @@
   min-width: 0;
   padding: 6px 10px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background var(--dur) var(--ease);
 }
 
 .constraint-endpoint-target:hover {
@@ -718,7 +718,7 @@
   min-width: 0;
   min-height: 42px;
   border: 1px solid #d9e6df;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f8fbf9;
   color: #2f4438;
   font-size: var(--text-xs);
@@ -730,7 +730,7 @@
   gap: 4px;
   padding: 4px 6px;
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background var(--dur) var(--ease);
 }
 
 .constraint-ligand-atom:hover:not(:disabled) {
@@ -779,7 +779,7 @@
 .constraint-ligand-atoms-empty {
   grid-column: 1 / -1;
   border: 1px dashed #c7d8cc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 10px;
   background: #fbfdfb;
   line-height: 1.4;

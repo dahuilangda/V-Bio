@@ -21,7 +21,7 @@
 
 .task-structure-query-row > .jsme-editor-container.task-structure-jsme-shell {
   border: 1px solid #dbe6df;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   background: #fff;
   width: min(100%, 720px);

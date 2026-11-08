@@ -44,7 +44,7 @@
   gap: 8px;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(180deg, #f9fcf8, #f4f9f5);
 }
 .share-modal-create {
@@ -102,7 +102,7 @@
   padding: 0;
   cursor: pointer;
   box-shadow: 0 1px 0 #edf4ef inset;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color var(--dur) var(--ease);
 }
 .share-role-option-circle {
   display: inline-flex;
@@ -157,7 +157,7 @@
 .share-modal-suggestion,
 .share-modal-suggestion-empty {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.86);
   padding: 8px 10px;
 }
@@ -186,7 +186,7 @@
 }
 .share-modal-list {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(180deg, #fbfdfb, #f7fbf8);
   overflow: hidden;
 }
@@ -264,7 +264,7 @@
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 1px 0 #f7efef inset;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity var(--dur) var(--ease);
 }
 .share-item-revoke-btn:hover:not(:disabled) {
   background: #faefef;

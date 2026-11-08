@@ -4,7 +4,7 @@
 
 .api-access-page .icon-btn,
 .api-access-page .btn {
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color var(--dur) var(--ease);
 }
 
 .api-access-page .icon-btn.is-copied,
@@ -84,7 +84,7 @@
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 1px 0 #edf4ef inset;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color var(--dur) var(--ease);
 }
 
 .api-access-action-btn:hover {
@@ -117,7 +117,7 @@
   justify-content: space-between;
   gap: 10px;
   border: 1px solid #d8e4dd;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(180deg, #fafdfb 0%, #f4faf7 100%);
   padding: 10px;
 }
@@ -174,7 +174,7 @@
 
 .api-project-table-wrap {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   box-shadow: 0 1px 0 #f0f5f2 inset;
 }
@@ -192,7 +192,7 @@
 
 .api-project-table tbody tr {
   cursor: pointer;
-  transition: background 0.14s ease;
+  transition: background var(--dur) var(--ease);
 }
 
 .api-project-table tbody tr:hover {
@@ -264,7 +264,7 @@
 
 .api-project-builder-btn {
   border: 1px solid #d3dfd7;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f6faf8;
   color: #294b3e;
   width: 28px;
@@ -288,7 +288,7 @@
 
 .api-project-token-view-btn {
   border: 1px solid #c7d9ce;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: linear-gradient(180deg, #f7fcf9 0%, #edf6f1 100%);
   color: #204739;
   width: 28px;
@@ -311,7 +311,7 @@
 
 .api-project-manage-btn {
   border: 1px solid #d3dfd7;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #ffffff;
   color: #2a4e40;
   width: 28px;
@@ -451,7 +451,7 @@
   align-items: center;
   gap: 4px;
   border: 1px solid #d4dfd8;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #f4f8f5;
   padding: 4px;
   min-height: 36px;
@@ -467,7 +467,7 @@
 
 .api-range-item {
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 5px 8px;
   background: transparent;
   color: #4a6155;
@@ -494,7 +494,7 @@
   gap: 10px;
   justify-items: flex-start;
   border: 1px dashed #cedad2;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #f8fbf9;
   padding: 14px;
 }
@@ -565,7 +565,7 @@
 
 .api-usage-table-wrap {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
 }
 
@@ -603,7 +603,7 @@
 
 .api-builder-controls {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #f8fbf9;
   padding: 12px;
   display: grid;
@@ -616,7 +616,7 @@
 
 .api-builder-project {
   border: 1px solid #d7e3dc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   padding: 8px 10px;
   display: grid;
@@ -650,7 +650,7 @@
 
 .api-builder-note {
   border: 1px solid #d7e3dc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   padding: 8px 10px;
   line-height: 1.45;
@@ -658,7 +658,7 @@
 
 .api-prediction-affinity-panel {
   border: 1px solid #d7e3dc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   padding: 8px 10px;
   display: grid;
@@ -723,7 +723,7 @@
 
 .api-command-item {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   overflow: hidden;
 }
@@ -756,7 +756,7 @@
 
 .api-command-history {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   padding: 10px;
   display: grid;

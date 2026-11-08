@@ -2,19 +2,6 @@
 @import './project-tasks-table.css';
 @import './project-tasks-responsive.css';
 
-@keyframes mmp-life-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.mmp-life-icon-spin {
-  animation: mmp-life-spin 0.9s linear infinite;
-}
-
 /* Async Excel export: circular ring on the toolbar button + a floating status
    card beneath it (matches the app popover look). No text bleeds into the bar. */
 .task-export-anchor {
@@ -29,7 +16,7 @@
   width: 224px;
   padding: 10px 12px 9px;
   border: 1px solid #d3e1d9;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   box-shadow: 0 12px 30px rgba(26, 56, 43, 0.14);
   z-index: 30;

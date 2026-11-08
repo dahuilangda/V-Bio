@@ -84,7 +84,7 @@
   background: #f8fcfa;
   color: #6a8075;
   box-shadow: 0 1px 1px rgba(17, 37, 29, 0.05);
-  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+  transition: border-color 0.14s ease, color 0.14s ease, background var(--dur) var(--ease);
 }
 
 .workspace-step-dot > svg {
@@ -106,11 +106,11 @@
   color: #1e3f31;
   background: #f8fcfa;
   border: 1px solid #d4e3da;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 4px 7px;
   box-shadow: 0 2px 8px rgba(26, 56, 43, 0.1);
   z-index: 24;
-  transition: opacity 0.12s ease, transform 0.12s ease;
+  transition: opacity 0.12s ease, transform var(--dur) var(--ease);
 }
 
 .workspace-step:hover .workspace-step-dot {
@@ -140,7 +140,7 @@
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 6px 9px;
   font: inherit;
   font-size: var(--text-xs);

@@ -7,7 +7,7 @@
   gap: 6px;
   padding: 4px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #f5faf7;
   width: fit-content;
 }
@@ -78,7 +78,7 @@
 
 .peptide-runtime-group {
   border: 1px solid #dbe8e1;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 12px;
   background: linear-gradient(180deg, #fbfdfb 0%, #f7fbf9 100%);
   display: grid;
@@ -206,7 +206,7 @@
 
 .peptide-linker-card {
   border: 1px solid #cfe0d5;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
   min-height: 224px;
   aspect-ratio: 1 / 1;
@@ -220,7 +220,7 @@
   align-content: stretch;
   justify-items: center;
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform var(--dur) var(--ease);
 }
 
 .peptide-linker-card:hover:not(:disabled) {
@@ -366,7 +366,7 @@
 /* ── Peptide-design pocket picker (docking-style 3D box / sequence rail) ── */
 .peptide-pocket-field {
   border: 1px solid #d3e2d8;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px;
   background: #fbfdfc;
 }
@@ -389,7 +389,7 @@
      scene gets the full standard viewer height. */
   height: clamp(560px, 74vh, 880px);
   border: 1px solid #d3e2d8;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: #fff;
 }
@@ -528,7 +528,7 @@
   gap: 8px;
   width: 100%;
   border: 1px solid #d3e2d8;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fbfdfc;
   padding: 6px 10px;
   font-size: 12px;
@@ -556,7 +556,7 @@
   grid-template-columns: minmax(0, 1fr);
   padding: 8px;
   border: 1px dashed #c7ddcf;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fcfffd;
   min-width: 0;
   width: 100%;
@@ -569,7 +569,7 @@
 
 .peptide-runtime-switch {
   border: 1px solid #d6e6dc;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 8px 10px;
   background: #fff;
   min-height: 42px;
@@ -599,7 +599,7 @@
   grid-auto-columns: 1fr;
   gap: 4px;
   border: 1px solid #d1e1d7;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #f6faf7;
   padding: 3px;
   width: 100%;
@@ -608,7 +608,7 @@
 
 .peptide-cys-mode-btn {
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: #3b5c4b;
   font-size: var(--text-xs);
@@ -643,7 +643,7 @@
   gap: 10px 16px;
   padding: 10px;
   border: 1px dashed #c7ddcf;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fcfffd;
 }
 
@@ -703,7 +703,7 @@
   gap: 4px;
   padding: 8px 10px;
   border: 1px dashed #c7ddcf;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fcfffd;
 }
 
@@ -831,7 +831,7 @@
 
 .peptide-cys-slot-tab {
   border: 1px solid #d1e1d7;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #fff;
   min-height: 46px;
   padding: 7px 10px;
@@ -874,7 +874,7 @@
 
 .peptide-position-dot {
   border: 1px solid #d5e4db;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   min-height: 30px;
   background: #fff;
   color: #496858;
@@ -1088,7 +1088,7 @@
   gap: 12px;
   padding: 12px;
   border: 1px solid #d7e3dd;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fbfdfc;
 }
 
@@ -1138,7 +1138,7 @@
   gap: 12px;
   padding: 8px 10px;
   border: 1px solid #e1ebe6;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f7fbf9;
 }
 
@@ -1231,7 +1231,7 @@
   display: grid;
   place-items: center;
   border: 1px dashed #d2ded8;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: #75857d;
   font-size: 12px;
 }
@@ -1245,7 +1245,7 @@
   min-width: 0;
   min-height: 164px;
   border: 1px solid #d8e1dc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fbfdfc;
   padding: 7px;
   color: #20342b;
@@ -1451,7 +1451,7 @@
   gap: 10px;
   padding: 10px;
   border: 1px solid #d7e3dd;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fbfdfc;
 }
 
@@ -1522,7 +1522,7 @@
   color: #2f4438;
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow var(--dur) var(--ease);
 }
 
 .peptide-custom-backbone-slot:hover:not(:disabled) {
@@ -1627,7 +1627,7 @@
   gap: 8px;
   padding: 12px 16px;
   border: 1px solid var(--line, #d6dfd9);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--surface-2, #f7fbf8);
   width: 100%;
   max-width: 900px;
@@ -1660,7 +1660,7 @@
 .affinity-pocket-chip {
   font-size: var(--text-2xs, 11px);
   padding: 2px 7px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--line, #d6dfd9);
   background: var(--surface, #ffffff);
   color: var(--text, #111a15);
@@ -1687,7 +1687,7 @@
   height: 38px;
   min-height: 38px;
   border: 1px dashed var(--line, #d6dfd9);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0 10px;
 }
 
@@ -1711,7 +1711,7 @@
   gap: 4px;
   font-size: var(--text-2xs, 11px);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid transparent;
 }
 
@@ -1819,7 +1819,7 @@
   color: var(--text, #111a15);
   cursor: pointer;
   padding: 0;
-  transition: all 0.12s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .pocket-btn:hover:not(:disabled) {
@@ -2070,7 +2070,7 @@
   z-index: 20;
   overflow-y: auto;
   background: var(--surface, #fff);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   box-shadow: 0 -4px 24px rgba(26, 56, 43, 0.15);
   animation: pocketDrawerSlide 0.18s ease;
   padding-top: 36px; /* space for the toggle button */
@@ -2114,11 +2114,11 @@
   padding: 0 14px;
   font-size: var(--text-sm);
   border: 1px solid var(--line, #d6dfd9);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--surface, #fff);
   color: var(--text, #111a15);
   cursor: pointer;
-  transition: all 0.14s ease;
+  transition: all var(--dur) var(--ease);
   white-space: nowrap;
 }
 
@@ -2149,7 +2149,7 @@
   align-items: center;
   border: 1px solid var(--line, #d6dfd9);
   background: var(--surface, #fff);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .affinity-upload-field--docked {
@@ -2227,7 +2227,7 @@
   width: min(360px, calc(100% - 16px));
   background: var(--surface, #fff);
   border: 1px solid var(--line, #d6dfd9);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   box-shadow: 0 4px 24px rgba(26, 56, 43, 0.15);
   padding: 8px 12px 12px;
   display: grid;
@@ -2280,7 +2280,7 @@
   color: var(--text, #111a15);
   cursor: pointer;
   letter-spacing: 0.03em;
-  transition: all 0.12s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .pocket-ligand-chip:hover:not(:disabled) {
@@ -2378,7 +2378,7 @@
   .pocket-float-panel .pocket-btn {
     width: 36px;
     height: 36px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
   }
 
   .pocket-float-panel .pocket-close-btn {
@@ -2400,7 +2400,7 @@
   .pocket-ligand-chip {
     font-size: var(--text-xs);
     padding: 6px 14px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
   }
 
   .pocket-float-panel .pocket-presets {
@@ -2436,7 +2436,7 @@
   width: 100%;
   padding: 8px 10px;
   border: 1px solid #e1ebe6;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #f7fbf9;
   cursor: pointer;
   font: inherit;
@@ -2528,7 +2528,7 @@
   align-items: center;
   gap: 4px;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   flex-wrap: wrap;
 }
 

@@ -7,13 +7,13 @@
   width: var(--task-ligand-thumb-w);
   min-height: var(--task-ligand-thumb-h);
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: transparent;
   padding: 0;
   display: block;
   text-align: left;
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, border-color var(--dur) var(--ease);
 }
 
 .task-ligand-open-btn:hover {
@@ -35,7 +35,7 @@
   width: var(--task-ligand-thumb-w);
   min-height: var(--task-ligand-thumb-h);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   padding: 0;
 }

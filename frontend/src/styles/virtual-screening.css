@@ -62,7 +62,7 @@
 .virtual-screening-editor {
   resize: vertical;
   border-color: #cbd8d0;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fcfefd;
   color: var(--text);
   font: 500 var(--text-sm)/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -129,7 +129,7 @@
 .virtual-screening-library-table-wrap {
   max-height: 300px;
   border: 1px solid #d7e3dc;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .virtual-screening-library-table {
@@ -172,7 +172,7 @@
   width: min(30vw, 320px);
   height: 30px;
   border: 1px solid #c8ddd3;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: #fff;
   color: #587061;
   padding: 0 9px;

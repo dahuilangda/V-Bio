@@ -12,7 +12,7 @@
 
 .status-stat {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 8px;
   background: #fff;
   display: grid;
@@ -105,7 +105,7 @@
   align-self: stretch;
   background: transparent;
   cursor: col-resize;
-  transition: background 0.16s ease, opacity 0.16s ease;
+  transition: background 0.16s ease, opacity var(--dur) var(--ease);
   opacity: 0.7;
   touch-action: none;
 }
@@ -121,7 +121,7 @@
   border-radius: 999px;
   transform: translateX(-50%);
   background: rgba(143, 163, 152, 0.26);
-  transition: background 0.16s ease, width 0.16s ease;
+  transition: background 0.16s ease, width var(--dur) var(--ease);
 }
 
 .results-resizer:hover,
@@ -165,7 +165,7 @@
 }
 
 .metrics-panel {
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
   border-color: #d9e2dc;
   box-shadow: none;
@@ -179,7 +179,7 @@
 
 .result-aside-block {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: #fff;
   padding: 10px;
   display: grid;
@@ -539,7 +539,7 @@
   text-decoration: none;
   cursor: pointer;
   box-shadow: 0 1px 0 #edf4ef inset;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color var(--dur) var(--ease);
 }
 
 .task-row-action-btn:hover {
