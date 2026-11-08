@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { InfoTip } from '../../components/common/InfoTip';
+import { useModalDialog } from '../../components/ui/useModalDialog';
 import { isValidNotifyEmail } from '../../utils/projectInputs';
 
 export interface PeptideSubmitSummary {
@@ -46,22 +47,14 @@ export function PeptideSubmitConfirmDialog({
   onConfirm,
   summary
 }: PeptideSubmitConfirmDialogProps) {
-  const backBtnRef = useRef<HTMLButtonElement | null>(null);
   const [notifyEmail, setNotifyEmail] = useState(defaultNotifyEmail);
   const estimatedTasks = summary.iterations * summary.populationSize;
+  const dialog = useModalDialog(isOpen, isSubmitting ? () => {} : onCancel);
 
   useEffect(() => {
     if (!isOpen) return;
     setNotifyEmail(defaultNotifyEmail);
-    backBtnRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isSubmitting) {
-        onCancel();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [isOpen, isSubmitting, onCancel, defaultNotifyEmail]);
+  }, [isOpen, defaultNotifyEmail]);
 
   if (!isOpen) return null;
 
@@ -77,9 +70,9 @@ export function PeptideSubmitConfirmDialog({
   return (
     <div className="modal-mask" role="dialog" aria-modal="true" aria-label="Confirm submission" onClick={isSubmitting ? undefined : onCancel}>
       <div
-        className="modal"
+        className="modal modal-sm"
         onClick={(event) => event.stopPropagation()}
-        style={{ width: 'min(460px, 95vw)' }}
+        {...dialog}
       >
         <h2>Review &amp; Submit</h2>
         <table className="peptide-submit-confirm-table">
@@ -122,7 +115,7 @@ export function PeptideSubmitConfirmDialog({
           />
         </label>
         <div className="peptide-submit-confirm-actions">
-          <button type="button" className="btn" ref={backBtnRef} onClick={onCancel} disabled={isSubmitting}>
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={isSubmitting}>
             Back
           </button>
           <button

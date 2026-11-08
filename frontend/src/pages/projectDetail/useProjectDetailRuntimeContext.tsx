@@ -95,6 +95,8 @@ import {
 } from './projectRuntimeRowHelpers';
 
 
+const RUNTIME_DETAIL_CACHE_TTL_MS = 8000;
+
 export function useProjectDetailRuntimeContext() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -338,9 +340,16 @@ export function useProjectDetailRuntimeContext() {
           readLeadOptEnumeratedCandidateCount(currentRow),
           readLeadOptEnumeratedCandidateCount(cached?.task || null)
         ) === 0;
+      // 非终态行的 updated_at 每 tick 都变（updatedAt 严格相等只挡并发不挡重复），
+      // TTL 内直接复用缓存，detail 拉取频率与轮询解耦。
+      const cachedFreshWithinTtl =
+        Boolean(cached) && Date.now() - (cached?.fetchedAt ?? 0) < RUNTIME_DETAIL_CACHE_TTL_MS;
+      const isTerminalState = ['SUCCESS', 'FAILURE', 'REVOKED'].includes(
+        String(currentRow?.task_state || '').trim().toUpperCase()
+      );
       if (
         cached &&
-        cached.updatedAt === currentUpdatedAt &&
+        (cached.updatedAt === currentUpdatedAt || (cachedFreshWithinTtl && !isTerminalState)) &&
         projectTaskDetailOptionsCover(cached.options, requestedOptions) &&
         !shouldRefetchLeadOptCandidates
       ) {
@@ -361,6 +370,7 @@ export function useProjectDetailRuntimeContext() {
           const mergedRow = latestRow ? mergeTaskRuntimeFields(detailRow, latestRow) : detailRow;
           projectTaskDetailCacheRef.current[normalizedTaskRowId] = {
             updatedAt: String(mergedRow.updated_at || '').trim(),
+            fetchedAt: Date.now(),
             options: mergedOptions,
             task: mergedRow,
           };

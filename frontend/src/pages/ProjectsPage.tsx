@@ -23,7 +23,7 @@ import {
   SlidersHorizontal,
   Square,
   Trash2
-, FolderPlus } from 'lucide-react';
+, FolderPlus , RotateCcw } from 'lucide-react';
 import { readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/copilotSessionState';
 
 // The modal drags in the whole Copilot chat UI; only its open state is read
@@ -507,12 +507,14 @@ export function ProjectsPage() {
   }, [hasActiveRuntime, load]);
 
   useEffect(() => {
+    // 无活跃运行时放宽心跳：空闲项目列表无需 15s 全量刷新。
+    const interval = hasActiveRuntime ? 15000 : 60000;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
       void load({ silent: true, preferBackendStatus: true });
-    }, 15000);
+    }, interval);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [hasActiveRuntime, load]);
 
   // announce the dialog to the overlay coordinator so the Copilot panel collapses
   // out of the way. No-op when no provider is mounted.
@@ -823,7 +825,14 @@ export function ProjectsPage() {
           </div>
         )}
 
-        {(error || renameError) && <div className="alert error" role="alert">{error || renameError}</div>}
+        {(error || renameError) && (
+          <div className="alert error" role="alert">
+            <span>{error || renameError}</span>
+            <button type="button" className="btn btn-ghost btn-compact" onClick={() => void load()}>
+              <RotateCcw size={13} /> Retry
+            </button>
+          </div>
+        )}
 
         {loading && projects.length === 0 ? (
           <div className="muted">Loading projects...</div>

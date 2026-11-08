@@ -901,6 +901,10 @@ select:focus {
   width: min(1100px, 96vw);
 }
 
+.modal-sm {
+  width: min(460px, 95vw);
+}
+
 
 
 

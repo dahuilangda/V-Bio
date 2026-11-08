@@ -123,6 +123,8 @@ export type NormalizedProjectTaskDetailOptions = Required<ProjectTaskDetailOptio
 
 export type CachedProjectTaskDetail = {
   updatedAt: string;
+  /** 本地写入时间：非终态行在 TTL 内复用缓存，避免轮询期每 tick 重拉全量 detail。 */
+  fetchedAt: number;
   options: NormalizedProjectTaskDetailOptions;
   task: ProjectTask;
 };

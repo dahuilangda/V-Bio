@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft , RotateCcw } from 'lucide-react';
 import { terminateTask as terminateBackendTask } from '../api/backendApi';
 import { rcsbCifUrl } from '../utils/structureParser';
 import { readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/copilotSessionState';
@@ -107,6 +107,7 @@ export function ProjectTasksPage() {
     refreshing,
     error,
     allTasksLoaded,
+    loadData,
     setTasks,
     setError,
     ensureAllTasksLoaded,
@@ -671,7 +672,14 @@ export function ProjectTasksPage() {
   if (!project) {
     return (
       <div className="page-grid">
-        {error && <div className="alert error" role="alert">{error}</div>}
+        {error && (
+          <div className="alert error" role="alert">
+            <span>{error}</span>
+            <button type="button" className="btn btn-ghost btn-compact" onClick={() => void loadData()}>
+              <RotateCcw size={13} /> Retry
+            </button>
+          </div>
+        )}
         <section className="panel">
           <Link className="btn btn-ghost btn-compact" to="/projects">
             <ArrowLeft size={14} />

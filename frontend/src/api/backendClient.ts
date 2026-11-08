@@ -22,12 +22,20 @@ export const API_HEADERS: Record<string, string> = new Proxy(
 
 export const BACKEND_TIMEOUT_MS = 20000;
 
+// 以原始字符串为键缓存解析结果：每请求的 localStorage 读取保留（成本低），
+// JSON.parse 只在会话真正变化时执行一次。
+let sessionRawCache: string | null = null;
+let sessionTokenCache: string | null = null;
+
 function managementSessionHeader(): string | null {
   try {
     const raw = localStorage.getItem('vbio_session');
-    if (!raw) return null;
+    if (raw === null) return null;
+    if (raw === sessionRawCache) return sessionTokenCache;
     const parsed = JSON.parse(raw) as { managementToken?: string };
-    return parsed.managementToken || null;
+    sessionRawCache = raw;
+    sessionTokenCache = parsed.managementToken || null;
+    return sessionTokenCache;
   } catch {
     return null;
   }

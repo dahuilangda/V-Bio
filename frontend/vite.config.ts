@@ -46,6 +46,10 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
+    // Worker 默认 iife 不支持代码分割；jszip 会把 worker 拆成多 chunk。
+    worker: {
+      format: 'es'
+    },
     plugins: [react()],
     build: {
       chunkSizeWarningLimit: 1000,
