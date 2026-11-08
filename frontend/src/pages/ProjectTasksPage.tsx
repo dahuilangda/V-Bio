@@ -1,7 +1,9 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft , RotateCcw } from 'lucide-react';
+import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { terminateTask as terminateBackendTask } from '../api/backendApi';
+import { API_HEADERS } from '../api/backendClient';
+import { connectTaskStatusStream } from '../api/taskStatusStream';
 import { rcsbCifUrl } from '../utils/structureParser';
 import { readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/copilotSessionState';
 
@@ -124,6 +126,40 @@ export function ProjectTasksPage() {
     () => canManageProjectShares(project, session?.userId || null),
     [project, session?.userId]
   );
+
+  // 终态 SSE 即时刷新：状态对账推送到达时立即拉取，不等下一个轮询 tick；
+  // 断流时既有轮询本身就是兜底，无需额外处理。
+  const hasLiveRuntimeTasks = useMemo(
+    () =>
+      tasks.some((task) => {
+        const state = String(task.task_state || '').trim().toUpperCase();
+        return state === 'QUEUED' || state === 'RUNNING';
+      }),
+    [tasks]
+  );
+  useEffect(() => {
+    if (!project || !hasLiveRuntimeTasks) return;
+    let cancelled = false;
+    let handle: { close: () => void } | null = null;
+    void connectTaskStatusStream({
+      projectId: project.id,
+      headers: API_HEADERS,
+      onEntries: () => {
+        if (!cancelled) void loadData({ silent: true, preferBackendStatus: true });
+      },
+      onError: () => {
+        cancelled = true;
+      }
+    }).then((streamHandle: { close: () => void }) => {
+      if (cancelled) streamHandle.close();
+      else handle = streamHandle;
+    });
+    return () => {
+      cancelled = true;
+      handle?.close();
+    };
+  }, [project, hasLiveRuntimeTasks, loadData]);
+
 
   const {
     taskCountText,

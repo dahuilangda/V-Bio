@@ -51,6 +51,7 @@ from management_api.copilot_settings import (
 from management_api.copilot_stream import copilot_event_stream, registry_key_for, register_steering, submit_follow_up, submit_steering
 from management_api.usage_tracker import UsageTracker
 from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
+from management_api.task_status_stream import TaskStatusHub
 
 LOG_LEVEL = os.environ.get("VBIO_MGMT_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -208,6 +209,9 @@ monitor_broker = (
     if monitor_store is not None
     else None
 )
+
+# 项目级任务状态 SSE：终态对账后即时推送（无 DB URL 时仅进程内扇出）。
+task_status_hub = TaskStatusHub(VBIO_MONITOR_DATABASE_URL)
 jwt_user_service = JwtUserService(postgrest_client)
 jwt_client_store = JwtClientStore(JWT_CLIENTS_FILE)
 runtime_proxy = RuntimeProxy(
@@ -453,6 +457,7 @@ gateway = GatewayHandlers(
     lead_opt_overlay_service=lead_opt_overlay_service,
     logger=logger,
     default_protenix_predict_seed=DEFAULT_PROTENIX_PREDICT_SEED,
+    task_status_hub=task_status_hub,
 )
 
 
@@ -1275,6 +1280,11 @@ def get_status_batch() -> Tuple[Response, int]:
 @app.post("/vbio-api/status/stubs")
 def get_status_stubs() -> Tuple[Response, int]:
     return gateway.forward_task_status_stubs()
+
+
+@app.get("/vbio-api/tasks/status/stream")
+def stream_task_status() -> Tuple[Response, int]:
+    return gateway.forward_task_status_stream()
 
 
 @app.get("/vbio-api/results/<task_id>")

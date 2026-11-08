@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 from urllib.parse import quote
 
 import requests
-from flask import Response, jsonify, request
+from flask import Response, jsonify, request, stream_with_context
 from management_api.runtime_proxy import RuntimeProxyBusyError
+from management_api.task_status_stream import task_status_sse_frames
 
 
 def forward_task_read(
@@ -137,6 +138,51 @@ def forward_task_status_stubs(gateway: Any) -> Tuple[Response, int]:
         return jsonify({"error": "Upstream runtime timed out."}), 504
 
 
+def forward_task_status_stream(gateway: Any) -> Tuple[Response, int]:
+    """任务状态 SSE：订阅本项目终态变更，changed 帧 + 心跳 + 周期重连。"""
+    started = time.perf_counter()
+    project_id: Optional[str] = None
+    token = None
+
+    try:
+        project_id = gateway._read_project_id_from_query()
+        token_plain = (request.headers.get("X-API-Token") or "").strip()
+        token = gateway._authorize_project_read(project_id, token_plain)
+    except PermissionError as exc:
+        return gateway._forbidden(str(exc), token, "read_status_stream", started, project_id)
+
+    hub = gateway.task_status_hub
+    if hub is None:
+        return jsonify({"error": "Task status stream is not available."}), 503
+
+    subscription = hub.subscribe(project_id)
+    gateway.logger.info("Task status stream opened (project %s).", project_id)
+
+    from flask import stream_with_context
+
+    def generate() -> Iterator[str]:
+        try:
+            yield ": stream opened\n\n"
+            for frame in task_status_sse_frames(subscription):
+                yield frame
+        finally:
+            gateway.logger.info("Task status stream closed (project %s).", project_id)
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    gateway._record_usage(
+        token,
+        action="read_status_stream",
+        status_code=200,
+        succeeded=True,
+        started_at=started,
+        project_id=project_id,
+        task_id=None,
+    )
+    return response
+
+
 def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
     started = time.perf_counter()
     project_id: Optional[str] = None
@@ -176,6 +222,15 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
                 }
                 if terminal:
                     gateway.task_store.reconcile_terminal_rows(project_id, terminal)
+                    hub = getattr(gateway, "task_status_hub", None)
+                    if hub is not None:
+                        try:
+                            hub.publish(
+                                project_id,
+                                [{"task_id": task_id, "state": state} for task_id, state in terminal.items()],
+                            )
+                        except Exception:
+                            gateway.logger.debug("task status publish failed", exc_info=True)
             except Exception:
                 gateway.logger.debug("task state reconcile failed", exc_info=True)
         gateway._record_usage(

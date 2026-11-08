@@ -9,7 +9,8 @@ from management_api.auth_service import AuthService, TokenContext
 from management_api.gateway_quick_forward import forward_quick_get, forward_quick_json, forward_quick_multipart
 from management_api.gateway_quick_overlay import handle_lead_optimization_pocket_overlay
 from management_api.gateway_submit import forward_submit
-from management_api.gateway_task import cancel_or_delete_task, forward_task_read, forward_task_status_batch, forward_task_status_stubs
+from management_api.gateway_task import cancel_or_delete_task, forward_task_read, forward_task_status_batch, forward_task_status_stubs, forward_task_status_stream
+from management_api.task_status_stream import TaskStatusHub
 from management_api.lead_opt_overlay import LeadOptOverlayService
 from management_api.runtime_proxy import RuntimeProxy
 from management_api.task_store import ProjectTaskStore
@@ -27,6 +28,7 @@ class GatewayHandlers:
         lead_opt_overlay_service: LeadOptOverlayService,
         logger: Any,
         default_protenix_predict_seed: int,
+        task_status_hub: Any = None,
     ) -> None:
         self.auth_service = auth_service
         self.usage_tracker = usage_tracker
@@ -35,6 +37,7 @@ class GatewayHandlers:
         self.lead_opt_overlay_service = lead_opt_overlay_service
         self.logger = logger
         self.default_protenix_predict_seed = int(default_protenix_predict_seed)
+        self.task_status_hub = task_status_hub
 
     def _record_usage(
         self,
@@ -183,6 +186,9 @@ class GatewayHandlers:
 
     def forward_task_status_stubs(self) -> Tuple[Response, int]:
         return forward_task_status_stubs(self)
+
+    def forward_task_status_stream(self) -> Tuple[Response, int]:
+        return forward_task_status_stream(self)
 
     def handle_lead_optimization_pocket_overlay(self) -> Tuple[Response, int]:
         return handle_lead_optimization_pocket_overlay(self)
