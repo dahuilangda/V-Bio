@@ -506,14 +506,14 @@ class CopilotSkillHarness:
         import json
 
         available = definitions if definitions is not None else self._read_definitions()
-        # Two-tier disclosure (pi progressive-disclosure alignment): "full" renders every
+        # Two-tier disclosure: "full" renders every
         # read skill's complete description+schema (the A/B-protected default); "summary"
         # renders each description's first sentence plus a compact name/type schema — the
         # FULL contracts stay reachable via the on-demand skills.contract read skill the
         # assistant registers in summary mode. Adoption is decided by the e2e A/B harness.
         summary_mode = str(read_disclosure).strip().lower() == "summary"
-        # Tool catalog in the conventional {name, description, input_schema} shape that tool-calling
-        # models are trained on (OpenAI/Anthropic/SmolAgents all use this). Split into read tools
+        # Tool catalog in the conventional {name, description, input_schema} shape that
+        # tool-calling models are trained on. Split into read tools
         # (the harness executes them and returns observations) and action tools (the harness surfaces
         # them as user confirmations) because that read/write split is what makes this harness
         # non-standard and must be explained to the model.

@@ -6,9 +6,8 @@ serializable list of steps so a host UI can render the planner's "reasoning step
 (what it searched, what the harness audited and fixed, what it proposed) and so the
 server log gains a single condensation line per turn.
 
-This mirrors the agent-trace pattern used by production agent SDKs and the OpenTelemetry
-GenAI semantic conventions: domain-agnostic event names plus compact detail, never raw
-payload or message bodies.
+Event names are domain-agnostic and detail stays compact — never raw payloads or
+message bodies.
 
 The trace is a passive recorder — it never influences planning decisions. The harness
 remains the single source of truth for audit and execution; this only observes it.

@@ -1981,7 +1981,7 @@ class CopilotAssistant:
                 # here bypassed it and surfaced a raw SSE error to the client instead.
                 last_issues = ["aborted by user"]
                 break
-            # FOLLOW-UPS (pi agent-loop alignment): queued work for after the current goal.
+            # FOLLOW-UPS: queued work for after the current goal.
             # get_follow_ups is drained ONLY when the planner is about to end with a plain
             # complete (the loop's would-stop point); each queued text revives the loop as a
             # new user message — the agent keeps working instead of bouncing through the UI.
@@ -1993,7 +1993,7 @@ class CopilotAssistant:
                     planner_messages.append({"role": "user", "content": f"{username or user_id} (follow-up): {queued}"})
                     trace.record(round_index, "user_follow_up", text=queued[:160])
                     self.logger.info("Copilot follow-up revived the loop at round %d.", round_index)
-            # STEERING (pi agent-loop alignment): the user may interject while the turn runs.
+            # STEERING: the user may interject while the turn runs.
             # Queued texts are drained BETWEEN rounds and appended as user messages — the
             # current round's already-declared tool calls are never skipped, and the planner
             # sees the interjection before its next decision. Names the user chose feed the
@@ -2073,7 +2073,7 @@ class CopilotAssistant:
                     # assistant content (empty or truncated JSON), which would burn the whole
                     # retry budget as HTTP 400s. The system instruction alone tells the model
                     # what happened and — for truncation — HOW to fit: be concise and reference
-                    # long values instead of retyping them (pi/Anthropic actionable-error rule).
+                    # long values instead of retyping them.
                     retry_instruction = (
                         "Your previous response hit the output token limit and was cut off. "
                         "Re-emit the COMPLETE JSON object with a SHORTER message: never retype "
@@ -3252,7 +3252,7 @@ class CopilotAssistant:
                 "observations": _full_observation_records(observations),
             }
 
-        # GRACEFUL PRESSURE EXIT (pi shouldStopAfterTurn): a turn that hit its wall-clock or
+        # GRACEFUL PRESSURE EXIT: a turn that hit its wall-clock or
         # round budget AFTER doing real work must not dump into "could not settle on a plan".
         # Exit through the best useful terminal the accumulated state supports — confirmation
         # actions first (the user can finish the goal in one click), else the synthesized

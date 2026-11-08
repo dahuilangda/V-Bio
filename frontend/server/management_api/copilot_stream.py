@@ -33,7 +33,7 @@ def sse_frame(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-# ── Steering registry (pi steering alignment) ────────────────────────────────────────────
+# ── Steering registry ────────────────────────────────────────────
 # A user interjects mid-turn by POSTing to /vbio-api/copilot/steer with the streaming turn's
 # key; the loop drains the queue between planner rounds. Registry lifetime == stream lifetime.
 _STEERING_MAX_ENTRIES = 5
@@ -61,7 +61,7 @@ def _register_steering(turn_key: str) -> "queue.Queue[str]":
     return register_steering(turn_key)
 
 
-# ── Abort registry (pi destructive-interrupt alignment) ──────────────────────────────────
+# ── Abort registry ──────────────────────────────────
 # Steering is cooperative (drained between rounds); STOP is the independent destructive
 # channel. The streaming generator registers its abort event here so an explicit
 # POST /vbio-api/copilot/stop can end the turn even while the SSE connection is still open

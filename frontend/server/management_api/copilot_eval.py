@@ -1,11 +1,9 @@
 """Copilot evaluation suite — a scored, runnable quality gate for the planner + harness.
 
-Production LLM systems ship an eval harness (OpenAI Evals, Inspect AI, promptfoo, LangSmith) that
-codifies the agent's behavioral contract into a registry of cases run repeatedly. This module is
-that artifact for the V-Bio Copilot. It mirrors the Inspect shape — *dataset* (archetypal cases) +
-*scorer* (multi-dimensional, over both the final ``PlanAudit`` and the planner *trajectory*) +
-*metrics* (per-dimension pass rates) — so the gate reports the industry-standard dimensions
-(outcome, state, tool-selection, efficiency, loop-health) rather than a single pass/fail.
+A scored, repeatable quality gate: *dataset* (archetypal structural cases) + *scorer*
+(multi-dimensional, over both the final ``PlanAudit`` and the planner *trajectory*) +
+*metrics* (per-dimension pass rates) — outcome, state, tool-selection, efficiency and
+loop-health are reported separately, not collapsed into a single pass/fail.
 
 The suite evaluates the harness audit + grounding + trajectory layer (the ``harness`` in
 planner+skills+harness) against invariants the hand-written unit tests assert one-at-a-time. Every
@@ -180,7 +178,7 @@ class EvalReport:
         return self.passed_count == len(self.results)
 
     def dimension_summary(self) -> str:
-        """Per-dimension pass-rate rollup — the Inspect-style metric surface."""
+        """Per-dimension pass-rate rollup."""
         counts: Counter[str] = Counter()
         totals: Counter[str] = Counter()
         for result in self.results:
@@ -248,9 +246,9 @@ def score_audit(audit: PlanAudit, case: EvalCase) -> EvalCaseResult:
 
 
 # ----------------------------------------------------------------------------------------------- #
-# Trajectory scoring — loop-health over the planner trace (not just the final audit).
-# Production agent evals score the whole path: BFCL-v3 multi-turn, Anthropic agentevals trace JSON,
-# LangSmith trajectory evaluators. This is the deterministic, CI-friendly analogue.
+# Trajectory scoring — loop-health over the planner trace, not just the final audit.
+# Deterministic and CI-runnable: every case asserts an invariant over a synthetic
+# trajectory, so regressions surface before a live turn ever sees them.
 # ----------------------------------------------------------------------------------------------- #
 
 
