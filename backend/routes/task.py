@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -561,6 +563,56 @@ def register_task_routes(
         logger.debug('Received status request for task ID: %s', task_id)
         return jsonify(build_task_status_response(task_id))
 
+    # ── 版本存根（增量轮询第一阶段）──────────────────────────────────────
+    # 每任务一个轻量指纹（state + tracker + 归档 mtime 的哈希），不读归档
+    # result payload、不做 compact_metrics 聚合——这两项是 /status/batch
+    # 每任务成本的大头。契约：状态未变 → ver 不变，前端据此跳过完整拉取。
+    # 快照按 task_id 短 TTL 缓存，多客户端在同一 TTL 窗口内共享一次读取。
+    _stub_snapshot_cache: Dict[str, tuple] = {}
+    _STUB_SNAPSHOT_TTL_SECONDS = 2.0
+
+    def _task_status_ver(task_id: str) -> str:
+        archive_name = find_result_archive(task_id)
+        if archive_name:
+            try:
+                archive_mtime = os.path.getmtime(os.path.join(app.config['UPLOAD_FOLDER'], archive_name))
+            except OSError:
+                archive_mtime = 0.0
+            source = f'a|{archive_name}|{archive_mtime}'
+        else:
+            task_result = AsyncResult(task_id, app=celery_app)
+            tracker_status, heartbeat = get_tracker_status(task_id)
+            tracker_blob = json.dumps(tracker_status, sort_keys=True, default=str)[:512]
+            source = f'r|{task_result.state}|{tracker_blob}|{heartbeat}'
+        return hashlib.sha1(source.encode('utf-8')).hexdigest()[:16]
+
+    @app.route('/status/stubs', methods=['POST'])
+    @require_api_token
+    def get_task_status_stubs():
+        payload = request.get_json(silent=True) or {}
+        task_ids_input = payload.get('task_ids')
+        task_ids = []
+        if isinstance(task_ids_input, list):
+            task_ids = [str(item or '').strip() for item in task_ids_input if str(item or '').strip()]
+        unique_task_ids = list(dict.fromkeys(task_ids))[:2000]
+        ttl_seconds = float(app.config.get('STATUS_STUB_TTL_SECONDS', _STUB_SNAPSHOT_TTL_SECONDS))
+        now = time.monotonic()
+        stubs = []
+        for task_id in unique_task_ids:
+            cached = _stub_snapshot_cache.get(task_id)
+            if cached is not None and cached[1] > now:
+                stubs.append(cached[0])
+                continue
+            try:
+                ver = _task_status_ver(task_id)
+            except Exception:
+                logger.exception('Status stub failed for task %s.', task_id)
+                ver = 'unknown'
+            stub = {'task_id': task_id, 'ver': ver}
+            _stub_snapshot_cache[task_id] = (stub, now + ttl_seconds)
+            stubs.append(stub)
+        return jsonify({'stubs': stubs})
+
     @app.route('/status/batch', methods=['POST'])
     @require_api_token
     def get_task_status_batch():
@@ -623,7 +675,12 @@ def register_task_routes(
         else:
             # 模块级常驻池：轮询高频，逐请求建池只会增加线程抖动
             statuses = [_compact(s) for s in _STATUS_BATCH_POOL.map(_status_or_error, trimmed_task_ids)]
-        return jsonify({'statuses': statuses})
+        body = jsonify({'statuses': statuses})
+        etag = 'W/"' + hashlib.sha1(body.get_data()).hexdigest()[:16] + '"'
+        if request.headers.get('If-None-Match') == etag:
+            return '', 304, {'ETag': etag}
+        body.headers['ETag'] = etag
+        return body
 
     @app.route('/results/<task_id>', methods=['GET'])
     @require_api_token

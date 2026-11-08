@@ -27,7 +27,47 @@ type PendingTaskStatusWaiter = {
 const taskStatusCache = new Map<string, CachedTaskStatusEntry>();
 const pendingTaskStatusWaiters = new Map<string, PendingTaskStatusWaiter[]>();
 const pendingTaskStatusIds = new Set<string>();
-let taskStatusBatchTimer: number | null = null;
+let taskStatusBatchTimer: ReturnType<typeof setTimeout> | null = null;
+// 增量轮询第一阶段：每任务的轻量状态指纹（服务端 /status/stubs）。
+// ver 未变化 → 直接复用上一份全量状态，不进批量拉取；map 有界防泄漏。
+const statusVerById = new Map<string, string>();
+const lastStatusById = new Map<string, TaskStatusResponse>();
+const STATUS_VER_MAP_MAX_ENTRIES = 20000;
+
+function trimStatusVerMap(): void {
+  const excess = statusVerById.size - STATUS_VER_MAP_MAX_ENTRIES;
+  if (excess <= 0) return;
+  let dropped = 0;
+  for (const key of statusVerById.keys()) {
+    statusVerById.delete(key);
+    dropped += 1;
+    if (dropped >= excess) break;
+  }
+}
+
+async function fetchStatusStubs(taskIds: string[]): Promise<Map<string, string>> {
+  const res = await requestBackend('/status/stubs', {
+    method: 'POST',
+    headers: {
+      ...API_HEADERS,
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ task_ids: taskIds })
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to fetch status stubs (${res.status}): ${text}`);
+  }
+  const payload = (await res.json()) as { stubs?: { task_id?: string; ver?: string }[] };
+  const stubs = new Map<string, string>();
+  for (const item of Array.isArray(payload.stubs) ? payload.stubs : []) {
+    const taskId = String(item?.task_id || '').trim();
+    const ver = String(item?.ver || '').trim();
+    if (taskId && ver) stubs.set(taskId, ver);
+  }
+  return stubs;
+}
 let runtimeIndexCache: { value: TaskRuntimeIndexResponse; expiresAt: number } | null = null;
 let runtimeIndexInFlight: Promise<TaskRuntimeIndexResponse> | null = null;
 
@@ -65,6 +105,7 @@ async function flushPendingTaskStatusBatch(): Promise<void> {
 
   const resolveTask = (taskId: string, status: TaskStatusResponse) => {
     writeCachedTaskStatus(status);
+    lastStatusById.set(taskId, status);
     const waiters = pendingTaskStatusWaiters.get(taskId) || [];
     pendingTaskStatusWaiters.delete(taskId);
     for (const waiter of waiters) waiter.resolve(status);
@@ -125,7 +166,7 @@ function queueTaskStatus(taskId: string): Promise<TaskStatusResponse> {
     pendingTaskStatusWaiters.set(taskId, waiters);
     pendingTaskStatusIds.add(taskId);
     if (taskStatusBatchTimer !== null) return;
-    taskStatusBatchTimer = window.setTimeout(() => {
+    taskStatusBatchTimer = setTimeout(() => {
       void flushPendingTaskStatusBatch();
     }, TASK_STATUS_BATCH_FLUSH_DELAY_MS);
   });
@@ -157,16 +198,52 @@ export async function getTaskStatuses(taskIds: string[]): Promise<Record<string,
   const pendingLookups: Array<Promise<void>> = [];
   const failedTaskIds: string[] = [];
 
+  const uncachedIds: string[] = [];
   for (const taskId of normalizedTaskIds) {
     const cached = readCachedTaskStatus(taskId);
     if (cached) {
       byTaskId[taskId] = cached;
       continue;
     }
+    uncachedIds.push(taskId);
+  }
+
+  // 增量两阶段：先取轻量指纹，仅对 ver 变化（或本地无全量）的 id 发批量请求；
+  // 未变化 id 直接复用上一份全量。stub 不可用（旧后端/瞬时故障）则退回全量路径。
+  let fullFetchIds = uncachedIds;
+  // 待拉取 id 在 stub 时刻的指纹：批量返回可能比 stub 更新，但契约以
+  // “ver 相同即视为状态未变”为准，存 stub 时刻的 ver 即可。
+  const stubVerById = new Map<string, string>();
+  if (fullFetchIds.length > 0) {
+    try {
+      const stubs = await fetchStatusStubs(fullFetchIds);
+      fullFetchIds = fullFetchIds.filter((taskId) => {
+        const ver = stubs.get(taskId);
+        const known = statusVerById.get(taskId);
+        const last = lastStatusById.get(taskId);
+        if (ver !== undefined && known === ver && last) {
+          byTaskId[taskId] = last;
+          return false;
+        }
+        if (ver !== undefined) stubVerById.set(taskId, ver);
+        return true;
+      });
+      trimStatusVerMap();
+    } catch {
+      // 退回全量
+    }
+  }
+
+  for (const taskId of fullFetchIds) {
+    const stubVer = stubVerById.get(taskId);
     pendingLookups.push(
       queueTaskStatus(taskId)
         .then((status) => {
           byTaskId[taskId] = status;
+          if (stubVer) {
+            statusVerById.set(taskId, stubVer);
+            trimStatusVerMap();
+          }
         })
         .catch(() => {
           // 批量失败不静默：记入 failedTaskIds 供日志说明列表为何陈旧。
