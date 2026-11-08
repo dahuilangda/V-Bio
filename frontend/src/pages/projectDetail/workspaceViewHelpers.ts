@@ -1,4 +1,5 @@
 import type { InputComponent, PredictionConstraint, ProjectTask } from '../../types/models';
+import { normalizeLeadOptPredictionBackend } from '../../utils/leadOptimization';
 import {
   buildLeadOptPredictionRecordKey,
   parseLeadOptPredictionRecordKey,
@@ -685,16 +686,10 @@ export function compactLigandAtomPlddts(values: unknown): number[] {
   return out;
 }
 
-export function normalizePredictionBackendStrict(value: unknown): string {
-  const token = readText(value).trim().toLowerCase();
-  if (token === 'boltz2') return 'boltz';
-  if (token === 'nesso1' || token === 'nesso-1') return 'nesso';
-  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'nesso' || token === 'pocketxmol' || token === 'boltz2dock' || token === 'protenix2dock' || token === 'mol1' || token === 'mol1dock') return token;
-  return '';
-}
+
 
 export function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOptPredictionRecord {
-  const backend = normalizePredictionBackendStrict(value.backend);
+  const backend = normalizeLeadOptPredictionBackend(value.backend);
   const renderContract = pickPredictionRenderContract(value, null);
   return {
     taskId: readText(value.taskId).trim(),
@@ -728,8 +723,8 @@ export function compactLeadOptPredictionMap(
   for (const [rawKey, record] of Object.entries(value)) {
     const normalizedRawKey = readText(rawKey).trim();
     const parsedKey = parseLeadOptPredictionRecordKey(rawKey);
-    const backendFromKey = normalizePredictionBackendStrict(parsedKey.backend);
-    const backendFromRawKey = normalizePredictionBackendStrict(normalizedRawKey);
+    const backendFromKey = normalizeLeadOptPredictionBackend(parsedKey.backend);
+    const backendFromRawKey = normalizeLeadOptPredictionBackend(normalizedRawKey);
     const parsedSmiles = readText(parsedKey.smiles).trim();
 
     // Reference prediction map uses backend-only keys.
@@ -780,7 +775,7 @@ export function resolveLeadOptSnapshotFromTask(taskInput: unknown): Record<strin
   const confidenceQueryResult = asRecord(fromConfidence.query_result);
   const propertiesSelection = asRecord(fromProperties.selection);
   const confidenceSelection = asRecord(fromConfidence.selection);
-  const stateSelectedBackend = normalizePredictionBackendStrict(
+  const stateSelectedBackend = normalizeLeadOptPredictionBackend(
     fromPropertiesState.selected_backend ?? fromConfidence.selected_backend
   );
   const preferredPredictionBackend = stateSelectedBackend;
@@ -921,4 +916,3 @@ export function pickPreferredLeadOptTask(projectTasks: ProjectTask[]): ProjectTa
   }
   return preferred;
 }
-

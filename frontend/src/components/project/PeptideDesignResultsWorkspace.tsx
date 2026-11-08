@@ -95,7 +95,9 @@ export function PeptideDesignResultsWorkspace({
     confidenceBackend === 'alphafold3' ||
     confidenceBackend === 'protenix' ||
     projectBackend === 'alphafold3' ||
-    projectBackend === 'protenix'
+    projectBackend === 'protenix' ||
+    projectBackend === 'protenix2dock' ||
+    projectBackend === 'mol1'
       ? 'alphafold'
       : 'default';
   const [viewerColorMode, setViewerColorMode] = useState<'default' | 'alphafold'>(initialViewerColorMode);

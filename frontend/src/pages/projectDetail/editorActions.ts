@@ -412,6 +412,21 @@ export function handleRuntimeSeedChangeAction<TDraft extends DraftLike>(params: 
   }));
 }
 
+export function handleRuntimeRfd4SpecChangeAction<TDraft extends DraftLike>(params: {
+  value: string;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { value, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => {
+    const spec = value.trim();
+    if (!spec) {
+      const { rfd4Spec: _dropped, ...rest } = options as typeof options & { rfd4Spec?: string };
+      return rest;
+    }
+    return { ...options, rfd4Spec: spec };
+  });
+}
+
 export function handleRuntimePeptidePocketFieldChangeAction<TDraft extends DraftLike>(params: {
   field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox';
   value: string | number | null;

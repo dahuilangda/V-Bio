@@ -39,6 +39,7 @@ import {
   handleRuntimePeptideResiduePoolChangeAction,
   handleRuntimePeptideUseInitialSequenceChangeAction,
   handleRuntimeSeedChangeAction,
+  handleRuntimeRfd4SpecChangeAction,
   handleRuntimePeptidePocketFieldChangeAction,
   handleRuntimePeptideDockPocketChangeAction,
   handleRuntimeLeadOptDockPocketChangeAction,
@@ -67,6 +68,7 @@ export interface UseProjectEditorHandlersResult {
   handlePredictionTemplateResiduePick: (pick: MolstarResiduePick) => void;
   handleRuntimeBackendChange: (backend: string) => void;
   handleRuntimeSeedChange: (seed: number | null) => void;
+  handleRuntimeRfd4SpecChange: (value: string) => void;
   handleRuntimeLowVramChange: (lowVram: boolean) => void;
   handleRuntimePeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   handleRuntimePeptideChiralityChange: (chirality: 'l' | 'd') => void;
@@ -154,6 +156,10 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
       seed,
       setDraft
     });
+  };
+
+  const handleRuntimeRfd4SpecChange = (value: string) => {
+    handleRuntimeRfd4SpecChangeAction({ value, setDraft });
   };
 
   const handleRuntimePeptidePocketFieldChange = (
@@ -394,6 +400,7 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handlePredictionTemplateResiduePick,
     handleRuntimeBackendChange,
     handleRuntimeSeedChange,
+    handleRuntimeRfd4SpecChange,
     handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
     handleRuntimePeptideChiralityChange,

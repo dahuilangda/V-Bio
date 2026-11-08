@@ -32,9 +32,8 @@ class TestTaskDetailParameterPatchSchema(unittest.TestCase):
     def test_prediction_exposes_seed_backend_replacement(self):
         props = self._patch_schema("prediction")["properties"]
         self.assertIn("seed", props)
-        self.assertEqual(
-            props["backend"]["enum"],
-            ["boltz", "alphafold3", "protenix", "nesso", "protenix2dock", "boltz2dock"])
+        from backend.core.engine_capabilities import active_engine_ids
+        self.assertEqual(props["backend"]["enum"], sorted(active_engine_ids()))
         self.assertIn("componentsReplacement", props)
 
     def test_virtual_screening_backend_is_nesso_only(self):

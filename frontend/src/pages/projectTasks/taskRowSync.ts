@@ -11,6 +11,7 @@ import { updateProject, updateProjectTask } from '../../api/supabaseLite';
 import type { Project, ProjectTask } from '../../types/models';
 import { canEditProject, canEditTask } from '../../utils/accessControl';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
+import { normalizeLeadOptPredictionBackend } from '../../utils/leadOptimization';
 import { derivePersistedResultConfidences } from '../../utils/resultConfidenceStorage';
 import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
 import { hasStoredTaskInputOptions, mergeTaskPropertiesPreservingInputOptions } from '../projectDetail/projectTaskSnapshot';
@@ -324,12 +325,7 @@ function canPersistProjectChanges(project: Project | null | undefined): boolean 
   return canEditProject(project);
 }
 
-function normalizeLeadOptPredictionBackend(value: unknown): string {
-  const token = String(value || '').trim().toLowerCase();
-  if (token === 'boltz2') return 'boltz';
-  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
-  return '';
-}
+
 
 function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
   const backend = normalizeLeadOptPredictionBackend(backendInput);

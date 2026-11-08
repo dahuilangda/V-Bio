@@ -7,7 +7,7 @@ import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
-import { engineOptionsFor } from '../../config/engineCapabilities';
+import { engineOptionsFor, engineSupportsDesignMode, engineSupportsWorkflow, type DesignMode } from '../../config/engineCapabilities';
 import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
@@ -124,6 +124,8 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
   onSeedChange: (seed: number | null) => void;
+  rfd4Spec: string;
+  onRfd4SpecChange: (value: string) => void;
   onLowVramChange: (isLowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
@@ -197,6 +199,8 @@ export function WorkflowRuntimeSettingsSection({
   peptideBicyclicCys3Pos,
   onBackendChange,
   onSeedChange,
+  rfd4Spec,
+  onRfd4SpecChange,
   onLowVramChange,
   onPeptideDesignModeChange,
   onPeptideChiralityChange,
@@ -250,10 +254,7 @@ export function WorkflowRuntimeSettingsSection({
   // L-type designs can use standard protenix inference (full model + MSA + templates);
   // D-type requires protenix2dock (mirror/refine workflow).
   const peptideBackendAllowed =
-    normalizedBackend === 'protenix2dock' ||
-    normalizedBackend === 'alphafold3' || normalizedBackend === 'mol1' ||
-    normalizedBackend === 'rfd4' ||
-    normalizedBackend === 'protenix';
+    normalizedBackend === 'alphafold3' || engineSupportsWorkflow(normalizedBackend, 'peptide_design');
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
       onBackendChange('protenix2dock');
@@ -275,13 +276,11 @@ export function WorkflowRuntimeSettingsSection({
   const isBicyclicMode = isPeptideDesignWorkflow && peptideDesignMode === 'bicyclic';
   // constrained rings are Protenix-only; migrate stale selections before submit
   useEffect(() => {
-    const supportedNonLinear = new Set([
-      'protenix', 'protenix2dock', 'mol1', 'rfd4',
-    ]);
+    const supportsMode = engineSupportsDesignMode(normalizedBackend, peptideDesignMode as DesignMode);
     if (
       isPeptideDesignWorkflow &&
       peptideDesignMode !== 'linear' &&
-      !supportedNonLinear.has(normalizedBackend) &&
+      !supportsMode &&
       canEditRuntimeIdentity
     ) {
       onBackendChange('protenix2dock');
@@ -882,7 +881,7 @@ export function WorkflowRuntimeSettingsSection({
 
           <Field
             label={<>Backend <span className="required-mark">*</span></>}
-            hint="Design engine. Mol1Dock runs Mol-1 blind co-folding with native cyclic-bond support; Protenix2Dock adds staged-pose refinement with TFG constraints."
+            hint="Design engine. Mol-1 runs blind co-folding with native cyclic-bond support; Protenix2Dock adds staged-pose refinement with TFG constraints."
           >
             <select
               required
@@ -914,7 +913,7 @@ export function WorkflowRuntimeSettingsSection({
         {(isPredictionWorkflow || isPeptideDesignWorkflow) && (
                       <Field
             label="Seed (optional)"
-            hint="Reproducibility seed. Protenix and Mol1Dock default to 42; AlphaFold3 draws a random seed when unset."
+            hint="Reproducibility seed. Protenix defaults to 42; AlphaFold3 draws a random seed when unset."
           >
             <input
             type="number"
@@ -929,6 +928,22 @@ export function WorkflowRuntimeSettingsSection({
             placeholder="42 (Protenix default)"
             />
             </Field>
+        )}
+
+        {isPredictionWorkflow && normalizedBackend === 'rfd4' && (
+          <Field
+            label="RFD4 binder spec (optional)"
+            hint="Motif-conditioning JSON spec for binder generation. Leave empty to let the engine derive one from the components."
+          >
+            <textarea
+              rows={5}
+              value={rfd4Spec}
+              onChange={(e) => onRfd4SpecChange(e.target.value)}
+              disabled={!canEditRuntimeIdentity}
+              spellCheck={false}
+              placeholder='{"motifs": [...]}'
+            />
+          </Field>
         )}
 
         {(isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && normalizedBackend !== 'nesso' && (

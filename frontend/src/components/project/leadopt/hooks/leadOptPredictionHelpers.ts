@@ -12,6 +12,7 @@ import {
 } from '../../../../pages/projectTasks/recordReaders';
 import type { ParsedResultBundle } from '../../../../types/models';
 import { isNumericToken } from '../../../../pages/projectTasks/taskDataConfidence';
+import { normalizeLeadOptPredictionBackend } from '../../../../utils/leadOptimization';
 
 interface LeadOptPredictionRenderPayload {
   ligandRenderSmiles: string;
@@ -78,7 +79,7 @@ function resolveLeadOptPreferredInterfaceMetric(params: {
 }
 
 export function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
-  const backendKey = normalizePredictionBackendStrict(backendInput);
+  const backendKey = normalizeLeadOptPredictionBackend(backendInput);
   if (!backendKey) return '';
   const normalizedSmiles = asString(candidateSmilesInput).trim();
   if (!normalizedSmiles) return '';
@@ -92,7 +93,7 @@ export function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: s
   if (separatorIndex < 0) {
     return { backend: '', smiles: key };
   }
-  const backendKey = normalizePredictionBackendStrict(key.slice(0, separatorIndex));
+  const backendKey = normalizeLeadOptPredictionBackend(key.slice(0, separatorIndex));
   const encodedSmiles = key.slice(separatorIndex + LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR.length);
   if (!encodedSmiles) {
     return { backend: backendKey, smiles: '' };
@@ -215,12 +216,7 @@ export function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: u
 }
 
 
-function normalizePredictionBackendStrict(value: unknown): string {
-  const token = String(value || '').trim().toLowerCase();
-  if (token === 'boltz2') return 'boltz';
-  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
-  return '';
-}
+
 
 
 
@@ -738,7 +734,6 @@ export {
   resolveLeadOptPreferredInterfaceMetric,
   mapPredictionRuntimeState,
   inferPredictionRuntimeStateFromStatusPayload,
-  normalizePredictionBackendStrict,
   extractPredictionMetricsFromStatusInfo,
   asString,
   asRecord,

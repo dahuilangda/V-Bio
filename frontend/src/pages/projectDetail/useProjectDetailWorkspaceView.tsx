@@ -17,6 +17,9 @@ import { createInputComponent, saveProjectInputConfig } from '../../utils/projec
 import type { LeadOptHaloCandidate } from '../../components/project/leadopt/hooks/useLeadOptHaloRun';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition } from '../../utils/workflows';
+import { activeEngineIds } from '../../config/engineCapabilities';
+
+const COPILOT_APPLYABLE_BACKENDS = new Set(activeEngineIds());
 import { ProjectDetailLayout } from './ProjectDetailLayout';
 import {
   filterConstraintsByBackend,
@@ -117,7 +120,7 @@ export function useProjectDetailWorkspaceView() {
   if (error && !project) {
     return (
       <div className="page-grid">
-        <div className="alert error">{error}</div>
+        <div className="alert error" role="alert">{error}</div>
         <Link className="btn btn-ghost" to="/projects">
           Back to projects
         </Link>
@@ -680,7 +683,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const backendPatch = readText(parameterPatch.backend).trim().toLowerCase();
     const backendPatchAllowed = isVirtualScreeningWorkflow
       ? backendPatch === 'nesso'
-      : backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix';
+      : COPILOT_APPLYABLE_BACKENDS.has(backendPatch);
     const seedPatch = readFiniteNumber(parameterPatch.seed);
     const hasPatch =
       replacementComponents.length > 0 ||
@@ -1033,6 +1036,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handlePredictionTemplateResiduePick,
     handleRuntimeBackendChange,
     handleRuntimeSeedChange,
+    handleRuntimeRfd4SpecChange,
     handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
     handleRuntimePeptideChiralityChange,
@@ -1393,6 +1397,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     predictionComponentsSidebarProps,
     backend: draft.backend,
     seed: draft.inputConfig.options.seed ?? null,
+    rfd4Spec: draft.inputConfig.options.rfd4Spec ?? '',
     lowVram: draft.inputConfig.options.lowVram ?? false,
     peptideDesignMode: draft.inputConfig.options.peptideDesignMode ?? 'linear',
     peptideChirality: draft.inputConfig.options.peptideChirality ?? 'l',
@@ -1444,6 +1449,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       (draft.inputConfig.options.peptideBinderLength ?? 20),
     onBackendChange: handleRuntimeBackendChange,
     onSeedChange: handleRuntimeSeedChange,
+    onRfd4SpecChange: handleRuntimeRfd4SpecChange,
     onLowVramChange: handleRuntimeLowVramChange,
     onPeptideDesignModeChange: handleRuntimePeptideDesignModeChange,
     onPeptideChiralityChange: handleRuntimePeptideChiralityChange,
@@ -1645,11 +1651,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const backendPatch = readText(patch.backend).trim().toLowerCase();
       const backendPatchAllowed = isVirtualScreeningWorkflow
         ? backendPatch === 'nesso'
-        : backendPatch === 'boltz' ||
-        backendPatch === 'alphafold3' ||
-        backendPatch === 'protenix' ||
-        backendPatch === 'boltz2dock' ||
-        backendPatch === 'protenix2dock';
+        : COPILOT_APPLYABLE_BACKENDS.has(backendPatch);
       if (backendPatchAllowed) {
         handleRuntimeBackendChange(backendPatch);
       }

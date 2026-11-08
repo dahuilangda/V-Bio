@@ -57,3 +57,29 @@ export function withLeadOptimizationLigandSmiles(
     components: nextComponents
   };
 }
+
+/** lead-opt 预测记录的 backend 词表：别名归一 + 引擎白名单（与配置矩阵保持一致）。 */
+const LEAD_OPT_BACKEND_ALIASES: Record<string, string> = {
+  boltz2: 'boltz',
+  nesso1: 'nesso',
+  'nesso-1': 'nesso'
+};
+
+const LEAD_OPT_BACKEND_IDS = new Set([
+  'boltz',
+  'alphafold3',
+  'protenix',
+  'nesso',
+  'pocketxmol',
+  'protenix2dock',
+  'mol1',
+  'mol1dock',
+  'rfd4'
+]);
+
+export function normalizeLeadOptPredictionBackend(value: unknown): string {
+  const token = String(value || '').trim().toLowerCase();
+  const aliased = LEAD_OPT_BACKEND_ALIASES[token];
+  if (aliased) return aliased;
+  return LEAD_OPT_BACKEND_IDS.has(token) ? token : '';
+}

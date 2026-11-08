@@ -66,8 +66,11 @@ export function formatActionSummary(action: CopilotPlanAction): ActionSummaryEnt
       // pairs with display labels so engine/chirality choices are readable.
       const FRIENDLY: Record<string, string> = {
         backend: '',
-        boltz2dock: 'Boltz2Dock',
+        boltz2dock: 'Boltz2Dock (deprecated)',
         protenix2dock: 'Protenix2Dock',
+        mol1: 'Mol-1',
+        mol1dock: 'Mol-1 Dock',
+        rfd4: 'RFD4-Proteina',
         peptideChirality: 'Chirality',
         d: 'D-peptide',
         l: 'L-peptide',

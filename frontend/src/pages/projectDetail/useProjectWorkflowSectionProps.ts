@@ -204,6 +204,8 @@ interface UseProjectWorkflowSectionPropsInput {
   peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
   onSeedChange: (seed: number | null) => void;
+  rfd4Spec: string;
+  onRfd4SpecChange: (value: string) => void;
   onLowVramChange: (lowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideChiralityChange: (chirality: 'l' | 'd') => void;
@@ -360,6 +362,8 @@ export function useProjectWorkflowSectionProps({
   lowVram,
   onBackendChange,
   onSeedChange,
+  rfd4Spec,
+  onRfd4SpecChange,
   onLowVramChange,
   peptideDesignMode,
   peptideChirality,
@@ -531,6 +535,8 @@ export function useProjectWorkflowSectionProps({
         onDockPocketChange: onAffinityDockPocketChange,
         onDockBlindChange: onAffinityDockBlindChange,
         onSeedChange,
+        rfd4Spec,
+        onRfd4SpecChange,
         onLigandSmilesChange: setAffinityLigandSmiles,
         onResizerPointerDown: onResultsResizerPointerDown,
         onResizerKeyDown: onResultsResizerKeyDown
@@ -643,6 +649,8 @@ export function useProjectWorkflowSectionProps({
         isAffinityWorkflow,
         backend,
         seed: seed ?? null,
+        rfd4Spec,
+        onRfd4SpecChange,
         isLowVram: lowVram,
         peptideDesignMode,
         peptideChirality,

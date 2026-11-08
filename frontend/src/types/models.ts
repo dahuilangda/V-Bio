@@ -219,6 +219,8 @@ export interface PredictionOptions {
   leadOptKeepFragmentSmiles?: string;
   leadOptEditAtomIndices?: string;
   lowVram?: boolean;
+  /** RFD4 motif 条件化 spec（仅 backend=rfd4 的 prediction 工作流）。 */
+  rfd4Spec?: string;
 }
 
 export interface ProjectInputConfig {
@@ -523,6 +525,8 @@ export interface PredictionSubmitInput {
   templateUploads?: PredictionTemplateUpload[];
   customCcdMolecules?: CustomCcdMoleculeInput[];
   lowVram?: boolean;
+  /** RFD4 专属：motif 条件化生成的 binder spec 文本（仅 backend=rfd4 时随表单透传）。 */
+  rfd4Spec?: string;
 }
 
 export interface CustomCcdMoleculeInput {

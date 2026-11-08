@@ -62,6 +62,14 @@ export function engineOptionsFor(options: {
     .map(([id, engine]) => ({ value: id, label: engine.label }));
 }
 
+export function engineSupportsWorkflow(backend: string, workflow: WorkflowKey): boolean {
+  return ENGINES[backend]?.workflows.includes(workflow) === true;
+}
+
+export function engineSupportsDesignMode(backend: string, mode: DesignMode): boolean {
+  return ENGINES[backend]?.design_modes.includes(mode) === true;
+}
+
 export function engineSupportsFeature(backend: string, feature: keyof EngineFeatures): boolean {
   return Boolean(ENGINES[backend]?.features?.[feature]);
 }

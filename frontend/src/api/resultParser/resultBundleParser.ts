@@ -1740,7 +1740,11 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
   const zip = await JSZipLib.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
-  const isProtenix = names.some((name) => name.toLowerCase().includes('protenix/output/'));
+  // protenix2dock 归档沿用 protenix/output/ 前缀；mol1 自带 mol1/output/，
+  // 两者置信度载荷同形（pLDDT/ipSAE），按 protenix 契约解析。
+  const isProtenix = names.some(
+    (name) => name.toLowerCase().includes('protenix/output/') || name.toLowerCase().includes('mol1/output/')
+  );
   const isNesso = names.some((name) => name.toLowerCase() === 'nesso/manifest.json');
   // HALO lead-optimization bundles are structureless run artifacts keyed on a
   // top-level halo_results.json (engine marker inside). The name deliberately

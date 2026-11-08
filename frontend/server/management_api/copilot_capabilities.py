@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from backend.core.engine_capabilities import active_engine_ids
 from management_api.copilot_skill_harness import CopilotSkillDefinition
 from management_api.copilot_skills.context_actions import build_context_skill_definitions
 from management_api.copilot_skills.workflows import (
@@ -119,10 +120,12 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
 ]
 
 
-TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
-    # Keep in sync with backend/routes/prediction.py accepted backends
-    # (single-source wiring: capabilities 同时服务 /tasks 快照与 copilot 会话).
-    "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix", "nesso", "protenix2dock", "boltz2dock"]},
+
+
+def _init_task_parameter_schema() -> Dict[str, Dict[str, Any]]:
+    schema: Dict[str, Dict[str, Any]] = {
+        # 与 configs/engine_capabilities.json 的 active 引擎同源派生，随矩阵自动跟随。
+        "backend": {"type": "enum", "values": sorted(active_engine_ids())},
     "seed": {"type": "int", "min": 0, "max": 2147483647},
     "affinityMode": {
         "type": "enum",
@@ -147,7 +150,7 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
             "placed at the pocket and refined against the pinned receptor, "
             "then the product is flipped back to L-target + D-peptide. "
             "Works with linear, cyclic and bicyclic modes; requires a "
-            "docking backend (protenix2dock or boltz2dock)."
+            "docking backend (protenix2dock or mol1)."
         ),
     },
     "peptideBinderLength": {"type": "int", "min": 5, "max": 120},
@@ -178,7 +181,11 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
     "peptideBicyclicCys2Pos": {"type": "int", "min": 1, "max": 200},
     "peptideBicyclicCys3Pos": {"type": "int", "min": 1, "max": 200},
     "componentsReplacement": {"type": "component_replacement"},
-}
+    }
+    return schema
+
+
+TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = _init_task_parameter_schema()
 
 WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
     "prediction": ["backend", "seed", "affinityBinding", "lowVram", "componentsReplacement"],

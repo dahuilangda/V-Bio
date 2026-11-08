@@ -176,6 +176,10 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   if (input.msaMode) {
     form.append('msa_mode', input.msaMode);
   }
+  const rfd4Spec = String(input.rfd4Spec || '').trim();
+  if (backend === 'rfd4' && rfd4Spec) {
+    form.append('rfd4_spec', rfd4Spec);
+  }
   if (input.notifyEmail && isValidNotifyEmail(input.notifyEmail)) {
     form.append('notify_email', input.notifyEmail);
   }

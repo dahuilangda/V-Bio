@@ -560,7 +560,11 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
         useMsa: hasMsa,
         templateUploads,
         customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined,
-        lowVram: !isVirtualScreeningWorkflow && submissionConfig.options.lowVram === true
+        lowVram: !isVirtualScreeningWorkflow && submissionConfig.options.lowVram === true,
+        rfd4Spec:
+          effectiveBackend === 'rfd4' && !isVirtualScreeningWorkflow && !isPeptideDesignWorkflow
+            ? String(submissionConfig.options.rfd4Spec || '').trim() || undefined
+            : undefined
       });
 
       const queuedAt = new Date().toISOString();

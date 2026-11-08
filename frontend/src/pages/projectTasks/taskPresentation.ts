@@ -1,4 +1,5 @@
 import type { ProjectTask } from '../../types/models';
+import { ENGINES } from '../../config/engineCapabilities';
 import { isPredictionLikeWorkflowKey, normalizeWorkflowKey, type WorkflowKey } from '../../utils/workflows';
 import type { MetricTone } from './taskListTypes';
 
@@ -96,6 +97,8 @@ export function backendLabel(value: string): string {
   if (value === 'protenix') return 'Protenix';
   if (value === 'boltz') return 'Boltz-2';
   if (value === 'nesso') return 'Nesso-1';
+  const matrixLabel = ENGINES[value]?.label;
+  if (matrixLabel) return matrixLabel;
   return value ? value.toUpperCase() : 'Unknown';
 }
 
