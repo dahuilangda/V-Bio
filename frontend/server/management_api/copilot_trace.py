@@ -32,6 +32,7 @@ TRACE_NO_CONVERGENCE = "no_convergence"
 # step-by-step concretization with progress tracking.
 TRACE_OUTLINE = "outline"
 TRACE_STEP_DONE = "step_done"
+TRACE_PROGRESS_NOTE = "progress_note"
 TRACE_WRITES_MATERIALIZED = "writes_materialized"
 
 

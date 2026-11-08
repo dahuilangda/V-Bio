@@ -117,6 +117,10 @@ export function formatTraceStep(step: CopilotTraceStep): string {
       if (state === 'failed') return 'Could not complete the plan';
       return 'Complete';
     }
+    case 'progress_note': {
+      // Codex 式过程播报：工作轮的一两句进度快照，流式气泡里跟随工具调用显示。
+      return String(detail.note || '').trim() || 'Working';
+    }
     case 'no_convergence':
       // Mirrors the backend's honest failure copy: the request is fine, the planner failed —
       // the final message names the actual blocker. Never tell the user to rephrase.
@@ -163,6 +167,38 @@ export function formatTraceStep(step: CopilotTraceStep): string {
     default:
       return step.event;
   }
+}
+
+// ---- live plan progress (Codex update_plan-style checklist) -------------
+
+export interface CopilotPlanProgress {
+  /** Step descriptions in plan order. */
+  steps: string[];
+  /** 0-based index of the step currently executing; === steps.length when all are done. */
+  current: number;
+}
+
+/**
+ * Derive the live plan checklist from a trace: the outline fixes the steps and every
+ * step_done advances the cursor. The harness owns the invariant (it drives step-by-step
+ * concretization), so statuses are DERIVED here — never model-declared.
+ */
+export function readPlanProgress(steps: CopilotTraceStep[]): CopilotPlanProgress | null {
+  let base: { steps: string[]; current: number } | null = null;
+  for (const step of steps) {
+    const detail = (step.detail && typeof step.detail === 'object' ? step.detail : {}) as Record<string, unknown>;
+    if (step.event === 'outline' && Array.isArray(detail.steps)) {
+      base = { steps: detail.steps.map((item) => String(item || '').trim()).filter(Boolean), current: 0 };
+      continue;
+    }
+    if (!base) continue;
+    if (step.event === 'step_done') {
+      const oneBased = Number(detail.step);
+      base = { steps: base.steps, current: Number.isInteger(oneBased) && oneBased > 0 ? oneBased : base.current + 1 };
+    }
+  }
+  if (!base || base.steps.length < 2) return null; // 单步计划不值得渲染清单
+  return base;
 }
 
 // ---- action receipts ----------------------------------------------------

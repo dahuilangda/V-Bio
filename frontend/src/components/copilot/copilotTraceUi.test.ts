@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ProjectCopilotMessage } from '../../types/models';
-import { collectCopilotMemory, formatTraceStep, readPlannerTrace, readSessionId } from './copilotTraceUi';
+import { collectCopilotMemory, formatTraceStep, readPlanProgress, readPlannerTrace, readSessionId } from './copilotTraceUi';
 
 function msg(role: ProjectCopilotMessage['role'], sessionId: string, observations?: unknown[]): ProjectCopilotMessage {
   return {
@@ -97,5 +97,40 @@ describe('collectCopilotMemory', () => {
 
   it('returns empty when no assistant observations exist', () => {
     expect(collectCopilotMemory([msg('user', 's1')], 's1')).toEqual([]);
+  });
+});
+
+describe('readPlanProgress', () => {
+  const outlineStep = (round: number, step: number, description = '') => ({
+    round,
+    event: 'step_done',
+    detail: { step, total: 3, description }
+  });
+
+  it('derives progress from an outline plus step_done events', () => {
+    const trace = [
+      { round: 0, event: 'model_request' },
+      { round: 0, event: 'outline', detail: { steps: ['检索靶点', '提交预测', '解读结果'] } },
+      outlineStep(1, 1)
+    ];
+    const progress = readPlanProgress(trace as never);
+    expect(progress).not.toBeNull();
+    expect(progress?.steps).toEqual(['检索靶点', '提交预测', '解读结果']);
+    expect(progress?.current).toBe(1);
+  });
+
+  it('uses the 1-based step marker over the event count', () => {
+    const trace = [
+      { round: 0, event: 'outline', detail: { steps: ['a', 'b', 'c'] } },
+      outlineStep(2, 3)
+    ];
+    expect(readPlanProgress(trace as never)?.current).toBe(3);
+  });
+
+  it('returns null without a multi-step outline', () => {
+    expect(readPlanProgress([{ round: 0, event: 'model_request' }] as never)).toBeNull();
+    expect(
+      readPlanProgress([{ round: 0, event: 'outline', detail: { steps: ['仅一步'] } }] as never)
+    ).toBeNull();
   });
 });

@@ -33,6 +33,7 @@ from management_api.copilot_trace import (
     TRACE_NO_CONVERGENCE,
     TRACE_OUTLINE,
     TRACE_SKILL_OBSERVATIONS,
+    TRACE_PROGRESS_NOTE,
     TRACE_STEP_DONE,
     TRACE_TERMINAL,
     PlannerTrace,
@@ -2272,6 +2273,11 @@ class CopilotAssistant:
             # (e.g. the next outline step), not a stuck loop.
             last_rejected_signature = None
             grounding_reject_streak = 0
+
+            # Codex User Updates Spec：工作轮的 message 即进度播报（1-2 句），进 trace
+            # 供流式气泡渲染；终态由最终消息接管，不落历史卡片。
+            if audit.state != "complete" and message and audit.operations:
+                trace.record(round_index, TRACE_PROGRESS_NOTE, note=message[:200])
 
             # Validated planner questions for this round (the audit rejected any malformed item,
             # so at this point every question in the candidate is well-formed).

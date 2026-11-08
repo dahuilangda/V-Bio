@@ -597,11 +597,15 @@ class CopilotSkillHarness:
             "GOAL_STEPS — for complex tasks, emit an outline first:\n"
             "  [{description}] — the harness drives step-by-step concretization\n"
             "  Each step is a single description. To fan out over a retrieved collection (one action "
-            "per element), emit one operation per element when the harness asks for that step.\n\n"
+            "per element), emit one operation per element when the harness asks for that step.\n"
+            "  Discipline: skip the outline for easy requests; never emit a single-step outline; "
+            "phrase each step as the outcome it produces, not the tool it calls.\n\n"
             "REFERENCE — use a retrieved value in an argument instead of pasting it\n"
             '  (canonical) {"$fromObservation": "<id>", "field": "<field>", "index": 0} — also\n'
             '  accepted as the shorthand string "$fromObservation:<id>.<field>[<index>]"\n\n'
             "GUIDELINES:\n"
+            "- When a round runs reads, write the message as a 1-2 sentence progress note: "
+            "what you found, what you do next\n"
             "- Emit goal_steps at most once per turn: the outline is fixed once the harness accepts it, "
             "and re-emitting it is rejected\n"
             "- Operation ids, depends_on, and $fromObservation references are scoped to the CURRENT "

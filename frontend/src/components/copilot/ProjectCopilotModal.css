@@ -781,3 +781,48 @@
   color: #243d32;
   overflow-wrap: anywhere;
 }
+
+/* 活计划清单（Codex update_plan 风格）：harness trace 推导的步进状态，
+   ✓ 已完成 / ▶ 进行中 / ○ 待办。 */
+.copilot-chat-window .copilot-plan-progress {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 5px;
+  border: 1px solid #e2ece6;
+  border-radius: 10px;
+  background: #f8fbf9;
+}
+
+.copilot-chat-window .copilot-plan-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.copilot-chat-window .copilot-plan-step-mark {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+}
+
+.copilot-chat-window .copilot-plan-step.is-done {
+  color: #4a6358;
+}
+
+.copilot-chat-window .copilot-plan-step.is-done .copilot-plan-step-mark {
+  color: #1f7a4d;
+}
+
+.copilot-chat-window .copilot-plan-step.is-current {
+  color: #1f4f3f;
+  font-weight: 600;
+}
+
+.copilot-chat-window .copilot-plan-step.is-current .copilot-plan-step-mark {
+  color: #1f7a4d;
+}
