@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Clock3, ExternalLink, Square, Trash2 } from 'lucide-react';
+import { Clock3, ExternalLink, ListChecks, Square, Trash2 } from 'lucide-react';
 import type { ProjectTask } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
 import { canEditTask } from '../../utils/accessControl';
@@ -110,7 +110,10 @@ export function ProjectTasksTable({
   return (
     <>
       {filteredCount === 0 ? (
-        <div className="empty-state">{totalRowCount > 0 ? 'No tasks match current filters.' : 'No task runs yet.'}</div>
+        <div className="empty-state">
+          <ListChecks size={20} aria-hidden="true" />
+          {totalRowCount > 0 ? 'No tasks match current filters.' : 'No task runs yet.'}
+        </div>
       ) : (
         <div className="table-wrap project-table-wrap task-table-wrap">
           <table className={tableClass}>

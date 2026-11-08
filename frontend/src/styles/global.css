@@ -800,10 +800,18 @@ select:focus {
 
 .empty-state {
   border: 1px dashed var(--line);
-  padding: 18px;
+  padding: 22px 18px;
   border-radius: 12px;
   color: var(--muted);
   background: #f8fbf9;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.empty-state svg {
+  color: #9db8aa;
 }
 
 .alert {

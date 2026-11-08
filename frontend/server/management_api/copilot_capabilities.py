@@ -15,6 +15,7 @@ from management_api.copilot_skills.workflows import (
 COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     {
         "name": "collaboration_message",
+        "short": "讨论 · 解读 · 总结",
         "description": "Respond to shared project/task discussion, summarize context, mention collaborators, and keep a durable conversation trail.",
         "trigger": "General discussion, status questions, result interpretation, or collaborator notes.",
         "inputs": "User message, conversation history, current project/task/list context.",
@@ -23,6 +24,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "project_list_analysis",
+        "short": "项目统计",
         "description": "Analyze projects by workflow, backend, task counts, activity, failures, and recency.",
         "trigger": "Questions about project portfolio, statistics, failures, active work, stale projects, or summaries.",
         "inputs": "Visible projects, filtered counts, current filters, sort order.",
@@ -31,6 +33,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "project_list_filter_sort",
+        "short": "项目筛选排序",
         "description": "Plan and apply project list search, workflow/state/backend/activity filters, recency filters, min task count, and sorting.",
         "trigger": "Requests to filter, sort, or summarize the project portfolio.",
         "inputs": "Current list controls and visible project statistics.",
@@ -39,6 +42,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_list_analysis",
+        "short": "任务洞察",
         "description": "Analyze a project's task list by state, backend, workflow, metric columns, failures, runtime status, and result quality.",
         "trigger": "Questions about task trends, best/worst results, failed runs, queued/running tasks, or quality metrics.",
         "inputs": "Visible task rows, filters, sort order, metrics, current page.",
@@ -47,6 +51,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_list_filter_sort",
+        "short": "任务筛选排序",
         "description": "Plan and apply task list search, state/workflow/backend filters, metric visibility, advanced filters, and sorting.",
         "trigger": "Requests to filter, sort, or summarize a project's task list.",
         "inputs": "Current task controls and visible task rows.",
@@ -55,6 +60,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_result_analysis",
+        "short": "结果解读",
         "description": "Explain a specific task's state, errors, confidence, affinity metrics, ligand/protein setup, and likely next steps.",
         "trigger": "Questions about a selected task result, failure reason, reliability, or what to do next.",
         "inputs": "Task row, runtime state, properties, confidence, affinity, current project workflow.",
@@ -63,6 +69,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_creation_planning",
+        "short": "规划新任务",
         "description": "Plan creating a new task from the task list with prefilled inputs, matched to the project workflow's accepted input types.",
         "trigger": "User asks to start a new task or to fill a task input while on a task list page.",
         "inputs": "Visible task rows, project workflow, retrieved inputs.",
@@ -71,6 +78,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_submission_planning",
+        "short": "提交与重跑",
         "description": "Draft a parameter-change and submission plan for the current task/project using existing UI form state, or copy a visible task-list row into a new draft and adjust it on the task-detail page.",
         "trigger": "Commands to rerun, change seed/backend/mode/parameters, submit variants, copy a visible task row, or submit confirmed tasks.",
         "inputs": "Current draft/task parameters, visible task rows when in task_list, workflow, editable status, run disabled reason, requested changes.",
@@ -79,6 +87,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "prediction.submit_plan",
+        "short": "预测重跑",
         "description": "Plan Prediction workflow parameter updates and reruns.",
         "trigger": "Prediction rerun, seed change, or request to submit the current prediction draft.",
         "inputs": "Current Prediction draft, seed, components, constraints, run disabled reason.",
@@ -87,6 +96,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "virtual_screening.submit_plan",
+        "short": "虚拟筛选重跑",
         "description": "Plan Virtual Screening seed updates and reruns with this workflow's fixed backend.",
         "trigger": "Virtual Screening rerun, seed change, or request to submit the current screening batch.",
         "inputs": "Current target sequence, compound library, seed, and run disabled reason.",
@@ -95,6 +105,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "affinity.submit_plan",
+        "short": "对接提交",
         "description": "Plan Docking workflow mode/seed updates and submission.",
         "trigger": "Docking (dock mode) request, mode change, seed change, or submit request. Dock is the default mode: protein structure plus ligand SMILES, docking and affinity computed together.",
         "inputs": "Current Docking draft, target structure / ligand SMILES state, affinityMode, seed, run disabled reason.",
@@ -103,6 +114,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "peptide_design.submit_plan",
+        "short": "肽设计参数",
         "description": "Plan Peptide Design runtime option updates and submission.",
         "trigger": "Peptide chirality (L/D), design mode, length window, NCAA pool, pocket residues, iterations, population, elite size, seed, or submit request.",
         "inputs": "Current Peptide Design draft, peptide runtime options, components, run disabled reason.",
@@ -111,6 +123,7 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "lead_optimization.submit_plan",
+        "short": "Lead-opt 引导",
         "description": "Explain that Lead Optimization needs dedicated candidate/MMP tools before automated submission.",
         "trigger": "Lead Optimization candidate scoring, MMP query, batch candidate submission, or fragment selection requests.",
         "inputs": "Current Lead Optimization workspace state, selected fragments/candidates, backend, query state.",

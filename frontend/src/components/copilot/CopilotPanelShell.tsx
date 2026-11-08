@@ -5,7 +5,7 @@
  * groups. The composer element is built by the modal and passed as `children`.
  */
 import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
-import { LoaderCircle } from 'lucide-react';
+import { LoaderCircle, ShieldAlert } from 'lucide-react';
 import type { CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage, Session } from '../../types/models';
 import type { CopilotCapabilityHint, CopilotTestResult } from '../../api/copilotApi';
 import { CopilotHeader } from './CopilotHeader';
@@ -116,29 +116,31 @@ function CopilotCapabilityCard({
   hints: { capabilities: CopilotCapabilityHint[]; boundaries: string[] };
 }) {
   const { capabilities, boundaries } = hints;
-  if (capabilities.length === 0 && boundaries.length === 0) return null;
+  const chips = capabilities
+    .map((item) => ({ name: item.name, label: item.short || item.summary }))
+    .filter((item) => item.label)
+    .slice(0, 8);
+  if (chips.length === 0 && boundaries.length === 0) return null;
   return (
     <div className="copilot-capability-card">
-      {capabilities.length > 0 && (
+      {chips.length > 0 ? (
         <>
-          <div className="copilot-capability-title">我可以帮你</div>
-          <ul className="copilot-capability-list">
-            {capabilities.slice(0, 8).map((item) => (
-              <li key={item.name || item.summary}>{item.summary}</li>
+          <div className="copilot-capability-title">试试问我</div>
+          <div className="copilot-capability-chips">
+            {chips.map((item) => (
+              <span className="copilot-capability-chip" key={item.name || item.label} title={capabilities.find((c) => c.name === item.name)?.summary}>
+                {item.label}
+              </span>
             ))}
-          </ul>
+          </div>
         </>
-      )}
-      {boundaries.length > 0 && (
-        <>
-          <div className="copilot-capability-title">请注意</div>
-          <ul className="copilot-capability-list is-boundaries">
-            {boundaries.map((line) => (
-              <li key={line}>{line}</li>
-            ))}
-          </ul>
-        </>
-      )}
+      ) : null}
+      {boundaries.length > 0 ? (
+        <div className="copilot-capability-boundaries">
+          <ShieldAlert size={12} aria-hidden="true" />
+          {boundaries.join(' · ')}
+        </div>
+      ) : null}
     </div>
   );
 }

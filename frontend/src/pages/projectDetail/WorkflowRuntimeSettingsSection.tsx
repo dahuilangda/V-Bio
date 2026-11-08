@@ -982,7 +982,7 @@ export function WorkflowRuntimeSettingsSection({
                   </Field>
                                   <Field
                   label="Peptide Chirality"
-                  hint="D-peptides run the mirror workflow: the target is mirrored, design happens in D-space, results are flipped back. Available on Mol1Dock/Protenix2Dock."
+                  hint="D-design runs the mirror workflow; available on docking backends."
                 >
                   <select
                   value={peptideChirality}
@@ -999,7 +999,7 @@ export function WorkflowRuntimeSettingsSection({
                   </Field>
                   <Field
                   label="Structure Mode"
-                  hint="Secondary-structure bias for de-novo proposals: helix favours amphipathic helices, hairpin favours beta-hairpins, strand-loop mixes an extended strand with a turn. Auto leaves the choice to the model."
+                  hint="Secondary-structure bias: helix, hairpin, strand-loop, or Auto (model decides)."
                 >
                   <select
                   value={peptideStructureMode}

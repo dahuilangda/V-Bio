@@ -2047,7 +2047,7 @@ ${submitTaskIdCapture}`;
                   </Field>
                 <Field
                   label="Library file path"
-                  hint="Uploaded as a separate compounds_file part, replacing the inline library. Provide the library inline or as a file — never both."
+                  hint="Uploads a compounds_file part; provide the library inline or as a file, never both."
                   hintAlign="end"
                 >
                   <input

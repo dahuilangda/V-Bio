@@ -23,7 +23,7 @@ import {
   SlidersHorizontal,
   Square,
   Trash2
-} from 'lucide-react';
+, FolderPlus } from 'lucide-react';
 import { readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/copilotSessionState';
 
 // The modal drags in the whole Copilot chat UI; only its open state is read
@@ -829,7 +829,17 @@ export function ProjectsPage() {
           <div className="muted">Loading projects...</div>
         ) : filteredProjects.length === 0 ? (
           <div className="empty-state">
-            {projects.length === 0 ? 'No projects yet. Create your first one.' : 'No projects match current filters.'}
+            <FolderPlus size={20} aria-hidden="true" />
+            {projects.length === 0 ? (
+              <>
+                <span>No projects yet.</span>
+                <button type="button" className="btn btn-primary btn-compact" onClick={() => setShowCreate(true)}>
+                  <FolderPlus size={14} /> New project
+                </button>
+              </>
+            ) : (
+              <span>No projects match current filters.</span>
+            )}
           </div>
         ) : (
           <div className="table-wrap project-table-wrap">

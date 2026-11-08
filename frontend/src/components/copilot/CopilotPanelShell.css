@@ -159,16 +159,28 @@
   color: #4a6358;
 }
 
-.copilot-capability-list {
-  margin: 0;
-  padding-left: 18px;
-  display: grid;
-  gap: 4px;
-  line-height: 1.45;
+.copilot-capability-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.copilot-capability-list.is-boundaries {
+.copilot-capability-chip {
+  padding: 4px 10px;
+  border: 1px solid #d7e4dc;
+  border-radius: 999px;
+  background: #fff;
+  color: #2e4c3d;
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.copilot-capability-boundaries {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: #7a6a4f;
+  font-size: var(--text-xs);
 }
 
 .copilot-chat-window .copilot-message {

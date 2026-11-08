@@ -94,6 +94,7 @@ function sanitizeCopilotContextPayload(payload: Record<string, unknown>): Record
 
 export interface CopilotCapabilityHint {
   name: string;
+  short: string;
   summary: string;
 }
 
@@ -119,7 +120,16 @@ export async function getCopilotConfig(): Promise<CopilotConfig> {
   return {
     enabled: payload.enabled === true,
     completionEnabled: payload.completionEnabled === true,
-    capabilities: Array.isArray(payload.capabilities) ? payload.capabilities : [],
+    capabilities: Array.isArray(payload.capabilities)
+      ? payload.capabilities.map((item) => {
+          const raw = item as unknown as Record<string, unknown>;
+          return {
+            name: String(raw?.name || ''),
+            short: String(raw?.short || ''),
+            summary: String(raw?.summary || '')
+          };
+        })
+      : [],
     boundaries: Array.isArray(payload.boundaries) ? payload.boundaries : []
   };
 }

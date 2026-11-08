@@ -481,7 +481,11 @@ def copilot_config() -> Tuple[Response, int]:
     from management_api.copilot_capabilities import COPILOT_CAPABILITIES
 
     capabilities = [
-        {"name": str(cap.get("name") or ""), "summary": " ".join(str(cap.get("description") or "").split())}
+        {
+            "name": str(cap.get("name") or ""),
+            "short": str(cap.get("short") or "").strip(),
+            "summary": " ".join(str(cap.get("description") or "").split()),
+        }
         for cap in COPILOT_CAPABILITIES
     ]
     return jsonify({
@@ -489,11 +493,11 @@ def copilot_config() -> Tuple[Response, int]:
         "completionEnabled": _copilot_is_completion_enabled(),
         "capabilities": capabilities,
         "boundaries": [
-            "不能执行任意代码或访问未在上下文中展示的页面/文件",
-            "只能查询已注册的数据源（UniProt、RCSB、AlphaFold、PubChem、ChEMBL 等）",
-            "不能创建或删除项目；写操作需经确认后由页面执行",
-            "已完成任务的结果只读，不能修改",
-            "不能调整工作流参数之外的内容，不预测实验结果",
+            "不执行任意代码",
+            "仅限注册数据源",
+            "写操作需确认",
+            "任务结果只读",
+            "不预测实验结果",
         ],
     }), 200
 
