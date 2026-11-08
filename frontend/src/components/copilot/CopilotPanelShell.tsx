@@ -110,7 +110,6 @@ interface CopilotPanelShellProps {
   children: ReactNode;
 }
 
-/** 空会话能力卡：展示 Copilot 能做什么与边界，数据来自 /copilot/config。 */
 function CopilotCapabilityCard({
   hints
 }: {

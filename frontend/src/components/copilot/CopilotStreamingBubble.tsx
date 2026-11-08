@@ -1,7 +1,5 @@
 /**
- * In-flight assistant bubble — meta + empty body + steering inserts + live trace +
- * live plan checklist (Codex update_plan 风格，状态由 harness 的 trace 推导).
- * Same shape as a finished message so completion fills the body without jitter.
+ * In-flight assistant bubble — meta, plan checklist, steering inserts, live trace.
  */
 import { formatDateTime } from '../../utils/date';
 import { CopilotThinkingCard } from './CopilotMessageCards';

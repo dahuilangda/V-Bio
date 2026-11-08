@@ -287,6 +287,8 @@ export interface CopilotTurnResult {
   trace: CopilotTraceStep[];
   /** Compact records retrieved this turn, carried forward as copilot_memory for follow-up turns. */
   observations: Record<string, unknown>[];
+  /** 终态计划进度（outline 步骤 + 已完成数）；无 outline 的回合为 null。 */
+  plan: { steps: string[]; current: number; done: boolean } | null;
 }
 
 /** Validate a raw Copilot turn payload into a CopilotTurnResult, or throw with a concrete reason.
@@ -344,6 +346,15 @@ export function validateCopilotTurnPayload(payload: Record<string, unknown>): Co
         (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
       )
     : [];
+  const rawPlan = payload.plan;
+  const plan =
+    rawPlan && typeof rawPlan === 'object' && !Array.isArray(rawPlan) && Array.isArray((rawPlan as Record<string, unknown>).steps)
+      ? {
+          steps: ((rawPlan as Record<string, unknown>).steps as unknown[]).map((item) => String(item || '').trim()).filter(Boolean),
+          current: Number((rawPlan as Record<string, unknown>).current) || 0,
+          done: (rawPlan as Record<string, unknown>).done === true
+        }
+      : null;
   return {
     content,
     actions,
@@ -351,7 +362,8 @@ export function validateCopilotTurnPayload(payload: Record<string, unknown>): Co
     questions,
     planId,
     trace: parseCopilotTrace(payload.trace),
-    observations
+    observations,
+    plan
   };
 }
 

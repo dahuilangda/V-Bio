@@ -2274,8 +2274,6 @@ class CopilotAssistant:
             last_rejected_signature = None
             grounding_reject_streak = 0
 
-            # Codex User Updates Spec：工作轮的 message 即进度播报（1-2 句），进 trace
-            # 供流式气泡渲染；终态由最终消息接管，不落历史卡片。
             if audit.state != "complete" and message and audit.operations:
                 trace.record(round_index, TRACE_PROGRESS_NOTE, note=message[:200])
 
@@ -3389,8 +3387,33 @@ class CopilotAssistant:
             get_steering=get_steering,
             get_follow_ups=get_follow_ups,
         )
+        plan_progress = self._plan_progress_from_trace(result.get("trace") or [])
+        if plan_progress:
+            result["plan"] = plan_progress
         self._persist_session_goal(context_payload=context_payload, user_id=user_id, content=content, result=result)
         return result
+
+    @staticmethod
+    def _plan_progress_from_trace(trace: Any) -> Dict[str, Any] | None:
+        """{steps, current, done} derived from outline/step_done trace events."""
+        steps: List[str] = []
+        current = 0
+        seen_outline = False
+        for step in trace if isinstance(trace, list) else []:
+            if not isinstance(step, dict):
+                continue
+            detail = step.get("detail") if isinstance(step.get("detail"), dict) else {}
+            event = str(step.get("event") or "")
+            if event == "outline" and isinstance(detail.get("steps"), list):
+                steps = [str(item or "").strip() for item in detail["steps"] if str(item or "").strip()]
+                current = 0
+                seen_outline = True
+            elif event == "step_done" and seen_outline:
+                one_based = detail.get("step")
+                current = int(one_based) if isinstance(one_based, (int, float)) and int(one_based) > 0 else current + 1
+        if len(steps) < 2:
+            return None
+        return {"steps": steps, "current": min(current, len(steps)), "done": current >= len(steps)}
 
     def _persist_session_goal(
         self,

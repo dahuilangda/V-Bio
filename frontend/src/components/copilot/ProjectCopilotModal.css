@@ -782,8 +782,6 @@
   overflow-wrap: anywhere;
 }
 
-/* 活计划清单（Codex update_plan 风格）：harness trace 推导的步进状态，
-   ✓ 已完成 / ▶ 进行中 / ○ 待办。 */
 .copilot-chat-window .copilot-plan-progress {
   list-style: none;
   margin: 0 0 8px;
