@@ -143,20 +143,9 @@
 /* 空会话能力卡：紧凑摘要，不喧宾夺主。 */
 .copilot-capability-card {
   align-self: stretch;
-  border: 1px solid #e2ece6;
-  border-radius: 12px;
-  background: #f8fbf9;
-  padding: 10px 12px;
-  display: grid;
-  gap: 8px;
-  font-size: var(--text-sm);
-  color: #3c5748;
-}
-
-.copilot-capability-title {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  color: #4a6358;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .copilot-capability-chips {
@@ -169,17 +158,8 @@
   padding: 4px 10px;
   border: 1px solid #d7e4dc;
   border-radius: 999px;
-  background: #fff;
+  background: #f8fbf9;
   color: #2e4c3d;
-  font-size: var(--text-xs);
-  font-weight: 500;
-}
-
-.copilot-capability-boundaries {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: #7a6a4f;
   font-size: var(--text-xs);
 }
 

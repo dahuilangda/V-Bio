@@ -5,7 +5,7 @@
  * groups. The composer element is built by the modal and passed as `children`.
  */
 import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
-import { LoaderCircle, ShieldAlert } from 'lucide-react';
+import { LoaderCircle } from 'lucide-react';
 import type { CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage, Session } from '../../types/models';
 import type { CopilotCapabilityHint, CopilotTestResult } from '../../api/copilotApi';
 import { CopilotHeader } from './CopilotHeader';
@@ -115,32 +115,24 @@ function CopilotCapabilityCard({
 }: {
   hints: { capabilities: CopilotCapabilityHint[]; boundaries: string[] };
 }) {
-  const { capabilities, boundaries } = hints;
-  const chips = capabilities
+  const chips = hints.capabilities
     .map((item) => ({ name: item.name, label: item.short || item.summary }))
     .filter((item) => item.label)
     .slice(0, 8);
-  if (chips.length === 0 && boundaries.length === 0) return null;
+  if (chips.length === 0) return null;
   return (
     <div className="copilot-capability-card">
-      {chips.length > 0 ? (
-        <>
-          <div className="copilot-capability-title">试试问我</div>
-          <div className="copilot-capability-chips">
-            {chips.map((item) => (
-              <span className="copilot-capability-chip" key={item.name || item.label} title={capabilities.find((c) => c.name === item.name)?.summary}>
-                {item.label}
-              </span>
-            ))}
-          </div>
-        </>
-      ) : null}
-      {boundaries.length > 0 ? (
-        <div className="copilot-capability-boundaries">
-          <ShieldAlert size={12} aria-hidden="true" />
-          {boundaries.join(' · ')}
-        </div>
-      ) : null}
+      <div className="copilot-capability-chips">
+        {chips.map((item) => (
+          <span
+            className="copilot-capability-chip"
+            key={item.name || item.label}
+            title={hints.capabilities.find((c) => c.name === item.name)?.summary}
+          >
+            {item.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
