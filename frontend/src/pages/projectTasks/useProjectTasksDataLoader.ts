@@ -18,6 +18,7 @@ import {
   type LoadTaskDataOptions,
 } from './taskDataUtils';
 import { TaskRowDeletionLedger } from './taskRowDeletionLedger';
+import { isSameRowShallow } from '../projectDetail/projectRuntimeRowHelpers';
 import { hydrateTaskMetricsFromResultRows, syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
 import { asRecord, hasObjectContent } from '../../pages/projectTasks/recordReaders';
 import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
@@ -135,7 +136,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   if (hasLeadOptPredictionRuntime(next)) {
     const nextTaskState = String(next.task_state || '').trim().toUpperCase();
     const isRuntimeState = nextTaskState === 'QUEUED' || nextTaskState === 'RUNNING';
-    return {
+    const merged: ProjectTask = {
       ...next,
       confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
       affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
@@ -146,36 +147,38 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
       status_text: String(next.status_text || '').trim() || prev.status_text,
       error_text: String(next.error_text || '').trim()
     };
+    return isSameRowShallow(merged as unknown as Record<string, unknown>, prev as unknown as Record<string, unknown>) ? prev : merged;
   }
   const nextPriority = taskStatePriority(next.task_state);
   const prevPriority = taskStatePriority(prev.task_state);
   if (prevPriority < nextPriority) return next;
-  if (prevPriority > nextPriority) {
-    return {
-      ...next,
-      confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
-      affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
-      components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
-      properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
-      task_state: prev.task_state,
-      status_text: prev.status_text,
-      error_text: prev.error_text,
-      completed_at: prev.completed_at || next.completed_at,
-      duration_seconds:
-        prev.duration_seconds ?? next.duration_seconds
-    };
-  }
-  return {
-    ...next,
-    confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
-    affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
-    components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
-    properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
-    completed_at: next.completed_at || prev.completed_at,
-    duration_seconds: next.duration_seconds ?? prev.duration_seconds,
-    status_text: String(next.status_text || '').trim() || prev.status_text,
-    error_text: String(next.error_text || '').trim() || prev.error_text
-  };
+  const merged: ProjectTask =
+    prevPriority > nextPriority
+      ? {
+          ...next,
+          confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
+          affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
+          components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
+          properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
+          task_state: prev.task_state,
+          status_text: prev.status_text,
+          error_text: prev.error_text,
+          completed_at: prev.completed_at || next.completed_at,
+          duration_seconds:
+            prev.duration_seconds ?? next.duration_seconds
+        }
+      : {
+          ...next,
+          confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
+          affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
+          components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
+          properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
+          completed_at: next.completed_at || prev.completed_at,
+          duration_seconds: next.duration_seconds ?? prev.duration_seconds,
+          status_text: String(next.status_text || '').trim() || prev.status_text,
+          error_text: String(next.error_text || '').trim() || prev.error_text
+        };
+  return isSameRowShallow(merged as unknown as Record<string, unknown>, prev as unknown as Record<string, unknown>) ? prev : merged;
 }
 
 // Exported for the deletion-ledger regression test: the merge is add-only, so

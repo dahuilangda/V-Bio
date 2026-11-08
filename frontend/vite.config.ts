@@ -69,6 +69,29 @@ export default defineConfig(({ mode }) => {
             ) {
               return 'vendor-react';
             }
+            // Markdown 渲染链（unified/micromark 全家桶）只有 copilot 用，
+            // 独立成桶避免抬进所有路由的首屏 vendor。
+            const markdownMarkers = [
+              '/node_modules/react-markdown/',
+              '/node_modules/remark',
+              '/node_modules/micromark',
+              '/node_modules/mdast',
+              '/node_modules/unified',
+              '/node_modules/unist',
+              '/node_modules/hast',
+              '/node_modules/vfile',
+              '/node_modules/property-information',
+              '/node_modules/character-entities',
+              '/node_modules/decode-named-character-reference',
+              '/node_modules/space-separated-tokens',
+              '/node_modules/comma-separated-tokens',
+              '/node_modules/web-namespaces',
+              '/node_modules/zwitch',
+              '/node_modules/bail',
+              '/node_modules/trough',
+              '/node_modules/is-plain-obj'
+            ];
+            if (markdownMarkers.some((marker) => id.includes(marker))) return 'vendor-markdown';
             return 'vendor';
           }
         }

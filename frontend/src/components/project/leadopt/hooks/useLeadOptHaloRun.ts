@@ -175,9 +175,11 @@ export function useLeadOptHaloRun({
         }
       }
       if (!runningRef.current || !mountedRef.current) return;
+      // 后台标签页降频（×3），回前台后立即补一轮。
+      const interval = document.hidden ? POLL_INTERVAL_MS * 3 : POLL_INTERVAL_MS;
       pollTimerRef.current = window.setTimeout(() => {
         void poll(taskId, deadline);
-      }, POLL_INTERVAL_MS);
+      }, interval);
     },
     [finishRun, onTaskCompleted, onTaskFailed]
   );

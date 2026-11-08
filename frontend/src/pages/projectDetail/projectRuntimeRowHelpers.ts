@@ -367,6 +367,27 @@ export function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): 
   };
 }
 
+/**
+ * 行级浅等判断（'' / null / undefined 视为等价，与 merge 的空值保留语义一致）。
+ * 未变化时让 merge 返回 prev 引用，保住下游行级缓存与 memo 链。
+ */
+export function isSameRowShallow(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+    const av = a[key];
+    const bv = b[key];
+    if (av === bv) continue;
+    const aEmpty = av === '' || av === null || av === undefined;
+    const bEmpty = bv === '' || bv === null || bv === undefined;
+    if (aEmpty && bEmpty) continue;
+    return false;
+  }
+  return true;
+}
+
 export function mergePayloadFields<T extends object, U extends object>(next: T, prev: U): T {
   const nextAny = next as Record<string, unknown>;
   const prevAny = prev as Record<string, unknown>;
@@ -410,6 +431,7 @@ export function mergePayloadFields<T extends object, U extends object>(next: T, 
   preserveNonEmptyScalarField('ligand_smiles');
   preserveNonEmptyScalarField('protein_sequence');
   preserveNonEmptyScalarField('structure_name');
+  if (isSameRowShallow(merged, prevAny)) return prev as unknown as T;
   return merged as T;
 }
 
