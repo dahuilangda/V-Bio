@@ -671,7 +671,7 @@ export function ProjectTasksPage() {
   if (!project) {
     return (
       <div className="page-grid">
-        {error && <div className="alert error">{error}</div>}
+        {error && <div className="alert error" role="alert">{error}</div>}
         <section className="panel">
           <Link className="btn btn-ghost btn-compact" to="/projects">
             <ArrowLeft size={14} />
@@ -712,7 +712,7 @@ export function ProjectTasksPage() {
       )}
 
       {/* 两个子视图共用错误横幅 */}
-      {error && <div className="alert error">{error}</div>}
+      {error && <div className="alert error" role="alert">{error}</div>}
 
       {workspaceView === 'api' && supportsApiAccess ? (
         <Suspense fallback={<RouteSkeleton />}>

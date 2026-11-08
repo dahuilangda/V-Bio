@@ -627,7 +627,13 @@ select:focus {
 }
 
 .btn:focus-visible,
-.icon-btn:focus-visible {
+.icon-btn:focus-visible,
+.task-row-action-btn:focus-visible,
+.task-th-sort:focus-visible,
+.project-name-edit-btn:focus-visible,
+.workflow-card:focus-visible,
+.peptide-preset-chip:focus-visible,
+.task-structure-mode-btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(31, 79, 63, 0.35);
 }
@@ -653,6 +659,17 @@ select:focus {
 
 .btn-ghost:hover {
   background: #e1ebe4;
+}
+
+.btn-secondary {
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.btn-secondary:hover {
+  background: #f3f8f5;
+  border-color: #c8d9ce;
 }
 
 .btn:disabled {
@@ -829,8 +846,18 @@ select:focus {
   background: #f5f8f6;
 }
 
+.icon-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .icon-btn.danger {
   color: var(--danger);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background: #fdeeee;
+  border-color: #e1a7a7;
 }
 
 

@@ -62,7 +62,7 @@ export function RunFeedbackOverlays({
       )}
 
       {(error || resultError || affinityPreviewError) && (
-        <div className="alert error">{error || resultError || affinityPreviewError}</div>
+        <div className="alert error" role="alert">{error || resultError || affinityPreviewError}</div>
       )}
       {resultChainConsistencyWarning && <div className="alert warning">{resultChainConsistencyWarning}</div>}
     </>

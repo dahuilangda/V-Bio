@@ -114,6 +114,6 @@
 
 .task-export-popover-hint {
   margin-top: 5px;
-  font-size: 10.5px;
+  font-size: var(--text-2xs);
   color: #8a3434;
 }

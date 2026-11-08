@@ -80,26 +80,44 @@
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 999px;
+  border: 1px solid transparent;
 }
 
-.task-card-state.tone-positive {
-  background: #e8f5e9;
-  color: #2e7d32;
+/* 与桌面 .task-state-chip.* 同色（taskStateTone 词表：draft/queued/running/success/failure/revoked）。 */
+.task-card-state.tone-draft {
+  color: #4b5650;
+  border-color: #c6d0ca;
+  background: #eef2ef;
 }
 
-.task-card-state.tone-negative {
-  background: #fce4ec;
-  color: #c62828;
+.task-card-state.tone-queued {
+  color: #1f4a72;
+  border-color: #99b5d3;
+  background: #e8f1fb;
 }
 
 .task-card-state.tone-running {
-  background: #e3f2fd;
-  color: #1565c0;
+  color: #6a4a0f;
+  border-color: #d8b474;
+  background: #fff2db;
 }
 
-.task-card-state.tone-muted {
-  background: #f5f5f5;
-  color: var(--muted);
+.task-card-state.tone-success {
+  color: #1d5b3f;
+  border-color: #8fc2a9;
+  background: #e5f5ec;
+}
+
+.task-card-state.tone-failure {
+  color: #8a2626;
+  border-color: #e1a7a7;
+  background: #fdeeee;
+}
+
+.task-card-state.tone-revoked {
+  color: #5d4f66;
+  border-color: #c9bdd0;
+  background: #f3eef6;
 }
 
 .task-card-summary {

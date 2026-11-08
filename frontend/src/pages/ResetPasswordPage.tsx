@@ -103,7 +103,7 @@ export function ResetPasswordPage() {
                 />
               </div>
             </Field>
-            {error ? <div className="alert error">{error}</div> : null}
+            {error ? <div className="alert error" role="alert">{error}</div> : null}
             <button type="submit" className="btn btn-primary" disabled={submitting}>
               {submitting ? 'Updating…' : 'Update password'}
             </button>

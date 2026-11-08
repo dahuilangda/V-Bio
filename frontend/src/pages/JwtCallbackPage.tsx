@@ -47,7 +47,7 @@ export function JwtCallbackPage() {
           <span>V-Bio</span>
         </div>
         <h1>Signing In</h1>
-        {error ? <div className="alert error">{error}</div> : <p className="auth-subtitle">Completing secure sign-in...</p>}
+        {error ? <div className="alert error" role="alert">{error}</div> : <p className="auth-subtitle">Completing secure sign-in...</p>}
       </div>
     </div>
   );

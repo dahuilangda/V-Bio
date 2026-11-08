@@ -378,7 +378,7 @@ export function SharingModal({
           ) : null}
         </div>
 
-        {error ? <div className="alert error">{error}</div> : null}
+        {error ? <div className="alert error" role="alert">{error}</div> : null}
 
         <div className="share-modal-list">
           <div className="share-modal-list-scroll">

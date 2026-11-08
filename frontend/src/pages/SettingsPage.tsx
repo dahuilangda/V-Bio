@@ -126,7 +126,7 @@ export function SettingsPage() {
         </div>
       </section>
 
-      {error && <div className="alert error">{error}</div>}
+      {error && <div className="alert error" role="alert">{error}</div>}
       {success && <div className="alert success">{success}</div>}
 
       <div className="settings-grid">

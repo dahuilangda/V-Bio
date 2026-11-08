@@ -823,7 +823,7 @@ export function ProjectsPage() {
           </div>
         )}
 
-        {(error || renameError) && <div className="alert error">{error || renameError}</div>}
+        {(error || renameError) && <div className="alert error" role="alert">{error || renameError}</div>}
 
         {loading && projects.length === 0 ? (
           <div className="muted">Loading projects...</div>
@@ -931,7 +931,7 @@ export function ProjectsPage() {
                               type="button"
                               className="project-name-edit-btn"
                               onClick={() => beginProjectNameEdit(project.id, projectName)}
-                              disabled={!canEditProject || Boolean(savingProjectNameId)}
+                              disabled={!canEditProject || (Boolean(savingProjectNameId) && savingProjectNameId !== project.id)}
                               title={canEditProject ? 'Edit project name' : 'Shared projects are read-only'}
                             >
                               <span className="project-name-link">{projectName}</span>
@@ -1007,7 +1007,7 @@ export function ProjectsPage() {
                               type="button"
                               className="btn btn-ghost btn-compact project-cancel-btn"
                               onClick={() => void cancelProjectRuns(project)}
-                              disabled={Boolean(cancellingProjectId)}
+                              disabled={Boolean(cancellingProjectId) && cancellingProjectId !== project.id}
                               title={`Cancel ${counts.running + counts.queued} active task(s)`}
                               aria-label={`Cancel ${counts.running + counts.queued} active task(s)`}
                             >
@@ -1096,7 +1096,7 @@ export function ProjectsPage() {
                         type="button"
                         className="btn btn-ghost btn-compact"
                         onClick={() => void cancelProjectRuns(project)}
-                        disabled={Boolean(cancellingProjectId)}
+                        disabled={Boolean(cancellingProjectId) && cancellingProjectId !== project.id}
                       >
                         <Square size={13} /> Cancel runs
                       </button>
@@ -1212,7 +1212,7 @@ export function ProjectsPage() {
                 <textarea name="summary" rows={3} />
               </Field>
 
-              {createError && <div className="alert error">{createError}</div>}
+              {createError && <div className="alert error" role="alert">{createError}</div>}
 
               <div className="row gap-8 end">
                 <button type="button" className="btn btn-ghost" onClick={() => setShowCreate(false)}>

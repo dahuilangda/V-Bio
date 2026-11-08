@@ -649,7 +649,7 @@ export function SharesPage() {
       </section>
 
       <section className="panel shares-list-panel">
-        {error ? <div className="alert error">{error}</div> : null}
+        {error ? <div className="alert error" role="alert">{error}</div> : null}
         {loading ? (
           <div className="muted">Loading shares...</div>
         ) : groupedProjects.length === 0 ? (

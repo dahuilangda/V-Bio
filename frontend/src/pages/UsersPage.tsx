@@ -155,12 +155,12 @@ export function UsersPage() {
             {creating ? 'Creating...' : 'Create user'}
           </button>
         </form>
-        {createError && <div className="alert error">{createError}</div>}
+        {createError && <div className="alert error" role="alert">{createError}</div>}
       </section>
 
       <section className="panel">
         <h2>User List</h2>
-        {error && <div className="alert error">{error}</div>}
+        {error && <div className="alert error" role="alert">{error}</div>}
         {loading ? (
           <div className="muted">Loading users...</div>
         ) : (

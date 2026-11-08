@@ -144,6 +144,6 @@ describe('readPlan', () => {
     expect(readPlan({ steps: ['only'], current: 1 })).toBeNull();
     expect(readPlan(null)).toBeNull();
     expect(readPlan('plan')).toBeNull();
-    expect(readPlan({ steps: ['a', 'b'], current: 9 }).current).toBe(2);
+    expect(readPlan({ steps: ['a', 'b'], current: 9 })?.current).toBe(2);
   });
 });

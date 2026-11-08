@@ -315,7 +315,7 @@
   place-items: center;
   border-radius: 999px;
   font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace;
-  font-size: 9px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   line-height: 1;
   color: #2a4c3e;

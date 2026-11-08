@@ -327,7 +327,7 @@ export function LeadOptimizationWorkspace({
       <div className="lead-opt-layout">
         <div className="lead-opt-main">
           <LeadOptHaloProgressPanel progress={halo.runState.progress} roundsLog={designRoundsLog} />
-          {error ? <div className="alert error">{error}</div> : null}
+          {error ? <div className="alert error" role="alert">{error}</div> : null}
           <LeadOptHaloCandidatesPanel
             candidates={designCandidates}
             mode={haloSnapshot?.mode || halo.runState.mode}
@@ -365,7 +365,7 @@ export function LeadOptimizationWorkspace({
 
   return (
     <div className="lead-opt-workspace">
-      {error ? <div className="alert error">{error}</div> : null}
+      {error ? <div className="alert error" role="alert">{error}</div> : null}
       <div ref={layoutRef} className="lead-opt-layout lead-opt-layout--resizable" style={layoutStyle}>
         <LeadOptReferencePanel
           isEditable={canEdit}

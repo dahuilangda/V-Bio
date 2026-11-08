@@ -375,7 +375,7 @@
   width: 100%;
   min-width: 0;
   color: #7a8d83;
-  font-size: 9px;
+  font-size: var(--text-2xs);
   line-height: 1;
   text-align: center;
   white-space: nowrap;

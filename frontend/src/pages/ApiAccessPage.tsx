@@ -1688,57 +1688,17 @@ ${submitTaskIdCapture}`;
   return (
     <div className={`page-grid api-access-page ${isProjectScoped ? 'is-project-scope' : ''}`}>
       {error && (
-        <div
-          role="alert"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            padding: '10px 14px',
-            marginBottom: 12,
-            background: '#fef2f2',
-            border: '1px solid #fecaca',
-            borderRadius: 6,
-            color: '#b91c1c',
-            fontSize: 13
-          }}
-        >
+        <div className="alert error" role="alert">
           <span>{error}</span>
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            aria-label="Dismiss error"
-            style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
-          >
+          <button type="button" className="icon-btn" onClick={() => setError(null)} aria-label="Dismiss error">
             ×
           </button>
         </div>
       )}
       {success && (
-        <div
-          role="status"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            padding: '10px 14px',
-            marginBottom: 12,
-            background: '#f0fdf4',
-            border: '1px solid #bbf7d0',
-            borderRadius: 6,
-            color: '#166534',
-            fontSize: 13
-          }}
-        >
+        <div className="alert success" role="status">
           <span>{success}</span>
-          <button
-            type="button"
-            onClick={() => setSuccess(null)}
-            aria-label="Dismiss notification"
-            style={{ background: 'none', border: 'none', color: '#166534', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
-          >
+          <button type="button" className="icon-btn" onClick={() => setSuccess(null)} aria-label="Dismiss notification">
             ×
           </button>
         </div>

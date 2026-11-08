@@ -159,7 +159,7 @@ export function JwtClientsPage() {
       </section>
 
       {!loading && !canManage ? (
-        <div className="alert error">Administrator management session is unavailable.</div>
+        <div className="alert error" role="alert">Administrator management session is unavailable.</div>
       ) : null}
       {loading ? <div className="muted">Loading integrations...</div> : null}
 
@@ -193,7 +193,7 @@ export function JwtClientsPage() {
           </div>
         ) : null}
         {notice ? <div className="alert success">{notice}</div> : null}
-        {error ? <div className="alert error">{error}</div> : null}
+        {error ? <div className="alert error" role="alert">{error}</div> : null}
       </section>
 
       <section className="panel">

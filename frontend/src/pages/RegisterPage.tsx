@@ -98,7 +98,7 @@ export function RegisterPage() {
             </div>
           </Field>
 
-          {error && <div className="alert error">{error}</div>}
+          {error && <div className="alert error" role="alert">{error}</div>}
 
           <button className="btn btn-primary" type="submit" disabled={submitting}>
             {submitting ? 'Creating account...' : 'Create account'}

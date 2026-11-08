@@ -1688,7 +1688,7 @@
   justify-content: space-between;
   gap: 8px;
   color: #5a6f87;
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .lead-opt-prop-delta {
@@ -1856,7 +1856,7 @@
 }
 
 .lead-opt-secondary-item > span:first-child {
-  font-size: 9px;
+  font-size: var(--text-2xs);
   color: #687d95;
 }
 

@@ -214,7 +214,7 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
   }, [smiles]);
 
   if (error) {
-    return <div className="alert error">{error}</div>;
+    return <div className="alert error" role="alert">{error}</div>;
   }
 
   return (

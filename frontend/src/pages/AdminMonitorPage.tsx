@@ -412,7 +412,7 @@ export function AdminMonitorPage() {
         </div>
       </section>
 
-      {error ? <div className="alert error"><AlertTriangle size={15} />{error}</div> : null}
+      {error ? <div className="alert error" role="alert"><AlertTriangle size={15} />{error}</div> : null}
       {overview?.cluster_error ? (
         <div className="admin-monitor-warning"><AlertTriangle size={15} /><span>Worker snapshot unavailable: {overview.cluster_error}</span></div>
       ) : null}
