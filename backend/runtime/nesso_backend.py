@@ -484,7 +484,7 @@ def _docker_args_has_flag(args: list[str], flag: str) -> bool:
 
 def _docker_gpu_arg() -> str:
     raw = str(
-        os.environ.get("BOLTZ_ASSIGNED_GPU_ID")
+        os.environ.get("VBIO_ASSIGNED_GPU_ID")
         or os.environ.get("CUDA_VISIBLE_DEVICES")
         or ""
     ).strip()
@@ -802,7 +802,7 @@ def run_nesso_backend(
 
     raw_extra_args = shlex.split(NESSO_DOCKER_EXTRA_ARGS) if NESSO_DOCKER_EXTRA_ARGS else []
     extra_args = _sanitize_docker_extra_args(raw_extra_args)
-    runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    runtime_task_id = str(task_id or os.environ.get("VBIO_TASK_ID") or "").strip()
     container_name = _task_container_name(runtime_task_id)
 
     try:

@@ -66,7 +66,7 @@ VBIO_POSTGREST_TIMEOUT_SECONDS = float(os.environ.get("VBIO_POSTGREST_TIMEOUT_SE
 
 RUNTIME_API_BASE_URL = os.environ.get("VBIO_RUNTIME_API_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
 RUNTIME_API_TOKEN = (
-    os.environ.get("VBIO_RUNTIME_API_TOKEN", "").strip() or os.environ.get("BOLTZ_API_TOKEN", "").strip()
+    os.environ.get("VBIO_RUNTIME_API_TOKEN", "").strip() or os.environ.get("VBIO_API_TOKEN", "").strip()
 )
 RUNTIME_TIMEOUT_SECONDS = float(os.environ.get("VBIO_RUNTIME_TIMEOUT_SECONDS", "180"))
 RUNTIME_HTTP_POOL_SIZE = int(os.environ.get("VBIO_RUNTIME_HTTP_POOL_SIZE", "64"))

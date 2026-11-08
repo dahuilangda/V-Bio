@@ -168,7 +168,7 @@ class RuntimeProxy:
 
     def _ensure_token(self) -> None:
         if not self.runtime_api_token:
-            raise RuntimeError("VBIO_RUNTIME_API_TOKEN (or BOLTZ_API_TOKEN) is not configured")
+            raise RuntimeError("VBIO_RUNTIME_API_TOKEN (or VBIO_API_TOKEN) is not configured")
 
     def proxy_multipart(self, request_obj: Any, upstream_path: str) -> requests.Response:
         data: List[Tuple[str, str]] = []

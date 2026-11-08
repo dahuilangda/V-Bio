@@ -41,7 +41,7 @@ ION_RESNAMES = {
 }
 PROTEIN_CHAIN_TYPE = const.chain_type_ids["PROTEIN"]
 DEFAULT_MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "https://api.colabfold.com")
-DEFAULT_MSA_CACHE_DIR = Path(os.environ.get("BOLTZ_MSA_CACHE_DIR", "/data/boltz_msa_cache"))
+DEFAULT_MSA_CACHE_DIR = Path(os.environ.get("VBIO_MSA_CACHE_DIR", "/data/boltz_msa_cache"))
 MSA_ALLOWED_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 

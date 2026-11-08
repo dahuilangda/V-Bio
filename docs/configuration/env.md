@@ -4,7 +4,7 @@
 
 | 变量 | 用途 |
 | --- | --- |
-| `BOLTZ_API_TOKEN` | 后端 API 访问 token。前端的 `VITE_API_TOKEN` 必须与它一致。 |
+| `VBIO_API_TOKEN` | 后端 API 访问 token。前端的 `VITE_API_TOKEN` 必须与它一致。 |
 | `REDIS_URL` | Redis 地址，例如 `redis://<HOST_IP>:6379/0`。 |
 | `CENTRAL_API_URL` | 中央 API 地址，例如 `http://<HOST_IP>:5000`。 |
 | `GPU_WORKER_CAPABILITIES` | GPU worker 服务列表，例如 `boltz2,alphafold3,protenix,nesso`。 |
@@ -14,7 +14,7 @@
 | `RESULTS_CLEANUP_ENABLED` | 结果清理开关，默认开启（`1/true/yes/on`）。 |
 | `RESULTS_CLEANUP_INTERVAL_SECONDS` | 结果清理执行间隔（秒），默认 `21600`（6 小时）；monitor 服务启动后会先执行一轮。 |
 | `LEAD_OPTIMIZATION_OUTPUT_DIR` | lead optimization 输出目录，默认 `/data/boltz_lead_optimization_results`。 |
-| `BOLTZ_MSA_CACHE_DIR` | MSA(a3m) 序列缓存目录，默认 `/data/boltz_msa_cache`。 |
+| `VBIO_MSA_CACHE_DIR` | MSA(a3m) 序列缓存目录，默认 `/data/boltz_msa_cache`。 |
 | `MSA_CACHE_RETENTION_DAYS` | MSA 缓存保留天数，默认 `90`。缓存可整体重建，超过该期限的文件由同一清理周期删除。 |
 
 清理同时受活动任务保护：`monitor_tasks_current` 中排队/运行中的任务不会被删除。亦可手动触发：
@@ -33,7 +33,7 @@ python -m backend.monitoring.result_cleanup --run
 | 变量 | 用途 |
 | --- | --- |
 | `VITE_API_BASE_URL` | 后端 API 地址。 |
-| `VITE_API_TOKEN` | 与 `BOLTZ_API_TOKEN` 保持一致。 |
+| `VITE_API_TOKEN` | 与 `VBIO_API_TOKEN` 保持一致。 |
 | `VITE_SUPABASE_REST_URL` | PostgREST 地址，默认 `http://127.0.0.1:54321`。 |
 | `VITE_SUPER_ADMIN_USERNAMES` | 超级管理员用户名，逗号分隔。 |
 | `VITE_SUPER_ADMIN_EMAILS` | 超级管理员邮箱，逗号分隔。 |

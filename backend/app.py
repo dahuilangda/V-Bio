@@ -73,7 +73,7 @@ def _request_entity_too_large(_error):
     }), 413
 
 # Frontend calls this API directly from the browser; permissive CORS by default.
-_cors_origins_raw = os.environ.get("BOLTZ_CORS_ALLOW_ORIGINS", "*").strip()
+_cors_origins_raw = os.environ.get("VBIO_CORS_ALLOW_ORIGINS", "*").strip()
 if _cors_origins_raw == "*":
     _cors_origin_allowlist = None
 else:
@@ -116,9 +116,9 @@ os.makedirs(config.EXPORTS_BASE_DIR, exist_ok=True)
 logger.info(f"Results base directory ensured: {config.RESULTS_BASE_DIR}")
 logger.info(f"Excel export directory ensured: {config.EXPORTS_BASE_DIR}")
 
-if config.BOLTZ_API_TOKEN == "development-api-token":
+if config.VBIO_API_TOKEN == "development-api-token":
     logger.warning(
-        "BOLTZ_API_TOKEN is the built-in development default; set the BOLTZ_API_TOKEN env var in "
+        "VBIO_API_TOKEN is the built-in development default; set the VBIO_API_TOKEN env var in "
         "production. The API is currently protected only by a public token."
     )
 
@@ -135,7 +135,7 @@ def require_api_token(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         token = request.headers.get('X-API-Token')
-        if not token or not hasattr(config, 'BOLTZ_API_TOKEN') or not hmac.compare_digest(token, config.BOLTZ_API_TOKEN):
+        if not token or not hasattr(config, 'VBIO_API_TOKEN') or not hmac.compare_digest(token, config.VBIO_API_TOKEN):
             logger.warning(f"Unauthorized API access attempt from {request.remote_addr} to {request.path}")
             return jsonify({'error': 'Unauthorized. Invalid or missing API token.'}), 403
         logger.debug(f"API token validated for {request.path} from {request.remote_addr}")

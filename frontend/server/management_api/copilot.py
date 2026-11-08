@@ -965,7 +965,7 @@ class CopilotAssistant:
         base_url = _os.environ.get("VBIO_RUNTIME_API_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
         token = (
             _os.environ.get("VBIO_RUNTIME_API_TOKEN", "").strip()
-            or _os.environ.get("BOLTZ_API_TOKEN", "").strip()
+            or _os.environ.get("VBIO_API_TOKEN", "").strip()
         )
         headers = {"X-API-Token": token} if token else {}
         try:
@@ -1002,7 +1002,7 @@ class CopilotAssistant:
         base_url = _os.environ.get("VBIO_RUNTIME_API_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
         token = (
             _os.environ.get("VBIO_RUNTIME_API_TOKEN", "").strip()
-            or _os.environ.get("BOLTZ_API_TOKEN", "").strip()
+            or _os.environ.get("VBIO_API_TOKEN", "").strip()
         )
         headers = {"X-API-Token": token} if token else {}
         try:

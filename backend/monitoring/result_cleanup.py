@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Optional, Set, Union
 
 from backend.core.config import (
-    BOLTZ_MSA_CACHE_DIR,
+    VBIO_MSA_CACHE_DIR,
     LEAD_OPTIMIZATION_OUTPUT_DIR,
     MSA_CACHE_RETENTION_DAYS,
     RESULTS_BASE_DIR,
@@ -250,7 +250,7 @@ def purge_stale_msa_cache(
     （MSA 服务会按序列重新生成），因此不做活动任务保护。
     """
     retention_days = MSA_CACHE_RETENTION_DAYS if retention_days is None else int(retention_days)
-    cache = Path(cache_dir) if cache_dir is not None else Path(BOLTZ_MSA_CACHE_DIR)
+    cache = Path(cache_dir) if cache_dir is not None else Path(VBIO_MSA_CACHE_DIR)
     min_mtime = time.time() - retention_days * 86400.0
     stats = CleanupStats()
     if not cache.is_dir():

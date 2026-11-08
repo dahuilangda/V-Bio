@@ -381,7 +381,7 @@ def _build_gpu_docker_python_command(
     command.extend(["--volume", f"{BASE_DIR}:/workspace/vbio:ro"])
     command.extend(["--workdir", "/workspace/vbio"])
     command.extend(["--env", "PYTHONPATH=/workspace/vbio"])
-    command.extend(["--env", f"BOLTZ_TASK_ID={task_id}"])
+    command.extend(["--env", f"VBIO_TASK_ID={task_id}"])
     msa_server_url = str(getattr(config, "MSA_SERVER_URL", "") or "").strip()
     if msa_server_url:
         command.extend(["--env", f"MSA_SERVER_URL={msa_server_url}"])
@@ -395,12 +395,12 @@ def _build_gpu_docker_python_command(
 
     # MSA cache lives on the big /data partition so container writable layers
     # stop accumulating ~MB-sized .a3m files.
-    msa_cache_host = str(getattr(config, "BOLTZ_MSA_CACHE_DIR", "") or "").strip()
+    msa_cache_host = str(getattr(config, "VBIO_MSA_CACHE_DIR", "") or "").strip()
     if msa_cache_host:
         try:
             os.makedirs(msa_cache_host, exist_ok=True)
             command.extend(["--volume", f"{msa_cache_host}:{msa_cache_host}"])
-            command.extend(["--env", f"BOLTZ_MSA_CACHE_DIR={msa_cache_host}"])
+            command.extend(["--env", f"VBIO_MSA_CACHE_DIR={msa_cache_host}"])
         except OSError:
             logger.warning("Task %s: could not prepare MSA cache dir %s; using container default.", task_id, msa_cache_host)
 
@@ -968,7 +968,7 @@ def upload_result_to_central_api(task_id: str, local_file_path: str, filename: s
     success.
     """
     upload_url = f"{config.CENTRAL_API_URL}/upload_result/{task_id}"
-    headers = {'X-API-Token': config.BOLTZ_API_TOKEN}
+    headers = {'X-API-Token': config.VBIO_API_TOKEN}
     logger.info(f"Task {task_id}: Starting upload from '{local_file_path}' to '{upload_url}'.")
 
     last_error: Optional[Exception] = None
@@ -1127,12 +1127,12 @@ def predict_task(self, predict_args: dict):
         if is_peptide_design:
             # Parent peptide workflow only orchestrates candidate workers.
             proc_env.pop("CUDA_VISIBLE_DEVICES", None)
-            proc_env.pop("BOLTZ_ASSIGNED_GPU_ID", None)
+            proc_env.pop("VBIO_ASSIGNED_GPU_ID", None)
         else:
             proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
             # Host GPU index for nested docker runtimes so they don't fall back to GPU 0.
-            proc_env["BOLTZ_ASSIGNED_GPU_ID"] = str(gpu_id)
-        proc_env["BOLTZ_TASK_ID"] = task_id
+            proc_env["VBIO_ASSIGNED_GPU_ID"] = str(gpu_id)
+        proc_env["VBIO_TASK_ID"] = task_id
         _raise_if_task_cancelled(self, redis_client, task_id)
         
         command = [
@@ -1472,11 +1472,11 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
 
     proc_env = os.environ.copy()
     proc_env.pop("CUDA_VISIBLE_DEVICES", None)
-    proc_env["BOLTZ_TASK_ID"] = str(task_id)
-    proc_env["BOLTZ_PEPTIDE_WORKER_TASK_ID"] = str(task_id)
+    proc_env["VBIO_TASK_ID"] = str(task_id)
+    proc_env["VBIO_PEPTIDE_WORKER_TASK_ID"] = str(task_id)
     # 取消可见性:孙进程等卡时轮询父任务取消标记,避免父取消后孤儿继续等卡跑完整推理
     if parent_task_id:
-        proc_env["BOLTZ_PARENT_TASK_ID"] = str(parent_task_id)
+        proc_env["VBIO_PARENT_TASK_ID"] = str(parent_task_id)
 
     command = [sys.executable, "-m", "backend.runtime.run_single_prediction", args_path]
     self.update_state(state="PROGRESS", meta={"status": "Peptide candidate task started"})

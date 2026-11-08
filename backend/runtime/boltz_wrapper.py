@@ -334,7 +334,7 @@ def _download_with_fallback(
         raise RuntimeError(f"No download URL provided for {label}.")
 
     try:
-        retries = int(os.environ.get("BOLTZ_DOWNLOAD_RETRIES", "3"))
+        retries = int(os.environ.get("VBIO_DOWNLOAD_RETRIES", "3"))
     except ValueError:
         retries = 3
     retries = max(1, retries)
@@ -1252,13 +1252,13 @@ def cli() -> None:
 @click.option(
     "--msa_server_username",
     type=str,
-    help="MSA server username for basic auth. Used only if --use_msa_server is set. Can also be set via BOLTZ_MSA_USERNAME environment variable.",
+    help="MSA server username for basic auth. Used only if --use_msa_server is set. Can also be set via VBIO_MSA_USERNAME environment variable.",
     default=None,
 )
 @click.option(
     "--msa_server_password",
     type=str,
-    help="MSA server password for basic auth. Used only if --use_msa_server is set. Can also be set via BOLTZ_MSA_PASSWORD environment variable.",
+    help="MSA server password for basic auth. Used only if --use_msa_server is set. Can also be set via VBIO_MSA_PASSWORD environment variable.",
     default=None,
 )
 @click.option(
@@ -1438,9 +1438,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     # Get MSA server credentials from environment variables if not provided
     if use_msa_server:
         if msa_server_username is None:
-            msa_server_username = os.environ.get("BOLTZ_MSA_USERNAME")
+            msa_server_username = os.environ.get("VBIO_MSA_USERNAME")
         if msa_server_password is None:
-            msa_server_password = os.environ.get("BOLTZ_MSA_PASSWORD")
+            msa_server_password = os.environ.get("VBIO_MSA_PASSWORD")
         if api_key_value is None:
             api_key_value = os.environ.get("MSA_API_KEY_VALUE")
         

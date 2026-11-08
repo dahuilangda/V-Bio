@@ -404,7 +404,7 @@ class NessoRuntimeTests(_EnsureImageStubMixin, unittest.TestCase):
                 mock.patch.object(nesso_backend, "NESSO_PRECISION", "bf16-mixed"),
                 mock.patch.object(nesso_backend.subprocess, "run"),
                 mock.patch.object(nesso_backend, "_run_docker_command", side_effect=fake_docker_run),
-                mock.patch.dict(os.environ, {"BOLTZ_ASSIGNED_GPU_ID": "2"}, clear=False),
+                mock.patch.dict(os.environ, {"VBIO_ASSIGNED_GPU_ID": "2"}, clear=False),
             ):
                 nesso_backend.run_nesso_backend(
                     temp_dir=str(root),

@@ -1,7 +1,7 @@
 """REAL Flask integration tests: POST /predict through the actual app.
 
 Exercises the genuine HTTP+route contract: real ``require_api_token`` (X-API-Token
-header against backend.core.config.BOLTZ_API_TOKEN), real multipart handling
+header against backend.core.config.VBIO_API_TOKEN), real multipart handling
 (the route requires a ``yaml_file`` FILE part), and the submission-time custom-CCD
 dry-run rejection. Nothing here touches GPUs or the celery broker: only request
 validation branches are driven; the success path that would enqueue GPU work is out
@@ -43,7 +43,7 @@ def api_token():
     """The exact secret the production decorator compares against."""
     from backend.core import config as backend_config  # noqa: E402
 
-    return str(getattr(backend_config, "BOLTZ_API_TOKEN"))
+    return str(getattr(backend_config, "VBIO_API_TOKEN"))
 
 
 def _post_predict(client, token: str, backend: str = "", workflow: str = "",

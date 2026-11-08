@@ -38,7 +38,7 @@ def lead_optimization_halo_task(self, optimization_args: dict):
         tracker.update_status("running", "Preparing HALO optimization inputs.")
 
         os.environ["VBIO_API_URL"] = str(getattr(config, "CENTRAL_API_URL", "http://127.0.0.1:5000"))
-        os.environ["VBIO_API_TOKEN"] = str(getattr(config, "BOLTZ_API_TOKEN", "") or "")
+        os.environ["VBIO_API_TOKEN"] = str(getattr(config, "VBIO_API_TOKEN", "") or "")
 
         output_root = Path(getattr(config, "LEAD_OPTIMIZATION_OUTPUT_DIR", "/data/boltz_lead_optimization_results"))
         task_temp_dir = str(output_root / f"halo_task_{task_id}")

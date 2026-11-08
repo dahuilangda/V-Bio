@@ -282,7 +282,7 @@ class TaskMonitor:
     def _cancel_active_msa_tickets(self, task_id: str) -> List[str]:
         """撤销以 task_id 登记的进行中 MSA ticket,释放 colabfold 侧 GPU search。
 
-        仅覆盖以该 task_id 经 BOLTZ_TASK_ID 登记的 ticket;肽候选的 ticket 登记
+        仅覆盖以该 task_id 经 VBIO_TASK_ID 登记的 ticket;肽候选的 ticket 登记
         在候选自身 id 下,由 _revoke_peptide_subtasks 逐个调用本方法覆盖。
         服务端 DELETE 会 SIGKILL search 进程组,其租约由 wrapper 心跳过期 +
         gpu_manager 维护周期在分钟级自愈回收。全程 best-effort;撤销失败的

@@ -38,7 +38,7 @@ bash frontend/run.sh start
 
 ```env
 VITE_API_BASE_URL=http://<HOST_IP>:5000
-VITE_API_TOKEN=<BOLTZ_API_TOKEN>
+VITE_API_TOKEN=<VBIO_API_TOKEN>
 VITE_SUPER_ADMIN_USERNAMES=<admin-username>
 VITE_SUPER_ADMIN_EMAILS=<admin@example.com>
 VBIO_JWT_CLIENTS_FILE=frontend/.run/jwt_clients.json

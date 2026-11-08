@@ -127,11 +127,11 @@ from backend.runtime.custom_ccd_builder import (
 )
 from backend.runtime.ccd_contract import validate_ccd_additions
 
-# MSA 缓存配置（目录可通过 BOLTZ_MSA_CACHE_DIR 覆盖；默认指向 /data 挂载，
+# MSA 缓存配置（目录可通过 VBIO_MSA_CACHE_DIR 覆盖；默认指向 /data 挂载，
 # 避免缓存放大容器可写层导致宿主机根分区膨胀）
 MSA_CACHE_CONFIG = {
     'cache_dir': os.environ.get(
-        'BOLTZ_MSA_CACHE_DIR',
+        'VBIO_MSA_CACHE_DIR',
         '/data/boltz_msa_cache'
     ),
     'enable_cache': True
@@ -1784,7 +1784,7 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
 
     raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
     extra_args = sanitize_docker_extra_args(raw_extra_args, log=_docker_warn)
-    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or record_id).strip()
+    runtime_task_id = str(os.environ.get("VBIO_TASK_ID") or record_id).strip()
     task_container_name = make_scoped_container_name(f"{runtime_task_id}-{record_id}-ipsae", prefix="boltz-af3")
 
     docker_command = ["docker", "run", "--rm"]
@@ -2778,7 +2778,7 @@ def _run_boltz2score_affinity_postprocess(
         )
     shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
 
-    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or affinity_base.name).strip()
+    runtime_task_id = str(os.environ.get("VBIO_TASK_ID") or affinity_base.name).strip()
     task_container_name = make_scoped_container_name(f"{runtime_task_id}-{archive_prefix}-boltz2score", prefix="boltz-af3")
     runtime_overridden = any(token == "--runtime" for token in extra_args)
 
@@ -2808,7 +2808,7 @@ def _run_boltz2score_affinity_postprocess(
     )
 
     passthrough_env_keys = [
-        "BOLTZ_DOWNLOAD_RETRIES",
+        "VBIO_DOWNLOAD_RETRIES",
         "BOLTZ_CCD_URL",
         "BOLTZ1_MODEL_URL",
         "BOLTZ2_MOLS_URL",
@@ -2827,7 +2827,7 @@ def _run_boltz2score_affinity_postprocess(
             docker_command.extend(["--env", f"{env_key}={env_val}"])
 
     if runtime_task_id:
-        docker_command.extend(["--env", f"BOLTZ_TASK_ID={runtime_task_id}"])
+        docker_command.extend(["--env", f"VBIO_TASK_ID={runtime_task_id}"])
 
     host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
     container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
@@ -3412,10 +3412,10 @@ def _msa_search_concurrency() -> int:
 def _register_active_msa_ticket(ticket_id: str) -> None:
     """把进行中的 MSA ticket 归档到任务名下,任务取消时由 terminate 链路撤销。
 
-    以 SET 存储(一个任务可能并发请求多条序列的 MSA);无 BOLTZ_TASK_ID 环境
+    以 SET 存储(一个任务可能并发请求多条序列的 MSA);无 VBIO_TASK_ID 环境
     (非 worker 子进程上下文)时跳过登记。
     """
-    task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    task_id = str(os.environ.get("VBIO_TASK_ID") or "").strip()
     if not task_id or not str(ticket_id or "").strip():
         return
     try:
@@ -3430,7 +3430,7 @@ def _register_active_msa_ticket(ticket_id: str) -> None:
 
 
 def _release_active_msa_ticket(ticket_id: str) -> None:
-    task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    task_id = str(os.environ.get("VBIO_TASK_ID") or "").strip()
     if not task_id or not str(ticket_id or "").strip():
         return
     try:
@@ -4072,7 +4072,7 @@ def _extract_peptide_candidate_archive_for_metrics(candidate_dir: str, archive_p
 
 def _resolve_backend_results_root(backend: str, task_id: Optional[str], temp_dir: str) -> Path:
     backend_token = str(backend or "unknown").strip().lower() or "unknown"
-    runtime_token = _safe_runtime_token(task_id or os.environ.get("BOLTZ_TASK_ID") or Path(temp_dir).name)
+    runtime_token = _safe_runtime_token(task_id or os.environ.get("VBIO_TASK_ID") or Path(temp_dir).name)
     base_dir = Path(str(RESULTS_BASE_DIR or "/data/boltz_central_results")).expanduser()
     root = base_dir / backend_token / runtime_token
     root.mkdir(parents=True, exist_ok=True)
@@ -5237,7 +5237,7 @@ def run_protenix_backend(
         print(f"[protenix] GPU env unavailable: {gpu_err}", file=sys.stderr)
         raise
 
-    runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    runtime_task_id = str(task_id or os.environ.get("VBIO_TASK_ID") or "").strip()
     task_container_name = make_scoped_container_name(runtime_task_id, prefix="boltz-af3")
 
     runtime_overridden = any(token == "--runtime" for token in extra_args)
@@ -8739,7 +8739,7 @@ def _dpeptide_collect_refine(
     # dir name too: cand_001 recurs in every generation, and a gen-agnostic
     # dir let the last writer win — a redelivered export's keep fallback then
     # shipped gen-6 structures for gen-2 rows.
-    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip().replace(":", "_")
+    runtime_task_id = str(os.environ.get("VBIO_TASK_ID") or "").strip().replace(":", "_")
     _cand_dir = Path(refined_cif).parent
     _gen_dir = _cand_dir.parent.name if _cand_dir.parent.name.startswith("gen_") else ""
     if _gen_dir:
@@ -10462,9 +10462,9 @@ def run_peptide_design_backend(
     # Generation checkpoint: acks_late redelivers a predict_task whose worker
     # died mid-run; without persistence the redesign restarts from generation
     # 1 and burns hours of GPU time. The checkpoint lives under the stable
-    # BOLTZ_TASK_ID (same across redeliveries), not the per-attempt temp dir.
+    # VBIO_TASK_ID (same across redeliveries), not the per-attempt temp dir.
     _ckpt_root = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / "peptide_checkpoints"
-    _ckpt_path = _ckpt_root / f"{os.environ.get('BOLTZ_TASK_ID') or 'local'}.json"
+    _ckpt_path = _ckpt_root / f"{os.environ.get('VBIO_TASK_ID') or 'local'}.json"
     _start_generation = 1
 
     def _save_generation_checkpoint(gen: int) -> None:
@@ -10797,7 +10797,7 @@ def run_peptide_design_backend(
         "default",
     )
     peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
-    parent_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "peptide-design").strip() or "peptide-design"
+    parent_task_id = str(os.environ.get("VBIO_TASK_ID") or "peptide-design").strip() or "peptide-design"
     # 候选子任务全量入队：共享 GPU 池 + worker 并发是唯一的并发边界，
     # 不在编排侧做容量快照或窗口猜测。
     if peptide_gpu_ids:
@@ -12676,7 +12676,7 @@ def run_boltz_backend(
         )
     shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
 
-    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    runtime_task_id = str(os.environ.get("VBIO_TASK_ID") or "").strip()
     task_container_name = make_scoped_container_name(runtime_task_id, prefix="boltz-af3")
     runtime_overridden = any(token == "--runtime" for token in extra_args)
 
@@ -12711,7 +12711,7 @@ def run_boltz_backend(
 
     # Pass through download/proxy related env vars into the Boltz runtime container.
     passthrough_env_keys = [
-        "BOLTZ_DOWNLOAD_RETRIES",
+        "VBIO_DOWNLOAD_RETRIES",
         "BOLTZ_CCD_URL",
         "BOLTZ1_MODEL_URL",
         "BOLTZ2_MOLS_URL",
@@ -12730,7 +12730,7 @@ def run_boltz_backend(
             docker_command.extend(["--env", f"{env_key}={env_val}"])
 
     if runtime_task_id:
-        docker_command.extend(["--env", f"BOLTZ_TASK_ID={runtime_task_id}"])
+        docker_command.extend(["--env", f"VBIO_TASK_ID={runtime_task_id}"])
 
     custom_molecules = _merge_referenced_preset_modification_molecules(
         _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
@@ -13156,7 +13156,7 @@ except Exception:
     container_database_dir = "/workspace/public_databases"
     container_cache_dir = "/workspace/af_cache"
     container_colabfold_jobs_dir = "/app/jobs"
-    runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    runtime_task_id = str(task_id or os.environ.get("VBIO_TASK_ID") or "").strip()
     task_container_name = make_scoped_container_name(runtime_task_id, prefix="boltz-af3")
 
     runtime_overridden = any(token == "--runtime" for token in extra_args)
@@ -13358,8 +13358,8 @@ def main():
                             client = _get_redis_client_optional()
                             if client is None:
                                 return
-                            own = os.environ.get("BOLTZ_PEPTIDE_WORKER_TASK_ID", "")
-                            parent = os.environ.get("BOLTZ_PARENT_TASK_ID", "")
+                            own = os.environ.get("VBIO_PEPTIDE_WORKER_TASK_ID", "")
+                            parent = os.environ.get("VBIO_PARENT_TASK_ID", "")
                             for marker_task_id in (own, parent):
                                 if marker_task_id and client.exists(f"task_cancelled:{marker_task_id}"):
                                     raise RuntimeError(
@@ -13541,7 +13541,7 @@ def main():
                     peptide_design_options.get("peptideDesignMode") or peptide_design_options.get("peptide_design_mode")
                 )
                 validate_template_paths(processed_yaml)
-                peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
+                peptide_parent_task_id = str(runtime_task_id or os.environ.get("VBIO_TASK_ID") or "").strip()
                 try:
                     run_peptide_design_backend(
                         temp_dir=temp_dir,

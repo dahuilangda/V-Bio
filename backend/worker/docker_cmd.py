@@ -182,7 +182,7 @@ def build_task_docker_skeleton(
     command.extend([
         "--volume", f"{repo}:{REPO_MOUNT_CONTAINER}:ro",
         "--workdir", REPO_MOUNT_CONTAINER,
-        "--env", f"BOLTZ_TASK_ID={task_id}",
+        "--env", f"VBIO_TASK_ID={task_id}",
     ])
     return command, container_name
 
@@ -197,7 +197,7 @@ def protenix_runtime_mounts(command: list[str]) -> list[str]:
         "--volume", f"{config.PROTENIX_MODEL_DIR}:/workspace/model:ro",
         "--volume", f"{config.PROTENIX_COMMON_CACHE_DIR}:/cache/common:ro",
         # rw：protenix2dock 回写共享 MSA 缓存
-        "--volume", f"{config.BOLTZ_MSA_CACHE_DIR}:/data/msa_cache",
+        "--volume", f"{config.VBIO_MSA_CACHE_DIR}:/data/msa_cache",
         "--volume", "/dev/shm:/dev/shm",
         "--env", f"PYTHONPATH={REPO_MOUNT_CONTAINER}/vendor/protenix-source",
         "--env", "PROTENIX_ROOT_DIR=/cache",

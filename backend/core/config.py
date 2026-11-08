@@ -239,12 +239,12 @@ COLABFOLD_JOBS_DIR = os.environ.get(
 # 4. 安全性配置
 
 # 生产环境必须通过环境变量显式设置。
-BOLTZ_API_TOKEN = os.environ.get("BOLTZ_API_TOKEN", "development-api-token")
+VBIO_API_TOKEN = os.environ.get("VBIO_API_TOKEN", "development-api-token")
 
 # 5. Boltz2 Docker 集成
 
 BOLTZ2_DOCKER_IMAGE = os.environ.get("BOLTZ2_DOCKER_IMAGE", "vbio-boltz2-runtime")  # Shared by boltz2/boltz2score/affinity runtime
-BOLTZ_MSA_CACHE_DIR = os.environ.get("BOLTZ_MSA_CACHE_DIR", "/data/boltz_msa_cache")  # MSA sequence cache on the /data partition
+VBIO_MSA_CACHE_DIR = os.environ.get("VBIO_MSA_CACHE_DIR", "/data/boltz_msa_cache")  # MSA sequence cache on the /data partition
 BOLTZ2_DOCKER_EXTRA_ARGS = os.environ.get("BOLTZ2_DOCKER_EXTRA_ARGS", "")
 BOLTZ2_DOCKER_SHM_SIZE = os.environ.get("BOLTZ2_DOCKER_SHM_SIZE", "16g")
 BOLTZ2_HOST_CACHE_DIR = os.environ.get("BOLTZ2_HOST_CACHE_DIR", "")
