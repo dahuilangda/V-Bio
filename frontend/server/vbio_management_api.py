@@ -1272,6 +1272,11 @@ def get_status_batch() -> Tuple[Response, int]:
     return gateway.forward_task_status_batch()
 
 
+@app.post("/vbio-api/status/stubs")
+def get_status_stubs() -> Tuple[Response, int]:
+    return gateway.forward_task_status_stubs()
+
+
 @app.get("/vbio-api/results/<task_id>")
 def get_results(task_id: str) -> Tuple[Response, int]:
     return gateway.forward_task_read(task_id, "/results", "read_results")
