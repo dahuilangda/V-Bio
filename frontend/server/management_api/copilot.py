@@ -1957,7 +1957,8 @@ class CopilotAssistant:
 
         malformed_attempts = 0
         transport_attempts = 0
-        turn_deadline = time.monotonic() + self.MAX_TURN_SECONDS
+        turn_started_monotonic = time.monotonic()
+        turn_deadline = turn_started_monotonic + self.MAX_TURN_SECONDS
         # The round budget scales with the plan. A hierarchical outline with N steps legitimately
         # needs an outline round plus up to two rounds per step (operations + observation
         # feedback), so once an outline is accepted the budget expands — a correctly-planned
@@ -2291,6 +2292,12 @@ class CopilotAssistant:
                 round_budget = max(
                     round_budget,
                     len(outline) * 2 + 4 + self.max_malformed_retries,
+                )
+                # 每步追加墙钟（含检索类工具的模型+工具延迟），多步复杂任务不再死在
+                # 简单回合的 600s 默认值；总上限 30min。
+                turn_deadline = min(
+                    turn_deadline + (90 * len(outline)),
+                    turn_started_monotonic + 1800,
                 )
                 trace.record(
                     round_index, TRACE_OUTLINE,

@@ -11,7 +11,7 @@ import {
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
 import { getCopilotConfig, getCopilotSettings, requestCopilotStop, saveCopilotSettings, streamCopilotTurn, submitCopilotSteering, testCopilotSettings } from '../../api/copilotApi';
-import type { CopilotTestResult } from '../../api/copilotApi';
+import type { CopilotCapabilityHint, CopilotTestResult } from '../../api/copilotApi';
 import type { CopilotContextType, CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { useAuth } from '../../hooks/useAuth';
 import { useOverlayPresence } from '../ui/OverlayContext';
@@ -351,15 +351,22 @@ function writeStoredCopilotPanelState(userId: string, patch: CopilotPanelState):
 // the page shells read it synchronously at first render while this modal is
 // lazy-loaded.
 
-function clampPanelPosition(pos: { x: number; y: number }): { x: number; y: number } {
-  // Clamp so a position persisted on a large screen can't strand the panel
-  // off-viewport or hide the header under the top-nav.
+function clampPanelPosition(
+  pos: { x: number; y: number },
+  size?: { width: number; height: number } | null
+): { x: number; y: number } {
+  // 钳制到完整可见：右/下边缘不超出视口（按 CSS max 上限后的有效尺寸计算），
+  // y 下限保证头部在顶栏之下、关闭按钮始终可达。
   if (typeof window === 'undefined') return pos;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
+  const width = Math.min(Math.max(280, size?.width || 560), vw - 16);
+  const height = Math.min(Math.max(240, size?.height || 680), vh - 16);
+  const xUpper = Math.max(8, vw - width - 8);
+  const yUpper = Math.max(TOP_CHROME_PX + 8, vh - height - 8);
   return {
-    x: Math.min(Math.max(8, pos.x), Math.max(8, vw - 280)),
-    y: Math.min(Math.max(TOP_CHROME_PX + 8, pos.y), Math.max(TOP_CHROME_PX + 8, vh - 180))
+    x: Math.min(Math.max(8, pos.x), xUpper),
+    y: Math.min(Math.max(TOP_CHROME_PX + 8, pos.y), yUpper)
   };
 }
 
@@ -517,6 +524,7 @@ export function ProjectCopilotModal({
     startY: number;
     originX: number;
     originY: number;
+    panelSize: { width: number; height: number };
   } | null>(null);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(() => {
     return getInitialPanelPosition(storedPanelState);
@@ -536,6 +544,11 @@ export function ProjectCopilotModal({
   const activeTurnKeyRef = useRef<string | null>(null);
   const [steeredTurnTexts, setSteeredTurnTexts] = useState<string[]>([]);
   const [completionEnabled, setCompletionEnabled] = useState(false);
+  // 空态能力提示：来自 /copilot/config 的能力目录与边界摘要。
+  const [capabilityHints, setCapabilityHints] = useState<{
+    capabilities: CopilotCapabilityHint[];
+    boundaries: string[];
+  }>({ capabilities: [], boundaries: [] });
   const contextPayloadRef = useRef(contextPayload);
 
   const sourceContext = useMemo(
@@ -741,13 +754,17 @@ export function ProjectCopilotModal({
         const nextY = Number(state.y);
         const nextWidth = Number(state.width);
         const nextHeight = Number(state.height);
+        const restoredSize =
+          Number.isFinite(nextWidth) && Number.isFinite(nextHeight) && nextWidth >= 300 && nextHeight >= 300
+            ? { width: nextWidth, height: nextHeight }
+            : null;
         if (Number.isFinite(nextX) && Number.isFinite(nextY)) {
-          const clamped = clampPanelPosition({ x: nextX, y: nextY });
+          const clamped = clampPanelPosition({ x: nextX, y: nextY }, restoredSize);
           latestPositionRef.current = clamped;
           setPosition(clamped);
         }
-        if (Number.isFinite(nextWidth) && Number.isFinite(nextHeight) && nextWidth >= 300 && nextHeight >= 300) {
-          setPanelSize({ width: nextWidth, height: nextHeight });
+        if (restoredSize) {
+          setPanelSize(restoredSize);
         }
         if (typeof state.historyOpen === 'boolean') {
           setHistoryOpen(state.historyOpen);
@@ -886,13 +903,16 @@ export function ProjectCopilotModal({
     historyNavRef.current = null;
   }, [currentUserId, draftScope]);
 
-  // Discover whether inline completion is enabled on the backend (one cheap GET per open).
+  // Discover whether inline completion is enabled on the backend (one cheap GET per open);
+  // the same response carries the capability/boundary hints for the empty state.
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
     void getCopilotConfig()
       .then((config) => {
-        if (!cancelled) setCompletionEnabled(config.completionEnabled);
+        if (cancelled) return;
+        setCompletionEnabled(config.completionEnabled);
+        setCapabilityHints({ capabilities: config.capabilities, boundaries: config.boundaries });
       })
       .catch(() => {
         // Completion is optional; absence is indistinguishable from disabled.
@@ -980,12 +1000,14 @@ export function ProjectCopilotModal({
     // Primary pointer only, so drag doesn't block touch clicks on header buttons.
     if (event.button !== 0 && event.pointerType === 'mouse') return;
     const current = position || { x: Math.max(12, window.innerWidth - 560 - 24), y: Math.max(12, window.innerHeight - 680 - 24) };
+    const rect = panelRef.current?.getBoundingClientRect();
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       originX: current.x,
-      originY: current.y
+      originY: current.y,
+      panelSize: { width: Math.round(rect?.width || 560), height: Math.round(rect?.height || 680) }
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -993,11 +1015,12 @@ export function ProjectCopilotModal({
   const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    const nextX = Math.min(Math.max(8, drag.originX + event.clientX - drag.startX), Math.max(8, window.innerWidth - 280));
-    const nextY = Math.min(Math.max(8, drag.originY + event.clientY - drag.startY), Math.max(8, window.innerHeight - 180));
-    const nextPosition = { x: nextX, y: nextY };
-    latestPositionRef.current = nextPosition;
-    setPosition(nextPosition);
+    const clamped = clampPanelPosition(
+      { x: drag.originX + event.clientX - drag.startX, y: drag.originY + event.clientY - drag.startY },
+      drag.panelSize
+    );
+    latestPositionRef.current = clamped;
+    setPosition(clamped);
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1315,19 +1338,29 @@ export function ProjectCopilotModal({
     rearmInFlightContinuation();
   }, [isOpen]);
 
-  // Re-clamp on viewport shrink so a persisted position never strands the panel.
+  // Re-clamp on viewport shrink so a persisted position/size never strands the panel.
   useEffect(() => {
     if (!isOpen || isMobileViewport) return;
     const onResize = () => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      setPanelSize((prev) => {
+        if (!prev) return prev;
+        const next = {
+          width: Math.min(prev.width, vw - 24),
+          height: Math.min(prev.height, vh - 24)
+        };
+        return next.width === prev.width && next.height === prev.height ? prev : next;
+      });
       setPosition((prev) => {
         if (!prev) return prev;
-        const clamped = clampPanelPosition(prev);
+        const clamped = clampPanelPosition(prev, panelSize);
         return clamped.x === prev.x && clamped.y === prev.y ? prev : clamped;
       });
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [isOpen, isMobileViewport]);
+  }, [isOpen, isMobileViewport, panelSize]);
 
   // Escape closes the panel — the last-resort exit when the close button is hard to reach.
   useEffect(() => {
@@ -1785,7 +1818,8 @@ export function ProjectCopilotModal({
         onLoadTrace: loadMessageTrace,
         streamStartedAt,
         steeredTurnTexts,
-        liveTrace
+        liveTrace,
+        capabilityHints
       }}
       turn={{
         isSending: sending,

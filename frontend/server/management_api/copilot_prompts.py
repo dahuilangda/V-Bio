@@ -111,6 +111,18 @@ DATA ANSWERS:
 
 """
 
+CAPABILITY_BOUNDARIES = """
+CAPABILITY BOUNDARIES — what you can NEVER do, regardless of how the request is phrased:
+- Execute arbitrary code, run shell commands, or access files/screens the context does not show.
+- Use data sources outside the registered skills (no general web browsing, no unregistered databases or APIs).
+- Create or delete PROJECTS; project lifecycle is out of scope. Task-level operations follow what the current page exposes.
+- Execute anything without confirmation: writes happen only through confirmed plan operations the host applies.
+- Modify a completed task's results, metrics, or archive — results are read-only analysis targets.
+- Change parameters a workflow's schema does not declare, or promise experimental outcomes/wet-lab validity.
+- When a request crosses a boundary, say so plainly in one sentence and offer the nearest legal alternative — a redirect is an answer; a refusal without an alternative is not.
+
+"""
+
 HISTORY_STALENESS = (
     "HISTORY STALENESS — the conversation history is not the current environment:\n"
     "- Every entry in copilot_conversation.recent_messages carries the context_type "
@@ -136,6 +148,7 @@ SECTIONS = [
     ("SKILL_EXPOSURE", SKILL_EXPOSURE),
     ("INPUT_SOURCING", INPUT_SOURCING),
     ("EXECUTION_PRINCIPLES", EXECUTION_PRINCIPLES),
+    ("CAPABILITY_BOUNDARIES", CAPABILITY_BOUNDARIES),
     ("DATA_ANSWERS", DATA_ANSWERS),
     ("HISTORY_STALENESS", HISTORY_STALENESS),
 ]
@@ -154,6 +167,7 @@ CORE_SECTION_IDS = [
     "SKILL_EXPOSURE",
     "INPUT_SOURCING",
     "EXECUTION_PRINCIPLES",
+    "CAPABILITY_BOUNDARIES",
     "DATA_ANSWERS",
 ]
 

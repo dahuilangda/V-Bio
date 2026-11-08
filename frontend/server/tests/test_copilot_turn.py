@@ -734,6 +734,7 @@ class RobustnessHardeningTests(unittest.TestCase):
     def test_wall_clock_deadline_ends_turn_honestly(self):
         import json as _json
         import time as _time
+        from unittest.mock import patch as _patch
         from tests.helpers import FakeResponse, is_phase2_request
 
         class SlowSession:
@@ -754,11 +755,22 @@ class RobustnessHardeningTests(unittest.TestCase):
         session = SlowSession()
         assistant = self._assistant(session)
         assistant.MAX_TURN_SECONDS = 0.01  # elapsed by the round-1 check
-        from tests.test_copilot_workflow_environment import patch_host_skills
-        payload = {"page": {"contextType": "task_detail", "workflowKey": "prediction"}, "project": {"id": "p"}}
-        with patch_host_skills():
-            result = assistant.plan_turn(context_type="task_detail", context_payload=payload,
-                                         user_id="u", username="alice", content="你好")
+        # Outline acceptance EXTENDS the deadline (90s/step) — simulate expiry by jumping
+        # the clock past the extended deadline instead of pinning MAX_TURN_SECONDS.
+        real_monotonic = _time.monotonic
+        clock = {"start": None}
+        def jumped_monotonic():
+            now = real_monotonic()
+            if clock["start"] is None:
+                clock["start"] = now
+                return now
+            return now + 3600  # past the 30min absolute cap on every later read
+        with _patch("management_api.copilot.time.monotonic", jumped_monotonic):
+            from tests.test_copilot_workflow_environment import patch_host_skills
+            payload = {"page": {"contextType": "task_detail", "workflowKey": "prediction"}, "project": {"id": "p"}}
+            with patch_host_skills():
+                result = assistant.plan_turn(context_type="task_detail", context_payload=payload,
+                                             user_id="u", username="alice", content="你好")
         self.assertEqual(result["state"], "failed")
         self.assertIn("wall-clock", " ".join(str(s.get("detail", {}).get("reason", "")) for s in result["trace"]))
 

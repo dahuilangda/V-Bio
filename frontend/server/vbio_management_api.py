@@ -478,7 +478,24 @@ def runtime_status() -> Tuple[Response, int]:
 
 @app.get("/vbio-api/copilot/config")
 def copilot_config() -> Tuple[Response, int]:
-    return jsonify({"enabled": _copilot_is_configured(), "completionEnabled": _copilot_is_completion_enabled()}), 200
+    from management_api.copilot_capabilities import COPILOT_CAPABILITIES
+
+    capabilities = [
+        {"name": str(cap.get("name") or ""), "summary": " ".join(str(cap.get("description") or "").split())}
+        for cap in COPILOT_CAPABILITIES
+    ]
+    return jsonify({
+        "enabled": _copilot_is_configured(),
+        "completionEnabled": _copilot_is_completion_enabled(),
+        "capabilities": capabilities,
+        "boundaries": [
+            "不能执行任意代码或访问未在上下文中展示的页面/文件",
+            "只能查询已注册的数据源（UniProt、RCSB、AlphaFold、PubChem、ChEMBL 等）",
+            "不能创建或删除项目；写操作需经确认后由页面执行",
+            "已完成任务的结果只读，不能修改",
+            "不能调整工作流参数之外的内容，不预测实验结果",
+        ],
+    }), 200
 
 
 # Copilot 端点需登录会话（可设 VBIO_COPILOT_REQUIRE_SESSION=0 退回旧行为）。

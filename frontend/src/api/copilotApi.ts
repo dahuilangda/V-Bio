@@ -92,12 +92,36 @@ function sanitizeCopilotContextPayload(payload: Record<string, unknown>): Record
   return sanitized && typeof sanitized === 'object' && !Array.isArray(sanitized) ? sanitized as Record<string, unknown> : {};
 }
 
-export async function getCopilotConfig(): Promise<{ enabled: boolean; completionEnabled: boolean }> {
+export interface CopilotCapabilityHint {
+  name: string;
+  summary: string;
+}
+
+export interface CopilotConfig {
+  enabled: boolean;
+  completionEnabled: boolean;
+  capabilities: CopilotCapabilityHint[];
+  boundaries: string[];
+}
+
+const EMPTY_COPILOT_CONFIG: CopilotConfig = {
+  enabled: false,
+  completionEnabled: false,
+  capabilities: [],
+  boundaries: []
+};
+
+export async function getCopilotConfig(): Promise<CopilotConfig> {
   const res = await requestManagement('/vbio-api/copilot/config', { method: 'GET', headers: API_HEADERS }, 10000);
-  const payload = (await res.json().catch(() => ({}))) as { enabled?: boolean; completionEnabled?: boolean };
-  if (res.status === 404) return { enabled: true, completionEnabled: false };
-  if (!res.ok) return { enabled: false, completionEnabled: false };
-  return { enabled: payload.enabled === true, completionEnabled: payload.completionEnabled === true };
+  const payload = (await res.json().catch(() => ({}))) as Partial<CopilotConfig>;
+  if (res.status === 404) return { ...EMPTY_COPILOT_CONFIG, enabled: true };
+  if (!res.ok) return { ...EMPTY_COPILOT_CONFIG };
+  return {
+    enabled: payload.enabled === true,
+    completionEnabled: payload.completionEnabled === true,
+    capabilities: Array.isArray(payload.capabilities) ? payload.capabilities : [],
+    boundaries: Array.isArray(payload.boundaries) ? payload.boundaries : []
+  };
 }
 
 // ---------------------------------------------------------------------------

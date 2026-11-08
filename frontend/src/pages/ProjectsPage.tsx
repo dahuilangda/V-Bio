@@ -1250,6 +1250,13 @@ export function ProjectsPage() {
           currentUserId={session.userId}
           currentUsername={session.username}
           contextPayload={{
+            page: {
+              contextType: 'project_list',
+              visibleProjects: filteredProjects.length,
+              activeFilterCount: [search, typeFilter, stateFilter, backendFilter, activityFilter, updatedWithinDays, minTaskCount].filter(
+                (value) => value !== 'all' && String(value || '').trim() !== ''
+              ).length
+            },
             total_projects: projects.length,
             matched_projects: filteredProjects.length,
             summary: {

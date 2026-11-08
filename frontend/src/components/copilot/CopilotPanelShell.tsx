@@ -7,7 +7,7 @@
 import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import type { CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage, Session } from '../../types/models';
-import type { CopilotTestResult } from '../../api/copilotApi';
+import type { CopilotCapabilityHint, CopilotTestResult } from '../../api/copilotApi';
 import { CopilotHeader } from './CopilotHeader';
 import { CopilotHistorySidebar, type CopilotSessionSummary } from './CopilotHistorySidebar';
 import { CopilotSettingsPanel } from './CopilotSettingsPanel';
@@ -80,6 +80,10 @@ export interface CopilotPanelShellMessagesProps {
   streamStartedAt: string;
   steeredTurnTexts: string[];
   liveTrace: CopilotTraceStep[];
+  capabilityHints: {
+    capabilities: CopilotCapabilityHint[];
+    boundaries: string[];
+  };
 }
 
 export interface CopilotPanelShellTurnProps {
@@ -104,6 +108,40 @@ interface CopilotPanelShellProps {
   plan: CopilotPanelShellPlanProps;
   error: string | null;
   children: ReactNode;
+}
+
+/** 空会话能力卡：展示 Copilot 能做什么与边界，数据来自 /copilot/config。 */
+function CopilotCapabilityCard({
+  hints
+}: {
+  hints: { capabilities: CopilotCapabilityHint[]; boundaries: string[] };
+}) {
+  const { capabilities, boundaries } = hints;
+  if (capabilities.length === 0 && boundaries.length === 0) return null;
+  return (
+    <div className="copilot-capability-card">
+      {capabilities.length > 0 && (
+        <>
+          <div className="copilot-capability-title">我可以帮你</div>
+          <ul className="copilot-capability-list">
+            {capabilities.slice(0, 8).map((item) => (
+              <li key={item.name || item.summary}>{item.summary}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {boundaries.length > 0 && (
+        <>
+          <div className="copilot-capability-title">请注意</div>
+          <ul className="copilot-capability-list is-boundaries">
+            {boundaries.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
 }
 
 export function CopilotPanelShell({
@@ -173,7 +211,8 @@ export function CopilotPanelShell({
     onLoadTrace,
     streamStartedAt,
     steeredTurnTexts,
-    liveTrace
+    liveTrace,
+    capabilityHints
   } = messages;
   const {
     isSending,
@@ -271,7 +310,7 @@ export function CopilotPanelShell({
               Loading messages
             </div>
           ) : sessionMessages.length === 0 ? (
-            null
+            <CopilotCapabilityCard hints={capabilityHints} />
           ) : (
             <>
               {sessionMessages.length > visibleMessageCount ? (
