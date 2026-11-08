@@ -230,6 +230,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 .project-name-icon {
   color: #547767;
@@ -240,6 +241,8 @@
   font-weight: 500;
   line-height: 1.3;
   font-size: var(--text-sm);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .project-name-link:hover {
   text-decoration: underline;
@@ -461,6 +464,8 @@
   flex-shrink: 0;
 }
 .project-card-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -546,6 +551,12 @@
 
 /* Small screens: reveal the mobile card list (base state above is display:none). */
 @media (max-width: 900px) {
+  /* 长名称的 min-content 宽会把卡片链逐级顶出视口：
+     容器链全部允许收缩，名称断词，面板裁剪兜底。 */
+  .panel:has(.project-card-list) {
+    min-width: 0;
+    overflow-x: hidden;
+  }
   .project-card-list {
     display: flex;
     flex-direction: column;
@@ -553,9 +564,19 @@
     max-width: 640px;
     margin: 0 auto;
     width: 100%;
+    min-width: 0;
   }
   .project-card {
     width: 100%;
+    min-width: 0;
+  }
+  .project-card-main {
+    min-width: 0;
+  }
+  .project-toolbar,
+  .project-toolbar-filters {
+    min-width: 0;
+    max-width: 100%;
   }
 }
 

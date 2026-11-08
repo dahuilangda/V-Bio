@@ -63,10 +63,9 @@
   color: #243d32;
   text-align: left;
   cursor: pointer;
-  overflow: hidden;
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
   padding: 0;
 }
 
@@ -121,6 +120,8 @@
 }
 
 .task-card-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: var(--text-xs);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -129,6 +130,8 @@
 }
 
 .task-card-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 8px;

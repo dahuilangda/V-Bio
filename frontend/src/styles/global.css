@@ -234,6 +234,8 @@ h3 {
 
 .page-grid {
   display: grid;
+  /* minmax(0,1fr)：轨道不超容器宽，长内容（长名称/长 token）不会把整页顶出视口。 */
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -346,6 +348,7 @@ h3 {
   background: var(--surface);
   padding: 16px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
