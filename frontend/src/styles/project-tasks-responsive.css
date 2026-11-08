@@ -64,6 +64,7 @@
   text-align: left;
   cursor: pointer;
   min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 0;
