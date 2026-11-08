@@ -22,6 +22,7 @@ unpaired 语义）；缓存缺失走内置 colabfold 搜索，服务地址可用
 输出：<output_dir>/summary.json（置信度与产物路径）+ predictions/*.cif
 """
 from __future__ import annotations
+import sys
 
 import argparse
 import hashlib
@@ -324,7 +325,7 @@ def run_inference(input_json: Path, output_dir: Path, seed: int,
                   samples: int = 5, atom_confidence: bool = False) -> None:
     checkpoint = Path(checkpoint_dir) / "mol-1-base.pt"
     cmd = [
-        "python3.12", "-m", "mol.runner.batch_inference",
+        sys.executable, "-m", "mol.runner.batch_inference",
         "--input", str(input_json),
         "--out_dir", str(output_dir),
         "--seeds", str(seed),
@@ -334,7 +335,7 @@ def run_inference(input_json: Path, output_dir: Path, seed: int,
     ]
     if atom_confidence:
         cmd += ["--need_atom_confidence", "true"]
-    result = subprocess.run(cmd, check=False)
+    result = subprocess.run(cmd, check=False, timeout=7200)
     if result.returncode != 0:
         raise RuntimeError(f"mol inference exited {result.returncode}")
 

@@ -559,12 +559,14 @@ def _normalize_probability_metric(value: Optional[float]) -> Optional[float]:
     if not isinstance(value, (int, float)):
         return None
     normalized = float(value)
-    if not math.isfinite(normalized):
+    if not math.isfinite(normalized) or normalized < 0.0:
         return None
-    if normalized > 1.0 and normalized <= 100.0:
-        normalized = normalized / 100.0
-    if normalized < 0.0:
-        return None
+    if normalized > 1.0:
+        # 0-100 量表按百分比折算；更大的值不是概率量纲，直接弃用
+        if normalized <= 100.0:
+            normalized = normalized / 100.0
+        else:
+            return None
     return normalized
 
 
@@ -973,7 +975,6 @@ def parse_confidence_metrics(
             except Exception as exc:
                 logger.warning(f"ligand-ipSAE fallback computation failed: {exc}")
 
-        structure_candidates = list(output_root.glob("**/*.cif")) + list(output_root.glob("**/*.pdb"))
         structure_candidates = list(output_root.glob("**/*.cif")) + list(output_root.glob("**/*.pdb"))
         model_path = _prefer_aggregate_file(structure_candidates)
         if model_path and model_path.exists():

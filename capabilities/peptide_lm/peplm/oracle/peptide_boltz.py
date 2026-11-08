@@ -294,9 +294,12 @@ class PeptideBoltzOracle:
         out_dir.mkdir(parents=True, exist_ok=True)
         yaml_dir = out_dir / "yaml"
         yaml_dir.mkdir(exist_ok=True)
-        for _, cand in indexed:
-            pass  # yamls written per attempt below
-        ok = self._attempt(indexed, out_dir, gpu)
+        try:
+            ok = self._attempt(indexed, out_dir, gpu)
+        except Exception as exc:
+            # 进程失败按契约返回 None 交给调用方二分，而不是让异常穿透炸掉整轮优化
+            self.log(f"[oracle] chunk attempt raised ({exc}); bisecting.")
+            ok = None
         if ok is not None:
             return
         if len(indexed) > 1:

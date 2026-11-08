@@ -1408,20 +1408,22 @@ class CopilotSkillHarness:
             return False
         return isinstance(parsed, dict) and ("message" in parsed or "operations" in parsed)
 
-    @staticmethod
-    def _same_call_as_observation(observation: Mapping[str, Any], skill: str, raw_arguments: Any) -> bool:
+    @classmethod
+    def _same_call_as_observation(cls, observation: Mapping[str, Any], skill: str, raw_arguments: Any) -> bool:
         """True when re-emitting ``skill``+``raw_arguments`` repeats EXACTLY the call that
         produced ``observation`` (skill match + argument-signature match). Anything else is a
-        different query masquerading under a used id and must not be dropped."""
+        different query masquerading under a used id and must not be dropped. 两边先过
+        shorthand 规范化：原样重发的 ``$fromObservation`` 简写是幂等重读，不是新调用。"""
         if str(observation.get("skill") or "") != str(skill or ""):
             return False
         items = observation.get("items")
         if not isinstance(items, list) or not items or not isinstance(items[0], dict):
             return False
-        prior_args = items[0].get("arguments")
-        if not isinstance(prior_args, dict) or not isinstance(raw_arguments, dict):
+        prior_args = cls._normalize_reference_shorthand(items[0].get("arguments"))
+        current = cls._normalize_reference_shorthand(raw_arguments)
+        if not isinstance(prior_args, dict) or not isinstance(current, dict):
             return False
-        return dict(prior_args) == dict(raw_arguments)
+        return dict(prior_args) == dict(current)
 
     @classmethod
     def _rebind_unambiguous_refs(
@@ -2120,6 +2122,27 @@ class CopilotSkillHarness:
                             "successCount": 0,
                         }
                         continue
+                schema_errors = self._validate_schema(wave_arguments, operation.definition.input_schema)
+                if schema_errors:
+                    observations[operation.operation_id] = {
+                        "skill": operation.skill,
+                        "items": [
+                            {
+                                "index": operation.index,
+                                "arguments": wave_arguments,
+                                "metadata": {},
+                                "ok": False,
+                                "result": None,
+                                "error": "; ".join(schema_errors),
+                            }
+                        ],
+                        "values": [],
+                        "errors": [{"index": operation.index, "error": "; ".join(schema_errors)}],
+                        "ok": False,
+                        "count": 1,
+                        "successCount": 0,
+                    }
+                    continue
                 calls.append(
                     PreparedSkillCall(
                         observation_id=operation.operation_id,

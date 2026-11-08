@@ -593,7 +593,7 @@ class OnlineDatabaseSkills:
                     response = self._session.post(url, headers=headers, data=data, timeout=timeout, proxies=self._proxies)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
                 if attempt + 1 == self._RETRY_MAX_ATTEMPTS:
-                    raise RuntimeError(f"online source unreachable: {exc}") from exc
+                    raise RuntimeError(f"online source unreachable: {self._redact_url(url)} ({exc})") from exc
                 self._sleep_backoff(backoff)
                 backoff = min(backoff * self._RETRY_BACKOFF_FACTOR, self._RETRY_BACKOFF_CAP_SECONDS)
                 continue
@@ -609,6 +609,19 @@ class OnlineDatabaseSkills:
                 continue
             return response
         return response
+
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        from urllib.parse import urlparse, parse_qs
+
+        parts = urlparse(url)
+        query = parse_qs(parts.query)
+        secret_keys = {"api_key", "email", "tool"}
+        kept = "&".join(
+            f"{key}={values[0]}" for key, values in sorted(query.items()) if key not in secret_keys
+        )
+        suffix = f"?{kept}" if kept else ""
+        return f"{parts.scheme}://{parts.netloc}{parts.path}{suffix}"
 
     def _get_json(self, url: str) -> Dict[str, Any]:
         return self._fetch_json("GET", url)
@@ -1114,7 +1127,7 @@ class OnlineDatabaseSkills:
                 )
             except RuntimeError as exc:
                 if "HTTP 404" in str(exc):
-                    return []
+                    return None
                 raise
             raw_targets = [payload] if isinstance(payload, dict) and payload.get("target_chembl_id") else []
         else:

@@ -35,6 +35,7 @@ from halo.data.targets import Target
 from halo.generate.agent import AgentUpdater, ReplayBuffer
 from halo.generate.grpo import GRPOUpdater
 from halo.loop.diversity import ScaffoldMemory
+from halo.loop.human import FeedbackBatch
 from halo.score.properties import (DEFAULT_WINDOW, compute_descriptors, is_pains,
                                    passes_window, canonical_smiles)
 from halo.score.preference import PreferenceModel
@@ -343,7 +344,7 @@ class HaloLoop:
                     r["final_reward"] = (1 - lam_mix) * r["machine_reward"] + lam_mix * r["pref_bonus"]
                 df = pd.DataFrame(rows)
             except Exception:
-                pass
+                logging.warning("Reward normalization failed; keeping raw rewards this round.", exc_info=True)
         # store surrogate uncertainty for unscored
         if len(unscored):
             for j, s in enumerate(unscored):
@@ -442,7 +443,7 @@ class HaloLoop:
             pref_oracle = rewards_df[rewards_df["source"] == "oracle"]
             pool_rank = pref_oracle if len(pref_oracle) >= 4 else rewards_df
             top = pool_rank.sort_values("final_reward", ascending=False).head(12)
-            self.elite_pool.extend([s for s in top["smiles"] if s not in self.elite_pool][-16:])
+            self.elite_pool = (self.elite_pool + [s for s in top["smiles"] if s not in self.elite_pool])[-16:]
             self.best_machine = (top.to_dict("records") + self.best_machine)[:64]
 
             # agent RL update with final rewards on the filtered pool

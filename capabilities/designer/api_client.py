@@ -56,26 +56,44 @@ class BoltzApiClient:
             print(f"An error occurred during job submission: {e}")
             return None
 
-    def poll_status(self, task_id: str, poll_interval: int = 15) -> Optional[Dict]:
-        """Polls the status of a task until it's completed or fails."""
+    def poll_status(self, task_id: str, poll_interval: int = 15, max_wait_seconds: int = 3600) -> Optional[Dict]:
+        """Polls the status of a task until terminal, the deadline passes, or the task disappears.
+
+        Returns the final status dict, or None when the deadline elapsed or the server
+        lost the task (404) — callers must treat None as a failed poll, never retry forever."""
         status_url = f"{self.server_url}/status/{task_id}"
-        while True:
+        deadline = time.monotonic() + max(60, max_wait_seconds)
+        consecutive_errors = 0
+        while time.monotonic() < deadline:
             try:
                 response = requests.get(status_url, timeout=30)
+                if response.status_code == 404:
+                    print(f"Task {task_id} no longer exists on the server (404).")
+                    return None
                 if response.status_code == 200:
                     status_data = response.json()
                     state = status_data.get('state')
                     print(f"Polling task {task_id}... Current state: {state}")
                     if state in ["SUCCESS", "FAILURE"]:
                         return status_data
+                    consecutive_errors = 0
                 else:
+                    consecutive_errors += 1
                     print(f"Warning: Could not get status for task {task_id} (HTTP {response.status_code})")
-                
+                    if consecutive_errors >= 12:
+                        print(f"Task {task_id}: aborting poll after repeated status errors.")
+                        return None
+
                 time.sleep(poll_interval)
 
             except requests.exceptions.RequestException as e:
+                consecutive_errors += 1
                 print(f"An error occurred while polling status: {e}")
+                if consecutive_errors >= 12:
+                    return None
                 time.sleep(poll_interval)
+        print(f"Task {task_id}: poll deadline ({max_wait_seconds}s) elapsed without a terminal state.")
+        return None
 
 
     def download_and_unzip_results(self, task_id: str, output_dir: str) -> Optional[str]:
