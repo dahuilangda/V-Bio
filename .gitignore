@@ -118,6 +118,8 @@ capabilities/peptide_lm/models/ss_track.pt
 vbio_runs/
 *.zip
 *.tar.gz
+*.deb
+*.rpm
 
 frontend/server/frontend/.run/
 # ESM3 GRPO adapter 权重(运行时产物, 不进 git)
