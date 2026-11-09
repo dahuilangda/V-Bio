@@ -2633,6 +2633,10 @@ class CopilotSkillHarness:
                     "carry the field"
                 )
             return column
+        raw_index = value.get("index")
+        if isinstance(raw_index, bool):
+            # bool 是 int 的子类，int(True) 会静默读到记录 1 — 显式拒绝
+            raise ValueError(f"Observation {observation_id} index must be an integer, not a boolean")
         try:
             index = int(value.get("index", 0))
         except (TypeError, ValueError):
@@ -2689,6 +2693,10 @@ class CopilotSkillHarness:
                     errors.append(f"{path} is below the declared minimum")
                 if schema.get("maximum") is not None and value > schema["maximum"]:
                     errors.append(f"{path} is above the declared maximum")
+                if schema.get("exclusiveMinimum") is not None and value <= schema["exclusiveMinimum"]:
+                    errors.append(f"{path} must be greater than {schema['exclusiveMinimum']}")
+                if schema.get("exclusiveMaximum") is not None and value >= schema["exclusiveMaximum"]:
+                    errors.append(f"{path} must be less than {schema['exclusiveMaximum']}")
             except TypeError:
                 errors.append(f"{path} declares a non-numeric minimum or maximum")
         if isinstance(value, list):

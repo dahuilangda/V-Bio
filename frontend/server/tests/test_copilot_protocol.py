@@ -490,6 +490,12 @@ class CopilotHarnessContractTests(unittest.TestCase):
             [1, 2],
         )
 
+    def test_observation_reference_rejects_boolean_index(self) -> None:
+        # bool 是 int 的子类：不做显式拒绝时 int(True) 会静默读到记录 1。
+        observations = {"x": {"ok": True, "values": [{"results": [{"a": 1}, {"a": 2}]}]}}
+        with self.assertRaises(ValueError):
+            self.harness.materialize_observations({"$fromObservation": "x", "field": "a", "index": True}, observations)
+
     def test_write_operation_consumes_prior_observation_scalar(self) -> None:
         observations = {
             "prot": {"ok": True, "values": [{"results": [{"value": "declared-from-observation"}]}]},
@@ -1093,6 +1099,13 @@ class CopilotSchemaPatternTests(unittest.TestCase):
         # A malformed schema (non-numeric minimum/maximum) surfaces as an issue, not a TypeError.
         errors = self.harness._validate_schema(5, {"type": "number", "minimum": "big"})
         self.assertTrue(errors)
+
+    def test_exclusive_bounds_enforced(self) -> None:
+        # compute.aggregate 的 value 声明 exclusiveMinimum: 0 — 边界值本身必须被拒绝。
+        self.assertTrue(self.harness._validate_schema(0, {"type": "number", "exclusiveMinimum": 0}))
+        self.assertFalse(self.harness._validate_schema(0.5, {"type": "number", "exclusiveMinimum": 0}))
+        self.assertTrue(self.harness._validate_schema(10, {"type": "number", "exclusiveMaximum": 10}))
+        self.assertFalse(self.harness._validate_schema(9.5, {"type": "number", "exclusiveMaximum": 10}))
 
 
 class CopilotAuditRobustnessTests(unittest.TestCase):
