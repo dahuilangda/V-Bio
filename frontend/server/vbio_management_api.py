@@ -51,6 +51,7 @@ from management_api.copilot_settings import (
 from management_api.copilot_stream import copilot_event_stream, registry_key_for, register_steering, submit_follow_up, submit_steering
 from management_api.usage_tracker import UsageTracker
 from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
+from management_api.task_status_janitor import TaskStatusJanitor
 from management_api.task_status_stream import TaskStatusHub
 
 LOG_LEVEL = os.environ.get("VBIO_MGMT_LOG_LEVEL", "INFO").upper()
@@ -212,6 +213,16 @@ monitor_broker = (
 
 # 项目级任务状态 SSE：终态对账后即时推送（无 DB URL 时仅进程内扇出）。
 task_status_hub = TaskStatusHub(VBIO_MONITOR_DATABASE_URL)
+
+# 任务状态对账清扫器：无人打开的项目里陈旧 QUEUED/RUNNING 行的周期自愈。
+task_status_janitor = TaskStatusJanitor(
+    postgrest=postgrest_client,
+    task_store=task_store,
+    runtime_api_base_url=RUNTIME_API_BASE_URL,
+    runtime_api_token=RUNTIME_API_TOKEN,
+    lock_path=str(REPO_ROOT / "frontend/.run/task-status-janitor.lock"),
+    logger=logger,
+)
 jwt_user_service = JwtUserService(postgrest_client)
 jwt_client_store = JwtClientStore(JWT_CLIENTS_FILE)
 runtime_proxy = RuntimeProxy(
@@ -459,6 +470,7 @@ gateway = GatewayHandlers(
     default_protenix_predict_seed=DEFAULT_PROTENIX_PREDICT_SEED,
     task_status_hub=task_status_hub,
 )
+task_status_janitor.start()
 
 
 @app.get("/vbio-api/healthz")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import os
@@ -218,6 +219,42 @@ class ProjectTaskStore:
                 }
 
         return results
+
+    def fail_lost_rows(self, project_id: str, rows: List[Dict[str, Any]]) -> int:
+        """把确认丢失的任务行标记 FAILURE（broker 无记录、创建超过阈值）。
+
+        at-most-once 投递语义下，worker 重启会让已派发消息消失；这些行永远
+        不会自行推进。逐行 PATCH 终态与可操作的 error_text，让前端能给出
+        "请重新提交" 的明确引导，而不是永远 QUEUED。
+        """
+        patched = 0
+        failed = 0
+        for row in rows:
+            row_id = str(row.get("row_id") or "").strip()
+            if not row_id:
+                continue
+            try:
+                self.postgrest.request(
+                    "PATCH",
+                    "project_tasks",
+                    query={"id": f"eq.{row_id}", "project_id": f"eq.{project_id}"},
+                    payload={
+                        "task_state": "FAILURE",
+                        "error_text": (
+                            "任务丢失：worker 重启导致队列消息未消费，请重新提交"
+                            "（Task lost during a worker restart; please resubmit）"
+                        ),
+                        "completed_at": _now_iso(),
+                    },
+                    headers={"Prefer": "return=minimal"},
+                    expect_json=False,
+                )
+                patched += 1
+            except Exception:
+                failed += 1
+        if failed:
+            logging.getLogger(__name__).warning("Failed to mark %d lost task rows", failed)
+        return patched
 
     def reconcile_terminal_rows(self, project_id: str, terminal_by_task_id: Dict[str, str]) -> int:
         """把已有运行时终态的任务行同步到终态, 返回更新的行数。
