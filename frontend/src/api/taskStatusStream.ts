@@ -44,7 +44,7 @@ export function parseStatusStreamChunk(
         const state = String(record?.state || "").trim();
         if (taskId && state) entries.push({ task_id: taskId, state });
       }
-      if (entries.length > 0) entriesList.push(entries);
+      entriesList.push(entries); // 空 entries 也是有效的刷新信号
     } catch {
       // 单帧坏数据不影响流
     }

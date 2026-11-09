@@ -61,6 +61,10 @@ class UsageTracker:
         project_id: Optional[str],
         task_id: Optional[str],
     ) -> None:
+        # platform 内部调用（runtime token）不属于任何 API token 行，
+        # 落库必然 400（user_id 非 UUID）——直接跳过。
+        if token is None or token.token_id == "platform":
+            return
         duration_ms = int(max(0.0, (time.perf_counter() - started_at) * 1000.0))
 
         meta: Dict[str, Any] = {}

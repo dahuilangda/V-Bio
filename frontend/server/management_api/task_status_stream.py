@@ -112,14 +112,9 @@ class TaskStatusHub:
     def publish(self, project_id: str, entries: list[dict]) -> None:
         """终态变更入口：进程内扇出 + pg_notify 通知另一 worker。"""
         normalized_project = str(project_id or "").strip()
-        payload = [
-            {"task_id": str(entry.get("task_id") or ""), "state": str(entry.get("state") or "")}
-            for entry in (entries or [])
-            if isinstance(entry, dict) and str(entry.get("task_id") or "").strip()
-        ]
-        if not payload:
-            return
-        event = {"project_id": normalized_project, "entries": payload}
+        # pg_notify 载荷上限 8000 字节：只带项目唤醒信号（帧内容对前端仅是
+        # 刷新触发器，条目由订阅方触发的即时刷新拉取），大批次不会超限。
+        event = {"project_id": normalized_project}
         with self._lock:
             subscribers = list(self._subscribers.values())
         delivered = 0
@@ -192,8 +187,8 @@ class TaskStatusHub:
     def _fan_out(self, event: dict) -> None:
         event_project = str(event.get("project_id") or "").strip()
         entries = event.get("entries")
-        if not isinstance(entries, list) or not entries:
-            return
+        if not isinstance(entries, list):
+            entries = []
         with self._lock:
             subscribers = list(self._subscribers.values())
         for subscriber_project, notifications in subscribers:

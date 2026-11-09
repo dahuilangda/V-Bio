@@ -94,7 +94,8 @@ class TaskStatusHubTests(unittest.TestCase):
         hub.publish("p-1", [{"task_id": "t-1", "state": "SUCCESS"}])
         event = sub_a.wait(timeout=1)
         self.assertIsNotNone(event)
-        self.assertEqual(event["entries"][0]["task_id"], "t-1")
+        # 跨 worker 通知只带唤醒信号（唤醒帧为空字典即可触发刷新）
+        self.assertEqual(event, {"project_id": "p-1"})
         self.assertIsNone(sub_b.wait(timeout=0.05))
         sub_a.close()
         sub_b.close()
@@ -116,7 +117,8 @@ class TaskStatusHubTests(unittest.TestCase):
         self.assertEqual(len(connection.notifies), 1)
         channel, payload = connection.notifies[0]
         self.assertEqual(channel, "vbio_task_events")
-        self.assertIn("t-1", payload)
+        # 跨 worker 通知只带唤醒信号（条目由订阅方触发的刷新拉取）
+        self.assertIn('"project_id": "p-1"', payload)
 
     def test_listen_loop_fans_out_remote_notification(self):
         pending: "queue.Queue[tuple[str, str]]" = queue.Queue()
@@ -160,7 +162,7 @@ class SseFrameTests(unittest.TestCase):
         hub.unsubscribe("p-1")
         joined = "".join(frames)
         self.assertIn("event: changed", joined)
-        self.assertIn('"state":"SUCCESS"', joined)
+        self.assertIn('"project_id":"p-1"', joined)
 
     def test_idle_subscription_yields_keepalives_then_reconnect(self):
         pending: "queue.Queue[tuple[str, str]]" = queue.Queue()
