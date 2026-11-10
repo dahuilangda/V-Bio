@@ -1,4 +1,4 @@
-# Python
+# ---------------------------------------------------------------- Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -16,16 +16,17 @@ build/
 *.egg-info/
 .eggs/
 
-capabilities/peptide_lm/peplm/bench/esm3_policy_smoke.py
-
-# Env
+# ---------------------------------------------------------------- 环境与密钥
+# 真实 env 一律不入库；模板以 *.env.example / configs/vbio.example.toml 入库
 .env
 .env.*
 !.env.example
 *.env.bak
 deploy/docker/*.env
+configs/vbio.toml
+deploy/docker/.vbio.generated.env
 
-# Runtime output
+# ---------------------------------------------------------------- 运行期产物
 *.log*
 *.pid
 nohup.out
@@ -37,30 +38,36 @@ nohup.out
 **/.run/
 results/
 exports/
-
-# Local data & caches
+vbio_runs/
 .af3_jax_cache/
 .boltz_cache/
 boltz_central_results/
-AF3Score/
-BioPhi
+
+# ---------------------------------------------------------------- 本地数据
 data/fold_input.json
 data/chembl_*
+AF3Score/
+BioPhi/
 capabilities/boltz2score/data/
 capabilities/boltz2score/.venv/
 capabilities/designer/temp_design_run_*
-capabilities/peptide_lm/runs/
-capabilities/halo/runs/
 
-# Model weights & training data
-capabilities/peptide_lm/models/*.pt
+# ---------------------------------------------------------------- 模型权重
+*.pth
+*.pt
+*.safetensors
+*.ckpt
 capabilities/peptide_lm/models/*.jsonl
 capabilities/peptide_lm/models/external/
 capabilities/peptide_lm/models/cache/
 capabilities/peptide_lm/hub/
+capabilities/peptide_lm/adapters/
+capabilities/peptide_lm/runs/
+capabilities/peptide_lm/esm3_local/data
+capabilities/halo/runs/
 
-# colabfold server
-capabilities/colabfold_server/databases
+# ---------------------------------------------------------------- colabfold 服务
+capabilities/colabfold_server/databases/
 capabilities/colabfold_server/jobs/
 capabilities/colabfold_server/msa-server-*
 capabilities/colabfold_server/_prebuilt/*.tar.gz
@@ -69,16 +76,22 @@ capabilities/colabfold_server/mmseqs-server/backend/msa-server
 capabilities/colabfold_server/mmseqs-server/backend/vendor/
 capabilities/colabfold_server/config.json.bak
 
-# Vendor build artifacts
+# ---------------------------------------------------------------- Mol-1 引擎工作目录
+capabilities/mol1/Mol-1-source/output/
+capabilities/mol1/Mol-1-source/**/linker_sdf/
+capabilities/mol1/Mol-1-source/**/self_msa/
+
+# ---------------------------------------------------------------- vendor 构建产物
 vendor/protenix-source/**/*.o
 vendor/protenix-source/**/*.so
 vendor/protenix-source/**/.ninja_*
-vendor/esm3-venv/
 vendor/*-venv/
 
-# Frontend
+# ---------------------------------------------------------------- 前端
 node_modules/
 frontend/dist/
+frontend/dist-new/
+frontend/dist-served/
 frontend/.vite/
 frontend/vite.config.js
 frontend/vite.config.d.ts
@@ -86,51 +99,25 @@ frontend/vite.config.d.ts
 coverage/
 frontend/supabase-lite/data/
 
-# Scratch files
+# ---------------------------------------------------------------- 草稿与测试工件
 *.orig
 *.rej
-capabilities/protenix2dock/RANKL_*.pdb
-backend/runtime/RANKL_*.pdb
-backend/runtime/psslm_data/rankl_cyclic_final.yaml
-
-# IDE / OS
-.vscode/
-.idea/
-.claude/settings.local.json
-.zcode/
 *.swp
 *.swo
-.DS_Store
-Thumbs.db
-backend/runtime/CD73_4H2I_dimer.pdb
-backend/runtime/CD73_7DX9_AB.pdb
-
-# Model weights and training data (too large for git)
-*.pth
-*.pt
-*.safetensors
-*.ckpt
-capabilities/peptide_lm/models/prior.pt
-capabilities/peptide_lm/models/ss_track.pt
-
-# Design outputs and runtime artifacts
-/data/boltz_central_results/
-vbio_runs/
 *.zip
 *.tar.gz
 *.deb
 *.rpm
+capabilities/protenix2dock/RANKL_*.pdb
+backend/runtime/RANKL_*.pdb
+backend/runtime/CD73_*.pdb
+backend/runtime/psslm_data/rankl_cyclic_final.yaml
+capabilities/peptide_lm/peplm/bench/esm3_policy_smoke.py
 
-frontend/server/frontend/.run/
-# ESM3 GRPO adapter 权重(运行时产物, 不进 git)
-capabilities/peptide_lm/adapters/
-capabilities/peptide_lm/esm3_local/data
-
-# Mol-1 引擎运行时产物（推理输出/自体 MSA/连接子 SDF 均写在工作目录，不进 git）
-capabilities/mol1/Mol-1-source/output/
-capabilities/mol1/Mol-1-source/**/linker_sdf/
-capabilities/mol1/Mol-1-source/**/self_msa/
-
-# 标准部署配置：现场真实值不入 git（模板 configs/vbio.example.toml 已入库）
-configs/vbio.toml
-deploy/docker/.vbio.generated.env
+# ---------------------------------------------------------------- IDE / OS
+.vscode/
+.idea/
+.claude/settings.local.json
+.zcode/
+.DS_Store
+Thumbs.db
