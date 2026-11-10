@@ -479,20 +479,24 @@ class ResultArchiveService:
 
     @staticmethod
     def _choose_best_protenix_files(src_zip: zipfile.ZipFile, names: list[str]) -> tuple[Optional[str], Optional[str]]:
-        canonical_structure_candidates = [
+        canonical_structures = [
             'protenix/output/protenix_model_0.cif',
             'protenix/output/protenix_model_0.mmcif',
             'protenix/output/protenix_model_0.pdb',
+            'mol1/output/mol1_model_0.cif',
         ]
         canonical_confidence = 'protenix/output/confidence_protenix_model_0.json'
-        structure = next((item for item in canonical_structure_candidates if item in names), None)
+        structure = next((item for item in canonical_structures if item in names), None)
         if structure and canonical_confidence in names:
             return structure, canonical_confidence
 
         summary_candidates = [
             item
             for item in names
-            if item.lower().startswith('protenix/output/')
+            if (
+                item.lower().startswith('protenix/output/')
+                or item.lower().startswith('mol1/output/')
+            )
             and item.lower().endswith('.json')
             and _PROTENIX_SUMMARY_SAMPLE_RE.search(os.path.basename(item))
         ]
@@ -548,7 +552,10 @@ class ResultArchiveService:
             names = [name for name in src_zip.namelist() if not name.endswith('/')]
             lower_names = [name.lower() for name in names]
             is_af3 = any('af3/output/' in name for name in lower_names)
-            is_protenix = any('protenix/output/' in name for name in lower_names)
+            is_protenix = any(
+                'protenix/output/' in name or 'mol1/output/' in name
+                for name in lower_names
+            )
             is_nesso = 'nesso/manifest.json' in lower_names
             preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
             preferred_structure = self._find_structure_file_by_name(names, preferred_structure_name)

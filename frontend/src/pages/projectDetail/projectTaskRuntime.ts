@@ -423,6 +423,8 @@ function mergePeptideRuntimeStatusIntoConfidence(
   return JSON.stringify(nextConfidence) === JSON.stringify(currentConfidence) ? null : nextConfidence;
 }
 
+const viewerPullInFlight = new Set<string>();
+
 export async function pullResultForViewerTask(params: {
   taskId: string;
   options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string };
@@ -459,6 +461,8 @@ export async function pullResultForViewerTask(params: {
 
   const shouldPersistProject = options?.persistProject !== false;
   const resultMode = options?.resultMode || 'view';
+  if (viewerPullInFlight.has(taskId)) return;
+  viewerPullInFlight.add(taskId);
   setResultError(null);
   try {
     const blob = await downloadResultBlob(taskId, {
@@ -517,26 +521,36 @@ export async function pullResultForViewerTask(params: {
     }
 
     if (shouldPersistProject) {
-      await patch({
-        confidence: persistedProjectConfidence,
-        affinity: parsed.affinity,
-        structure_name: parsed.structureName,
-      });
+      try {
+        await patch({
+          confidence: persistedProjectConfidence,
+          affinity: parsed.affinity,
+          structure_name: parsed.structureName,
+        });
+      } catch {
+        // 只读会话（viewer 共享）持久化被拒：结构已解析显示，静默跳过
+      }
     }
     if (options?.taskRowId) {
       const propertiesPatch = baseTaskProperties && hasStoredTaskInputOptions({ properties: baseTaskProperties })
         ? mergePeptidePreviewIntoProperties(baseTaskProperties, persistedTaskConfidence)
         : null;
-      await patchTask(options.taskRowId, {
-        confidence: persistedTaskConfidence,
-        affinity: parsed.affinity,
-        structure_name: parsed.structureName,
-        ...(propertiesPatch ? { properties: propertiesPatch as unknown as ProjectTask['properties'] } : {})
-      });
+      try {
+        await patchTask(options.taskRowId, {
+          confidence: persistedTaskConfidence,
+          affinity: parsed.affinity,
+          structure_name: parsed.structureName,
+          ...(propertiesPatch ? { properties: propertiesPatch as unknown as ProjectTask['properties'] } : {})
+        });
+      } catch {
+        // 同上：persist 失败不回滚已就绪的查看状态
+      }
     }
   } catch (err) {
     setStructureTaskId(null);
     setResultError(err instanceof Error ? err.message : 'Failed to parse downloaded result.');
+  } finally {
+    viewerPullInFlight.delete(taskId);
   }
 }
 

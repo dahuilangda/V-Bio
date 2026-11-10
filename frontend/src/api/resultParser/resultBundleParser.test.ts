@@ -121,3 +121,24 @@ describe('parseResultBundle — boltz2score affinity/interactions flow', () => {
     expect(affinity.interactions).toBeUndefined();
   });
 });
+
+describe('parseResultBundle — mol1 archives follow the protenix contract', () => {
+  it('pairs the best ranking_score sample with its confidence file', async () => {
+    const sample = (index: number) => JSON.stringify({
+      plddt: 90 + index,
+      iptm: 0.7 + 0.01 * index,
+      ranking_score: 0.7 + 0.01 * index
+    });
+    const files: Record<string, string> = {
+      'mol1/output/summary.json': JSON.stringify({ engine: 'mol1' })
+    };
+    for (let i = 0; i < 2; i += 1) {
+      files[`mol1/output/input/seed_1/predictions/input_sample_${i}.cif`] = MINIMAL_CIF;
+      files[`mol1/output/input/seed_1/predictions/input_summary_confidence_sample_${i}.json`] = sample(i);
+    }
+    const parsed = await parseResultBundle(await buildResultZip(files));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.structureName).toContain('input_sample_1.cif');
+    expect((parsed!.confidence as Record<string, unknown>).plddt).toBeCloseTo(91);
+  });
+});

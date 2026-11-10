@@ -13697,8 +13697,7 @@ def main():
                     if chirality_raw != "l":
                         raise ValueError(
                             "RFD4-Proteina 仅支持 L 肽设计；D 肽请使用 ESM3 + RL 策略。")
-                    # RFD4 设计策略：一次性生成 + 自动派发验证子任务，
-                    # 不进入 ESM3 世代循环（环内融合为后续特性）。
+                    # 一次性生成后自动派发验证子任务，不进入世代循环
                     score_backend_sel = str(
                         peptide_design_options.get("peptideScorerBackend")
                         or peptide_design_options.get("peptide_scorer_backend") or "protenix").strip().lower()
