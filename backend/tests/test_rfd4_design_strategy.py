@@ -1,15 +1,18 @@
 """RFD4 设计策略的纯函数单测：候选提取与靶标序列解析。"""
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from runtime.run_single_prediction import (
-    _dpeptide_target_sequence,
-    _rfd4_candidates_from_summary,
-)
+rsp = importlib.import_module("backend.runtime.run_single_prediction")
+
+_dpeptide_target_sequence = rsp._dpeptide_target_sequence
+_rfd4_candidates_from_summary = rsp._rfd4_candidates_from_summary
 
 
 def test_candidates_pick_shortest_polymer_per_output():
