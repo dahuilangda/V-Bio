@@ -952,7 +952,7 @@ export function WorkflowRuntimeSettingsSection({
                 designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
               }).map((option: { value: string; label: string }) => (
                 <option key={option.value} value={option.value}>
-                  {option.value === 'rfd4' ? option.label : `${option.label} + RL（世代循环）`}
+                  {option.value === 'rfd4' ? option.label : `${option.label} + RL`}
                 </option>
               ))}
             </select>
