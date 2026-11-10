@@ -1134,35 +1134,64 @@ export function WorkflowRuntimeSettingsSection({
                 </div>
                 <div className="peptide-settings-block">
                   <div className="peptide-settings-block-head">Length & residue pool</div>
-                  <label className="field peptide-length-range">
-                  <span>
-                    Peptide Length
-                    <InfoTip text="Design length window. Set min = max for a fixed length; an open range lets each generation adapt candidate lengths within it." align="start" />
-                    {lengthLocked ? ' (fixed)' : ' (min–max)'}
-                    {!lengthLocked && peptideLengthMin !== undefined ? (
-                      <span className="muted" style={{ marginLeft: 6, fontSize: '0.9em' }}>
-                        adaptive {peptideLengthMin}–{peptideLengthMax} aa
+                  <div className="peptide-length-nonnatural-row">
+                    <div className="peptide-length-group">
+                      <span className="peptide-length-label">
+                        Peptide Length
+                        <InfoTip text="Design length window. Set min = max for a fixed length; an open range lets each generation adapt candidate lengths within it." align="start" />
+                        {lengthLocked ? ' (fixed)' : ''}
                       </span>
-                    ) : null}
-                  </span>
-                  <div className="peptide-length-range-inputs">
-                    <CommitNumberInput
-                      min={peptideDesignMode === 'bicyclic' ? 8 : 5}
-                      max={peptideLengthMax}
-                      value={peptideLengthMin}
-                      onCommit={(v) => onPeptideLengthRange(v, peptideLengthMax)}
-                      disabled={!isEditable}
-                    />
-                    <span className="peptide-length-range-dash">–</span>
-                    <CommitNumberInput
-                      min={peptideLengthMin}
-                      max={80}
-                      value={peptideLengthMax}
-                      onCommit={(v) => onPeptideLengthRange(peptideLengthMin, v)}
-                      disabled={!isEditable}
-                    />
+                      <div className="peptide-length-range-inputs">
+                        <CommitNumberInput
+                          min={peptideDesignMode === 'bicyclic' ? 8 : 5}
+                          max={peptideLengthMax}
+                          value={peptideLengthMin}
+                          onCommit={(v) => onPeptideLengthRange(v, peptideLengthMax)}
+                          disabled={!isEditable}
+                        />
+                        <span className="peptide-length-range-dash">–</span>
+                        <CommitNumberInput
+                          min={peptideLengthMin}
+                          max={80}
+                          value={peptideLengthMax}
+                          onCommit={(v) => onPeptideLengthRange(peptideLengthMin, v)}
+                          disabled={!isEditable}
+                        />
+                      </div>
+                    </div>
+                    <div className="peptide-residue-usage">
+                      <strong className="peptide-residue-usage-title">
+                        Non-natural residue count
+                        <InfoTip text="Caps how many selected non-natural residues each designed peptide may contain." align="start" />
+                      </strong>
+                      <label className="field peptide-residue-usage-field">
+                        <span>least</span>
+                        <CommitNumberInput
+                          min={0}
+                          max={effectiveDesignLength}
+                          value={peptideNonNaturalMin}
+                          onCommit={(value) => {
+                            const nextMin = clampNonNaturalLimit(value);
+                            onPeptideNonNaturalRangeChange(nextMin, Math.max(nextMin, peptideNonNaturalMax));
+                          }}
+                          disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
+                        />
+                      </label>
+                      <label className="field peptide-residue-usage-field">
+                        <span>most</span>
+                        <CommitNumberInput
+                          min={peptideNonNaturalMin}
+                          max={effectiveDesignLength}
+                          value={peptideNonNaturalMax}
+                          onCommit={(value) => {
+                            const nextMax = clampNonNaturalLimit(value);
+                            onPeptideNonNaturalRangeChange(Math.min(peptideNonNaturalMin, nextMax), nextMax);
+                          }}
+                          disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
+                        />
+                      </label>
+                    </div>
                   </div>
-                </label>
                 <div className={`peptide-residue-config${residuePoolOpen ? " residue-pool-open" : ""}`}>
                   <button
                     type="button"
@@ -1178,42 +1207,6 @@ export function WorkflowRuntimeSettingsSection({
                       {selectedNaturalCount} natural / {selectedNonNaturalCount} non-natural selected
                     </span>
                   </button>
-                  <div className="peptide-residue-usage">
-                    <div className="peptide-residue-usage-copy">
-                      <strong>
-                        Non-natural residue count
-                        <InfoTip text="Caps how many selected non-natural residues each designed peptide may contain." align="start" />
-                      </strong>
-                    </div>
-                    <div className="peptide-residue-usage-controls">
-                      <label className="field peptide-residue-usage-field">
-                        <span>At least</span>
-                        <CommitNumberInput
-                          min={0}
-                          max={effectiveDesignLength}
-                          value={peptideNonNaturalMin}
-                          onCommit={(value) => {
-                            const nextMin = clampNonNaturalLimit(value);
-                            onPeptideNonNaturalRangeChange(nextMin, Math.max(nextMin, peptideNonNaturalMax));
-                          }}
-                          disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
-                        />
-                      </label>
-                      <label className="field peptide-residue-usage-field">
-                        <span>At most</span>
-                        <CommitNumberInput
-                          min={peptideNonNaturalMin}
-                          max={effectiveDesignLength}
-                          value={peptideNonNaturalMax}
-                          onCommit={(value) => {
-                            const nextMax = clampNonNaturalLimit(value);
-                            onPeptideNonNaturalRangeChange(Math.min(peptideNonNaturalMin, nextMax), nextMax);
-                          }}
-                          disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
-                        />
-                      </label>
-                    </div>
-                  </div>
                   {!hasPeptideResiduePool ? (
                     <div className="muted small peptide-runtime-backend-hint">
                       Edits apply to the next submission.

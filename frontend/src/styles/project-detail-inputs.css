@@ -1227,42 +1227,72 @@
 }
 
 .peptide-residue-usage {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 6px 12px;
   border: 1px solid #e1ebe6;
   border-radius: var(--radius-sm);
   background: #f7fbf9;
 }
 
-.peptide-residue-usage-label {
-  flex: 1;
+.peptide-residue-usage-title {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #274336;
-  font-size: 12px;
-  line-height: 1.25;
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: nowrap;
 }
 
-.peptide-residue-usage-controls {
+/* Peptide Length 与 Non-natural 上限合并为同一行 */
+.peptide-length-nonnatural-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 18px;
+  flex-wrap: wrap;
 }
 
-.peptide-residue-usage-field {
+.peptide-length-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
 }
 
-.peptide-residue-usage-field > span {
-  font-size: 11px;
+.peptide-length-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-.peptide-residue-usage-field input {
-  height: 34px;
-  min-height: 34px;
+.peptide-length-group .peptide-length-range-inputs input {
+  flex: 0 0 72px;
+  width: 72px;
+  max-width: 72px;
+}
+
+label.peptide-residue-usage-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+label.peptide-residue-usage-field > span {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+label.peptide-residue-usage-field input {
+  height: 30px;
+  min-height: 30px;
+  width: 64px;
+  flex: 0 0 auto;
+  padding: 4px 8px;
 }
 
 .peptide-residue-pool {
@@ -1693,13 +1723,9 @@
 }
 
 @media (max-width: 720px) {
-  .peptide-residue-config-head,
-  .peptide-residue-usage {
-    grid-template-columns: 1fr;
-  }
-
   .peptide-residue-config-head {
     display: grid;
+    grid-template-columns: 1fr;
   }
 
   .peptide-residue-selection-summary {
@@ -1707,7 +1733,7 @@
     white-space: normal;
   }
 
-  .peptide-residue-usage-controls,
+  .peptide-length-nonnatural-row,
   .peptide-custom-editor-grid,
   .peptide-custom-editor-main {
     grid-template-columns: 1fr;
@@ -2573,28 +2599,7 @@
   border-radius: 6px;
   background: #fff;
 }
-.peptide-residue-usage-label {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: #274336;
-  font-size: 12px;
-}
-.peptide-residue-usage-controls {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-}
-.peptide-residue-usage-field {
-  min-width: 0;
-}
-.peptide-residue-usage-field > span {
-  font-size: 11px;
-}
-.peptide-residue-usage-field input {
-  height: 30px;
-  min-height: 30px;
+.peptide-mask-dot.stretch {  min-height: 30px;
 }
 
 .peptide-mask-dot.stretch {

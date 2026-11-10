@@ -1568,10 +1568,10 @@ select:focus {
 .peptide-structure-seed-row {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 14px;
 }
 .peptide-structure-seed-row > .field {
-  flex: 1;
+  flex: 0 1 460px;
   min-width: 0;
 }
 /* The toggle pill matches the file input's height, so flush bottom edges align
