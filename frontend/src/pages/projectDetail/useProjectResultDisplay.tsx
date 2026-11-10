@@ -220,7 +220,10 @@ export function useProjectResultDisplay({
             rfd4Consistency: asRecord(snapshotConfidence).rfd4_consistency as
               | import('./resultPresentation').Rfd4ConsistencyMetrics
               | undefined
-              | null
+              | null,
+            isDPeptideDesign:
+              asRecord(asRecord(asRecord(snapshotConfidence).request).options).peptideChirality === 'd' ||
+              asRecord(snapshotConfidence).peptide_chirality === 'd'
           })
         : [],
     [

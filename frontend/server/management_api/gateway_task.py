@@ -35,8 +35,8 @@ def forward_task_read(
 
         passthrough_query = {key: value for key, value in request.args.items() if key != "project_id"}
         upstream = gateway._proxy_get(f"{upstream_prefix}/{quote(task_id, safe='')}{upstream_suffix}", passthrough_query)
-        status_code = upstream.status_code
-        if action == "read_results_view" and 200 <= status_code < 300 and project_id:
+        status_code = getattr(upstream, "status_code", None)
+        if action == "read_results_view" and isinstance(status_code, int) and 200 <= status_code < 300 and project_id:
             enriched = maybe_enrich_view(gateway, task_id, project_id, upstream)
             if enriched is not None:
                 response = Response(enriched, status=status_code, content_type="application/zip")
@@ -52,6 +52,7 @@ def forward_task_read(
                 return response, status_code
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 400
+
 
         gateway._record_usage(
             token,
@@ -129,6 +130,7 @@ def forward_task_status_stubs(gateway: Any) -> Tuple[Response, int]:
         upstream = gateway._proxy_post_json("/status/stubs", {"task_ids": task_ids})
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 400
+
         gateway._record_usage(
             token,
             action="read_status_stubs",
@@ -226,6 +228,7 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
         upstream = gateway._proxy_post_json("/status/batch", {"task_ids": task_ids})
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 400
+
         if succeeded:
             # 服务端对账: 运行时已终态而行未推进的(页面没开着/经 API 直提),
             # 在任意一次状态轮询时自愈。仅处理明确终态, 失败不影响读取。

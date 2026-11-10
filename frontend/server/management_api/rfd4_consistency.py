@@ -176,6 +176,8 @@ def maybe_enrich_view(
         row = _load_task_row(gateway, task_id, project_id)
         if row is None:
             return None
+        if _is_d_peptide_task(row):
+            return None
         cached = row.get("confidence")
         if isinstance(cached, dict) and isinstance(cached.get("rfd4_consistency"), dict):
             payload = json.dumps(cached["rfd4_consistency"], ensure_ascii=False)
@@ -208,12 +210,22 @@ def maybe_enrich_view(
         return None
 
 
+def _is_d_peptide_task(row: Dict[str, Any]) -> bool:
+    properties = row.get("properties")
+    if not isinstance(properties, dict):
+        return False
+    chirality = str(
+        properties.get("peptideChirality") or properties.get("peptide_chirality") or ""
+    ).strip().lower()
+    return chirality == "d"
+
+
 def _load_task_row(gateway, task_id: str, project_id: str) -> Optional[Dict[str, Any]]:
     rows = gateway.task_store.postgrest.request(
         "GET",
         "project_tasks",
         query={
-            "select": "id,name,backend,task_state,confidence",
+            "select": "id,name,backend,task_state,confidence,properties",
             "task_id": f"eq.{task_id}",
             "project_id": f"eq.{project_id}",
             "order": "created_at.desc",

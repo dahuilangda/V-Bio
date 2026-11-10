@@ -47,6 +47,7 @@ export function buildSnapshotCards(params: {
   selectedResultLigandLabel: string;
   selectedResultPairLabel: string;
   rfd4Consistency?: Rfd4ConsistencyMetrics | null;
+  isDPeptideDesign?: boolean;
 }): SnapshotCard[] {
   const {
     snapshotPlddt,
@@ -66,26 +67,28 @@ export function buildSnapshotCards(params: {
     selectedResultLigandLabel,
     selectedResultPairLabel,
     rfd4Consistency = null,
+    isDPeptideDesign = false,
   } = params;
 
-  const rfd4Cards: SnapshotCard[] = rfd4Consistency
-    ? [
-        {
-          key: 'rfd4-dockq',
-          label: 'RFD4 DockQ',
-          value: rfd4Consistency.dockq?.toFixed(3) ?? '-',
-          detail: `vs ${rfd4Consistency.label || 'RFD4 model'}${rfd4Consistency.fnat != null ? ` · Fnat ${(rfd4Consistency.fnat * 100).toFixed(0)}%` : ''}`,
-          tone: toneForDockQ(rfd4Consistency.dockq ?? 0)
-        },
-        {
-          key: 'rfd4-lrmsd',
-          label: 'RFD4 LRMSD',
-          value: rfd4Consistency.lrmsd != null ? `${rfd4Consistency.lrmsd.toFixed(2)} Å` : '-',
-          detail: 'vs RFD4 model',
-          tone: rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 2 ? 'excellent' : rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 5 ? 'medium' : 'low'
-        }
-      ]
-    : [];
+  const rfd4Cards: SnapshotCard[] =
+    rfd4Consistency && !isDPeptideDesign
+      ? [
+          {
+            key: 'rfd4-dockq',
+            label: 'RFD4 DockQ',
+            value: rfd4Consistency.dockq?.toFixed(3) ?? '-',
+            detail: `vs ${rfd4Consistency.label || 'RFD4 model'}${rfd4Consistency.fnat != null ? ` · Fnat ${(rfd4Consistency.fnat * 100).toFixed(0)}%` : ''}`,
+            tone: toneForDockQ(rfd4Consistency.dockq ?? 0)
+          },
+          {
+            key: 'rfd4-lrmsd',
+            label: 'RFD4 LRMSD',
+            value: rfd4Consistency.lrmsd != null ? `${rfd4Consistency.lrmsd.toFixed(2)} Å` : '-',
+            detail: 'vs RFD4 model',
+            tone: rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 2 ? 'excellent' : rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 5 ? 'medium' : 'low'
+          }
+        ]
+      : [];
 
   return [
     {

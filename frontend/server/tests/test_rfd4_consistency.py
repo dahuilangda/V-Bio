@@ -156,3 +156,49 @@ def test_maybe_enrich_injects_and_persists(tmp_path):
     assert payload["dockq"] > 0.9
     assert payload["label"] == label
     assert patches and patches[0]["confidence"]["rfd4_consistency"]["dockq"] > 0.9
+
+
+def test_maybe_enrich_skips_d_peptide_task(tmp_path):
+    view_buffer = io.BytesIO()
+    model = _complex_cif(0.0)
+    with zipfile.ZipFile(view_buffer, "w") as zf:
+        zf.writestr("mol1/output/input/seed_1/predictions/input_sample_0.cif", model)
+
+    row = {
+        "id": "row-d",
+        "name": "RFD4 verify mol1 traf6_1lb5_L16_9 CREEEC",
+        "backend": "mol1",
+        "task_state": "SUCCESS",
+        "confidence": {},
+        "properties": {"peptideChirality": "d"},
+    }
+
+    def fake_request(method, table, **kwargs):
+        query = kwargs.get("query") or {}
+        if method == "GET" and "name" in query:
+            return [{"task_id": "gen-task-1"}]
+        if method == "GET":
+            return [row]
+        return []
+
+    gateway = SimpleNamespace(
+        task_store=SimpleNamespace(postgrest=SimpleNamespace(request=fake_request)),
+        runtime_proxy=SimpleNamespace(
+            session=SimpleNamespace(
+                get=lambda url, headers, timeout: SimpleNamespace(
+                    raise_for_status=lambda: None, content=b""
+                )
+            ),
+            runtime_api_base_url="http://runtime",
+            runtime_api_token="tok",
+        ),
+        logger=SimpleNamespace(info=lambda *a: None),
+    )
+    upstream = SimpleNamespace(
+        headers={"Content-Type": "application/zip"},
+        status_code=200,
+        content=view_buffer.getvalue(),
+    )
+
+    enriched = maybe_enrich_view(gateway, "task-d", "proj-1", upstream)
+    assert enriched is None
