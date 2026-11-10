@@ -9,6 +9,7 @@ services:
     restart: unless-stopped
     working_dir: ${VBIO_HOST_ROOT}
     env_file:
+      - ./.vbio.generated.env
       - ./DOCKER_STACK_CENTRAL_DECOUPLED.env
     volumes:
       - ${VBIO_HOST_ROOT}:${VBIO_HOST_ROOT}
@@ -28,6 +29,7 @@ services:
     restart: unless-stopped
     working_dir: ${VBIO_HOST_ROOT}
     env_file:
+      - ./.vbio.generated.env
       - ./DOCKER_STACK_CENTRAL_DECOUPLED.env
     volumes:
       - ${VBIO_HOST_ROOT}:${VBIO_HOST_ROOT}

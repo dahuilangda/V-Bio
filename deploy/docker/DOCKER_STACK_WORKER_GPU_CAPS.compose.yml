@@ -13,6 +13,7 @@ x-gpu-worker-base: &gpu_worker_base
     - "host.docker.internal:host-gateway"
   working_dir: ${VBIO_HOST_ROOT:-/data/V-Bio}
   env_file:
+    - ./.vbio.generated.env
     - ./DOCKER_STACK_WORKER_GPU_CAPS.env
   volumes:
     - /usr/bin/docker:/usr/bin/docker:ro

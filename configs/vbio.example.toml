@@ -1,0 +1,331 @@
+# V-Bio 标准部署配置模板。
+#
+# 用法：复制为 configs/vbio.toml（不入 git），按环境改值。
+#   cp configs/vbio.example.toml configs/vbio.toml
+# 加载：backend/run.sh 与 frontend/run.sh 启动时自动把本文件导出为环境
+#   变量（env_file 注入容器 / 进程环境）；真实环境变量优先于本文件。
+# 键名即环境变量名，小节仅作组织。全部键由契约测试守护
+# （backend/tests/test_vbio_config_contract.py）：代码新读一个配置键
+# 而模板缺失时会测试失败，防止配置面发散。
+# 运行期注入键（VBIO_TASK_ID、CUDA_VISIBLE_DEVICES 等）不在此列，见测试的排除清单。
+
+# ---------------------------------------------------------------- 核心
+[core]
+# 统一访问令牌：API 网关、worker、前端三方一致（必改）
+VBIO_API_TOKEN = "change-me"
+# 代码目录（宿主机绝对路径，容器挂载用；必改）
+VBIO_HOST_ROOT = "/data/V-Bio"
+# Redis 地址（Celery broker / GPU 池 / 事件流）
+REDIS_URL = "redis://localhost:6379/0"
+# 中央 API 地址（worker 回传结果/状态）
+CENTRAL_API_URL = "http://localhost:5000"
+# 前端基址（邮件深链、RFD4 策略网关地址推导）
+FRONTEND_URL = ""
+# 结果存储根目录
+RESULTS_BASE_DIR = "/data/boltz_central_results"
+# 任务结果保留天数（zip、中间结果树、lead_opt 输出统一 GC）
+RESULTS_RETENTION_DAYS = 90
+# 结果定期清理开关与间隔秒（monitor 启动先跑一轮）
+RESULTS_CLEANUP_ENABLED = true
+RESULTS_CLEANUP_INTERVAL_SECONDS = 21600
+# 任务列表 Excel 导出目录与条目 TTL
+EXPORTS_BASE_DIR = ""
+EXPORT_JOB_TTL_SECONDS = 172800
+EXPORT_FILE_TTL_SECONDS = 172800
+EXPORT_MAX_TASK_ROWS = 50000
+EXPORT_REQUEST_MAX_BYTES = 67108864
+# lead optimization 输出目录
+LEAD_OPTIMIZATION_OUTPUT_DIR = "/data/boltz_lead_optimization_results"
+# MSA(a3m) 序列缓存目录与保留天数（缓存可重建）
+VBIO_MSA_CACHE_DIR = "/data/boltz_msa_cache"
+MSA_CACHE_RETENTION_DAYS = 90
+# worker 共享临时根目录
+WORKER_SHARED_TMP_ROOT = ""
+# 请求体上限：结构上传 64MiB；worker 归档回传 32GiB
+MAX_UPLOAD_BYTES = 67108864
+WORKER_RESULT_UPLOAD_MAX_BYTES = 34359738368
+# 向客户端回显内部异常详情（生产保持 false）
+EXPOSE_ERROR_DETAILS = false
+# 允许的跨域来源（逗号分隔；空 = 同源）
+VBIO_CORS_ALLOW_ORIGINS = ""
+# Flask 调试模式（生产保持 false）
+FLASK_DEBUG = false
+
+# ---------------------------------------------------------------- API 服务
+[api]
+# 运行时 API 监听地址（容器内必须 0.0.0.0，宿主端口映射依赖）
+VBIO_RUNTIME_BIND = "0.0.0.0"
+# gunicorn 进程数
+GUNICORN_WORKERS = 1
+# GPU 并发上限（<=0 用全部 GPU）；CPU worker 并发（0 = 全部核心）
+MAX_CONCURRENT_TASKS = -1
+CPU_MAX_CONCURRENT_TASKS = 0
+# 每 API 租户每日 /predict 配额（<=0 关闭）
+TENANT_MAX_DAILY = 50
+# 任务邮件合并窗口秒（0 = 逐任务即发）
+NOTIFY_DIGEST_WINDOW_SECONDS = 900
+
+# ---------------------------------------------------------------- 任务超时
+[timeouts]
+# 常规单次预测秒数
+PREDICTION_SUBPROCESS_TIMEOUT_SECONDS = 10800
+# boltz2score 评分软/硬超时（硬须大于软 +300s）
+BOLTZ2SCORE_TASK_SOFT_TIME_LIMIT_SECONDS = 16200
+BOLTZ2SCORE_TASK_HARD_TIME_LIMIT_SECONDS = 18000
+# 多肽候选/父任务超时（<=0 禁用）；预算估算参数
+PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS = 0
+PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS = 0
+PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS = 1800
+PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS = 1800
+# 多肽候选等 GPU 上限（<=0 一直等待）
+PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS = 0
+# 候选派发窗口与 refine 队列宽限秒
+PEPTIDE_CANDIDATE_DISPATCH_WINDOW = ""
+PEPTIDE_REFINE_QUEUE_GRACE_SECONDS = ""
+# D 肽相关
+DPEPTIDE_PLDDT_GATE = ""
+DPEPTIDE_TARGET_PREDICT_TIMEOUT_SECONDS = ""
+
+# ---------------------------------------------------------------- MSA 服务
+[msa]
+# ColabFold MSA 服务地址（生产必改）
+MSA_SERVER_URL = "http://localhost:8080"
+MSA_SERVER_TIMEOUT_SECONDS = 1800
+# ColabFold 任务目录（历史清理用）
+COLABFOLD_JOBS_DIR = "/data/colabfold/jobs"
+# mmseqs 并发与私服凭据（可空）
+VBIO_MSA_SEARCH_CONCURRENCY = 4
+VBIO_MSA_USERNAME = ""
+VBIO_MSA_PASSWORD = ""
+MSA_API_KEY_VALUE = ""
+# MSA 软保留：存活的 MSA 等待方让长任务让出下一张空卡
+GPU_MSA_RESERVE_ENABLED = true
+GPU_MSA_RESERVE_HOLDER_LIMIT = 3
+GPU_MSA_WAITER_STALE_SECONDS = 180
+VBIO_MSA_HEALTH_SWEEP_SECONDS = ""
+
+# ---------------------------------------------------------------- GPU 池
+[gpu]
+# 可用 GPU ID 列表（如 "0,1,3"；空 = 自动探测）
+GPU_DEVICE_IDS = ""
+# 池键命名空间（多套部署共用一个 Redis 时区分）
+GPU_POOL_NAMESPACE = ""
+# 池维护周期秒；孤儿容器策略 report/kill 与最短运行秒
+GPU_MAINTENANCE_INTERVAL_SECONDS = 300
+GPU_ORPHAN_POLICY = "report"
+GPU_ORPHAN_MIN_AGE_SECONDS = 1800
+GPU_WAITER_STALE_SECONDS = 180
+# 高优等待让位开关
+GPU_PRIORITY_RESERVE_ENABLED = true
+# ESM3 提案器 GPU 与服务
+ESM3_GPU_ID = "0"
+ESM3_SERVER_URL = "http://localhost:9333"
+ESM3_TIMEOUT_SECONDS = 600
+# 二级结构条件（DSSP 单字母平铺；空串关闭）
+ESM3_SS_PROFILE = "H"
+ESM3_PEPTIDE_FIRST = false
+# 结果盘水位告警（仅告警不阻断）
+DISK_WARN_PERCENT = 85
+DISK_CRITICAL_PERCENT = 92
+
+# ---------------------------------------------------------------- 引擎
+[boltz2]
+BOLTZ2_DOCKER_IMAGE = "vbio-boltz2-runtime"
+BOLTZ2_DOCKER_EXTRA_ARGS = ""
+BOLTZ2_DOCKER_SHM_SIZE = "16g"
+BOLTZ2_HOST_CACHE_DIR = ""
+BOLTZ2_CONTAINER_CACHE_DIR = "/root/.boltz"
+
+[alphafold3]
+ALPHAFOLD3_DOCKER_IMAGE = "jurgjn/alphafold3:v3.0.2"
+ALPHAFOLD3_MODEL_DIR = ""
+ALPHAFOLD3_DATABASE_DIR = ""
+ALPHAFOLD3_DOCKER_EXTRA_ARGS = ""
+ALPHAFOLD3_JAX_CACHE_DIR = ""
+ALPHAFOLD3_VALIDATE_MAX_LINES = ""
+# AF3 CCD 单字母映射覆盖（JSON）
+VBIO_AF3_CCD_ONE_LETTER_OVERRIDES = ""
+
+[protenix]
+PROTENIX_DOCKER_IMAGE = "vbio-protenix-v2-runtime:2.0.0"
+PROTENIX_MODEL_DIR = ""
+PROTENIX_MODEL_NAME = "protenix-v2"
+PROTENIX_SOURCE_DIR = ""
+PROTENIX_DOCKER_EXTRA_ARGS = "--entrypoint="
+PROTENIX_INFER_EXTRA_ARGS = ""
+PROTENIX_PYTHON_BIN = "/usr/local/micromamba/envs/protenix/bin/python"
+PROTENIX_USE_HOST_USER = "false"
+PROTENIX_CONTAINER_APP_DIR = "/app"
+PROTENIX_CONTAINER_MODEL_DIR = "/workspace/model"
+PROTENIX_CONTAINER_CHECKPOINT_PATH = ""
+PROTENIX_COMMON_CACHE_DIR = "/data/protenix/common_cache"
+PROTENIX_MODULE_CACHE_DIR = "/data/protenix/module_cache"
+PROTENIX_DISABLE_TFG = ""
+PROTENIX2DOCK_REFINE_SAMPLING_STEPS = ""
+# protenix2dock 亲和头权重（空 = 关闭）
+PROTENIX2DOCK_AFFINITY_CKPT = ""
+# protenix 嵌套容器镜像 tag
+P2D_IMAGE = "vbio-protenix-v2-runtime:2.0.0"
+
+[mol1]
+MOL1_DOCKER_IMAGE = "vbio-mol1-runtime:1.0.3"
+MOL1_DATA_DIR = "/data/mol1"
+MOL1_ATOM_CONFIDENCE = ""
+
+[rfd4]
+RFD4_DOCKER_IMAGE = "rfd4-proteina-engine:cu13"
+RFD4_DATA_DIR = "/data/rfd4-proteina"
+# 每次生成候选数
+RFD4_NUM_DESIGNS = 2
+# 覆盖默认 binder contig（默认 "12-22, /0, A1-<靶标长度>"）
+RFD4_CONTIG = ""
+
+[nesso]
+NESSO_DOCKER_IMAGE = "vbio-nesso-runtime:1.0.0"
+NESSO_DOCKER_EXTRA_ARGS = ""
+NESSO_HOST_CACHE_DIR = "/data/nesso_cache"
+NESSO_CONTAINER_CACHE_DIR = "/workspace/nesso-cache"
+NESSO_MODEL_REVISION = "v1.0.0"
+NESSO_NO_KERNELS = "true"
+NESSO_RECYCLING_STEPS = 5
+NESSO_NUM_WORKERS = 2
+NESSO_PRECISION = "bf16-mixed"
+
+# ---------------------------------------------------------------- Worker
+[worker]
+# GPU worker 承接的引擎能力（逗号分隔）
+GPU_WORKER_CAPABILITIES = "boltz2,alphafold3,protenix,nesso,mol1,rfd4"
+# CPU worker 承接的服务（export 承接任务列表异步导出）
+CPU_WORKER_CAPABILITIES = "lead_opt,peptide_design,export"
+# 兼容旧栈的统一能力变量（GPU/CPU 均缺省时回退读它）
+WORKER_CAPABILITIES = ""
+# MSA 池 Redis 键覆盖（默认与 GPU 池键一致，多套部署隔离用）
+VBIO_MSA_GPU_POOL_KEY = ""
+VBIO_MSA_GPU_IN_USE_KEY = ""
+
+# ---------------------------------------------------------------- 权重与数据源
+[assets]
+# 模型/数据下载镜像（空 = 用内置回退地址链；离线机预下载后指定本地路径）
+BOLTZ1_MODEL_URL = ""
+BOLTZ2_MODEL_URL = ""
+BOLTZ2_MOLS_URL = ""
+BOLTZ2_AFFINITY_MODEL_URL = ""
+BOLTZ_CCD_URL = ""
+# boltz wrapper 模块缓存与主缓存目录
+BOLTZ_WRAPPER_CACHE_DIR = ""
+BOLTZ_CACHE = ""
+
+# ---------------------------------------------------------------- 数据库与监控
+[database]
+# PostgREST（用户/项目/任务行）
+VBIO_POSTGREST_URL = "http://127.0.0.1:54321"
+VBIO_POSTGREST_APIKEY = ""
+VBIO_POSTGREST_TIMEOUT_SECONDS = 8
+VBIO_POSTGREST_HTTP_POOL_SIZE = ""
+PGRST_JWT_SECRET = ""
+# 监控库（任务事件流、worker 心跳、对账清扫器）
+VBIO_MONITOR_DATABASE_URL = ""
+VBIO_MONITOR_MIGRATION_DATABASE_URL = ""
+VBIO_MONITOR_DB_CONNECT_TIMEOUT_SECONDS = ""
+VBIO_MONITOR_DB_POOL_MAX = ""
+VBIO_MONITOR_LOG_LEVEL = "INFO"
+VBIO_MONITOR_STREAM_KEY = ""
+VBIO_MONITOR_STREAM_MAXLEN = ""
+VBIO_MONITOR_CONSUMER_GROUP = ""
+VBIO_MONITOR_CONSUMER_NAME = ""
+VBIO_MONITOR_EVENT_QUEUE_SIZE = ""
+VBIO_MONITOR_HEARTBEAT_WRITE_SECONDS = ""
+VBIO_MONITOR_LEASE_SWEEP_SECONDS = ""
+VBIO_MONITOR_RECLAIM_IDLE_MS = ""
+VBIO_MONITOR_TASK_LEASE_SECONDS = ""
+VBIO_MONITOR_WORKER_LEASE_SECONDS = ""
+
+# ---------------------------------------------------------------- 管理面
+[management]
+# 管理面 API 监听
+VBIO_MGMT_HOST = ""
+VBIO_MGMT_PORT = 5055
+VBIO_MGMT_LOG_LEVEL = "INFO"
+VBIO_MGMT_WORKERS = 2
+VBIO_MGMT_THREADS = 8
+# 中央 API（运行时）地址与平台令牌；token 回退读 VBIO_API_TOKEN
+VBIO_RUNTIME_API_BASE_URL = "http://127.0.0.1:5000"
+VBIO_RUNTIME_API_TOKEN = ""
+VBIO_RUNTIME_TIMEOUT_SECONDS = 180
+VBIO_RUNTIME_HTTP_POOL_SIZE = 64
+VBIO_RUNTIME_MAX_INFLIGHT_REQUESTS = ""
+VBIO_RUNTIME_STATUS_HISTORY_SIZE = ""
+# 会话签名密钥（生产必改，只放服务端）
+VBIO_SESSION_SECRET = "change-me-session-secret"
+VBIO_MANAGEMENT_SESSION_TTL_SECONDS = ""
+VBIO_MANAGEMENT_SESSION_REFRESH_TTL_SECONDS = ""
+# 超级管理员（用户名/邮箱，逗号分隔）
+VBIO_SUPER_ADMIN_USERNAMES = ""
+VBIO_SUPER_ADMIN_EMAILS = ""
+VITE_SUPER_ADMIN_USERNAMES = ""
+VITE_SUPER_ADMIN_EMAILS = ""
+# 外部系统 JWT 接入配置文件
+VBIO_JWT_CLIENTS_FILE = "frontend/.run/jwt_clients.json"
+# 管理面统计缓存
+VBIO_ADMIN_STATS_CACHE_FILE = ""
+VBIO_ADMIN_STATS_CACHE_TTL_SECONDS = ""
+# lead-opt overlay 并发与缓存
+VBIO_LEAD_OPT_OVERLAY_MAX_WORKERS = ""
+VBIO_LEAD_OPT_OVERLAY_MAX_PENDING = ""
+VBIO_LEAD_OPT_OVERLAY_TIMEOUT_SECONDS = ""
+VBIO_LEAD_OPT_OVERLAY_CACHE_SIZE = ""
+VBIO_LEAD_OPT_OVERLAY_CACHE_TTL_SECONDS = ""
+# 管理面侧结果根目录覆盖（默认沿用 RESULTS_BASE_DIR）
+VBIO_RESULTS_ROOT = ""
+VBIO_DOWNLOAD_RETRIES = 3
+# worker 编排子任务的网关地址（默认由 FRONTEND_URL + /vbio-api 推导）
+VBIO_GATEWAY_URL = ""
+
+# ---------------------------------------------------------------- Copilot
+[copilot]
+# Copilot 助手开关与模型服务
+VBIO_COPILOT_ENABLED = ""
+VBIO_COPILOT_API_URL = ""
+VBIO_COPILOT_API_KEY = ""
+VBIO_COPILOT_MODEL = ""
+VBIO_COPILOT_TIMEOUT_SECONDS = ""
+VBIO_COPILOT_MAX_REQUEST_BYTES = ""
+VBIO_COPILOT_ENABLE_THINKING = ""
+VBIO_COPILOT_REQUIRE_SESSION = ""
+VBIO_COPILOT_CONTACT_EMAIL = ""
+VBIO_COPILOT_SETTINGS_FILE = ""
+# 在线数据库（PubMed/ChEMBI 等）凭据
+VBIO_COPILOT_NCBI_API_KEY = ""
+VBIO_COPILOT_NCBI_EMAIL = ""
+# 代码补全（独立模型端点）
+VBIO_COPILOT_COMPLETE_API_URL = ""
+VBIO_COPILOT_COMPLETE_API_KEY = ""
+VBIO_COPILOT_COMPLETE_MODEL = ""
+VBIO_COPILOT_COMPLETE_TIMEOUT_SECONDS = ""
+VBIO_COPILOT_COMPLETE_MAX_REQUEST_BYTES = ""
+# 任务结果自然语言解读（独立模型端点）
+VBIO_TASK_CHAT_API_URL = ""
+VBIO_TASK_CHAT_API_KEY = ""
+VBIO_TASK_CHAT_MODEL = ""
+
+# ---------------------------------------------------------------- 邮件
+[mail]
+SMTP_HOST = ""
+SMTP_PORT = 465
+SMTP_USER = ""
+SMTP_PASS = ""
+SMTP_SENDER_NAME = "V-Bio"
+SMTP_SSL = true
+
+# ---------------------------------------------------------------- 前端构建
+[frontend]
+# Vite 构建期注入（改后需 npm run build）；服务端也读超级管理员两项
+VITE_API_BASE_URL = ""
+VITE_API_TOKEN = "change-me"
+VITE_VBIO_MANAGEMENT_API_BASE_URL = ""
+VITE_SUPABASE_REST_URL = "http://127.0.0.1:54321"
+VITE_JSME_SCRIPT_URL = "/vendor/jsme/jsme.nocache.js"
+VITE_MOLSTAR_SCRIPT_URL = "/vendor/molstar/molstar.js"
+VITE_MOLSTAR_CSS_URL = "/vendor/molstar/molstar.css"
+VITE_RDKIT_SCRIPT_URL = "/vendor/rdkit/RDKit_minimal.js"
+VITE_RDKIT_WASM_URL = "/vendor/rdkit/RDKit_minimal.wasm"

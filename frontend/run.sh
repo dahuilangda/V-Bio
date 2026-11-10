@@ -128,6 +128,14 @@ load_frontend_env() {
     source "${VBIO_DIR}/.env"
     set +a
   fi
+  # 标准配置：configs/vbio.toml 导出为进程环境（真实环境变量优先）
+  if [[ -f "${ROOT_DIR}/configs/vbio.toml" ]] && command -v python3 >/dev/null 2>&1; then
+    # shellcheck disable=SC2046
+    eval "$(
+      python3 "${ROOT_DIR}/configs/load_vbio_config.py" \
+        --file "${ROOT_DIR}/configs/vbio.toml" --export
+    )"
+  fi
 }
 
 start_supabase() {

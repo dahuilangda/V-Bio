@@ -10,6 +10,7 @@ services:
     gpus: all
     working_dir: ${VBIO_HOST_ROOT}
     env_file:
+      - ./.vbio.generated.env
       - ./DOCKER_STACK_WORKER_GPU.env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

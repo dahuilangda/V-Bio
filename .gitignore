@@ -130,3 +130,7 @@ capabilities/peptide_lm/esm3_local/data
 capabilities/mol1/Mol-1-source/output/
 capabilities/mol1/Mol-1-source/**/linker_sdf/
 capabilities/mol1/Mol-1-source/**/self_msa/
+
+# 标准部署配置：现场真实值不入 git（模板 configs/vbio.example.toml 已入库）
+configs/vbio.toml
+deploy/docker/.vbio.generated.env

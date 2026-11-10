@@ -1,5 +1,20 @@
 # 环境变量
 
+## 标准配置文件（推荐）
+
+部署配置统一写在 `configs/vbio.toml`（不入 git），模板与全部键目录见
+`configs/vbio.example.toml`。`backend/run.sh` / `frontend/run.sh` 启动时
+自动加载：容器栈经 `deploy/docker/.vbio.generated.env` 注入，前端裸进程
+导出为进程环境。优先级：真实环境变量 > vbio.toml > 栈 env 接线值 > 代码默认值。
+
+```bash
+cp configs/vbio.example.toml configs/vbio.toml   # 初始化
+python3 configs/load_vbio_config.py --check      # 校验键名
+```
+
+契约测试保证代码新读的配置键一定登记在模板里；下文的零散变量说明仍有效，
+但推荐统一在 vbio.toml 中维护。
+
 ## 后端与 worker
 
 | 变量 | 用途 |

@@ -4,6 +4,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKER_DIR="${ROOT_DIR}/deploy/docker"
 
+# 标准配置（configs/vbio.toml）→ env_file 层；栈 env 在后覆盖容器接线值。
+generate_vbio_env() {
+  mkdir -p "${DOCKER_DIR}"
+  if [[ -f "${ROOT_DIR}/configs/vbio.toml" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 "${ROOT_DIR}/configs/load_vbio_config.py" \
+        --file "${ROOT_DIR}/configs/vbio.toml" \
+        --env-file "${DOCKER_DIR}/.vbio.generated.env" >/dev/null
+    else
+      echo "WARN: python3 不可用，跳过 configs/vbio.toml 加载" >&2
+      : >"${DOCKER_DIR}/.vbio.generated.env"
+    fi
+  else
+    : >"${DOCKER_DIR}/.vbio.generated.env"
+  fi
+}
+generate_vbio_env
+
+
 CENTRAL_COMPOSE="${DOCKER_DIR}/DOCKER_STACK_CENTRAL_DECOUPLED.compose.yml"
 CENTRAL_ENV="${DOCKER_DIR}/DOCKER_STACK_CENTRAL_DECOUPLED.env"
 if [[ ! -f "${CENTRAL_ENV}" ]]; then
