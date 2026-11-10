@@ -708,6 +708,17 @@ export function handleRuntimePeptideProposerBackendChangeAction<TDraft extends D
   }));
 }
 
+export function handleRuntimePeptideScorerBackendChangeAction<TDraft extends DraftLike>(params: {
+  peptideScorerBackend: string;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideScorerBackend, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideScorerBackend
+  }));
+}
+
 export function handleRuntimePeptidePopulationSizeChangeAction<TDraft extends DraftLike>(params: {
   peptidePopulationSize: number;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;

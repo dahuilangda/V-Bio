@@ -139,6 +139,8 @@ export interface WorkflowRuntimeSettingsSectionProps {
   onPeptideIterationsChange: (value: number) => void;
   peptideProposerBackend?: 'esm3' | 'rfd4';
   onPeptideProposerBackendChange?: (value: 'esm3' | 'rfd4') => void;
+  peptideScorerBackend?: string;
+  onPeptideScorerBackendChange?: (value: string) => void;
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
@@ -214,6 +216,8 @@ export function WorkflowRuntimeSettingsSection({
   onPeptideIterationsChange,
   peptideProposerBackend = 'esm3',
   onPeptideProposerBackendChange,
+  peptideScorerBackend = 'protenix2dock',
+  onPeptideScorerBackendChange,
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
   onPeptideResiduePoolChange,
@@ -253,9 +257,10 @@ export function WorkflowRuntimeSettingsSection({
   // instead of auto-detecting over them; cleared by Auto and on open
   const manualOverrideBackboneRef = useRef(false);
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
-  // 肽设计的打分引擎必须声明 score 角色；不符合的存量选择（旧 boltz/protenix）
-  // 迁移到 protenix2dock，保证 select 不出现未匹配值。
-  const peptideBackendAllowed = engineSupportsPeptideRole(normalizedBackend, 'score');
+  const isRfd4Strategy = isPeptideDesignWorkflow && peptideProposerBackend === 'rfd4';
+  // 肽设计的打分引擎必须声明 score 角色；RFD4 策略下任务路由后端固定为
+  // rfd4（生成在 rfd4 队列），不符合的存量选择迁移到 protenix2dock。
+  const peptideBackendAllowed = isRfd4Strategy || engineSupportsPeptideRole(normalizedBackend, 'score');
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
       onBackendChange('protenix2dock');
@@ -885,17 +890,23 @@ export function WorkflowRuntimeSettingsSection({
               ? <>Predict & Score <span className="required-mark">*</span></>
               : <>Backend <span className="required-mark">*</span></>}
             hint={isPeptideDesignWorkflow
-              ? "Conformation prediction and scoring engine for each designed candidate: Protenix (L), Protenix2Dock (L/D), Mol-1 (L, linear), AlphaFold3 (L, linear)."
+              ? (isRfd4Strategy
+                ? "Engine that co-folds each RFD4 candidate against the target — one verification task is dispatched per candidate automatically."
+                : "Conformation prediction and scoring engine for each designed candidate: Protenix (L), Protenix2Dock (L/D), Mol-1 (L, linear), AlphaFold3 (L, linear).")
               : "Prediction engine for the submitted components."}
           >
             <select
               required
-              value={displayedBackend}
-              onChange={(e) =>
-                isPeptideDesignWorkflow
-                  ? handlePeptideBackendSelect(e.target.value)
-                  : onBackendChange(e.target.value)
-              }
+              value={isRfd4Strategy ? peptideScorerBackend : displayedBackend}
+              onChange={(e) => {
+                if (!isPeptideDesignWorkflow) {
+                  onBackendChange(e.target.value);
+                } else if (isRfd4Strategy) {
+                  onPeptideScorerBackendChange?.(e.target.value);
+                } else {
+                  handlePeptideBackendSelect(e.target.value);
+                }
+              }}
               disabled={!canEditRuntimeIdentity}
             >
               {(isPeptideDesignWorkflow
@@ -922,11 +933,17 @@ export function WorkflowRuntimeSettingsSection({
         }).length > 0 && (
           <Field
             label="Design Strategy"
-            hint="Two design strategies: ESM3 + RL proposes candidates each generation inside the evolution loop (L/D); RFD4-Proteina (L) runs motif-conditioned generation — its in-loop fusion opens in a future release."
+            hint="Two design strategies: ESM3 + RL proposes candidates each generation inside the evolution loop (L/D); RFD4-Proteina (L, linear) runs one-shot motif-conditioned generation and auto-dispatches each candidate to the chosen Predict & Score engine."
           >
             <select
               value={peptideProposerBackend}
-              onChange={(e) => onPeptideProposerBackendChange?.(e.target.value === 'rfd4' ? 'rfd4' : 'esm3')}
+              onChange={(e) => {
+                const next = e.target.value === 'rfd4' ? 'rfd4' : 'esm3';
+                // 策略决定任务路由后端：RFD4 在 rfd4 队列生成；
+                // ESM3 回到当前所选打分引擎。
+                onBackendChange(next === 'rfd4' ? 'rfd4' : peptideScorerBackend);
+                onPeptideProposerBackendChange?.(next);
+              }}
               disabled={!canEditRuntimeIdentity}
             >
               {peptideEngineOptionsFor({
@@ -934,15 +951,8 @@ export function WorkflowRuntimeSettingsSection({
                 chirality: (peptideChirality as 'l' | 'd') || 'l',
                 designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
               }).map((option: { value: string; label: string }) => (
-                <option
-                  key={option.value}
-                  value={option.value}
-                  disabled={option.value === 'rfd4'}
-                  title={option.value === 'rfd4' ? 'RFD4 与世代循环的在线融合下一版本开放；当前可用预测工作流独立生成后验证。' : undefined}
-                >
-                  {option.value === 'rfd4'
-                    ? `${option.label}（下一版本）`
-                    : `${option.label} + RL（世代循环）`}
+                <option key={option.value} value={option.value}>
+                  {option.value === 'rfd4' ? option.label : `${option.label} + RL（世代循环）`}
                 </option>
               ))}
             </select>

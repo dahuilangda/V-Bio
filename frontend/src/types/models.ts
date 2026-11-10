@@ -162,8 +162,10 @@ export interface PredictionOptions {
   notifyEmail?: string | null;
   peptideDesignMode?: PeptideDesignMode;
   peptideChirality?: 'l' | 'd';
-  /** 肽设计提案器（设计引擎）：esm3 为世代循环默认；rfd4 在线融合待开放。 */
+  /** 肽设计提案器（设计引擎）：esm3 为世代循环默认；rfd4 走一次性生成+自动验证。 */
   peptideProposerBackend?: 'esm3' | 'rfd4';
+  /** RFD4 策略下候选验证所用的打分引擎（任务 backend 固定为 rfd4 路由）。 */
+  peptideScorerBackend?: string;
   peptideStructureMode?: 'auto' | 'helix' | 'hairpin' | 'strand_loop';
   peptideBinderLength?: number;
   peptideLengthMin?: number;

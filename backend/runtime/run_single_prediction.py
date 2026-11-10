@@ -4935,6 +4935,151 @@ def run_rfd4_backend(
     print(f"RFD4 generation archive written: {output_archive_path}", file=sys.stderr)
 
 
+def _rfd4_candidates_from_summary(summary: Dict[str, Any]) -> List[Dict[str, str]]:
+    """summary.json → 候选 binder 列表（每输出最短聚合链）。
+
+    与 verify_designs.py 的"最短聚合链为 binder"约定一致；含非标准残基
+    标记（[CCD]）的链不作为候选序列。
+    """
+    candidates: List[Dict[str, str]] = []
+    for entry in summary.get("outputs") or []:
+        if not isinstance(entry, dict):
+            continue
+        chains = entry.get("chains") or {}
+        polymers = [
+            (name, str(info.get("sequence") or ""))
+            for name, info in chains.items()
+            if isinstance(info, dict) and "[" not in str(info.get("sequence") or "")
+            and str(info.get("sequence") or "").strip()
+        ]
+        if not polymers:
+            continue
+        _name, sequence = min(polymers, key=lambda item: len(item[1]))
+        label = Path(str(entry.get("file") or "")).stem or f"binder_{len(candidates) + 1}"
+        candidates.append({"label": label, "sequence": sequence})
+    return candidates
+
+
+def run_rfd4_design_strategy(
+    temp_dir: str,
+    yaml_content: str,
+    output_archive_path: str,
+    *,
+    score_backend: str,
+    project_id: str,
+    predict_args: Dict[str, Any],
+    seed: Optional[int],
+    target_chain_id: Optional[str],
+    template_inputs: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """RFD4 设计策略：一次性生成候选，随后经网关自动派发共折叠验证任务。
+
+    生成产物（CIF + summary.json）即父任务归档；候选 binder 序列取自
+    summary（每输出最短聚合链，与 verify_designs.py 约定一致）。验证任务
+    以所选打分引擎经网关提交到同一项目（"RFD4 verify <engine> <label>"），
+    失败逐条记录进 verification_manifest.json，不阻断父任务。
+    """
+    gateway_base = str(getattr(config, "VBIO_GATEWAY_URL", "") or "").rstrip("/")
+    platform_token = str(getattr(config, "VBIO_API_TOKEN", "") or "").strip()
+    if not gateway_base or not platform_token:
+        raise RuntimeError(
+            "RFD4 设计策略需要网关地址与平台令牌（VBIO_GATEWAY_URL / VBIO_API_TOKEN）。")
+
+    gen_dir = Path(temp_dir) / "rfd4_strategy"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    gen_archive = gen_dir / "generation.zip"
+    run_rfd4_backend(
+        temp_dir=str(gen_dir),
+        yaml_content=yaml_content,
+        output_archive_path=str(gen_archive),
+        template_inputs=template_inputs if isinstance(template_inputs, list) else None,
+        rfd4_spec=predict_args.get("rfd4_spec"),
+        seed=seed,
+        task_id=str(predict_args.get("task_id") or ""),
+    )
+
+    with zipfile.ZipFile(gen_archive) as zf:
+        summary_name = next((n for n in zf.namelist() if n.endswith("summary.json")), None)
+        if not summary_name:
+            raise RuntimeError("RFD4 生成归档缺少 summary.json，无法提取候选")
+        summary = json.loads(zf.read(summary_name).decode("utf-8"))
+        archived = {n: zf.read(n) for n in zf.namelist() if not n.endswith("summary.json")}
+
+    candidates = _rfd4_candidates_from_summary(summary)
+    if not candidates:
+        raise RuntimeError("RFD4 生成未产出可用候选序列")
+
+    base_yaml = yaml.safe_load(yaml_content) or {}
+    target_sequence = _dpeptide_target_sequence(base_yaml, target_chain_id or "")
+
+    verify_seed = int(seed) if isinstance(seed, int) else 101
+    manifest: Dict[str, Any] = {
+        "strategy": "rfd4",
+        "score_backend": score_backend,
+        "project_id": project_id,
+        "verifications": [],
+    }
+    headers = {"X-API-Token": platform_token}
+    dispatched = 0
+    for cand in candidates:
+        verify_yaml = (
+            "version: 1\nsequences:\n"
+            "- protein:\n    id: A\n"
+            f"    sequence: {target_sequence}\n"
+            "- protein:\n    id: B\n"
+            f"    sequence: {cand['sequence']}\n"
+        )
+        fields = {
+            "project_id": project_id,
+            "backend": score_backend,
+            "workflow": "prediction",
+            "use_msa_server": "true",
+            "msa_mode": "uniref",
+            "seed": str(verify_seed),
+            "task_name": f"RFD4 verify {score_backend} {cand['label']} {cand['sequence'][:16]}",
+        }
+        entry = {
+            "design": cand["label"],
+            "sequence": cand["sequence"],
+            "backend": score_backend,
+        }
+        try:
+            response = requests.post(
+                f"{gateway_base}/predict",
+                data=fields,
+                files={"yaml_file": ("design.yaml", verify_yaml, "application/x-yaml")},
+                headers=headers,
+                timeout=(10, 120),
+            )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id:
+                raise RuntimeError(f"gateway response missing task_id: {str(payload)[:160]}")
+            entry["task_id"] = task_id
+            dispatched += 1
+            print(f"[rfd4-strategy] {cand['label']} {score_backend} -> {task_id}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 — 单条失败不阻断其余候选
+            entry["error"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
+            print(f"[rfd4-strategy] {cand['label']} dispatch FAILED: {entry['error']}",
+                  file=sys.stderr)
+        manifest["verifications"].append(entry)
+
+    if dispatched == 0:
+        raise RuntimeError(
+            f"RFD4 候选验证派发全部失败（{len(candidates)} 条）；检查网关可达性后重试。")
+
+    if os.path.exists(output_archive_path):
+        os.remove(output_archive_path)
+    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in archived.items():
+            zf.writestr(name, data)
+        zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=1))
+        zf.writestr("verification_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+    print(f"[rfd4-strategy] {dispatched}/{len(candidates)} verification tasks dispatched",
+          file=sys.stderr)
+
+
 def run_mol1_backend(
     temp_dir: str,
     yaml_content: str,
@@ -13542,26 +13687,53 @@ def main():
                 )
                 validate_template_paths(processed_yaml)
                 peptide_parent_task_id = str(runtime_task_id or os.environ.get("VBIO_TASK_ID") or "").strip()
-                try:
-                    run_peptide_design_backend(
+                proposer_backend_sel = str(
+                    peptide_design_options.get("peptideProposerBackend")
+                    or peptide_design_options.get("peptide_proposer_backend") or "esm3").strip().lower()
+                if proposer_backend_sel == "rfd4":
+                    chirality_raw = str(
+                        peptide_design_options.get("peptideChirality")
+                        or peptide_design_options.get("peptide_chirality") or "l").strip().lower()
+                    if chirality_raw != "l":
+                        raise ValueError(
+                            "RFD4-Proteina 仅支持 L 肽设计；D 肽请使用 ESM3 + RL 策略。")
+                    # RFD4 设计策略：一次性生成 + 自动派发验证子任务，
+                    # 不进入 ESM3 世代循环（环内融合为后续特性）。
+                    score_backend_sel = str(
+                        peptide_design_options.get("peptideScorerBackend")
+                        or peptide_design_options.get("peptide_scorer_backend") or "protenix").strip().lower()
+                    run_rfd4_design_strategy(
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
-                        backend=backend,
+                        score_backend=score_backend_sel,
+                        project_id=str(predict_args.get("project_id") or ""),
                         predict_args=predict_args,
-                        model_name=model_name,
                         seed=seed,
-                        options=peptide_design_options,
                         target_chain_id=peptide_design_target_chain,
-                        progress_path=peptide_progress_path,
-                        gpu_ids=peptide_gpu_ids,
-                        subtask_queue=peptide_subtask_queue,
-                        custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                         template_inputs=template_inputs if isinstance(template_inputs, list) else None,
                     )
-                finally:
-                    if peptide_parent_task_id:
-                        _clear_peptide_subtask_registry(peptide_parent_task_id)
+                else:
+                    try:
+                        run_peptide_design_backend(
+                            temp_dir=temp_dir,
+                            yaml_content=processed_yaml,
+                            output_archive_path=output_archive_path,
+                            backend=backend,
+                            predict_args=predict_args,
+                            model_name=model_name,
+                            seed=seed,
+                            options=peptide_design_options,
+                            target_chain_id=peptide_design_target_chain,
+                            progress_path=peptide_progress_path,
+                            gpu_ids=peptide_gpu_ids,
+                            subtask_queue=peptide_subtask_queue,
+                            custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                            template_inputs=template_inputs if isinstance(template_inputs, list) else None,
+                        )
+                    finally:
+                        if peptide_parent_task_id:
+                            _clear_peptide_subtask_registry(peptide_parent_task_id)
             elif backend == "alphafold3":
                 if not af3_template_payloads:
                     af3_template_payloads = prepare_yaml_template_payloads(

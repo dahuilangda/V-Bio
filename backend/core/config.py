@@ -225,6 +225,13 @@ MSA_CACHE_RETENTION_DAYS = _parse_int_env("MSA_CACHE_RETENTION_DAYS", 90, minimu
 # 中心 API 地址（Worker 用它上传结果、更新状态）
 CENTRAL_API_URL = os.environ.get("CENTRAL_API_URL", "http://localhost:5000")
 
+# 前端网关地址（Worker 侧编排任务用它提交带项目归属的子任务；
+# 默认由 FRONTEND_URL 推导，与 verify_designs.py 的 VBIO_GATEWAY_URL 同约定）
+VBIO_GATEWAY_URL = os.environ.get(
+    "VBIO_GATEWAY_URL",
+    (os.environ.get("FRONTEND_URL", "") or "").rstrip("/") + "/vbio-api",
+).rstrip("/")
+
 # ColabFold MSA 服务地址；默认值仅本机联调，生产需显式配置。
 MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://localhost:8080")
 MSA_SERVER_TIMEOUT_SECONDS = _parse_int_env("MSA_SERVER_TIMEOUT_SECONDS", 1800, minimum=60)
