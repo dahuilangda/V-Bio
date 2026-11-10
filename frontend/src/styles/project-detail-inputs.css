@@ -128,6 +128,98 @@
   min-width: 0;
 }
 
+/* General 组内的四个分节：Backbone / Length & residue pool / Sampling effort / Fixed positions。
+ * 每节自带标题与内部列宽，避免字段在 2 列网格里随意漂移产生大片留白。 */
+.peptide-settings-block {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid #e0ebe4;
+  border-radius: var(--radius-md);
+  background: #fff;
+  min-width: 0;
+}
+
+.peptide-settings-block-head {
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5d7f6e;
+}
+
+.peptide-settings-columns {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(160px, 1fr));
+  align-items: start;
+  min-width: 0;
+}
+
+.peptide-settings-columns-3 {
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+}
+
+.peptide-effort-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.peptide-effort-row .peptide-preset-row {
+  margin: 0;
+}
+
+.peptide-effort-estimate {
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* 长度窗口是 2–3 位数字，输入框收敛到内容宽度 */
+.peptide-length-range-inputs input {
+  flex: 0 1 96px;
+  min-width: 0;
+  max-width: 96px;
+}
+
+.peptide-fixed-mod-list {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.peptide-fixed-mod-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+}
+
+.peptide-fixed-mod-row select {
+  min-width: 0;
+  padding: 6px 26px 6px 10px;
+  font-size: var(--text-sm);
+}
+
+.peptide-fixed-mod-row .btn {
+  padding: 5px 10px;
+}
+
+.peptide-fixed-mod-row .btn.danger {
+  color: #9b2f24;
+}
+
+@media (max-width: 900px) {
+  .peptide-settings-columns,
+  .peptide-settings-columns-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
 .peptide-runtime-backend-hint {
   grid-column: 1 / -1;
   margin: -2px 0 0;
@@ -307,6 +399,8 @@
 
 .peptide-fixed-reference-input {
   margin-top: 6px;
+  /* 参考序列至多数十残基，通栏输入框只会留白 */
+  max-width: 560px;
 }
 
 .peptide-mask-rail {

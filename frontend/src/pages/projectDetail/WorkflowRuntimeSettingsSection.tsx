@@ -963,60 +963,64 @@ export function WorkflowRuntimeSettingsSection({
             <section className="peptide-runtime-group">
               <div className="peptide-runtime-group-head">General</div>
               <div className="peptide-runtime-grid">
-                                  <Field label="Peptide Design Mode">
-                  <select
-                  value={peptideDesignMode}
-                  onChange={(e) =>
-                    onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'linear')
-                  }
-                  disabled={!isEditable}
-                  >
-                  <option value="linear">Linear</option>
-                  <option value="cyclic" disabled={normalizedBackend === 'alphafold3'}>
-                    Cyclic{normalizedBackend === 'alphafold3' ? ' (Protenix2Dock only)' : ''}
-                  </option>
-                  <option value="bicyclic" disabled={normalizedBackend === 'alphafold3'}>
-                    Bicyclic{normalizedBackend === 'alphafold3' ? ' (Protenix2Dock only)' : ''}
-                  </option>
-                  </select>
-                  </Field>
-                                  <Field
-                  label="Peptide Chirality"
-                  hint="D-design runs the mirror workflow; available on docking backends."
-                >
-                  <select
-                  value={peptideChirality}
-                  onChange={(e) =>
-                    onPeptideChiralityChange((e.target.value as 'l' | 'd') || 'l')
-                  }
-                  disabled={!isEditable}
-                  >
-                  <option value="l">L-peptide (standard)</option>
-                  <option value="d" disabled={normalizedBackend !== 'protenix2dock'}>
-                    D-peptide
-                  </option>
-                  </select>
-                  </Field>
-                  <Field
-                  label="Structure Mode"
-                  hint="Secondary-structure bias: helix, hairpin, strand-loop, or Auto (model decides)."
-                >
-                  <select
-                  value={peptideStructureMode}
-                  onChange={(e) =>
-                    onPeptideStructureModeChange(
-                      (e.target.value as 'auto' | 'helix' | 'hairpin' | 'strand_loop') || 'auto'
-                    )
-                  }
-                  disabled={!isEditable}
-                  >
-                  <option value="auto">Auto (no bias)</option>
-                  <option value="helix">Helix</option>
-                  <option value="hairpin">Hairpin</option>
-                  <option value="strand_loop">Strand-loop</option>
-                  </select>
-                  </Field>
-                <div className="peptide-structure-seed-row">
+                <div className="peptide-settings-block">
+                  <div className="peptide-settings-block-head">Backbone</div>
+                  <div className="peptide-settings-columns peptide-settings-columns-3">
+                    <Field label="Peptide Design Mode">
+                      <select
+                        value={peptideDesignMode}
+                        onChange={(e) =>
+                          onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'linear')
+                        }
+                        disabled={!isEditable}
+                      >
+                        <option value="linear">Linear</option>
+                        <option value="cyclic" disabled={normalizedBackend === 'alphafold3'}>
+                          Cyclic{normalizedBackend === 'alphafold3' ? ' (Protenix2Dock only)' : ''}
+                        </option>
+                        <option value="bicyclic" disabled={normalizedBackend === 'alphafold3'}>
+                          Bicyclic{normalizedBackend === 'alphafold3' ? ' (Protenix2Dock only)' : ''}
+                        </option>
+                      </select>
+                    </Field>
+                    <Field
+                      label="Peptide Chirality"
+                      hint="D-design runs the mirror workflow; available on docking backends."
+                    >
+                      <select
+                        value={peptideChirality}
+                        onChange={(e) =>
+                          onPeptideChiralityChange((e.target.value as 'l' | 'd') || 'l')
+                        }
+                        disabled={!isEditable}
+                      >
+                        <option value="l">L-peptide (standard)</option>
+                        <option value="d" disabled={normalizedBackend !== 'protenix2dock'}>
+                          D-peptide
+                        </option>
+                      </select>
+                    </Field>
+                    <Field
+                      label="Structure Mode"
+                      hint="Secondary-structure bias: helix, hairpin, strand-loop, or Auto (model decides)."
+                    >
+                      <select
+                        value={peptideStructureMode}
+                        onChange={(e) =>
+                          onPeptideStructureModeChange(
+                            (e.target.value as 'auto' | 'helix' | 'hairpin' | 'strand_loop') || 'auto'
+                          )
+                        }
+                        disabled={!isEditable}
+                      >
+                        <option value="auto">Auto (no bias)</option>
+                        <option value="helix">Helix</option>
+                        <option value="hairpin">Hairpin</option>
+                        <option value="strand_loop">Strand-loop</option>
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="peptide-structure-seed-row">
                   <Field label="Initial peptide structure (optional)">
                   <div className="peptide-structure-upload">
                   <input
@@ -1076,8 +1080,11 @@ export function WorkflowRuntimeSettingsSection({
                       <InfoTip text="Use the reference sequence as the starting point for generation 1." align="start" />
                     </span>
                   </label>
+                  </div>
                 </div>
-                <label className="field peptide-length-range">
+                <div className="peptide-settings-block">
+                  <div className="peptide-settings-block-head">Length & residue pool</div>
+                  <label className="field peptide-length-range">
                   <span>
                     Peptide Length
                     <InfoTip text="Design length window. Set min = max for a fixed length; an open range lets each generation adapt candidate lengths within it." align="start" />
@@ -1305,7 +1312,11 @@ export function WorkflowRuntimeSettingsSection({
                   onSave={saveCustomResidueDraft}
                   onClose={closeCustomResidueEditor}
                 />
-                <div className="peptide-preset-row" role="group" aria-label="Sampling effort presets">
+                </div>
+                <div className="peptide-settings-block">
+                  <div className="peptide-settings-block-head">Sampling effort</div>
+                  <div className="peptide-effort-row">
+                    <div className="peptide-preset-row" role="group" aria-label="Sampling effort presets">
                   {PEPTIDE_EFFORT_PRESETS.map((preset) => {
                     const isActive =
                       peptideIterations === preset.iterations
@@ -1329,47 +1340,53 @@ export function WorkflowRuntimeSettingsSection({
                     );
                   })}
                 </div>
-                                  <Field
-                  label="Iterations"
-                  hint="Evolution generations. Each generation evaluates one population of candidates and breeds the next from the elites."
-                >
-                  <CommitNumberInput
-                  min={2}
-                  max={100}
-                  value={peptideIterations}
-                  onCommit={onPeptideIterationsChange}
-                  isDisabled={!isEditable}
-                  />
+                  <p className="muted small peptide-effort-estimate">
+                    ≈ {peptideIterations * peptidePopulationSize} candidate predictions total
+                    (generations × population).
+                  </p>
+                </div>
+                <div className="peptide-settings-columns peptide-settings-columns-3">
+                  <Field
+                    label="Iterations"
+                    hint="Evolution generations. Each generation evaluates one population of candidates and breeds the next from the elites."
+                  >
+                    <CommitNumberInput
+                      min={2}
+                      max={100}
+                      value={peptideIterations}
+                      onCommit={onPeptideIterationsChange}
+                      isDisabled={!isEditable}
+                    />
                   </Field>
-                                  <Field
-                  label="Population Size"
-                  hint="Candidates evaluated per generation. Larger populations explore more sequence space per generation."
-                >
-                  <CommitNumberInput
-                  min={2}
-                  max={100}
-                  value={peptidePopulationSize}
-                  onCommit={onPeptidePopulationSizeChange}
-                  isDisabled={!isEditable}
-                  />
+                  <Field
+                    label="Population Size"
+                    hint="Candidates evaluated per generation. Larger populations explore more sequence space per generation."
+                  >
+                    <CommitNumberInput
+                      min={2}
+                      max={100}
+                      value={peptidePopulationSize}
+                      onCommit={onPeptidePopulationSizeChange}
+                      isDisabled={!isEditable}
+                    />
                   </Field>
-                                  <Field
-                  label="Elite Size"
-                  hint="Top candidates carried into the next generation's breeding pool."
-                >
-                  <CommitNumberInput
-                  min={1}
-                  max={Math.max(1, peptidePopulationSize - 1)}
-                  value={peptideEliteSize}
-                  onCommit={onPeptideEliteSizeChange}
-                  isDisabled={!isEditable}
-                  />
+                  <Field
+                    label="Elite Size"
+                    hint="Top candidates carried into the next generation's breeding pool."
+                  >
+                    <CommitNumberInput
+                      min={1}
+                      max={Math.max(1, peptidePopulationSize - 1)}
+                      value={peptideEliteSize}
+                      onCommit={onPeptideEliteSizeChange}
+                      isDisabled={!isEditable}
+                    />
                   </Field>
-                <p className="muted small">
-                  ≈ {peptideIterations * peptidePopulationSize} candidate predictions total
-                  (generations × population).
-                </p>
-                <label className="field peptide-mask-field">
+                </div>
+                </div>
+                <div className="peptide-settings-block">
+                  <div className="peptide-settings-block-head">Fixed positions</div>
+                  <label className="field peptide-mask-field">
                   <span>Fixed positions</span>
                   <input
                     className="peptide-fixed-reference-input"
@@ -1487,12 +1504,12 @@ export function WorkflowRuntimeSettingsSection({
                     </p>
                   ) : null}
                 </label>
+                <div className="peptide-settings-columns">
                 <Field label="Fixed Non-natural Residue Modifications">
-                  <div className="space-y-2">
+                  <div className="peptide-fixed-mod-list">
                     {(peptideFixedModifications || []).map((mod, idx) => (
-                      <div key={idx} className="flex items-center gap-2">
+                      <div key={idx} className="peptide-fixed-mod-row">
                         <select
-                          className="border rounded px-2 py-1 text-sm w-20"
                           value={mod.position}
                           onChange={(e) => {
                             const next = [...(peptideFixedModifications || [])];
@@ -1506,7 +1523,6 @@ export function WorkflowRuntimeSettingsSection({
                           ))}
                         </select>
                         <select
-                          className="border rounded px-2 py-1 text-sm flex-1"
                           value={mod.ccd}
                           onChange={(e) => {
                             const next = [...(peptideFixedModifications || [])];
@@ -1523,7 +1539,8 @@ export function WorkflowRuntimeSettingsSection({
                         </select>
                         <button
                           type="button"
-                          className="text-red-500 hover:text-red-700 px-1"
+                          className="btn btn-ghost btn-compact danger"
+                          aria-label={`Remove modification at position ${mod.position}`}
                           onClick={() => onPeptideFixedModificationsChange((peptideFixedModifications || []).filter((_, i) => i !== idx))}
                           disabled={!isEditable}
                         >✕</button>
@@ -1531,7 +1548,7 @@ export function WorkflowRuntimeSettingsSection({
                     ))}
                     <button
                       type="button"
-                      className="border rounded px-3 py-1 text-sm hover:bg-gray-50"
+                      className="btn btn-ghost btn-compact"
                       onClick={() => onPeptideFixedModificationsChange([
                         ...(peptideFixedModifications || []),
                         { position: 1, ccd: 'NLE' },
@@ -1540,7 +1557,7 @@ export function WorkflowRuntimeSettingsSection({
                     >
                       + Add
                     </button>
-                    <p className="text-xs text-gray-400 mt-1">
+                    <p className="muted small">
                       Fixed non-natural residues are applied to every candidate and excluded from mutation.
                     </p>
                   </div>
@@ -1568,6 +1585,8 @@ export function WorkflowRuntimeSettingsSection({
                     Selected residues never appear at free positions; fixed mask positions keep their residues.
                   </p>
                 </Field>
+                </div>
+                </div>
               </div>
               {normalizedInitialSequence.length !== effectiveDesignLength && (
                 <p className="muted small">
