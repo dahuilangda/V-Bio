@@ -15,6 +15,7 @@ import {
   resolveExactLigandConfidencePreview
 } from './resultPresentation';
 import { componentTypeLabel } from '../../utils/projectInputs';
+import { asRecord } from './workspaceViewHelpers';
 import { isSequenceLigandType, OverviewLigandSequencePreview } from './OverviewLigandSequencePreview';
 
 interface UseProjectResultDisplayOptions {
@@ -216,6 +217,10 @@ export function useProjectResultDisplay({
             selectedResultTargetLabel,
             selectedResultLigandLabel,
             selectedResultPairLabel,
+            rfd4Consistency: asRecord(snapshotConfidence).rfd4_consistency as
+              | import('./resultPresentation').Rfd4ConsistencyMetrics
+              | undefined
+              | null
           })
         : [],
     [

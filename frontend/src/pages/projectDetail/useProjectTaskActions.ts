@@ -351,7 +351,7 @@ const saveDraft = useCallback(
         project?.confidence && typeof project.confidence === 'object' ? (project.confidence as Record<string, unknown>) : null;
       return pullResultForViewerTask({
         taskId,
-        options,
+        options: { ...options, projectId: project?.id ?? null },
         baseProjectConfidence,
         baseTaskConfidence,
         baseTaskProperties,

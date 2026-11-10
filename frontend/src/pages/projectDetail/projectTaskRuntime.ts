@@ -427,7 +427,7 @@ const viewerPullInFlight = new Set<string>();
 
 export async function pullResultForViewerTask(params: {
   taskId: string;
-  options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string };
+  options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string; projectId?: string | null };
   baseProjectConfidence?: Record<string, unknown> | null;
   baseTaskConfidence?: Record<string, unknown> | null;
   baseTaskProperties?: Record<string, unknown> | null;
@@ -467,7 +467,8 @@ export async function pullResultForViewerTask(params: {
   try {
     const blob = await downloadResultBlob(taskId, {
       mode: resultMode,
-      preferredStructureName: options?.preferredStructureName
+      preferredStructureName: options?.preferredStructureName,
+      projectId: options?.projectId
     });
     const parsed = await parseResultBundle(blob, {
       preservePeptideCandidateStructureText: false,

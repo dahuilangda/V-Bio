@@ -226,7 +226,8 @@ export async function listProjectTasksForList(
           'confidence_complex_pde:confidence->>complex_pde',
           'confidence_complex_pae:confidence->>complex_pae',
           'confidence_gpde:confidence->>gpde',
-          'confidence_pae:confidence->>pae'
+          'confidence_pae:confidence->>pae',
+          'confidence_rfd4_consistency:confidence->rfd4_consistency'
         ]
       : []),
     ...(includeConfidence ? ['confidence'] : []),
@@ -650,6 +651,7 @@ export async function listProjectTasksForList(
       assignNumber('complex_pae', rowRecord.confidence_complex_pae);
       assignNumber('gpde', rowRecord.confidence_gpde);
       assignNumber('pae', rowRecord.confidence_pae);
+      assignObject('rfd4_consistency', rowRecord.confidence_rfd4_consistency);
 
       const ligandDisplay: Record<string, unknown> = {};
       const displaySmiles = readText(rowRecord.confidence_ligand_display_smiles);

@@ -333,7 +333,7 @@ export type DownloadResultMode = 'view' | 'full';
 
 export async function downloadResultBlob(
   taskId: string,
-  options?: { mode?: DownloadResultMode; preferredStructureName?: string }
+  options?: { mode?: DownloadResultMode; preferredStructureName?: string; projectId?: string | null }
 ): Promise<Blob> {
   const mode = options?.mode || 'full';
   const path = mode === 'view' ? `/results/${taskId}/view` : `/results/${taskId}`;
@@ -341,6 +341,10 @@ export async function downloadResultBlob(
   const preferredStructureName = String(options?.preferredStructureName || '').trim();
   if (mode === 'view' && preferredStructureName) {
     params.set('structure_name', preferredStructureName);
+  }
+  const projectId = String(options?.projectId || '').trim();
+  if (projectId) {
+    params.set('project_id', projectId);
   }
   const url = apiUrl(params.size > 0 ? `${path}?${params.toString()}` : path);
   const res = await fetchWithTimeout(url, {

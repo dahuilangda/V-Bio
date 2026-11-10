@@ -1948,6 +1948,10 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       };
     }
     if (isProtenix) {
+      const rfd4Consistency = await readZipJson(zip, 'mol1/rfd4_consistency.json');
+      if (rfd4Consistency && typeof rfd4Consistency === 'object' && !Array.isArray(rfd4Consistency)) {
+        confidence = { ...confidence, rfd4_consistency: rfd4Consistency };
+      }
       const raw = confidence as Record<string, unknown>;
       const paeScalar =
         toFiniteNumber(raw.complex_pde) ??

@@ -15,6 +15,20 @@ export interface SnapshotCard {
   tone: MetricTone;
 }
 
+export interface Rfd4ConsistencyMetrics {
+  dockq?: number;
+  fnat?: number;
+  irmsd?: number;
+  lrmsd?: number;
+  label?: string;
+}
+
+function toneForDockQ(value: number): MetricTone {
+  if (value >= 0.49) return 'excellent';
+  if (value >= 0.23) return 'medium';
+  return 'low';
+}
+
 export function buildSnapshotCards(params: {
   snapshotPlddt: number | null;
   snapshotSelectedLigandChainPlddt: number | null;
@@ -32,6 +46,7 @@ export function buildSnapshotCards(params: {
   selectedResultTargetLabel: string;
   selectedResultLigandLabel: string;
   selectedResultPairLabel: string;
+  rfd4Consistency?: Rfd4ConsistencyMetrics | null;
 }): SnapshotCard[] {
   const {
     snapshotPlddt,
@@ -50,7 +65,27 @@ export function buildSnapshotCards(params: {
     selectedResultTargetLabel,
     selectedResultLigandLabel,
     selectedResultPairLabel,
+    rfd4Consistency = null,
   } = params;
+
+  const rfd4Cards: SnapshotCard[] = rfd4Consistency
+    ? [
+        {
+          key: 'rfd4-dockq',
+          label: 'RFD4 DockQ',
+          value: rfd4Consistency.dockq?.toFixed(3) ?? '-',
+          detail: `vs ${rfd4Consistency.label || 'RFD4 model'}${rfd4Consistency.fnat != null ? ` · Fnat ${(rfd4Consistency.fnat * 100).toFixed(0)}%` : ''}`,
+          tone: toneForDockQ(rfd4Consistency.dockq ?? 0)
+        },
+        {
+          key: 'rfd4-lrmsd',
+          label: 'RFD4 LRMSD',
+          value: rfd4Consistency.lrmsd != null ? `${rfd4Consistency.lrmsd.toFixed(2)} Å` : '-',
+          detail: 'vs RFD4 model',
+          tone: rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 2 ? 'excellent' : rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 5 ? 'medium' : 'low'
+        }
+      ]
+    : [];
 
   return [
     {
@@ -105,7 +140,8 @@ export function buildSnapshotCards(params: {
       value: snapshotBindingProbability === null ? '-' : `${(snapshotBindingProbability * 100).toFixed(1)}%`,
       detail: snapshotBindingStd === null ? 'uncertainty: -' : `± ${(snapshotBindingStd * 100).toFixed(1)}%`,
       tone: snapshotBindingTone
-    }
+    },
+    ...rfd4Cards
   ];
 }
 
