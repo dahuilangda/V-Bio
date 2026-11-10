@@ -882,10 +882,10 @@ export function WorkflowRuntimeSettingsSection({
 
           <Field
             label={isPeptideDesignWorkflow
-              ? <>Score Engine <span className="required-mark">*</span></>
+              ? <>Predict & Score <span className="required-mark">*</span></>
               : <>Backend <span className="required-mark">*</span></>}
             hint={isPeptideDesignWorkflow
-              ? "Scoring engine that verifies each designed candidate. Mol-1 runs blind co-folding with native cyclic-bond support; Protenix2Dock adds staged-pose refinement with TFG constraints; AlphaFold3 scores linear L-peptides."
+              ? "Conformation prediction and scoring engine for each designed candidate: Protenix (L), Protenix2Dock (L/D), Mol-1 (L, linear), AlphaFold3 (L, linear)."
               : "Prediction engine for the submitted components."}
           >
             <select
@@ -921,8 +921,8 @@ export function WorkflowRuntimeSettingsSection({
           designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
         }).length > 0 && (
           <Field
-            label="Design Engine"
-            hint="Proposer that generates candidate sequences each generation. ESM3 drives the evolution loop for L and D designs; RFD4 online fusion opens in a future release."
+            label="Design Strategy"
+            hint="Two design strategies: ESM3 + RL proposes candidates each generation inside the evolution loop (L/D); RFD4-Proteina (L) runs motif-conditioned generation — its in-loop fusion opens in a future release."
           >
             <select
               value={peptideProposerBackend}
@@ -940,7 +940,9 @@ export function WorkflowRuntimeSettingsSection({
                   disabled={option.value === 'rfd4'}
                   title={option.value === 'rfd4' ? 'RFD4 与世代循环的在线融合下一版本开放；当前可用预测工作流独立生成后验证。' : undefined}
                 >
-                  {option.value === 'rfd4' ? `${option.label}（下一版本）` : option.label}
+                  {option.value === 'rfd4'
+                    ? `${option.label}（下一版本）`
+                    : `${option.label} + RL（世代循环）`}
                 </option>
               ))}
             </select>

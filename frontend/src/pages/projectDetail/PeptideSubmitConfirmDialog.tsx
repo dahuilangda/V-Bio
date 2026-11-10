@@ -62,8 +62,8 @@ export function PeptideSubmitConfirmDialog({
   if (!isOpen) return null;
 
   const rows: Array<[string, string]> = [
-    ['Design engine', backendLabel(summary.proposerBackend || 'esm3')],
-    ['Score engine', backendLabel(summary.backend)],
+    ['Design strategy', backendLabel(summary.proposerBackend || 'esm3')],
+    ['Predict & score', backendLabel(summary.backend)],
     ['Design mode', summary.designMode],
     ['Chirality', summary.chirality === 'd' ? 'D-peptide (mirror workflow)' : 'L-peptide'],
     ['Binder length', summary.binderLengthLabel],

@@ -21,9 +21,10 @@
     "protenix": {
       "label": "Protenix",
       "status": "active",
-      "workflows": ["prediction"],
+      "workflows": ["prediction", "peptide_design"],
       "chirality": ["l"],
       "design_modes": ["linear", "cyclic", "bicyclic"],
+      "peptide_roles": ["score"],
       "features": { "pocket": true, "custom_ccd": true, "msa": true, "ncaa": true }
     },
     "protenix2dock": {
