@@ -40,7 +40,7 @@ export function UsagePanel(p: UsagePanelProps) {
           disabled={p.tokens.length === 0}
         >
           {p.selectedProjectTokens.length === 0 ? (
-            <option value="">No p.tokens</option>
+            <option value="">No tokens</option>
           ) : (
             p.selectedProjectTokens.map((token) => (
               <option key={token.id} value={token.id}>
@@ -126,10 +126,16 @@ export function UsagePanel(p: UsagePanelProps) {
           <tbody>
             {p.tokenUsage.map((item) => (
               <tr key={item.id}>
-                <td>{formatIso(item.created_at)}</td>
-                <td>{item.action || `${item.method} ${item.path}`}</td>
-                <td>{item.succeeded ? 'OK' : `Error (${item.status_code})`}</td>
-                <td><code>{item.path}</code></td>
+                <td className="api-event-time">{formatIso(item.created_at)}</td>
+                <td><span className="api-action-tag">{item.action || item.method}</span></td>
+                <td>
+                  {item.succeeded ? (
+                    <span className="badge state-success">OK</span>
+                  ) : (
+                    <span className="badge state-failure">Error {item.status_code}</span>
+                  )}
+                </td>
+                <td><code className="api-event-path" title={item.path}>{item.path}</code></td>
               </tr>
             ))}
             {p.tokenUsageTotal === 0 && (

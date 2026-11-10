@@ -573,6 +573,38 @@
   min-width: 640px;
 }
 
+.api-usage-table td {
+  vertical-align: middle;
+}
+
+.api-event-time {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.api-action-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f4f7f5;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-2xs);
+  color: #33544a;
+  white-space: nowrap;
+}
+
+.api-event-path {
+  display: inline-block;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-size: var(--text-xs);
+}
+
 .api-pager {
   display: inline-flex;
   align-items: center;
