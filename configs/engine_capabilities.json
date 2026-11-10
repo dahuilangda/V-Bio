@@ -44,7 +44,7 @@
     "rfd4": {
       "label": "RFD4-Proteina",
       "status": "active",
-      "workflows": ["prediction"],
+      "workflows": ["peptide_design"],
       "chirality": ["l"],
       "design_modes": ["linear"],
       "features": { "pocket": false, "custom_ccd": false, "msa": false, "ncaa": true }

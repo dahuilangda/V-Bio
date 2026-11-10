@@ -562,7 +562,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
         customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined,
         lowVram: !isVirtualScreeningWorkflow && submissionConfig.options.lowVram === true,
         rfd4Spec:
-          effectiveBackend === 'rfd4' && !isVirtualScreeningWorkflow && !isPeptideDesignWorkflow
+          effectiveBackend === 'rfd4' && !isVirtualScreeningWorkflow
             ? String(submissionConfig.options.rfd4Spec || '').trim() || undefined
             : undefined
       });

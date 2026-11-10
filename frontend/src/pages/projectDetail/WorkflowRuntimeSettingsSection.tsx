@@ -930,7 +930,7 @@ export function WorkflowRuntimeSettingsSection({
             </Field>
         )}
 
-        {isPredictionWorkflow && normalizedBackend === 'rfd4' && (
+        {(isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend === 'rfd4' && (
           <Field
             label="RFD4 binder spec (optional)"
             hint="Motif-conditioning JSON spec for binder generation. Leave empty to let the engine derive one from the components."
