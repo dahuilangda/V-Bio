@@ -677,6 +677,16 @@ function resolveTaskSelectionContext(
     ...splitChainTokens(rawBinder),
     ...splitChainTokens(rawLigand)
   ];
+  // 编辑器在草稿未保存 target/ligand 时默认取第一个小分子（或第一个非 target
+  // 组件）；列表行沿用同一默认，Ligand View 才能与 Binding 面板显示一致。
+  const targetComponentOption = targetChainId
+    ? componentOptions.find((item) => item.chainId === targetChainId) || null
+    : null;
+  const bindingLigandPool = componentOptions.filter(
+    (item) => item.chainId && (!targetComponentOption || item.componentId !== targetComponentOption.componentId)
+  );
+  const defaultBindingLigandOption =
+    bindingLigandPool.find((item) => item.isSmiles) || bindingLigandPool[0] || null;
   const selectedLigandOption = (() => {
     if (useBindingPreference) {
       const typedLigandOptions = componentOptions.filter((item) => item.type === 'ligand' && item.chainId);
@@ -702,7 +712,7 @@ function resolveTaskSelectionContext(
         const resolved = resolveComponentFromCandidate(candidate, { allowAnyType: true });
         if (resolved) return resolved;
       }
-      return null;
+      return defaultBindingLigandOption;
     }
     if (workflow === 'affinity') return resolveWorkflowUploadLigandComponent('affinity');
     if (workflow === 'lead_optimization') return resolveWorkflowUploadLigandComponent('lead_optimization');
