@@ -4979,8 +4979,8 @@ def run_rfd4_design_strategy(
     以所选打分引擎经网关提交到同一项目（"RFD4 verify <engine> <label>"），
     失败逐条记录进 verification_manifest.json，不阻断父任务。
     """
-    gateway_base = str(getattr(config, "VBIO_GATEWAY_URL", "") or "").rstrip("/")
-    platform_token = str(getattr(config, "VBIO_API_TOKEN", "") or "").strip()
+    gateway_base = config.VBIO_GATEWAY_URL
+    platform_token = config.VBIO_API_TOKEN.strip()
     if not gateway_base or not platform_token:
         raise RuntimeError(
             "RFD4 设计策略需要网关地址与平台令牌（VBIO_GATEWAY_URL / VBIO_API_TOKEN）。")

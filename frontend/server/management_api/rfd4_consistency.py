@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import sys
 import zipfile
 from pathlib import Path
@@ -23,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BOLTZ2SCORE_ROOT = REPO_ROOT / "capabilities" / "boltz2score"
 
 VERIFIED_ENGINES = {"mol1", "protenix", "alphafold3"}
+CONSISTENCY_MEMBER = "mol1/rfd4_consistency.json"
 
 
 def _log(gateway, message: str) -> None:
@@ -32,8 +34,8 @@ def _log(gateway, message: str) -> None:
         pass
 
 
-def parse_verify_name(name: str) -> Optional[Tuple[str, str]]:
-    "RFD4 verify <engine> <label> <seq> -> (label, gen_task_name)"
+def parse_verify_name(name: str) -> Optional[Tuple[str, str, str]]:
+    "RFD4 verify <engine> <label> <seq> -> (label, gen_task_name, binder_seq)"
     tokens = str(name or "").split()
     if len(tokens) < 5 or tokens[0] != "RFD4" or tokens[1] != "verify":
         return None
@@ -43,7 +45,7 @@ def parse_verify_name(name: str) -> Optional[Tuple[str, str]]:
     if "_" not in label:
         return None
     gen_short = label.rsplit("_", 1)[0]
-    return label, f"RFD4 gen {gen_short}"
+    return label, f"RFD4 gen {gen_short}", tokens[4]
 
 
 def _load_structure(cif_text: str):
@@ -91,7 +93,7 @@ def compute_consistency(reference_cif: str, model_cif: str) -> Dict[str, Any]:
             parsed = float(value)
         except (TypeError, ValueError):
             return None
-        return parsed if parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
+        return parsed if math.isfinite(parsed) else None
 
     payload: Dict[str, Any] = {}
     for key in ("dockq", "fnat", "irmsd", "lrmsd"):
@@ -110,7 +112,6 @@ def _candidate_binder_sequence(cif_text: str) -> str:
         if chain.name == binder:
             return "".join(residue.name for residue in chain)
     return ""
-
 
 
 def _fetch_reference_cif(
@@ -181,17 +182,14 @@ def maybe_enrich_view(
         cached = row.get("confidence")
         if isinstance(cached, dict) and isinstance(cached.get("rfd4_consistency"), dict):
             payload = json.dumps(cached["rfd4_consistency"], ensure_ascii=False)
-            return _inject_member(
-                upstream.content, "mol1/rfd4_consistency.json", payload
-            )
+            return _inject_member(upstream.content, CONSISTENCY_MEMBER, payload)
         parsed_name = parse_verify_name(str(row.get("name") or ""))
         if parsed_name is None:
             return None
-        label, gen_name = parsed_name
+        label, gen_name, binder_sequence = parsed_name
         gen_task_id = _find_gen_task_id(gateway, project_id, gen_name)
         if not gen_task_id:
             return None
-        binder_sequence = str(row.get("name") or "").split()[4] if len(str(row.get("name") or "").split()) > 4 else ""
         reference_cif = _fetch_reference_cif(gateway, gen_task_id, label, binder_sequence)
         model_cif = _extract_model_cif(upstream.content)
         if not model_cif:
@@ -202,7 +200,7 @@ def maybe_enrich_view(
         _log(gateway, f"{task_id} label={label} -> {consistency.get('dockq')}")
         return _inject_member(
             upstream.content,
-            "mol1/rfd4_consistency.json",
+            CONSISTENCY_MEMBER,
             json.dumps(consistency, ensure_ascii=False),
         )
     except Exception as exc:
@@ -268,8 +266,4 @@ def _persist(gateway, row: Dict[str, Any], consistency: Dict[str, Any]) -> None:
     )
 
 
-def supports(name: str, backend: str) -> bool:
-    return str(name or "").startswith("RFD4 verify") and str(backend or "") in VERIFIED_ENGINES
-
-
-__all__ = ["maybe_enrich_view", "parse_verify_name", "compute_consistency", "supports"]
+__all__ = ["maybe_enrich_view", "parse_verify_name", "compute_consistency"]

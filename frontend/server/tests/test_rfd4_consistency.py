@@ -60,6 +60,7 @@ def test_parse_verify_name_extracts_label_and_gen_name():
     assert parse_verify_name("RFD4 verify mol1 uhrf1_4gy5_L18_15 CREEEC") == (
         "uhrf1_4gy5_L18_15",
         "RFD4 gen uhrf1_4gy5_L18",
+        "CREEEC",
     )
     assert parse_verify_name("mol1 plain task") is None
 
