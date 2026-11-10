@@ -528,7 +528,7 @@ export async function pullResultForViewerTask(params: {
           structure_name: parsed.structureName,
         });
       } catch {
-        // 只读会话（viewer 共享）持久化被拒：结构已解析显示，静默跳过
+        // 只读会话持久化被拒：结构已解析显示，静默跳过
       }
     }
     if (options?.taskRowId) {
@@ -543,7 +543,7 @@ export async function pullResultForViewerTask(params: {
           ...(propertiesPatch ? { properties: propertiesPatch as unknown as ProjectTask['properties'] } : {})
         });
       } catch {
-        // 同上：persist 失败不回滚已就绪的查看状态
+        // 同上
       }
     }
   } catch (err) {

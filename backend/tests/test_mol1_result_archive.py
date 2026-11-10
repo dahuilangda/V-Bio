@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 import zipfile
+import importlib
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from backend.services.result_archive import ResultArchiveService
+_result_archive = importlib.import_module("backend.services.result_archive")
+ResultArchiveService = _result_archive.ResultArchiveService
 
 
 def _mol1_zip_bytes() -> bytes:
@@ -65,8 +69,6 @@ def test_is_protenix_detection_includes_mol1_prefix(tmp_path):
     source.write_bytes(_mol1_zip_bytes())
     svc = _service()
 
-    # 修复前 mol1 前缀落入 boltz 分支（结构固定选第一个样本）；现在走 protenix 分支，
-    # ranking_score 最高的样本（sample_1）被选中，证明 mol1/output/ 被识别。
     data = svc._build_view_archive_bytes(str(source))
     members = zipfile.ZipFile(io.BytesIO(data)).namelist()
     assert any(name.endswith("input_sample_1.cif") for name in members)
