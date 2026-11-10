@@ -162,6 +162,8 @@ export interface PredictionOptions {
   notifyEmail?: string | null;
   peptideDesignMode?: PeptideDesignMode;
   peptideChirality?: 'l' | 'd';
+  /** 肽设计提案器（设计引擎）：esm3 为世代循环默认；rfd4 在线融合待开放。 */
+  peptideProposerBackend?: 'esm3' | 'rfd4';
   peptideStructureMode?: 'auto' | 'helix' | 'hairpin' | 'strand_loop';
   peptideBinderLength?: number;
   peptideLengthMin?: number;

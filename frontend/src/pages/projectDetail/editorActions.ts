@@ -697,6 +697,17 @@ export function handleRuntimePeptideIterationsChangeAction<TDraft extends DraftL
   }));
 }
 
+export function handleRuntimePeptideProposerBackendChangeAction<TDraft extends DraftLike>(params: {
+  peptideProposerBackend: 'esm3' | 'rfd4';
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideProposerBackend, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideProposerBackend: peptideProposerBackend === 'rfd4' ? 'rfd4' : 'esm3'
+  }));
+}
+
 export function handleRuntimePeptidePopulationSizeChangeAction<TDraft extends DraftLike>(params: {
   peptidePopulationSize: number;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;

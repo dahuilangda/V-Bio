@@ -32,6 +32,7 @@ import {
   handleRuntimePeptideEliteSizeChangeAction,
   handleRuntimePeptideInitialSequenceChangeAction,
   handleRuntimePeptideIterationsChangeAction,
+  handleRuntimePeptideProposerBackendChangeAction,
   handleRuntimePeptideSequenceMaskChangeAction,
   handleRuntimePeptideExcludedAasChangeAction,
   handleRuntimePeptideFixedModificationsChangeAction,
@@ -87,6 +88,7 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimePeptideExcludedAasChange: (value: string[]) => void;
   handleRuntimePeptideFixedModificationsChange: (value: { position: number; ccd: string }[]) => void;
   handleRuntimePeptideIterationsChange: (value: number) => void;
+  handleRuntimePeptideProposerBackendChange: (value: 'esm3' | 'rfd4') => void;
   handleRuntimePeptidePopulationSizeChange: (value: number) => void;
   handleRuntimePeptideEliteSizeChange: (value: number) => void;
   handleRuntimePeptidePocketFieldChange: (field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox', value: string | number | null) => void;
@@ -279,6 +281,13 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   }, [setDraft]);
 
+  const handleRuntimePeptideProposerBackendChange = useCallback((value: 'esm3' | 'rfd4') => {
+    handleRuntimePeptideProposerBackendChangeAction({
+      peptideProposerBackend: value,
+      setDraft
+    });
+  }, [setDraft]);
+
   const handleRuntimePeptidePopulationSizeChange = useCallback((value: number) => {
     handleRuntimePeptidePopulationSizeChangeAction({
       peptidePopulationSize: value,
@@ -415,6 +424,7 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handleRuntimePeptideExcludedAasChange,
     handleRuntimePeptideFixedModificationsChange,
     handleRuntimePeptideIterationsChange,
+    handleRuntimePeptideProposerBackendChange,
     handleRuntimePeptidePocketFieldChange,
     handleRuntimePeptideDockPocketChange,
     handleRuntimeLeadOptOptionChange,

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "engines": {
     "boltz": {
       "label": "Boltz-2",
@@ -12,15 +12,16 @@
     "alphafold3": {
       "label": "AlphaFold3",
       "status": "active",
-      "workflows": ["prediction"],
-      "chirality": ["l", "d"],
+      "workflows": ["prediction", "peptide_design"],
+      "chirality": ["l"],
       "design_modes": ["linear"],
+      "peptide_roles": ["score"],
       "features": { "pocket": false, "custom_ccd": false, "msa": true, "ncaa": false }
     },
     "protenix": {
       "label": "Protenix",
       "status": "active",
-      "workflows": ["prediction", "peptide_design"],
+      "workflows": ["prediction"],
       "chirality": ["l"],
       "design_modes": ["linear", "cyclic", "bicyclic"],
       "features": { "pocket": true, "custom_ccd": true, "msa": true, "ncaa": true }
@@ -31,6 +32,7 @@
       "workflows": ["peptide_design", "lead_optimization"],
       "chirality": ["l", "d"],
       "design_modes": ["linear", "cyclic", "bicyclic"],
+      "peptide_roles": ["score"],
       "features": { "pocket": true, "custom_ccd": true, "msa": true, "ncaa": true }
     },
     "mol1": {
@@ -39,7 +41,17 @@
       "workflows": ["prediction", "peptide_design"],
       "chirality": ["l"],
       "design_modes": ["linear"],
+      "peptide_roles": ["score"],
       "features": { "pocket": false, "custom_ccd": false, "msa": true, "ncaa": true }
+    },
+    "esm3": {
+      "label": "ESM3",
+      "status": "active",
+      "workflows": ["peptide_design"],
+      "chirality": ["l", "d"],
+      "design_modes": ["linear", "cyclic", "bicyclic"],
+      "peptide_roles": ["design"],
+      "features": { "pocket": true, "custom_ccd": false, "msa": false, "ncaa": true }
     },
     "rfd4": {
       "label": "RFD4-Proteina",
@@ -47,6 +59,7 @@
       "workflows": ["peptide_design"],
       "chirality": ["l"],
       "design_modes": ["linear"],
+      "peptide_roles": ["design"],
       "features": { "pocket": false, "custom_ccd": false, "msa": false, "ncaa": true }
     },
     "nesso": {

@@ -14,6 +14,9 @@ export type WorkflowKey =
 export type Chirality = 'l' | 'd';
 export type DesignMode = 'linear' | 'cyclic' | 'bicyclic';
 
+/** 肽设计工作流内引擎承担的角色：design = 提案器（生成候选），score = 打分器（验证候选）。 */
+export type PeptideRole = 'design' | 'score';
+
 export interface EngineFeatures {
   pocket: boolean;
   custom_ccd: boolean;
@@ -27,6 +30,7 @@ export interface EngineCapability {
   workflows: WorkflowKey[];
   chirality: Chirality[];
   design_modes: DesignMode[];
+  peptide_roles?: PeptideRole[];
   features: EngineFeatures;
 }
 
@@ -60,6 +64,28 @@ export function engineOptionsFor(options: {
       return true;
     })
     .map(([id, engine]) => ({ value: id, label: engine.label }));
+}
+
+/** 肽设计工作流按角色（design/score）过滤引擎；未声明角色的引擎不参与肽设计下拉。 */
+export function peptideEngineOptionsFor(options: {
+  role: PeptideRole;
+  chirality: Chirality;
+  designMode: DesignMode;
+}): EngineOption[] {
+  return Object.entries(ENGINES)
+    .filter(([, engine]) => {
+      if (engine.status !== 'active') return false;
+      if (!engine.workflows.includes('peptide_design')) return false;
+      if (!(engine.peptide_roles || []).includes(options.role)) return false;
+      if (engine.chirality.length > 0 && !engine.chirality.includes(options.chirality)) return false;
+      if (engine.design_modes.length > 0 && !engine.design_modes.includes(options.designMode)) return false;
+      return true;
+    })
+    .map(([id, engine]) => ({ value: id, label: engine.label }));
+}
+
+export function engineSupportsPeptideRole(backend: string, role: PeptideRole): boolean {
+  return (ENGINES[backend]?.peptide_roles || []).includes(role) === true;
 }
 
 export function engineSupportsWorkflow(backend: string, workflow: WorkflowKey): boolean {

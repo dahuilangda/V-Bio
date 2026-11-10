@@ -5,6 +5,7 @@ import { isValidNotifyEmail } from '../../utils/projectInputs';
 
 export interface PeptideSubmitSummary {
   backend: string;
+  proposerBackend?: string;
   designMode: string;
   chirality: string;
   binderLengthLabel: string;
@@ -32,6 +33,8 @@ const BACKEND_LABELS: Record<string, string> = {
   boltz: 'Boltz-2',
   nesso: 'Nesso-1',
   mol1: 'Mol-1',
+  esm3: 'ESM3',
+  rfd4: 'RFD4-Proteina',
 };
 
 function backendLabel(backend: string): string {
@@ -59,7 +62,8 @@ export function PeptideSubmitConfirmDialog({
   if (!isOpen) return null;
 
   const rows: Array<[string, string]> = [
-    ['Backend', backendLabel(summary.backend)],
+    ['Design engine', backendLabel(summary.proposerBackend || 'esm3')],
+    ['Score engine', backendLabel(summary.backend)],
     ['Design mode', summary.designMode],
     ['Chirality', summary.chirality === 'd' ? 'D-peptide (mirror workflow)' : 'L-peptide'],
     ['Binder length', summary.binderLengthLabel],

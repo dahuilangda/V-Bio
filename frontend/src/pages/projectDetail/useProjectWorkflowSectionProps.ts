@@ -215,6 +215,8 @@ interface UseProjectWorkflowSectionPropsInput {
   onPeptideInitialSequenceChange: (value: string) => void;
   onPeptideSequenceMaskChange: (value: string) => void;
   onPeptideIterationsChange: (value: number) => void;
+  peptideProposerBackend?: 'esm3' | 'rfd4';
+  onPeptideProposerBackendChange?: (value: 'esm3' | 'rfd4') => void;
   onPeptidePocketFieldChange: (field: 'peptidePocketCenter' | 'peptidePocketResidues' | 'peptidePocketBox', value: string | number | null) => void;
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
@@ -415,6 +417,8 @@ export function useProjectWorkflowSectionProps({
   onPeptideInitialSequenceChange,
   onPeptideSequenceMaskChange,
   onPeptideIterationsChange,
+  peptideProposerBackend,
+  onPeptideProposerBackendChange,
   onPeptidePocketFieldChange,
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
@@ -699,6 +703,8 @@ export function useProjectWorkflowSectionProps({
         onPeptideInitialSequenceChange,
         onPeptideSequenceMaskChange,
         onPeptideIterationsChange,
+        peptideProposerBackend,
+        onPeptideProposerBackendChange,
         onPeptidePopulationSizeChange,
         onPeptideEliteSizeChange,
         onPeptideResiduePoolChange,

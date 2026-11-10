@@ -1050,6 +1050,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimePeptideExcludedAasChange,
     handleRuntimePeptideFixedModificationsChange,
     handleRuntimePeptideIterationsChange,
+    handleRuntimePeptideProposerBackendChange,
     handleRuntimePeptidePocketFieldChange,
     handleRuntimePeptideDockPocketChange,
     handleRuntimeLeadOptOptionChange,
@@ -1462,6 +1463,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onPeptideFixedModificationsChange: handleRuntimePeptideFixedModificationsChange,
     onPeptideExcludedAAsChange: handleRuntimePeptideExcludedAasChange,
     onPeptideIterationsChange: handleRuntimePeptideIterationsChange,
+    peptideProposerBackend: draft.inputConfig.options.peptideProposerBackend ?? 'esm3',
+    onPeptideProposerBackendChange: handleRuntimePeptideProposerBackendChange,
     onPeptidePocketFieldChange: handleRuntimePeptidePocketFieldChange,
     onPeptidePopulationSizeChange: handleRuntimePeptidePopulationSizeChange,
     onPeptideEliteSizeChange: handleRuntimePeptideEliteSizeChange,
@@ -1574,6 +1577,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const lengthMax = options.peptideLengthMax ?? options.peptideBinderLength ?? 20;
     return {
       backend: draft.backend,
+      proposerBackend: options.peptideProposerBackend ?? 'esm3',
       designMode: options.peptideDesignMode ?? 'linear',
       chirality: options.peptideChirality ?? 'l',
       binderLengthLabel: lengthMin === lengthMax ? `${lengthMin} aa` : `${lengthMin}–${lengthMax} aa (adaptive)`,

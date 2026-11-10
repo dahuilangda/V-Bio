@@ -7,7 +7,7 @@ import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
-import { engineOptionsFor, engineSupportsDesignMode, engineSupportsWorkflow, type DesignMode } from '../../config/engineCapabilities';
+import { engineOptionsFor, peptideEngineOptionsFor, engineSupportsDesignMode, engineSupportsPeptideRole, type DesignMode } from '../../config/engineCapabilities';
 import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
@@ -137,6 +137,8 @@ export interface WorkflowRuntimeSettingsSectionProps {
   onPeptideInitialSequenceChange: (value: string) => void;
   onPeptideSequenceMaskChange: (value: string) => void;
   onPeptideIterationsChange: (value: number) => void;
+  peptideProposerBackend?: 'esm3' | 'rfd4';
+  onPeptideProposerBackendChange?: (value: 'esm3' | 'rfd4') => void;
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
@@ -210,6 +212,8 @@ export function WorkflowRuntimeSettingsSection({
   onPeptideInitialSequenceChange,
   onPeptideSequenceMaskChange,
   onPeptideIterationsChange,
+  peptideProposerBackend = 'esm3',
+  onPeptideProposerBackendChange,
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
   onPeptideResiduePoolChange,
@@ -249,12 +253,9 @@ export function WorkflowRuntimeSettingsSection({
   // instead of auto-detecting over them; cleared by Auto and on open
   const manualOverrideBackboneRef = useRef(false);
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
-  // peptide design only offers the docking engines (+ AF3); migrate a legacy
-  // 'boltz' so the select never shows an unmatched value
-  // L-type designs can use standard protenix inference (full model + MSA + templates);
-  // D-type requires protenix2dock (mirror/refine workflow).
-  const peptideBackendAllowed =
-    normalizedBackend === 'alphafold3' || engineSupportsWorkflow(normalizedBackend, 'peptide_design');
+  // 肽设计的打分引擎必须声明 score 角色；不符合的存量选择（旧 boltz/protenix）
+  // 迁移到 protenix2dock，保证 select 不出现未匹配值。
+  const peptideBackendAllowed = engineSupportsPeptideRole(normalizedBackend, 'score');
   useEffect(() => {
     if (isPeptideDesignWorkflow && !peptideBackendAllowed) {
       onBackendChange('protenix2dock');
@@ -880,8 +881,12 @@ export function WorkflowRuntimeSettingsSection({
       <div className="component-runtime-settings-row">
 
           <Field
-            label={<>Backend <span className="required-mark">*</span></>}
-            hint="Design engine. Mol-1 runs blind co-folding with native cyclic-bond support; Protenix2Dock adds staged-pose refinement with TFG constraints."
+            label={isPeptideDesignWorkflow
+              ? <>Score Engine <span className="required-mark">*</span></>
+              : <>Backend <span className="required-mark">*</span></>}
+            hint={isPeptideDesignWorkflow
+              ? "Scoring engine that verifies each designed candidate. Mol-1 runs blind co-folding with native cyclic-bond support; Protenix2Dock adds staged-pose refinement with TFG constraints; AlphaFold3 scores linear L-peptides."
+              : "Prediction engine for the submitted components."}
           >
             <select
               required
@@ -893,21 +898,54 @@ export function WorkflowRuntimeSettingsSection({
               }
               disabled={!canEditRuntimeIdentity}
             >
-              {engineOptionsFor({
-                workflow: isAffinityWorkflow
-                  ? 'virtual_screening'
-                  : isPeptideDesignWorkflow
-                    ? 'peptide_design'
-                    : 'prediction',
-                chirality: isPeptideDesignWorkflow ? (peptideChirality as 'l' | 'd') : undefined,
-                designMode: isPeptideDesignWorkflow ? (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') : undefined,
-              }).map((option: { value: string; label: string }) => (
+              {(isPeptideDesignWorkflow
+                ? peptideEngineOptionsFor({
+                    role: 'score',
+                    chirality: (peptideChirality as 'l' | 'd') || 'l',
+                    designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
+                  })
+                : engineOptionsFor({
+                    workflow: isAffinityWorkflow ? 'virtual_screening' : 'prediction',
+                  })
+              ).map((option: { value: string; label: string }) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
             </select>
           </Field>
+
+        {isPeptideDesignWorkflow && peptideEngineOptionsFor({
+          role: 'design',
+          chirality: (peptideChirality as 'l' | 'd') || 'l',
+          designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
+        }).length > 0 && (
+          <Field
+            label="Design Engine"
+            hint="Proposer that generates candidate sequences each generation. ESM3 drives the evolution loop for L and D designs; RFD4 online fusion opens in a future release."
+          >
+            <select
+              value={peptideProposerBackend}
+              onChange={(e) => onPeptideProposerBackendChange?.(e.target.value === 'rfd4' ? 'rfd4' : 'esm3')}
+              disabled={!canEditRuntimeIdentity}
+            >
+              {peptideEngineOptionsFor({
+                role: 'design',
+                chirality: (peptideChirality as 'l' | 'd') || 'l',
+                designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
+              }).map((option: { value: string; label: string }) => (
+                <option
+                  key={option.value}
+                  value={option.value}
+                  disabled={option.value === 'rfd4'}
+                  title={option.value === 'rfd4' ? 'RFD4 与世代循环的在线融合下一版本开放；当前可用预测工作流独立生成后验证。' : undefined}
+                >
+                  {option.value === 'rfd4' ? `${option.label}（下一版本）` : option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
 
 
         {(isPredictionWorkflow || isPeptideDesignWorkflow) && (
