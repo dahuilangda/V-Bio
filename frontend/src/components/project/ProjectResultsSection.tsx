@@ -1,10 +1,9 @@
-import { memo, useMemo, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { useTabsKeyboard } from '../ui/useTabsKeyboard';
 import { AffinityResultsWorkspace } from './AffinityWorkspace';
 import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
-import { PaeMatrixChart } from './PaeMatrixChart';
 import { MolstarViewer } from './MolstarViewer';
 import { PeptideDesignResultsWorkspace } from './PeptideDesignResultsWorkspace';
 import { VirtualScreeningResultsSection } from './VirtualScreeningResultsSection';
@@ -60,6 +59,84 @@ export interface ProjectResultsSectionProps {
   onPredictionRecordsChange?: (records: Record<string, VirtualScreeningPredictionRecord>) => void;
   requestStructureAction?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
 }
+
+
+function PaeMatrixSection({ snapshotConfidence }: { snapshotConfidence: Record<string, unknown> | null }) {
+  const conf = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: Array<{ chain: number; start: number; end: number }> };
+  let matrix = conf.pae_matrix;
+  let bounds = conf.pae_chain_bounds;
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    try {
+      const cached = JSON.parse(localStorage.getItem('vbio:pae:latest') || 'null');
+      if (cached && Array.isArray(cached.pae_matrix)) {
+        matrix = cached.pae_matrix;
+        bounds = cached.pae_chain_bounds;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !Array.isArray(matrix) || matrix.length === 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const size = 300;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+    canvas.style.width = `${size}px`;
+    canvas.style.height = `${size}px`;
+    ctx.scale(dpr, dpr);
+    const n = matrix.length;
+    const cell = size / n;
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        const t = Math.min(1, Math.max(0, (matrix[i][j] ?? 25) / 25));
+        ctx.fillStyle = `rgb(${Math.round(20 + 235 * t)},${Math.round(80 + 60 * Math.abs(t - 0.5))},${Math.round(240 - 210 * t)})`;
+        ctx.fillRect(j * cell, i * cell, cell + 0.5, cell + 0.5);
+      }
+    }
+    if (bounds && bounds.length > 1) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1.5;
+      let acc = 0;
+      bounds.forEach((b, idx) => {
+        acc += b.end - b.start + 1;
+        if (idx < bounds.length - 1) {
+          const pos = (acc / n) * size;
+          ctx.beginPath();
+          ctx.moveTo(pos, 0);
+          ctx.lineTo(pos, size);
+          ctx.moveTo(0, pos);
+          ctx.lineTo(size, pos);
+          ctx.stroke();
+        }
+      });
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.font = '11px sans-serif';
+      let acc2 = 0;
+      bounds.forEach((b) => {
+        const mid = ((acc2 + (b.end - b.start) / 2) / n) * size;
+        ctx.fillText(`链${b.chain}`, mid - 10, 12);
+        acc2 += b.end - b.start + 1;
+      });
+    }
+  }, [matrix, bounds]);
+  if (!Array.isArray(matrix) || matrix.length === 0) return null;
+  return (
+    <div className="pae-matrix-chart">
+      <canvas ref={canvasRef} aria-label="PAE matrix heatmap" />
+      <div className="pae-matrix-legend">
+        <span>0Å</span>
+        <span className="pae-matrix-legend-bar" style={{ background: 'linear-gradient(90deg, rgb(20,80,240), rgb(120,140,140), rgb(255,140,30))' }} />
+        <span>25Å</span>
+      </div>
+    </div>
+  );
+}
+
 
 export const ProjectResultsSection = memo(function ProjectResultsSection({
   isPredictionWorkflow,
@@ -278,21 +355,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                   </div>
                 ))}
               </div>
-              {(() => {
-                const matrix = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: Array<{ chain: number; start: number; end: number }> };
-                return Array.isArray(matrix.pae_matrix) && matrix.pae_matrix.length > 0 ? (
-                  <div className="result-aside-title" style={{ marginTop: 12 }}>PAE Matrix</div>
-                ) : null;
-              })()}
-              {(() => {
-                const matrix = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: Array<{ chain: number; start: number; end: number }> };
-                return Array.isArray(matrix.pae_matrix) && matrix.pae_matrix.length > 0 ? (
-                  <PaeMatrixChart
-                    matrix={matrix.pae_matrix}
-                    chainBounds={matrix.pae_chain_bounds}
-                  />
-                ) : null;
-              })()}
+              <PaeMatrixSection snapshotConfidence={snapshotConfidence} />
             </section>
           </aside>
         </div>

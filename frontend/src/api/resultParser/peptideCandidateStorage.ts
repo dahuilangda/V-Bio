@@ -213,6 +213,8 @@ export function compactConfidenceForStorage(
   if (Array.isArray(pae) || (pae && typeof pae === 'object')) {
     delete next.pae;
   }
+  delete next.pae_matrix;
+  delete next.pae_chain_bounds;
 
   const compactCandidateRows = compactPeptideCandidateRows(
     collectPeptideCandidateRows(input),

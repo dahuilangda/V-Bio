@@ -481,6 +481,19 @@ export async function pullResultForViewerTask(params: {
     const baseTaskInputOptions = baseTaskProperties && hasStoredTaskInputOptions({ properties: baseTaskProperties })
       ? readTaskInputOptions({ properties: baseTaskProperties } as unknown as ProjectTask)
       : {};
+    // PAE 矩阵不进 DB，按任务存 localStorage 供结果视图热图读取
+    try {
+      const paeMatrix = asRecord(parsedConfidence).pae_matrix;
+      const chainBounds = asRecord(parsedConfidence).pae_chain_bounds;
+      if (Array.isArray(paeMatrix) && paeMatrix.length > 0) {
+        localStorage.setItem('vbio:pae:latest', JSON.stringify({
+          pae_matrix: paeMatrix,
+          pae_chain_bounds: Array.isArray(chainBounds) ? chainBounds : []
+        }));
+      }
+    } catch {
+      // quota/serialization errors are non-fatal
+    }
     const persistedConfidence = derivePersistedResultConfidences({
       parsedConfidenceValue: parsedConfidence,
       baseProjectConfidenceValue: baseProjectConfidence,
