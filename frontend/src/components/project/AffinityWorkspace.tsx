@@ -28,7 +28,7 @@ export interface AffinitySignalCard {
   key: string;
   label: string;
   value: string;
-  detail: string;
+  detail?: string;
   tone: MetricTone;
 }
 
@@ -626,7 +626,7 @@ export function AffinityResultsWorkspace({
                 <div key={card.key} className={`overview-signal-row tone-${card.tone}`}>
                   <div className="overview-signal-main">
                     <span className="overview-signal-label">{card.label}</span>
-                    <span className="overview-signal-detail">{card.detail}</span>
+                    <span className="overview-signal-detail">{card.detail ?? ''}</span>
                   </div>
                   <strong className={`overview-signal-value metric-value-${card.tone}`}>{card.value}</strong>
                 </div>

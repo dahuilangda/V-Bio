@@ -11,7 +11,7 @@ export interface SnapshotCard {
   key: string;
   label: string;
   value: string;
-  detail: string;
+  detail?: string;
   tone: MetricTone;
 }
 
@@ -75,16 +75,14 @@ export function buildSnapshotCards(params: {
       ? [
           {
             key: 'rfd4-dockq',
-            label: 'RFD4 DockQ',
+            label: 'DockQ',
             value: rfd4Consistency.dockq?.toFixed(3) ?? '-',
-            detail: `vs ${rfd4Consistency.label || 'RFD4 model'}${rfd4Consistency.fnat != null ? ` · Fnat ${(rfd4Consistency.fnat * 100).toFixed(0)}%` : ''}`,
             tone: toneForDockQ(rfd4Consistency.dockq ?? 0)
           },
           {
             key: 'rfd4-lrmsd',
-            label: 'RFD4 LRMSD',
+            label: 'LRMSD',
             value: rfd4Consistency.lrmsd != null ? `${rfd4Consistency.lrmsd.toFixed(2)} Å` : '-',
-            detail: 'vs RFD4 model',
             tone: rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 2 ? 'excellent' : rfd4Consistency.lrmsd != null && rfd4Consistency.lrmsd <= 5 ? 'medium' : 'low'
           }
         ]

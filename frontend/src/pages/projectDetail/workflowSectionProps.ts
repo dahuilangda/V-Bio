@@ -255,7 +255,7 @@ export function buildPredictionComponentsSidebarProps(
 
 export function buildProjectResultsSectionProps(
   params: Omit<ProjectResultsSectionProps, 'snapshotCards'> & {
-    snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }>;
+    snapshotCards: Array<{ key: string; label: string; value: string; detail?: string; tone: MetricTone }>;
   }
 ): ProjectResultsSectionProps {
   return {

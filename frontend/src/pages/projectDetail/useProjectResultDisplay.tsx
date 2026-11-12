@@ -82,7 +82,7 @@ interface UseProjectResultDisplayResult {
   constraintStructureText: string;
   constraintStructureFormat: 'cif' | 'pdb';
   hasConstraintStructure: boolean;
-  snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }>;
+  snapshotCards: Array<{ key: string; label: string; value: string; detail?: string; tone: MetricTone }>;
   affinityPreviewStructureText: string;
   affinityPreviewStructureFormat: 'cif' | 'pdb';
   affinityPreviewLigandOverlayText: string;
@@ -197,7 +197,7 @@ export function useProjectResultDisplay({
     [snapshotIptm, snapshotIpsaeDom, snapshotLigandIpsaeMax, snapshotInterfaceMetric, snapshotSelectedPairIptm]
   );
 
-  const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> = useMemo(
+  const snapshotCards: Array<{ key: string; label: string; value: string; detail?: string; tone: MetricTone }> = useMemo(
     () =>
       shouldPrepareSnapshotCards
         ? buildSnapshotCards({
