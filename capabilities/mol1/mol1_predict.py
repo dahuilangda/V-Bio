@@ -347,29 +347,18 @@ def patch_msa_server(url: str | None) -> None:
 
 def run_inference(input_json: Path, output_dir: Path, seed: int,
                   checkpoint_dir: str, use_msa: bool = True,
-                  samples: int = 5, atom_confidence: bool = False,
-                  constraint_model: bool = False) -> None:
-    ckpt_name = "mol-1-constraint.pt" if constraint_model else "mol-1-base.pt"
-    checkpoint = Path(checkpoint_dir) / ckpt_name
-    if constraint_model:
-        # mol-1-constraint 走 cpred 子命令（pred 的 model_name 只认 base）
-        cmd = ["mol", "cpred",
-               "--input", str(input_json),
-               "--out_dir", str(output_dir),
-               "--seeds", str(seed),
-               "--load_checkpoint_path", str(checkpoint),
-               "--use_msa", "true" if use_msa else "false",
-               "--sample", str(samples)]
-    else:
-        cmd = [
-            sys.executable, "-m", "mol.runner.batch_inference",
-            "--input", str(input_json),
-            "--out_dir", str(output_dir),
-            "--seeds", str(seed),
-            "--load_checkpoint_path", str(checkpoint),
-            "--use_msa", "true" if use_msa else "false",
-            "--sample", str(samples),
-        ]
+                  samples: int = 5, atom_confidence: bool = False) -> None:
+    # mol-1-constraint 为默认推理模型：接受与 base 完全相同的 job 格式，
+    # 额外支持 site/contact/exclusion 条件（无约束时等价 base，已实测）。
+    # constraint 分支的 cpred 子命令承载该模型（pred 只认 mol-1-base）。
+    checkpoint = Path(checkpoint_dir) / "mol-1-constraint.pt"
+    cmd = ["mol", "cpred",
+           "--input", str(input_json),
+           "--out_dir", str(output_dir),
+           "--seeds", str(seed),
+           "--load_checkpoint_path", str(checkpoint),
+           "--use_msa", "true" if use_msa else "false",
+           "--sample", str(samples)]
     if atom_confidence:
         cmd += ["--need_atom_confidence", "true"]
     result = subprocess.run(cmd, check=False, timeout=7200)
@@ -433,15 +422,11 @@ def main() -> None:
         if isinstance(jobs, dict):
             jobs = [jobs]
 
-    constraint_model = False
     if args.constraints_json:
         constraints_obj = json.loads(Path(args.constraints_json).read_text())
         for job in jobs:
             job.setdefault("constraints", {})
             job["constraints"].update(constraints_obj)
-        constraint_model = True
-    elif any("site" in (job.get("constraints") or {}) for job in jobs):
-        constraint_model = True
 
     if not args.no_msa:
         attach_cached_msa(jobs, args.msa_cache_dir)
@@ -451,8 +436,7 @@ def main() -> None:
     input_json.write_text(json.dumps(jobs, ensure_ascii=False, indent=1))
 
     run_inference(input_json, output_dir, args.seed, args.checkpoint_dir,
-                  use_msa=not args.no_msa, atom_confidence=args.atom_confidence,
-                  constraint_model=constraint_model)
+                  use_msa=not args.no_msa, atom_confidence=args.atom_confidence)
 
     summaries, skipped = collect_summaries(output_dir)
     summary = {

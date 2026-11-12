@@ -5158,7 +5158,7 @@ def run_mol1_backend(
             "partner_chains": [binder_chain],
             "residue_ids": contacts,
         }}
-        constraints_path = Path(work_dir) / "mol1_constraints.json"
+        constraints_path = Path(mol1_work_root) / "mol1_constraints.json"
         constraints_path.write_text(json.dumps(constraints_obj), encoding="utf-8")
 
     if not use_msa_server:
