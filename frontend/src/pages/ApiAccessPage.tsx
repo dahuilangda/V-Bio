@@ -25,7 +25,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { InfoTip } from '../components/common/InfoTip';
-import { engineOptionsFor } from '../config/engineCapabilities';
+import { ENGINES, engineOptionsFor, peptideEngineOptionsFor } from '../config/engineCapabilities';
 import { useModalDialog } from '../components/ui/useModalDialog';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
@@ -200,6 +200,8 @@ export function ApiAccessPage() {
   const [builderLigandPath, setBuilderLigandPath] = useState('./ligand.sdf');
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
+  const [builderPeptideDesignMode, setBuilderPeptideDesignMode] = useState<'linear' | 'cyclic' | 'bicyclic'>('bicyclic');
+  const [builderPeptideChirality, setBuilderPeptideChirality] = useState<'l' | 'd'>('l');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
   const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('default');
   const [builderMsaMode, setBuilderMsaMode] = useState<'env' | 'uniref' | 'auto' | 'none'>('uniref');
@@ -592,6 +594,7 @@ export function ApiAccessPage() {
   const selectedBackend = String(selectedProject?.backend || 'boltz').trim().toLowerCase() || 'boltz';
   const isAffinityWorkflow = selectedWorkflow.key === 'affinity';
   const isPredictionWorkflow = selectedWorkflow.key === 'prediction' || selectedWorkflow.key === 'peptide_design';
+  const isPeptideDesignWorkflow = selectedWorkflow.key === 'peptide_design';
   const isVirtualScreeningWorkflow = selectedWorkflow.key === 'virtual_screening';
   const isLeadOptimizationWorkflow = selectedWorkflow.key === 'lead_optimization';
   const isSupportedSubmitWorkflow = isPredictionWorkflow || isVirtualScreeningWorkflow || isAffinityWorkflow;
@@ -1397,9 +1400,12 @@ else
   echo "TASK_ID=$TASK_ID"
 fi
 `;
-  const peptideDesignCurlFlags = selectedWorkflow.key === 'peptide_design'
-    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`
-    : '';
+  const peptideDesignCurlFlags = selectedWorkflow.key !== 'peptide_design'
+    ? ''
+    : builderPeptideDesignMode === 'bicyclic'
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"${builderPeptideChirality}","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`
+    : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`;
+
 
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
@@ -1833,6 +1839,30 @@ ${submitTaskIdCapture}`;
             )}
 
             {(isPredictionWorkflow || isVirtualScreeningWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
+              <>
+                {isPeptideDesignWorkflow && (
+                  <>
+                    <Field label="Design Mode">
+                      <select
+                        value={builderPeptideDesignMode}
+                        onChange={(e) => setBuilderPeptideDesignMode(e.target.value as 'linear' | 'cyclic' | 'bicyclic')}
+                      >
+                        <option value="linear">linear</option>
+                        <option value="cyclic">cyclic</option>
+                        <option value="bicyclic">bicyclic</option>
+                      </select>
+                    </Field>
+                    <Field label="Peptide Chirality">
+                      <select
+                        value={builderPeptideChirality}
+                        onChange={(e) => setBuilderPeptideChirality(e.target.value as 'l' | 'd')}
+                      >
+                        <option value="l">L (natural)</option>
+                        <option value="d">D (mirror)</option>
+                      </select>
+                    </Field>
+                  </>
+                )}
               <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}>
                 <select
                   value={effectivePredictionBackend}
@@ -1841,15 +1871,28 @@ ${submitTaskIdCapture}`;
                 >
                   {isVirtualScreeningWorkflow ? (
                     <option value="nesso">nesso</option>
+                  ) : isPeptideDesignWorkflow ? (
+                    peptideEngineOptionsFor({
+                      role: 'score',
+                      chirality: builderPeptideChirality,
+                      designMode: builderPeptideDesignMode
+                    }).map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))
                   ) : (
                     engineOptionsFor({ workflow: isLeadOptimizationWorkflow ? 'lead_optimization' : 'prediction' })
-                      .filter((option) => option.value !== 'esm3' && option.value !== 'nesso')
+                      .filter((option) => {
+                        const engine = ENGINES[option.value];
+                        return option.value !== 'nesso' &&
+                          (!engine?.peptide_roles || engine.peptide_roles.includes('score'));
+                      })
                       .map((option) => (
                         <option key={option.value} value={option.value}>{option.label}</option>
                       ))
                   )}
                 </select>
               </Field>
+              </>
             )}
 
             {isPredictionWorkflow && effectivePredictionBackend !== 'alphafold3' && !isNessoPredictionBackend && (
