@@ -25,6 +25,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { InfoTip } from '../components/common/InfoTip';
+import { engineOptionsFor } from '../config/engineCapabilities';
 import { useModalDialog } from '../components/ui/useModalDialog';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
@@ -1841,11 +1842,11 @@ ${submitTaskIdCapture}`;
                   {isVirtualScreeningWorkflow ? (
                     <option value="nesso">nesso</option>
                   ) : (
-                    <>
-                      <option value="boltz">boltz</option>
-                      <option value="alphafold3">alphafold3</option>
-                      <option value="protenix">protenix</option>
-                    </>
+                    engineOptionsFor({ workflow: isLeadOptimizationWorkflow ? 'lead_optimization' : 'prediction' })
+                      .filter((option) => option.value !== 'esm3' && option.value !== 'nesso')
+                      .map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))
                   )}
                 </select>
               </Field>
