@@ -5192,6 +5192,49 @@ def run_mol1_backend(
             from core.ipsae import compute_ipsae_for_output
 
             ipsae_by_sample = compute_ipsae_for_output(Path(output_dir))
+            # 表位接触谱数据：PAE<10 且两侧残基 pLDDT>=70 的界面残基对
+            # （供前端接触谱/表位覆盖渲染；无坐标依赖，纯 PAE+plddt 口径）
+            try:
+                import numpy as _np
+
+                for full_path in sorted(Path(output_dir).rglob("*full_data_sample_*.json")):
+                    sample = full_path.stem.rsplit("_sample_", 1)[1]
+                    fd = json.loads(full_path.read_text())
+                    asym = _np.asarray(fd.get("token_asym_id") or [], dtype=int)
+                    pae_m = _np.asarray(fd.get("token_pair_pae") or [], dtype=float)
+                    a2t = _np.asarray(fd.get("atom_to_token_idx") or [], dtype=int)
+                    apl = _np.asarray(fd.get("atom_plddt") or [], dtype=float)
+                    if not (len(asym) and pae_m.shape[0] == len(asym) and len(a2t) == len(apl)):
+                        continue
+                    tok_plddt = {}
+                    for ai, ti in enumerate(a2t):
+                        tok_plddt.setdefault(int(ti), []).append(float(apl[ai]))
+                    tok_plddt = {t: float(_np.mean(v)) for t, v in tok_plddt.items()}
+                    groups = {}
+                    for ti, a in enumerate(asym):
+                        groups.setdefault(int(a), []).append(ti)
+                    if len(groups) < 2:
+                        continue
+                    ordered = sorted(groups, key=lambda g: min(groups[g]))
+                    src_g, part_g = ordered[0], ordered[-1]
+                    pairs = []
+                    epitope = set()
+                    for ti in groups[src_g]:
+                        for tj in groups[part_g]:
+                            if pae_m[ti, tj] < 10.0 and tok_plddt.get(ti, 0) >= 70 and tok_plddt.get(tj, 0) >= 70:
+                                pairs.append([int(ti), int(tj)])
+                                epitope.add(int(ti))
+                    contact = {
+                        "source_chain": int(src_g), "partner_chain": int(part_g),
+                        "high_conf_pairs": pairs,
+                        "epitope_tokens": sorted(epitope),
+                        "n_pairs": len(pairs),
+                    }
+                    out = full_path.parent / full_path.name.replace(
+                        "_full_data_", "_epitope_contacts_")
+                    out.write_text(json.dumps(contact, default=str))
+            except Exception as contact_err:
+                print(f"[WARN] mol1 接触谱提取失败(不影响结果): {contact_err}", file=sys.stderr)
             if ipsae_by_sample:
                 best_idx = max(ipsae_by_sample, key=lambda s: ipsae_by_sample[s].get("ipsae_dom") or 0)
                 best_payload = None
