@@ -1416,7 +1416,7 @@ fi
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag}${isPeptideDesignWorkflow && builderDesignStrategy === 'rfd4' ? ' \\\\\n  -F "template_files=@./seed_target_combined.cif" \\\\\n  -F "rfd4_spec=@./rfd4_spec.yaml"' : ''} \\
   -F "backend=${effectiveSubmitBackend}" \\
-  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
+  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : isPredictionWorkflow && builderDesignStrategy === 'esm3' ? 'peptide_design' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
   -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \
   -F "msa_mode=${builderMsaMode}" \
   -F "priority=${builderPriority}"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
@@ -1844,7 +1844,18 @@ ${submitTaskIdCapture}`;
 
             {(isPredictionWorkflow || isVirtualScreeningWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
               <>
-                {isPeptideDesignWorkflow && (
+                {(isPredictionWorkflow || isPeptideDesignWorkflow) && (
+                  <Field label="Design Engine" hint="rfd4: motif 条件化生成（种子+靶点合并结构，走 rfd4 队列）；esm3: ESM3+RL 进化循环（peptide_design 流程）">
+                    <select
+                      value={builderDesignStrategy}
+                      onChange={(e) => setBuilderDesignStrategy(e.target.value as 'esm3' | 'rfd4')}
+                    >
+                      <option value="rfd4">RFD4-Proteina</option>
+                      <option value="esm3">ESM3 + RL</option>
+                    </select>
+                  </Field>
+                )}
+                {isPeptideDesignWorkflow && builderDesignStrategy === 'esm3' && (
                   <>
                     <Field label="Design Mode">
                       <select
@@ -1865,18 +1876,9 @@ ${submitTaskIdCapture}`;
                         <option value="d">D (mirror)</option>
                       </select>
                     </Field>
-                    <Field label="Design Strategy" hint="ESM3 + RL 进化循环；RFD4-Proteina 一次性 motif 条件化生成并自动派发验证（需准备种子+靶点合并结构）">
-                      <select
-                        value={builderDesignStrategy}
-                        onChange={(e) => setBuilderDesignStrategy(e.target.value as 'esm3' | 'rfd4')}
-                      >
-                        <option value="esm3">ESM3 + RL</option>
-                        <option value="rfd4">RFD4-Proteina</option>
-                      </select>
-                    </Field>
                   </>
                 )}
-              <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}>
+              <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : builderDesignStrategy === 'rfd4' ? 'Generation Backend' : 'Prediction Backend'}>
                 <select
                   value={effectivePredictionBackend}
                   onChange={(e) => setBuilderPredictionBackend(normalizePredictionBackend(e.target.value))}
