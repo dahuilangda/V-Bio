@@ -1414,7 +1414,7 @@ fi
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
-  -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
+  -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag}${isPeptideDesignWorkflow && builderDesignStrategy === 'rfd4' ? ' \\\\\n  -F "template_files=@./seed_target_combined.cif" \\\\\n  -F "rfd4_spec=@./rfd4_spec.yaml"' : ''} \\
   -F "backend=${effectiveSubmitBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
   -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \
@@ -1896,9 +1896,6 @@ ${submitTaskIdCapture}`;
                     engineOptionsFor({ workflow: 'prediction' })
                       .filter((option) => {
                         const engine = ENGINES[option.value];
-                        // rfd4 生成属 prediction 维度（平台 rfd4 队列）；
-                        // esm3 仅作为肽设计提案器，不列为 prediction 后端
-                        if (option.value === 'rfd4') return true;
                         return option.value !== 'nesso' && option.value !== 'esm3' &&
                           (!engine?.peptide_roles || engine.peptide_roles.includes('score'));
                       })
