@@ -5165,9 +5165,11 @@ def run_mol1_backend(
         command.append("--no-msa")
     if constraints_path:
         command += ["--constraints-json", str(constraints_path)]
+    ipsae_enabled = False
     if str(os.environ.get("MOL1_ATOM_CONFIDENCE", "")).strip().lower() in ("1", "true", "yes"):
         # 输出 token/原子级置信（含 PAE），供 ipSAE 等后处理使用；归档体积显著增大
         command.append("--atom-confidence")
+        ipsae_enabled = True
     print(f"Mol-1 docker: {shlex.join(command)}", file=sys.stderr)
     started = time.time()
     completed = subprocess.run(command, check=False)
@@ -5175,6 +5177,47 @@ def run_mol1_backend(
           file=sys.stderr)
     if completed.returncode != 0:
         raise RuntimeError(f"Mol-1 inference failed (exit {completed.returncode})")
+
+    # atom-confidence 运行后计算逐样本 ipSAE（与 protenix 同源评估器）。
+    # best_ipsae.json / ipsae_*.json 写入输出树进归档——前端 IPSAE 列与
+    # 结果视图的数据源；失败仅告警不阻断。
+    if ipsae_enabled:
+        try:
+            import sys as _sys
+
+            _repo = Path(__file__).resolve().parents[2]
+            _p2d = str(_repo / "capabilities" / "protenix2dock")
+            if _p2d not in _sys.path:
+                _sys.path.insert(0, _p2d)
+            from core.ipsae import compute_ipsae_for_output
+
+            ipsae_by_sample = compute_ipsae_for_output(Path(output_dir))
+            if ipsae_by_sample:
+                best_idx = max(ipsae_by_sample, key=lambda s: ipsae_by_sample[s].get("ipsae_dom") or 0)
+                best_payload = None
+                for sample_idx, fields in sorted(ipsae_by_sample.items()):
+                    conf_files = sorted(output_dir.rglob(f"*summary_confidence_sample_{sample_idx}.json"))
+                    payload = dict(fields)
+                    payload["sample"] = sample_idx
+                    if conf_files:
+                        try:
+                            payload.update(json.loads(conf_files[0].read_text()))
+                        except Exception:
+                            pass
+                        stem = conf_files[0].name.split("_summary_confidence_")[0]
+                        (conf_files[0].parent /
+                         f"ipsae_{stem}_sample_{sample_idx}.json").write_text(
+                            json.dumps(payload, default=str))
+                    if best_payload is None and sample_idx == best_idx:
+                        best_payload = payload
+                if best_payload is not None:
+                    (output_dir / "best_ipsae.json").write_text(
+                        json.dumps(best_payload, default=str))
+                best_dom = (best_payload or {}).get("ipsae_dom")
+                print(f"[mol1] ipSAE: {len(ipsae_by_sample)} 样本, best ipsae_dom={best_dom}",
+                      file=sys.stderr)
+        except Exception as ipsae_err:
+            print(f"[WARN] mol1 ipSAE 后处理失败(不影响结果): {ipsae_err}", file=sys.stderr)
 
     # 归档：mol1/<name>.json + input.yaml + output/ 树 + README
     summary_path = os.path.join(output_dir, "summary.json")
