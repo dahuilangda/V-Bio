@@ -4896,6 +4896,8 @@ def run_rfd4_backend(
         "-v", f"{RFD4_DATA_DIR}/hf_cache:/workspace/hf_cache",
         "-v", f"{RFD4_DATA_DIR}/runs:/workspace/runs",
         "-v", f"{input_dir}:/workspace/input:ro",
+        # atomworks CCD 解析走容器内 biotite 自带词典（含 NLE/AIB/HYP 等非标准残基），
+        # 勿设 CCD_MIRROR_PATH：镜像一旦存在即为排他源，缺标准残基会全线失败。
         "-w", "/workspace",
         "--entrypoint", "python3",
         image, "/app/rfd4_generate.py",
@@ -13134,10 +13136,10 @@ def run_alphafold3_backend(
 
     af3_results_root = _resolve_backend_results_root("alphafold3", task_id, temp_dir)
     af3_work_root = _resolve_backend_work_root(af3_results_root)
-    custom_molecules = _merge_referenced_preset_modification_molecules(
-        _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
-        yaml_content,
-    )
+    # AF3 3.0.0 内置全量 RCSB CCD（含 AIB/NLE/HYP 等），preset 修饰分子无需注入
+    # userCCD（生成的 cif 缺 descriptor 类目会触发 AF3 解析 KeyError）；
+    # 显式 custom_ccd_molecules（自定义配体/链接子）仍然透传。
+    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
     user_ccd_text = None
     if custom_molecules:
@@ -13151,8 +13153,7 @@ def run_alphafold3_backend(
         msa_server_url = _assert_msa_server_configured("alphafold3")
         print(f"开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
         _require_complete_external_msa(
-            yaml_content, str(af3_work_root), "AlphaFold3",
-            msa_mode=str(predict_args.get("msa_mode") or "auto"))
+            yaml_content, str(af3_work_root), "AlphaFold3", msa_mode="auto")
         print("MSA 生成成功，将用于 AF3 输入", file=sys.stderr)
         if MSA_CACHE_CONFIG['enable_cache']:
             cache_msa_files_from_temp_dir(str(af3_work_root), yaml_content)
@@ -13282,7 +13283,7 @@ try:
     import os as _os
     import json as _json
     from alphafold3.constants import residue_names as _af3_residue_names
-    _ccd_overrides = json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
+    _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
     if isinstance(_ccd_overrides, dict):
         for _ccd, _one in _ccd_overrides.items():
             _ccd = str(_ccd or "").strip().upper()
