@@ -5217,17 +5217,25 @@ def run_mol1_backend(
                         continue
                     ordered = sorted(groups, key=lambda g: min(groups[g]))
                     src_g, part_g = ordered[0], ordered[-1]
+                    # 双向界面接触（PAE<10，双侧残基 pLDDT>=70）与各链表位 token
                     pairs = []
-                    epitope = set()
+                    epitope = {int(src_g): set(), int(part_g): set()}
                     for ti in groups[src_g]:
                         for tj in groups[part_g]:
-                            if pae_m[ti, tj] < 10.0 and tok_plddt.get(ti, 0) >= 70 and tok_plddt.get(tj, 0) >= 70:
+                            lo_ok = pae_m[ti, tj] < 10.0
+                            hi_ok = pae_m[tj, ti] < 10.0
+                            pl_ok = tok_plddt.get(ti, 0) >= 70 and tok_plddt.get(tj, 0) >= 70
+                            if (lo_ok or hi_ok) and pl_ok:
                                 pairs.append([int(ti), int(tj)])
-                                epitope.add(int(ti))
+                                epitope[int(src_g)].add(int(ti))
+                                epitope[int(part_g)].add(int(tj))
                     contact = {
                         "source_chain": int(src_g), "partner_chain": int(part_g),
                         "high_conf_pairs": pairs,
-                        "epitope_tokens": sorted(epitope),
+                        "epitope_tokens": {
+                            str(chain): sorted(tokens)
+                            for chain, tokens in epitope.items()
+                        },
                         "n_pairs": len(pairs),
                     }
                     out = full_path.parent / full_path.name.replace(

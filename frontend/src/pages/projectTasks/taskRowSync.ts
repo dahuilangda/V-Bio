@@ -1728,14 +1728,24 @@ export async function hydrateTaskMetricsFromResultRows(
         );
       const needsProtenixDetailHydration =
         backendValue === 'protenix' && (!hasLigandByChain || !hasResidueByChain);
-      if (!needsSummaryHydration && !needsLigandAtomHydration && !needsLigandResidueHydration && !needsProtenixDetailHydration) {
+      const attempts = resultHydrationAttemptsRef.current.get(taskId) || 0;
+      if (resultHydrationDoneRef.current.has(taskId)) return false;
+      if (resultHydrationInFlightRef.current.has(taskId)) return false;
+      if (attempts >= 2) return false;
+      // mol1 历史行缺 pae_matrix（PAE 热图数据）时补一次解析
+      const needsPaeMatrixHydration =
+        backendValue === 'mol1' && attempts < 1 && !confidence?.pae_matrix;
+      if (
+        !needsSummaryHydration &&
+        !needsLigandAtomHydration &&
+        !needsLigandResidueHydration &&
+        !needsProtenixDetailHydration &&
+        !needsPaeMatrixHydration
+      ) {
         resultHydrationDoneRef.current.add(taskId);
         return false;
       }
-      if (resultHydrationDoneRef.current.has(taskId)) return false;
-      if (resultHydrationInFlightRef.current.has(taskId)) return false;
-      const attempts = resultHydrationAttemptsRef.current.get(taskId) || 0;
-      return attempts < 2;
+      return true;
     })
     .slice(0, 2);
 
