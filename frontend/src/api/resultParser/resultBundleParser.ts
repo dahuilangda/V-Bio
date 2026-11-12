@@ -1861,6 +1861,48 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
 
     if (summary) confidence = { ...summary };
 
+    // mol1 full_data：保留 PAE 矩阵与链边界，供结果视图渲染 PAE 热图
+    const mol1FullDataName = names.find(
+      (n) => n.includes('full_data') && n.toLowerCase().endsWith('.json')
+    );
+    if (mol1FullDataName) {
+      try {
+        const fdRaw = (await readZipJson(zip, mol1FullDataName)) as {
+          token_pair_pae?: unknown;
+          token_asym_id?: unknown;
+        } | null;
+        if (!fdRaw) throw new Error('empty full_data');
+        const pae = flattenNumberMatrix(fdRaw.token_pair_pae);
+        const asym = Array.isArray(fdRaw.token_asym_id)
+          ? (fdRaw.token_asym_id as number[])
+          : null;
+        if (pae.length > 0 && asym && asym.length === pae.length) {
+          // flattenNumberMatrix 返回行优先扁平数组，按 down 采样重排为方阵
+          const n0 = Math.round(Math.sqrt(pae.length));
+          const down = Math.max(1, Math.ceil(n0 / 256));
+          const n = Math.floor(n0 / down) * down;
+          const matrix: number[][] = [];
+          for (let i = 0; i < n; i += down) {
+            const row: number[] = [];
+            for (let j = 0; j < n; j += down) {
+              row.push(pae[i * n0 + j]);
+            }
+            matrix.push(row);
+          }
+          const bounds: Array<{ chain: number; start: number; end: number }> = [];
+          asym.forEach((a, idx) => {
+            const last = bounds[bounds.length - 1];
+            if (last && last.chain === a) last.end = idx;
+            else bounds.push({ chain: a, start: idx, end: idx });
+          });
+          confidence.pae_matrix = matrix;
+          confidence.pae_chain_bounds = bounds;
+        }
+      } catch {
+        // full_data 缺失或格式不符时跳过热图数据
+      }
+    }
+
     const af3Metrics: Record<string, unknown> = {};
     if (confidencesRaw) {
       const atomPlddtsRaw = confidencesRaw.atom_plddts;

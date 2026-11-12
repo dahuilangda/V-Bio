@@ -4,6 +4,7 @@ import { AffinityResultsWorkspace } from './AffinityWorkspace';
 import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
+import { PaeMatrixChart } from './PaeMatrixChart';
 import { MolstarViewer } from './MolstarViewer';
 import { PeptideDesignResultsWorkspace } from './PeptideDesignResultsWorkspace';
 import { VirtualScreeningResultsSection } from './VirtualScreeningResultsSection';
@@ -277,6 +278,21 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                   </div>
                 ))}
               </div>
+              {(() => {
+                const matrix = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: Array<{ chain: number; start: number; end: number }> };
+                return Array.isArray(matrix.pae_matrix) && matrix.pae_matrix.length > 0 ? (
+                  <div className="result-aside-title" style={{ marginTop: 12 }}>PAE Matrix</div>
+                ) : null;
+              })()}
+              {(() => {
+                const matrix = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: Array<{ chain: number; start: number; end: number }> };
+                return Array.isArray(matrix.pae_matrix) && matrix.pae_matrix.length > 0 ? (
+                  <PaeMatrixChart
+                    matrix={matrix.pae_matrix}
+                    chainBounds={matrix.pae_chain_bounds}
+                  />
+                ) : null;
+              })()}
             </section>
           </aside>
         </div>

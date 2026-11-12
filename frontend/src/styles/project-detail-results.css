@@ -701,3 +701,24 @@
   position: relative;
   z-index: 1;
 }
+
+.pae-matrix-chart {
+  margin-top: 8px;
+}
+.pae-matrix-chart canvas {
+  border-radius: 8px;
+  border: 1px solid #d6e4dc;
+}
+.pae-matrix-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #4a6a5a;
+}
+.pae-matrix-legend-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+}
