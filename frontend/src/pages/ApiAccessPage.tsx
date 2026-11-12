@@ -202,6 +202,7 @@ export function ApiAccessPage() {
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderPeptideDesignMode, setBuilderPeptideDesignMode] = useState<'linear' | 'cyclic' | 'bicyclic'>('bicyclic');
   const [builderPeptideChirality, setBuilderPeptideChirality] = useState<'l' | 'd'>('l');
+  const [builderDesignStrategy, setBuilderDesignStrategy] = useState<'esm3' | 'rfd4'>('esm3');
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
   const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('default');
   const [builderMsaMode, setBuilderMsaMode] = useState<'env' | 'uniref' | 'auto' | 'none'>('uniref');
@@ -1400,18 +1401,21 @@ else
   echo "TASK_ID=$TASK_ID"
 fi
 `;
+  const effectiveSubmitBackend = isPeptideDesignWorkflow && builderDesignStrategy === 'rfd4'
+    ? 'rfd4'
+    : effectivePredictionBackend;
   const peptideDesignCurlFlags = selectedWorkflow.key !== 'peptide_design'
     ? ''
     : builderPeptideDesignMode === 'bicyclic'
-    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"${builderPeptideChirality}","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`
-    : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`;
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`
+    : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`;
 
 
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
-  -F "backend=${effectivePredictionBackend}" \\
+  -F "backend=${effectiveSubmitBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
   -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \
   -F "msa_mode=${builderMsaMode}" \
@@ -1861,6 +1865,15 @@ ${submitTaskIdCapture}`;
                         <option value="d">D (mirror)</option>
                       </select>
                     </Field>
+                    <Field label="Design Strategy" hint="ESM3 + RL 进化循环；RFD4-Proteina 一次性 motif 条件化生成并自动派发验证（需准备种子+靶点合并结构）">
+                      <select
+                        value={builderDesignStrategy}
+                        onChange={(e) => setBuilderDesignStrategy(e.target.value as 'esm3' | 'rfd4')}
+                      >
+                        <option value="esm3">ESM3 + RL</option>
+                        <option value="rfd4">RFD4-Proteina</option>
+                      </select>
+                    </Field>
                   </>
                 )}
               <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}>
@@ -1880,10 +1893,13 @@ ${submitTaskIdCapture}`;
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))
                   ) : (
-                    engineOptionsFor({ workflow: isLeadOptimizationWorkflow ? 'lead_optimization' : 'prediction' })
+                    engineOptionsFor({ workflow: 'prediction' })
                       .filter((option) => {
                         const engine = ENGINES[option.value];
-                        return option.value !== 'nesso' &&
+                        // rfd4 生成属 prediction 维度（平台 rfd4 队列）；
+                        // esm3 仅作为肽设计提案器，不列为 prediction 后端
+                        if (option.value === 'rfd4') return true;
+                        return option.value !== 'nesso' && option.value !== 'esm3' &&
                           (!engine?.peptide_roles || engine.peptide_roles.includes('score'));
                       })
                       .map((option) => (
