@@ -1462,6 +1462,7 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
         "yaml_content": worker_payload.get("candidate_yaml"),
         "output_archive_path": archive_path,
         "predict_args": candidate_predict_args,
+        "mol1_pocket_sequence_contacts": worker_payload.get("pocket_sequence_contacts"),
         "model_name": worker_payload.get("model_name"),
         "backend": str(worker_payload.get("backend") or "boltz"),
         "__peptide_worker_acquire_gpu__": True,

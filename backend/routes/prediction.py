@@ -364,24 +364,8 @@ def register_prediction_routes(
                 return jsonify({'error': "Backend 'protenix2dock' is only available for the peptide_design and lead_optimization workflows."}), 400
             backend = 'protenix2dock'
         elif backend in {'mol1', 'mol-1'}:
-            if yaml_payload is None:
-                try:
-                    yaml.safe_load(yaml_content)
-                except yaml.YAMLError as exc:
-                    return jsonify({'error': f'Invalid YAML: {exc}'}), 400
-                return jsonify({'error': 'Invalid YAML: payload must be a mapping.'}), 400
-            _y = yaml_payload
-            _opts_raw = request.form.get('peptide_design_options') or ''
-            try:
-                _opts = json.loads(_opts_raw) if _opts_raw else {}
-            except json.JSONDecodeError as exc:
-                return jsonify({'error': f'Invalid peptide_design_options JSON: {exc}'}), 400
-            _has_pocket = any(
-                isinstance(c, dict) and 'pocket' in c
-                for c in (_y.get('constraints') or [])
-            ) or any('pocket' in str(key).lower() for key in _opts)
-            if _has_pocket:
-                return jsonify({'error': "Backend 'mol1' 不支持 pocket 约束；请使用 Protenix2Dock。"}), 400
+            # mol-1-constraint 支持 pocket（SITE 条件）：口袋块由 runtime
+            # 透传给 mol1_predict；直接提交的口袋编号按输入序列全序位置解释
             backend = 'mol1'
         elif backend in {'mol1dock', 'mol-1-dock'}:
             return jsonify({'error': "Backend 'mol1dock' 已下线；肽设计请使用 Protenix2Dock。"}), 400

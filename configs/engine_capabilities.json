@@ -43,7 +43,7 @@
       "chirality": ["l"],
       "design_modes": ["linear"],
       "peptide_roles": ["score"],
-      "features": { "pocket": false, "custom_ccd": false, "msa": true, "ncaa": true }
+      "features": { "pocket": true, "custom_ccd": false, "msa": true, "ncaa": true }
     },
     "esm3": {
       "label": "ESM3",

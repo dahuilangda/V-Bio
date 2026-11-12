@@ -218,7 +218,32 @@ def yaml_to_mol_jobs(yaml_path: Path) -> list[dict]:
         "sequences": _to_mol_sequences(sequences),
         "covalent_bonds": covalent,
     }
+    site = _pocket_site_from_yaml(data)
+    if site:
+        # mol-1-constraint：SITE 钉住受体口袋与 binder 的接触关系。
+        # contacts 按输入序列的全序位置（b_residue=1）解释；作者编号与
+        # 序列编号不一致的上传由候选链路以序列号注入（--constraints-json）。
+        job["constraints"] = {"site": site}
     return [job]
+
+
+def _pocket_site_from_yaml(data: dict) -> dict | None:
+    contacts, binder = [], None
+    for c in data.get("constraints") or []:
+        if isinstance(c, dict) and "pocket" in c:
+            pocket = c["pocket"] or {}
+            binder = binder or str(pocket.get("binder") or "").strip() or None
+            for contact in pocket.get("contacts") or []:
+                if isinstance(contact, (list, tuple)) and len(contact) == 2:
+                    contacts.append([str(contact[0]).upper(), int(contact[1])])
+    if not contacts:
+        return None
+    partner = binder or ("B" if contacts[0][0] != "B" else "A")
+    return {
+        "source_chains": sorted({chain for chain, _num in contacts}),
+        "partner_chains": [partner],
+        "residue_ids": sorted(contacts, key=lambda x: (x[0], x[1])),
+    }
 
 
 # ---------------------------------------------------------------- MSA
@@ -322,17 +347,29 @@ def patch_msa_server(url: str | None) -> None:
 
 def run_inference(input_json: Path, output_dir: Path, seed: int,
                   checkpoint_dir: str, use_msa: bool = True,
-                  samples: int = 5, atom_confidence: bool = False) -> None:
-    checkpoint = Path(checkpoint_dir) / "mol-1-base.pt"
-    cmd = [
-        sys.executable, "-m", "mol.runner.batch_inference",
-        "--input", str(input_json),
-        "--out_dir", str(output_dir),
-        "--seeds", str(seed),
-        "--load_checkpoint_path", str(checkpoint),
-        "--use_msa", "true" if use_msa else "false",
-        "--sample", str(samples),
-    ]
+                  samples: int = 5, atom_confidence: bool = False,
+                  constraint_model: bool = False) -> None:
+    ckpt_name = "mol-1-constraint.pt" if constraint_model else "mol-1-base.pt"
+    checkpoint = Path(checkpoint_dir) / ckpt_name
+    if constraint_model:
+        # mol-1-constraint 走 cpred 子命令（pred 的 model_name 只认 base）
+        cmd = ["mol", "cpred",
+               "--input", str(input_json),
+               "--out_dir", str(output_dir),
+               "--seeds", str(seed),
+               "--load_checkpoint_path", str(checkpoint),
+               "--use_msa", "true" if use_msa else "false",
+               "--sample", str(samples)]
+    else:
+        cmd = [
+            sys.executable, "-m", "mol.runner.batch_inference",
+            "--input", str(input_json),
+            "--out_dir", str(output_dir),
+            "--seeds", str(seed),
+            "--load_checkpoint_path", str(checkpoint),
+            "--use_msa", "true" if use_msa else "false",
+            "--sample", str(samples),
+        ]
     if atom_confidence:
         cmd += ["--need_atom_confidence", "true"]
     result = subprocess.run(cmd, check=False, timeout=7200)
@@ -379,6 +416,9 @@ def main() -> None:
                     help="完全不用 MSA（精度损失大，仅诊断用）")
     ap.add_argument("--atom-confidence", action="store_true",
                     help="输出 token/原子级置信（含 PAE），供 ipSAE 等后处理使用")
+    ap.add_argument("--constraints-json", type=str, default=None,
+                    help="Mol-1-constraint 约束对象 JSON（site/contact/exclusion）；"
+                         "设置后切换 mol-1-constraint 模型并合并进每个 job")
     args = ap.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -393,6 +433,16 @@ def main() -> None:
         if isinstance(jobs, dict):
             jobs = [jobs]
 
+    constraint_model = False
+    if args.constraints_json:
+        constraints_obj = json.loads(Path(args.constraints_json).read_text())
+        for job in jobs:
+            job.setdefault("constraints", {})
+            job["constraints"].update(constraints_obj)
+        constraint_model = True
+    elif any("site" in (job.get("constraints") or {}) for job in jobs):
+        constraint_model = True
+
     if not args.no_msa:
         attach_cached_msa(jobs, args.msa_cache_dir)
         fill_missing_msa(jobs, work_dir, args.msa_server_url)
@@ -401,7 +451,8 @@ def main() -> None:
     input_json.write_text(json.dumps(jobs, ensure_ascii=False, indent=1))
 
     run_inference(input_json, output_dir, args.seed, args.checkpoint_dir,
-                  use_msa=not args.no_msa, atom_confidence=args.atom_confidence)
+                  use_msa=not args.no_msa, atom_confidence=args.atom_confidence,
+                  constraint_model=constraint_model)
 
     summaries, skipped = collect_summaries(output_dir)
     summary = {

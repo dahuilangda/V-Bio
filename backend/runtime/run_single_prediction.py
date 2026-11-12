@@ -5085,6 +5085,7 @@ def run_mol1_backend(
     yaml_content: str,
     output_archive_path: str,
     use_msa_server: bool,
+    pocket_sequence_contacts: Optional[List[Tuple[str, int]]] = None,
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
 ) -> None:
@@ -5143,8 +5144,27 @@ def run_mol1_backend(
         "--seed", str(seed_value),
         "--msa-server-url", msa_server_url,
     ]
+    constraints_path = None
+    if pocket_sequence_contacts:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+        binder_chain = "B"
+        for c in yaml_data.get("constraints") or []:
+            if isinstance(c, dict) and "pocket" in c:
+                binder_chain = str((c["pocket"] or {}).get("binder") or binder_chain)
+                break
+        contacts = [[c, int(n)] for c, n in pocket_sequence_contacts]
+        constraints_obj = {"site": {
+            "source_chains": sorted({c for c, _n in contacts}),
+            "partner_chains": [binder_chain],
+            "residue_ids": contacts,
+        }}
+        constraints_path = Path(work_dir) / "mol1_constraints.json"
+        constraints_path.write_text(json.dumps(constraints_obj), encoding="utf-8")
+
     if not use_msa_server:
         command.append("--no-msa")
+    if constraints_path:
+        command += ["--constraints-json", str(constraints_path)]
     if str(os.environ.get("MOL1_ATOM_CONFIDENCE", "")).strip().lower() in ("1", "true", "yes"):
         # 输出 token/原子级置信（含 PAE），供 ipSAE 等后处理使用；归档体积显著增大
         command.append("--atom-confidence")
@@ -10668,9 +10688,8 @@ def run_peptide_design_backend(
         pocket_author_contacts, pocket_sequence_contacts = (
             _pocket_contacts_for_staged_space(
                 base_yaml_data, options, resolved_target_chain_id))
-        if peptide_backend == "mol1" and pocket_sequence_contacts:
-            raise ValueError(
-                "Mol-1 不支持 pocket 约束；pocket 肽设计请使用 Protenix2Dock 后端。")
+        # mol1 走 mol-1-constraint：口袋以序列号 SITE 条件注入候选共折叠
+        # yaml 之外的 --constraints-json（作者编号换算已在上方完成）。
         # ── Chemistry-informed warm-start seeds (BindCraft motif-grafting) ──
         # When the user provides NO seed sequence but defined a pocket, derive
         # generation-1 anchor sequences from the pocket's amino-acid composition:
@@ -11188,9 +11207,16 @@ def run_peptide_design_backend(
             # run_protenix_backend) and enforce the pocket natively during
             # candidate prediction.
             candidate_pocket_constraint = None
+            candidate_pocket_sequence = None
             if pocket_constraint_blueprint:
                 candidate_pocket_constraint = dict(pocket_constraint_blueprint)
                 candidate_pocket_constraint["binder"] = binder_chain_id
+                if peptide_backend == "mol1":
+                    # mol1 的 SITE 条件用序列号（候选 worker 载荷注入），
+                    # yaml 里保留作者编号口袋会与约束注入冲突
+                    candidate_pocket_sequence = [
+                        [c, int(n)] for c, n in pocket_sequence_contacts]
+                    candidate_pocket_constraint = None
             candidate_yaml = _build_peptide_candidate_yaml(
                 candidate_base_yaml_data,
                 binder_chain_id=binder_chain_id,
@@ -11229,6 +11255,7 @@ def run_peptide_design_backend(
                     "cys_positions": candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else [],
                     "candidate_yaml": candidate_yaml,
                     "candidate_dir": candidate_dir,
+                    "pocket_sequence_contacts": candidate_pocket_sequence,
                     "archive_path": archive_path,
                     "predict_args": per_candidate_args,
                     "model_name": model_name,
@@ -13545,6 +13572,8 @@ def main():
                         yaml_content=worker_yaml_content,
                         output_archive_path=worker_output_archive_path,
                         use_msa_server=bool(worker_predict_args.get("use_msa_server", False)),
+                        pocket_sequence_contacts=predict_args.pop(
+                            "mol1_pocket_sequence_contacts", None),
                         seed=worker_seed,
                         task_id=worker_task_id,
                     )
