@@ -178,8 +178,7 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   }
   const rfd4Spec = String(input.rfd4Spec || '').trim();
   const proposerUsesRfd4 = String(
-    input.peptideDesignOptions?.peptideProposerBackend
-    || input.peptideDesignOptions?.peptide_proposer_backend || '').trim().toLowerCase() === 'rfd4';
+    input.peptideDesignOptions?.peptideProposerBackend || '').trim().toLowerCase() === 'rfd4';
   if (rfd4Spec && (backend === 'rfd4' || proposerUsesRfd4)) {
     form.append('rfd4_spec', rfd4Spec);
   }

@@ -1593,7 +1593,39 @@ async function parsePeptideDesignCandidatesFromBundle(
     }
   }
   const rows = selectPeptideCandidateRowsFromSummaries(sources);
-  if (rows.length === 0) return [];
+  if (rows.length > 0) return rows;
+
+  // RFD4 strategy archives carry no design_results summaries; the
+  // verification manifest is the candidate list (one row per dispatched
+  // verification, linked to its mol1 task and generated structure).
+  const manifestPath = names.find((name) => getBaseName(name).toLowerCase() === 'verification_manifest.json');
+  if (!manifestPath) return [];
+  const manifest = await readZipJson(zip, manifestPath);
+  const verifications = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+    ? (manifest as Record<string, unknown>).verifications
+    : null;
+  if (!Array.isArray(verifications) || verifications.length === 0) return [];
+  const manifestRows: Array<Record<string, unknown>> = [];
+  for (const raw of verifications) {
+    if (!raw || typeof raw !== 'object') continue;
+    const v = raw as Record<string, unknown>;
+    const label = String(v.design ?? '').trim();
+    const sequence = String(v.sequence ?? '').trim();
+    if (!label || !sequence) continue;
+    manifestRows.push({
+      id: label,
+      label,
+      name: label,
+      sequence,
+      peptide_sequence: sequence,
+      backend: String(v.backend ?? ''),
+      task_id: String(v.task_id ?? ''),
+      modifications: Array.isArray(v.modifications) ? v.modifications : [],
+      structure_name: `gen/${label}/${label}_generated.cif`,
+      source: 'rfd4_verification'
+    });
+  }
+  return manifestRows;
 
   const structureFiles = names
     .filter((name) => {

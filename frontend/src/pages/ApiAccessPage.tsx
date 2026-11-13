@@ -1412,7 +1412,7 @@ fi
   const peptideDesignCurlFlags = selectedWorkflow.key !== 'peptide_design'
     ? ''
     : builderDesignStrategy === 'rfd4' && builderPeptideDesignMode === 'bicyclic'
-    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideProposerBackend":"rfd4","peptideScorerBackend":"${effectivePredictionBackend}","peptideBicyclicLinkerCcd":"${builderBicyclicLinkerCcd}","peptideSequenceMask":"${builderSeedMask.trim() || 'AARFKVWW'}","peptideNcaaCcds":"${builderNcaaCcds.trim()}","peptideLengthMin":${builderPeptideLenMin},"peptideLengthMax":${builderPeptideLenMax}}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\\n  -F "msa_mode=${builderMsaMode}"`
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideProposerBackend":"rfd4","peptideScorerBackend":"${effectivePredictionBackend}","peptideBicyclicLinkerCcd":"${builderBicyclicLinkerCcd}","peptideSequenceMask":"${builderSeedMask.trim() || 'AARFKVWW'}","peptideNcaaCcds":"${builderNcaaCcds.trim()}","peptideLengthMin":${builderPeptideLenMin},"peptideLengthMax":${builderPeptideLenMax}${builderPocketResidues.trim() ? `,"peptidePocketResidues":"${builderPocketResidues.trim()}"` : ''}}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\\n  -F "msa_mode=${builderMsaMode}"`
     : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideScorerBackend":"${effectivePredictionBackend}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\\n  -F "msa_mode=${builderMsaMode}"`;
 
 
@@ -1917,6 +1917,13 @@ ${submitTaskIdCapture}`;
                         <option value="29N">29N</option>
                         <option value="BS3">BS3</option>
                       </select>
+                    </Field>
+                    <Field label="Pocket Residues" hint="required: author-numbered pocket on the uploaded structure, e.g. A:41,D:92,D:93">
+                      <input
+                        value={builderPocketResidues}
+                        onChange={(e) => setBuilderPocketResidues(e.target.value)}
+                        placeholder="A:41,D:92,D:93,..."
+                      />
                     </Field>
                     <Field label="Length Min / Max" hint="total; >= seed + 7 (closure ring span)">
                       <div className="field-row">

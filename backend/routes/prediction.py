@@ -505,6 +505,22 @@ def register_prediction_routes(
                 len_max = int(peptide_design_options.get('peptideLengthMax') or 0)
                 if len_min <= 0 or len_max < len_min:
                     return jsonify({'error': 'bicyclic mode requires peptideLengthMin/Max (Min>0, Max>=Min).'}), 400
+                if len_min < len(seed_mask) + 7:
+                    return jsonify({'error': f'bicyclic total length must be >= seed length + 7 '
+                                             f'({len(seed_mask)} + 7 = {len(seed_mask) + 7}); got Min={len_min}.'}), 400
+                pocket_given = bool(
+                    str(peptide_design_options.get('peptidePocketResidues')
+                        or peptide_design_options.get('peptide_pocket_residues') or '').strip()
+                    or str(peptide_design_options.get('peptidePocketCenter')
+                           or peptide_design_options.get('peptide_pocket_center') or '').strip())
+                if not pocket_given:
+                    return jsonify({'error': 'bicyclic mode requires pocket targeting: peptidePocketResidues '
+                                             '(author numbering, e.g. "A:41,D:92") or peptidePocketCenter.'}), 400
+        proposer_backend_sel = str(
+            peptide_design_options.get('peptideProposerBackend')
+            or peptide_design_options.get('peptide_proposer_backend') or 'esm3'
+        ).strip().lower() if workflow == 'peptide_design' else ''
+        proposer_uses_rfd4 = proposer_backend_sel == 'rfd4'
 
         priority = request.form.get('priority', 'default').lower()
         if priority not in ['high', 'default']:
@@ -524,10 +540,6 @@ def register_prediction_routes(
         if not target_queue:
             return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
         parent_queue_selection = None
-        proposer_backend_sel = str(
-            peptide_design_options.get('peptideProposerBackend')
-            or peptide_design_options.get('peptide_proposer_backend') or 'esm3'
-        ).strip().lower() if workflow == 'peptide_design' else ''
         if workflow == 'peptide_design' and proposer_backend_sel != 'rfd4':
             # ESM3 parent is orchestration-only: heavy steps run as sub-tasks,
             # so it stays on the CPU queue with PeptideLM. The RFD4 strategy
@@ -688,11 +700,6 @@ def register_prediction_routes(
             predict_args['template_inputs'] = template_inputs
         if custom_ccd_molecules:
             predict_args['custom_ccd_molecules'] = custom_ccd_molecules
-        proposer_uses_rfd4 = (
-            workflow == 'peptide_design'
-            and str(peptide_design_options.get('peptideProposerBackend')
-                    or peptide_design_options.get('peptide_proposer_backend') or 'esm3').strip().lower() == 'rfd4'
-        )
         if backend == 'rfd4' or proposer_uses_rfd4:
             # rfd4_spec: 完整条件 spec 透传（motif 条件化生成）；
             # 缺省时由 runtime 按靶标自动生成固定 binder spec
