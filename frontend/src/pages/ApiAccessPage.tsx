@@ -205,7 +205,7 @@ export function ApiAccessPage() {
   const [builderDesignStrategy, setBuilderDesignStrategy] = useState<'esm3' | 'rfd4'>('esm3');
   const [builderSeedMask, setBuilderSeedMask] = useState('AARFKVWW');
   const [builderNcaaCcds, setBuilderNcaaCcds] = useState('NLE,AIB,HYP');
-  const [builderBicyclicLinkerCcd, setBuilderBicyclicLinkerCcd] = useState('SEZ');
+  const [builderBicyclicLinkerCcd, setBuilderBicyclicLinkerCcd] = useState('ZBR');
   const [builderPeptideLenMin, setBuilderPeptideLenMin] = useState(15);
   const [builderPeptideLenMax, setBuilderPeptideLenMax] = useState(15);
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
@@ -1907,11 +1907,12 @@ ${submitTaskIdCapture}`;
                         placeholder="NLE,AIB,HYP"
                       />
                     </Field>
-                    <Field label="Bicyclic Linker">
+                    <Field label="Bicyclic Linker" hint="ZBR: 1,3,5-tris(bromomethyl)benzene (standard TBMB chemistry)">
                       <select
                         value={builderBicyclicLinkerCcd}
                         onChange={(e) => setBuilderBicyclicLinkerCcd(e.target.value)}
                       >
+                        <option value="ZBR">ZBR (TBMB)</option>
                         <option value="SEZ">SEZ</option>
                         <option value="29N">29N</option>
                         <option value="BS3">BS3</option>

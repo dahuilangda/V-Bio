@@ -100,6 +100,7 @@ from backend.services.common_utils import (
     is_msa_disabled,
 )
 from backend.runtime.nesso_backend import run_nesso_backend
+from backend.runtime import rfd4_adapter
 from backend.runtime.af3_adapter import (
     AF3Preparation,
     build_af3_fasta,
@@ -4850,35 +4851,6 @@ def create_protenix_archive(
         raise RuntimeError(f"Failed to create Protenix archive: {exc}") from exc
 
 
-def _stage_rfd4_target(input_dir: Path, template_inputs: Optional[List[dict]]) -> Path:
-    """落盘 RFD4 靶标结构。RFD4 是生成引擎，必须有带坐标的靶标输入：
-    优先取上传结构（首个模板），PDB 上传转 mmCIF，其余格式原样透传。"""
-    for idx, template in enumerate(template_inputs or []):
-        content_b64 = template.get("content_base64")
-        if not content_b64:
-            continue
-        try:
-            raw = base64.b64decode(content_b64)
-        except Exception as exc:
-            raise ValueError(f"靶标结构解码失败: {exc}") from exc
-        target_path = input_dir / "target.cif"
-        fmt = str(template.get("format") or "").lower()
-        suffix = Path(str(template.get("file_name") or f"target_{idx}")).suffix.lower()
-        if fmt == "pdb" or suffix == ".pdb":
-            structure = gemmi.read_structure_string(raw.decode("utf-8", errors="replace"))
-            structure.setup_entities()
-            structure.remove_alternative_conformations()
-            structure.remove_ligands_and_waters()
-            structure.setup_entities()
-            structure.make_mmcif_document().write_file(str(target_path))
-        else:
-            target_path.write_bytes(raw)
-        return target_path
-    raise ValueError(
-        "RFD4 生成任务需要靶标坐标：请上传靶标结构（template_files），"
-        "或先提交预测任务再将产物结构作为输入。")
-
-
 def run_rfd4_backend(
     temp_dir: str,
     yaml_content: str,
@@ -4894,8 +4866,6 @@ def run_rfd4_backend(
     推导 contig 长度；RFD4_CONTIG 可整体覆盖 contig。产物按 task 隔离在
     RFD4_DATA_DIR/runs/<task>，避免并发任务互覆。
     """
-    import yaml as _yaml
-
     rfd4_image = str(RFD4_DOCKER_IMAGE or "").strip()
     ensure_image(rfd4_image)
     print("Using RFD4-Proteina backend", file=sys.stderr)
@@ -4906,7 +4876,7 @@ def run_rfd4_backend(
     input_dir.mkdir(parents=True, exist_ok=True)
     (results_root / "output").mkdir(parents=True, exist_ok=True)
 
-    _stage_rfd4_target(input_dir, template_inputs)
+    rfd4_adapter.stage_target(input_dir, template_inputs)
 
     spec_payload = yaml.safe_load(yaml_content) or {}
     target_entry = next(
@@ -4922,18 +4892,7 @@ def run_rfd4_backend(
         # /workspace/input/target.cif（已落盘的上传靶标）
         spec_text = str(rfd4_spec)
     else:
-        spec = {
-            "binder": {
-                "input": "/workspace/input/target.cif",
-                "contig": str(RFD4_CONTIG or "").strip()
-                          or f"12-22, /0, A1-{target_length}",
-                "conditions": {
-                    "C_CRDGRP": {"1": [{"select": "sel('A/*/*/[N,CA,C,O]')"}]},
-                    "C_SEQ": {"true": [{"select": "sel('A')"}]},
-                },
-            }
-        }
-        spec_text = yaml.safe_dump(spec, sort_keys=False)
+        spec_text = rfd4_adapter.default_spec(target_length, RFD4_CONTIG)
     spec_path = input_dir / "rfd4_spec.yaml"
     spec_path.write_text(spec_text, encoding="utf-8")
 
@@ -4994,31 +4953,6 @@ def run_rfd4_backend(
     print(f"RFD4 generation archive written: {output_archive_path}", file=sys.stderr)
 
 
-def _rfd4_candidates_from_summary(summary: Dict[str, Any]) -> List[Dict[str, str]]:
-    """summary.json → 候选 binder 列表（每输出最短聚合链）。
-
-    与 verify_designs.py 的"最短聚合链为 binder"约定一致；含非标准残基
-    标记（[CCD]）的链不作为候选序列。
-    """
-    candidates: List[Dict[str, str]] = []
-    for entry in summary.get("outputs") or []:
-        if not isinstance(entry, dict):
-            continue
-        chains = entry.get("chains") or {}
-        polymers = [
-            (name, str(info.get("sequence") or ""))
-            for name, info in chains.items()
-            if isinstance(info, dict) and "[" not in str(info.get("sequence") or "")
-            and str(info.get("sequence") or "").strip()
-        ]
-        if not polymers:
-            continue
-        _name, sequence = min(polymers, key=lambda item: len(item[1]))
-        label = Path(str(entry.get("file") or "")).stem or f"binder_{len(candidates) + 1}"
-        candidates.append({"label": label, "sequence": sequence})
-    return candidates
-
-
 def run_rfd4_design_strategy(
     temp_dir: str,
     yaml_content: str,
@@ -5043,7 +4977,7 @@ def run_rfd4_design_strategy(
 
     Bicyclic mode (peptideDesignMode=bicyclic) is fully automatic: seed,
     NCAA, pocket and lengths drive in-runtime construction of the bicyclic
-    inputs and spec (rfd4_bicyclic), and verification carries the linker
+    inputs and spec (rfd4_adapter), and verification carries the linker
     ligand plus three SG bonds.
     """
     options = options or {}
@@ -5056,7 +4990,7 @@ def run_rfd4_design_strategy(
             "RFD4 设计策略需要网关地址与平台令牌（VBIO_GATEWAY_URL / VBIO_API_TOKEN）。")
 
     if design_mode == "bicyclic":
-        _run_rfd4_bicyclic_strategy(
+        run_bicyclic_strategy(
             temp_dir=temp_dir,
             yaml_content=yaml_content,
             output_archive_path=output_archive_path,
@@ -5090,7 +5024,7 @@ def run_rfd4_design_strategy(
         summary = json.loads(zf.read(summary_name).decode("utf-8"))
         archived = {n: zf.read(n) for n in zf.namelist() if not n.endswith("summary.json")}
 
-    candidates = _rfd4_candidates_from_summary(summary)
+    candidates = rfd4_adapter.candidates_from_summary(summary)
     if not candidates:
         raise RuntimeError("RFD4 生成未产出可用候选序列")
 
@@ -5107,12 +5041,23 @@ def run_rfd4_design_strategy(
     headers = {"X-API-Token": platform_token}
     dispatched = 0
     for cand in candidates:
+        # cyclic 模式：验证侧补头尾 N(1)-C(L) bond（平台无引擎级 cyclic 标志）
+        cyclic_bond = ""
+        if design_mode == "cyclic":
+            seq_len = len(cand["sequence"])
+            cyclic_bond = (
+                "constraints:\n"
+                "- bond:\n"
+                "    atom1: [B, 1, N]\n"
+                f"    atom2: [B, {seq_len}, C]\n"
+            )
         verify_yaml = (
             "version: 1\nsequences:\n"
             "- protein:\n    id: A\n"
             f"    sequence: {target_sequence}\n"
             "- protein:\n    id: B\n"
             f"    sequence: {cand['sequence']}\n"
+            + cyclic_bond
         )
         fields = {
             "project_id": project_id,
@@ -5165,7 +5110,7 @@ def run_rfd4_design_strategy(
           file=sys.stderr)
 
 
-def _run_rfd4_bicyclic_strategy(
+def run_bicyclic_strategy(
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
@@ -5188,18 +5133,7 @@ def _run_rfd4_bicyclic_strategy(
     (NCAA x length) pair generates independently; every candidate is verified
     with the linker ligand, three Cys-SG bonds and NCAA modifications.
     """
-    from backend.runtime.rfd4_bicyclic import (
-        MIN_CLOSURE_RESIDUES,
-        binder_from_cif_text,
-        build_bicyclic_skeleton,
-        build_spec,
-        build_verify_yaml,
-        chain_centroids,
-        combined_template_input,
-        load_anchor_skeleton,
-        pocket_centroid,
-        write_combined_cif,
-    )
+    from backend.runtime import rfd4_adapter
 
     base_yaml = yaml.safe_load(yaml_content) or {}
     seed_letters = re.sub(r"[^A-Z]", "",
@@ -5217,7 +5151,7 @@ def _run_rfd4_bicyclic_strategy(
         ncaa_list = [str(x).strip().upper() for x in ncaa_raw if str(x).strip()]
 
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd")
-                     or options.get("peptide_bicyclic_linker_ccd") or "SEZ").strip().upper()
+                     or options.get("peptide_bicyclic_linker_ccd") or "ZBR").strip().upper()
     if linker_ccd not in BICYCLIC_LINKER_ATOM_MAP:
         raise ValueError(f"未知双环 linker CCD：{linker_ccd}"
                          f"（可用：{sorted(BICYCLIC_LINKER_ATOM_MAP)}）")
@@ -5251,12 +5185,12 @@ def _run_rfd4_bicyclic_strategy(
         raise ValueError("双环 rfd4 策略需要 yaml 中的靶标蛋白序列。")
 
     runtime_dir = Path(__file__).resolve().parent
-    anchors, sez_atoms = load_anchor_skeleton(runtime_dir)
+    anchors, sez_atoms = rfd4_adapter.load_anchor_skeleton(runtime_dir, linker_ccd)
 
     prep_dir = Path(temp_dir) / "bicyclic_prep"
     prep_dir.mkdir(parents=True, exist_ok=True)
-    staged_target = _stage_rfd4_target(prep_dir, template_inputs)
-    pocket_center = pocket_centroid(staged_target, pocket_author_contacts)
+    staged_target = rfd4_adapter.stage_target(prep_dir, template_inputs)
+    pocket_center = rfd4_adapter.pocket_centroid(staged_target, pocket_author_contacts)
 
     gateway_base = VBIO_GATEWAY_URL
     platform_token = VBIO_API_TOKEN.strip()
@@ -5286,7 +5220,7 @@ def _run_rfd4_bicyclic_strategy(
             gen_dir = Path(temp_dir) / "rfd4_strategy" / stem
             gen_dir.mkdir(parents=True, exist_ok=True)
 
-            residues, sez, _letters, bonds = build_bicyclic_skeleton(
+            residues, sez, _letters, bonds = rfd4_adapter.build_bicyclic_skeleton(
                 seed_letters, ncaa, length, anchors, sez_atoms)
             pep_len = len(residues)
             motif_pts = np.array([p for _c, atoms in residues for p in atoms.values()])
@@ -5295,10 +5229,10 @@ def _run_rfd4_bicyclic_strategy(
                        for c, atoms in residues]
             shifted_sez = [(n, p + shift) for n, p in sez]
             combined_cif = gen_dir / f"{stem}_combined.cif"
-            target_chains = write_combined_cif(combined_cif, stem, shifted, shifted_sez,
-                                               linker_ccd, staged_target)
-            spec = build_spec(stem, len(seed_letters), bool(ncaa), pep_len,
-                              target_chains, chain_centroids(combined_cif))
+            target_chains = rfd4_adapter.write_combined_cif(
+                combined_cif, stem, shifted, shifted_sez, linker_ccd, staged_target)
+            spec = rfd4_adapter.build_spec(stem, len(seed_letters), bool(ncaa), pep_len,
+                                           target_chains, rfd4_adapter.chain_centroids(combined_cif))
             spec_path = gen_dir / f"{stem}_spec.yaml"
             spec_path.write_text(spec, encoding="utf-8")
             archive_files[f"{stem}_combined.cif"] = combined_cif.read_bytes()
@@ -5310,7 +5244,7 @@ def _run_rfd4_bicyclic_strategy(
                 temp_dir=str(gen_dir),
                 yaml_content=yaml_content,
                 output_archive_path=str(gen_archive),
-                template_inputs=[combined_template_input(combined_cif)],
+                template_inputs=[rfd4_adapter.combined_template_input(combined_cif)],
                 rfd4_spec=spec,
                 seed=seed,
                 task_id=str(predict_args.get("task_id") or ""),
@@ -5329,9 +5263,9 @@ def _run_rfd4_bicyclic_strategy(
                 archive_files[f"gen/{stem}/{Path(name).name}"] = archived[name]
             for name in cifs:
                 label = f"{stem}_{Path(name).parent.name}"
-                binder_seq, mods, cys_positions = binder_from_cif_text(
+                binder_seq, mods, cys_positions = rfd4_adapter.binder_from_cif_text(
                     archived[name].decode("utf-8"))
-                verify_yaml = build_verify_yaml(
+                verify_yaml = rfd4_adapter.build_verify_yaml(
                     target_sequence, binder_seq, mods, cys_positions,
                     linker_ccd, linker_arms)
                 fields = {

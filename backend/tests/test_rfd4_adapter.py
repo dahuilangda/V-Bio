@@ -7,7 +7,7 @@ import numpy as np
 import yaml
 import pytest
 
-from backend.runtime import rfd4_bicyclic as rb
+from backend.runtime import rfd4_adapter as rb
 
 RUNTIME_DIR = Path(rb.__file__).resolve().parent
 SEED = "AARFKVWW"
@@ -37,7 +37,7 @@ def build(seed=SEED, ncaa="NLE", length=15):
     """Memoized skeleton build: closures cost ~100 s each."""
     key = (seed, ncaa, length)
     if key not in _SKELETON_CACHE:
-        anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR)
+        anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR, "ZBR")
         _SKELETON_CACHE[key] = rb.build_bicyclic_skeleton(seed, ncaa, length, anchors, sez)
     return _SKELETON_CACHE[key]
 
@@ -56,7 +56,7 @@ def _bond_violations(residues, limit=4.0):
 
 class TestSkeleton:
     def test_load_anchor_skeleton(self):
-        anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR)
+        anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR, "ZBR")
         assert sorted(anchors) == [1, 2, 3]
         for atoms in anchors.values():
             assert {"N", "CA", "C", "O", "CB", "SG"} <= set(atoms)

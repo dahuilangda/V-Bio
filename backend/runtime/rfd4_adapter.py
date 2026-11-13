@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Bicyclic RFD4 design: input construction and verification payloads.
+"""RFD4-Proteina adapter: input staging, spec construction, candidate
+extraction and bicyclic design geometry.
 
-From form inputs only (target structure, target sequence, pocket residues,
-seed sequence, NCAA list, length window) this module builds:
+Pure input/output translation -- the docker runners live in
+run_single_prediction (same split as af3_adapter / protenix_adapter).
 
-- the bicyclic skeleton (verified SEZ anchor fold from
-  rfd4_assets/sez_bicyclic_anchor.cif + NeRF bridge closure), placed at the
-  pocket centroid
-- the combined cif (B peptide + C linker + target chains) and the RFD4 spec
-  (sequence/coordinate conditioning)
-- the bicyclic verification yaml (linker ligand + three Cys-SG covalent
-  bonds + NCAA modifications)
+Sections:
+- input staging          stage_target
+- spec construction      default_spec (linear), build_spec (bicyclic)
+- candidate extraction   candidates_from_summary, binder_from_cif_text
+- bicyclic geometry      load_anchor_skeleton, build_bicyclic_skeleton,
+                         pocket_centroid, write_combined_cif, chain_centroids
+- verification payload   build_verify_yaml, combined_template_input
 
-Ring layout: anchor1 -[seed]- anchor2 -[NCAA + fillers]- anchor3. Seed ring
-span ~11.8 A, closure ring ~8.4 A; a single residue reaches ~3.5 A, so the
-closure ring needs at least MIN_CLOSURE_RESIDUES residues and the total
-length at least |seed| + 3 + MIN_CLOSURE_RESIDUES. Constraint violations
-raise; no silent fallbacks.
+Bicyclic layout: anchor1 -[seed]- anchor2 -[NCAA + fillers]- anchor3. Anchor
+folds come from per-linker assets (rfd4_assets/bicyc_anchor_<CCD>.cif,
+generated from verified SEZ folds; the linker core is Kabsch-fitted onto the
+verified arm positions). Seed-ring span ~11.8 A, closure ring ~8.4 A, ~3.5 A
+reach per residue -> the closure ring needs at least MIN_CLOSURE_RESIDUES.
+Constraint violations raise; no silent fallbacks.
 """
 from __future__ import annotations
 
@@ -27,18 +29,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# Engh & Huber ideal geometry
-B_C_N, A_CA_C_N = 1.329, math.radians(116.2)
-B_N_CA, A_C_N_CA = 1.458, math.radians(121.7)
-B_CA_C, A_N_CA_C = 1.525, math.radians(111.2)
-B_CA_C_O, A_CA_C_O = 1.23, math.radians(120.8)
-B_CA_CB, A_N_CA_CB = 1.53, math.radians(110.5)
-T_C_N_CA_CB = math.radians(-122.6)
-
-CLOSURE_TOL = 0.3  # max deviation of the closed peptide bond from ideal
-# Closure-ring span ~8.4 A; 3 residues cannot span it (closure stalls near
-# 3.6 A bond), 4 can -- verified by the optimizer
-MIN_CLOSURE_RESIDUES = 4
+# ---------------------------------------------------------------- bicyclic tables
 
 # NCAA sidechain atoms must match CCD naming (atomworks validates against it)
 NCAA_ATOMS = {
@@ -50,6 +41,11 @@ NCAA_ATOMS = {
 }
 NCAA_ONE_LETTER = {"NLE": "L", "AIB": "A", "HYP": "P", "ORN": "R", "CIT": "R"}
 
+CLOSURE_TOL = 0.3  # max deviation of the closed peptide bond from ideal
+# Closure-ring span ~8.4 A; 3 residues cannot span it (closure stalls near
+# 3.6 A bond), 4 can -- verified by the optimizer
+MIN_CLOSURE_RESIDUES = 4
+
 AA3_TO_AA1 = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
     "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
@@ -57,6 +53,182 @@ AA3_TO_AA1 = {
     "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
 }
 AA1_TO_AA3 = {v: k for k, v in AA3_TO_AA1.items()}
+
+# Engh & Huber ideal geometry
+B_C_N, A_CA_C_N = 1.329, math.radians(116.2)
+B_N_CA, A_C_N_CA = 1.458, math.radians(121.7)
+B_CA_C, A_N_CA_C = 1.525, math.radians(111.2)
+B_CA_C_O, A_CA_C_O = 1.23, math.radians(120.8)
+B_CA_CB, A_N_CA_CB = 1.53, math.radians(110.5)
+T_C_N_CA_CB = math.radians(-122.6)
+
+
+# ---------------------------------------------------------------- input staging
+
+def stage_target(input_dir: Path, template_inputs: Optional[List[dict]]) -> Path:
+    """Persist the RFD4 target structure (first uploaded template). RFD4 is a
+    structure-conditioned engine: PDB uploads are converted to mmCIF, other
+    formats pass through unchanged."""
+    import base64
+
+    for idx, template in enumerate(template_inputs or []):
+        content_b64 = template.get("content_base64")
+        if not content_b64:
+            continue
+        try:
+            raw = base64.b64decode(content_b64)
+        except Exception as exc:
+            raise ValueError(f"靶标结构解码失败: {exc}") from exc
+        target_path = input_dir / "target.cif"
+        fmt = str(template.get("format") or "").lower()
+        suffix = Path(str(template.get("file_name") or f"target_{idx}")).suffix.lower()
+        if fmt == "pdb" or suffix == ".pdb":
+            import gemmi
+            structure = gemmi.read_structure_string(raw.decode("utf-8", errors="replace"))
+            structure.setup_entities()
+            structure.remove_alternative_conformations()
+            structure.remove_ligands_and_waters()
+            structure.setup_entities()
+            structure.make_mmcif_document().write_file(str(target_path))
+        else:
+            target_path.write_bytes(raw)
+        return target_path
+    raise ValueError(
+        "RFD4 生成任务需要靶标坐标：请上传靶标结构（template_files），"
+        "或先提交预测任务再将产物结构作为输入。")
+
+
+# ---------------------------------------------------------------- spec construction
+
+def default_spec(target_length: int, contig_override: str = "") -> str:
+    """Linear binder spec: target backbone rigid, target identity pinned,
+    binder length from RFD4_CONTIG or the 12-22 default."""
+    import yaml
+
+    spec = {
+        "binder": {
+            "input": "/workspace/input/target.cif",
+            "contig": str(contig_override or "").strip()
+                      or f"12-22, /0, A1-{target_length}",
+            "conditions": {
+                "C_CRDGRP": {"1": [{"select": "sel('A/*/*/[N,CA,C,O]')"}]},
+                "C_SEQ": {"true": [{"select": "sel('A')"}]},
+            },
+        }
+    }
+    return yaml.safe_dump(spec, sort_keys=False)
+
+
+def build_spec(stem: str, seed_len: int, has_ncaa: bool, pep_len: int,
+               target_chains: Sequence[Tuple[str, int]],
+               centroids: Dict[str, Tuple[float, float, float]]) -> str:
+    """Bicyclic RFD4 spec.
+
+    C_SEQ pins fixed residues only (terminal Cys, seed, NCAA); closure-ring
+    fillers stay free for the engine. C_CRD pins the linker and Cys SG in
+    absolute terms; the target backbone is rigid-body only -- an absolute
+    C_CRD on group atoms conflicts with the coordinate group. Layout:
+    cys1=1, seed 2..(1+seed_len), cys2=2+seed_len, NCAA=3+seed_len,
+    terminal Cys=pep_len.
+    """
+    seed_end = 1 + seed_len
+    fixed = [f"sel('B/*/1')", f"sel('B/*/[2-{seed_end}]')",
+             f"sel('B/*/{seed_end + 1}')"]
+    if has_ncaa:
+        fixed.append(f"sel('B/*/{seed_end + 2}')")
+    fixed.append(f"sel('B/*/{pep_len}')")
+    cseq_lines = "\n".join(f'        - {{select: "{s}"}}' for s in fixed)
+    contig = f"B1-{pep_len}, /0, C1, /0, " + ", /0, ".join(
+        f"{c}1-{n}" for c, n in target_chains)
+    cent_lines = "\n".join(
+        f'      "{v[0]:.3f},{v[1]:.3f},{v[2]:.3f}":\n'
+        f'        - {{select: "sel(\'{name}\')"}}'
+        for name, v in sorted(centroids.items()))
+    target_crd = "\n".join(
+        f'        - {{select: "sel(\'{c}/*/*/[N,CA,C,O]\')"}}' for c, _n in target_chains)
+    target_cseq = "\n".join(
+        f'        - {{select: "sel(\'{c}\')"}}' for c, _n in target_chains)
+    return f"""# {stem}
+{stem}:
+  input: /workspace/input/target.cif
+  contig: "{contig}"
+  conditions:
+    C_SEQ:
+      true:
+        - {{select: "sel('C')"}}
+{cseq_lines}
+{target_cseq}
+    C_CRD:
+      true:
+        - {{select: "sel('C')"}}
+        - {{select: "sel('B/CYS/*/SG')"}}
+    C_CENTROID:
+{cent_lines}
+    C_CRDGRP:
+      1:
+{target_crd}
+"""
+
+
+# ---------------------------------------------------------------- candidate extraction
+
+def candidates_from_summary(summary: Dict[str, Any]) -> List[Dict[str, str]]:
+    """summary.json -> candidate binders (shortest polymer chain per output,
+    same convention as verify_designs.py). Chains with non-standard residue
+    markers ([CCD]) are skipped."""
+    candidates: List[Dict[str, str]] = []
+    for entry in summary.get("outputs") or []:
+        if not isinstance(entry, dict):
+            continue
+        chains = entry.get("chains") or {}
+        polymers = [
+            (name, str(info.get("sequence") or ""))
+            for name, info in chains.items()
+            if isinstance(info, dict) and "[" not in str(info.get("sequence") or "")
+            and str(info.get("sequence") or "").strip()
+        ]
+        if not polymers:
+            continue
+        _name, sequence = min(polymers, key=lambda item: len(item[1]))
+        label = Path(str(entry.get("file") or "")).stem or f"binder_{len(candidates) + 1}"
+        candidates.append({"label": label, "sequence": sequence})
+    return candidates
+
+
+def binder_from_cif_text(cif_text: str) -> Tuple[str, List[Dict[str, Any]], List[int]]:
+    """Extract the shortest polymer chain of a generated structure: one-letter
+    sequence, NCAA modifications, Cys positions."""
+    import gemmi
+    st = gemmi.read_structure_string(cif_text)
+    st.setup_entities()
+    st.remove_alternative_conformations()
+    polymers = [c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3]
+    if not polymers:
+        raise ValueError("no polymer chain in generated structure")
+    chain = min(polymers, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+    letters: List[str] = []
+    mods: List[Dict[str, Any]] = []
+    cys: List[int] = []
+    for res in chain:
+        if res.het_flag == "H":
+            continue
+        name = res.name.strip().upper()
+        pos = len(letters) + 1
+        if name in NCAA_ONE_LETTER:
+            mods.append({"position": pos, "ccd": name,
+                         "baseResidue": NCAA_ONE_LETTER[name]})
+            letters.append(NCAA_ONE_LETTER[name])
+        else:
+            letters.append(AA3_TO_AA1.get(name, "A"))
+            if name == "CYS":
+                cys.append(pos)
+    return "".join(letters), mods, cys
+
+
+# ---------------------------------------------------------------- bicyclic geometry
+
+def _centroid(points: np.ndarray) -> np.ndarray:
+    return points.mean(axis=0)
 
 
 def _nerf(a, b, c, bond: float, angle: float, torsion: float) -> np.ndarray:
@@ -147,35 +319,33 @@ def _closure_segment(start_n, start_ca, start_c, target_n, n, obstacles):
     return seg, float(np.linalg.norm(seg[-1]["C"] - target_n))
 
 
-def load_anchor_skeleton(runtime_dir: Path) -> Tuple[Dict[int, Dict[str, np.ndarray]], List[Tuple[str, np.ndarray]]]:
-    """Load the anchor skeleton asset (verified SEZ fold: 3 Cys + linker atoms).
-
-    Coordinates only; the anchor distances fix both ring spans and the
-    feasibility envelope.
-    """
+def load_anchor_skeleton(runtime_dir: Path, linker_ccd: str) -> Tuple[Dict[int, Dict[str, np.ndarray]], List[Tuple[str, np.ndarray]]]:
+    """Load the bicyclic anchor skeleton asset for a linker: the verified fold's
+    three anchor Cys plus the linker's heavy atoms. Coordinates only; the
+    anchor distances fix both ring spans and the feasibility envelope."""
     import gemmi
-    path = runtime_dir / "rfd4_assets" / "sez_bicyclic_anchor.cif"
+    path = runtime_dir / "rfd4_assets" / f"bicyc_anchor_{linker_ccd}.cif"
     if not path.is_file():
-        raise ValueError(f"bicyclic anchor asset missing: {path}")
+        raise ValueError(f"双环锚定骨架资产缺失：{path}")
     blk = gemmi.cif.read(str(path)).sole_block()
     anchors: Dict[int, Dict[str, np.ndarray]] = {}
-    sez: List[Tuple[str, np.ndarray]] = []
+    linker: List[Tuple[str, np.ndarray]] = []
     for row in blk.find("_atom_site.",
                         ["label_atom_id", "label_comp_id", "label_asym_id",
                          "label_seq_id", "Cartn_x", "Cartn_y", "Cartn_z"]):
         pos = np.array([float(row[4]), float(row[5]), float(row[6])])
         if row[2] == "C":
-            sez.append((row[0], pos))
+            linker.append((row[0], pos))
         else:
             anchors.setdefault(int(row[3]), {})[row[0]] = pos
     required = {"N", "CA", "C", "O", "CB", "SG"}
     for idx, atoms in anchors.items():
         missing = required - set(atoms)
         if missing:
-            raise ValueError(f"anchor Cys{idx} missing atoms: {sorted(missing)}")
-    if set(anchors) != {1, 2, 3} or len(sez) < 3:
-        raise ValueError(f"incomplete anchor asset: anchors={sorted(anchors)}, sez={len(sez)}")
-    return anchors, sez
+            raise ValueError(f"锚定骨架 Cys{idx} 缺少原子: {sorted(missing)}")
+    if set(anchors) != {1, 2, 3} or len(linker) < 3:
+        raise ValueError(f"锚定骨架资产不完整: anchors={sorted(anchors)}, linker={len(linker)}")
+    return anchors, linker
 
 
 def build_bicyclic_skeleton(
@@ -183,12 +353,12 @@ def build_bicyclic_skeleton(
     ncaa_ccd: Optional[str],
     length: int,
     anchors: Dict[int, Dict[str, np.ndarray]],
-    sez_atoms: List[Tuple[str, np.ndarray]],
+    linker_atoms: List[Tuple[str, np.ndarray]],
 ) -> Tuple[List[Tuple[str, Dict[str, np.ndarray]]], List[Tuple[str, np.ndarray]], str, Tuple[float, float]]:
     """Build the skeleton: anchor1 -[seed]- anchor2 -[NCAA + fillers]- anchor3.
 
     The NCAA takes the first closure-ring position (adjacent to the seed-ring
-    exit). Returns (residues, sez heavy atoms, one-letter sequence with X
+    exit). Returns (residues, linker heavy atoms, one-letter sequence with X
     fillers, (seed-ring / closure-ring peptide bond lengths)).
     """
     closure_n = length - len(seed) - 3
@@ -202,7 +372,7 @@ def build_bicyclic_skeleton(
                          f"(supported: {sorted(NCAA_ATOMS)})")
 
     cys1, cys2, cys3 = anchors[1], anchors[2], anchors[3]
-    obstacles = [cys1["SG"], cys2["SG"], cys3["SG"]] + [p for _, p in sez_atoms]
+    obstacles = [cys1["SG"], cys2["SG"], cys3["SG"]] + [p for _, p in linker_atoms]
 
     seed_ring, bond1 = _closure_segment(
         cys1["N"], cys1["CA"], cys1["C"], cys2["N"], len(seed), obstacles)
@@ -236,11 +406,7 @@ def build_bicyclic_skeleton(
     letters = ["C"] + list(seed) + ["C"] + ["X"] * closure_n + ["C"]
     if ncaa_ccd:
         letters[len(seed) + 2] = NCAA_ONE_LETTER[ncaa_ccd]
-    return residues, sez_atoms, "".join(letters), (bond1, bond2)
-
-
-def _centroid(points: np.ndarray) -> np.ndarray:
-    return points.mean(axis=0)
+    return residues, linker_atoms, "".join(letters), (bond1, bond2)
 
 
 def pocket_centroid(target_cif: Path,
@@ -347,83 +513,7 @@ def chain_centroids(combined_cif: Path) -> Dict[str, Tuple[float, float, float]]
             for name, p in sorted(pts.items())}
 
 
-def build_spec(stem: str, seed_len: int, has_ncaa: bool, pep_len: int,
-               target_chains: Sequence[Tuple[str, int]],
-               centroids: Dict[str, Tuple[float, float, float]]) -> str:
-    """RFD4 spec for the bicyclic design.
-
-    C_SEQ pins fixed residues only (terminal Cys, seed, NCAA); closure-ring
-    fillers stay free for the engine. Layout: cys1=1, seed
-    2..(1+seed_len), cys2=2+seed_len, NCAA=3+seed_len, terminal Cys=pep_len.
-    """
-    seed_end = 1 + seed_len
-    fixed = [f"sel('B/*/1')", f"sel('B/*/[2-{seed_end}]')",
-             f"sel('B/*/{seed_end + 1}')"]
-    if has_ncaa:
-        fixed.append(f"sel('B/*/{seed_end + 2}')")
-    fixed.append(f"sel('B/*/{pep_len}')")
-    cseq_lines = "\n".join(f'        - {{select: "{s}"}}' for s in fixed)
-    contig = f"B1-{pep_len}, /0, C1, /0, " + ", /0, ".join(
-        f"{c}1-{n}" for c, n in target_chains)
-    cent_lines = "\n".join(
-        f'      "{v[0]:.3f},{v[1]:.3f},{v[2]:.3f}":\n'
-        f'        - {{select: "sel(\'{name}\')"}}'
-        for name, v in sorted(centroids.items()))
-    target_crd = "\n".join(
-        f'        - {{select: "sel(\'{c}/*/*/[N,CA,C,O]\')"}}' for c, _n in target_chains)
-    target_cseq = "\n".join(
-        f'        - {{select: "sel(\'{c}\')"}}' for c, _n in target_chains)
-    return f"""# {stem}
-{stem}:
-  input: /workspace/input/target.cif
-  contig: "{contig}"
-  conditions:
-    C_SEQ:
-      true:
-        - {{select: "sel('C')"}}
-{cseq_lines}
-{target_cseq}
-    C_CRD:
-      true:
-        - {{select: "sel('C')"}}
-        - {{select: "sel('B/CYS/*/SG')"}}
-    C_CENTROID:
-{cent_lines}
-    C_CRDGRP:
-      1:
-{target_crd}
-"""
-
-
-def binder_from_cif_text(cif_text: str) -> Tuple[str, List[Dict[str, Any]], List[int]]:
-    """Extract the shortest polymer chain: one-letter sequence, NCAA
-    modifications, Cys positions."""
-    import gemmi
-    st = gemmi.read_structure_string(cif_text)
-    st.setup_entities()
-    st.remove_alternative_conformations()
-    polymers = [c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3]
-    if not polymers:
-        raise ValueError("no polymer chain in generated structure")
-    chain = min(polymers, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
-    letters: List[str] = []
-    mods: List[Dict[str, Any]] = []
-    cys: List[int] = []
-    for res in chain:
-        if res.het_flag == "H":
-            continue
-        name = res.name.strip().upper()
-        pos = len(letters) + 1
-        if name in NCAA_ONE_LETTER:
-            mods.append({"position": pos, "ccd": name,
-                         "baseResidue": NCAA_ONE_LETTER[name]})
-            letters.append(NCAA_ONE_LETTER[name])
-        else:
-            letters.append(AA3_TO_AA1.get(name, "A"))
-            if name == "CYS":
-                cys.append(pos)
-    return "".join(letters), mods, cys
-
+# ---------------------------------------------------------------- verification payload
 
 def build_verify_yaml(target_sequence: str, binder_sequence: str,
                       mods: List[Dict[str, Any]], cys_positions: List[int],
