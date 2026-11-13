@@ -508,9 +508,14 @@ def register_prediction_routes(
         if not target_queue:
             return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
         parent_queue_selection = None
-        if workflow == 'peptide_design':
-            # Parent task is orchestration-only: heavy steps run as sub-tasks,
-            # so it stays on the CPU queue with PeptideLM.
+        proposer_backend_sel = str(
+            peptide_design_options.get('peptideProposerBackend')
+            or peptide_design_options.get('peptide_proposer_backend') or 'esm3'
+        ).strip().lower() if workflow == 'peptide_design' else ''
+        if workflow == 'peptide_design' and proposer_backend_sel != 'rfd4':
+            # ESM3 parent is orchestration-only: heavy steps run as sub-tasks,
+            # so it stays on the CPU queue with PeptideLM. The RFD4 strategy
+            # generates inside the parent task and keeps the GPU queue.
             parent_queue_selection = select_queue_for_capability('peptide_design', 'default')
             if not bool(parent_queue_selection.get('online', False)):
                 return jsonify({

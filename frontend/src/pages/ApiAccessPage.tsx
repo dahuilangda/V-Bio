@@ -203,6 +203,11 @@ export function ApiAccessPage() {
   const [builderPeptideDesignMode, setBuilderPeptideDesignMode] = useState<'linear' | 'cyclic' | 'bicyclic'>('bicyclic');
   const [builderPeptideChirality, setBuilderPeptideChirality] = useState<'l' | 'd'>('l');
   const [builderDesignStrategy, setBuilderDesignStrategy] = useState<'esm3' | 'rfd4'>('esm3');
+  const [builderSeedMask, setBuilderSeedMask] = useState('AARFKVWW');
+  const [builderNcaaCcds, setBuilderNcaaCcds] = useState('NLE,AIB,HYP');
+  const [builderBicyclicLinkerCcd, setBuilderBicyclicLinkerCcd] = useState('SEZ');
+  const [builderPeptideLenMin, setBuilderPeptideLenMin] = useState(15);
+  const [builderPeptideLenMax, setBuilderPeptideLenMax] = useState(15);
   const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
   const [builderPriority, setBuilderPriority] = useState<'high' | 'default'>('default');
   const [builderMsaMode, setBuilderMsaMode] = useState<'env' | 'uniref' | 'auto' | 'none'>('uniref');
@@ -1406,15 +1411,15 @@ fi
     : effectivePredictionBackend;
   const peptideDesignCurlFlags = selectedWorkflow.key !== 'peptide_design'
     ? ''
-    : builderPeptideDesignMode === 'bicyclic'
-    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideBicyclicLinkerCcd":"BS3","peptideSequenceMask":"CREEECXXXXXXXXXXXC","peptideLengthMin":10,"peptideLengthMax":18,"peptideIterations":6,"peptidePopulationSize":12,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`
-    : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=true" \\\n  -F "msa_mode=${builderMsaMode}"`;
+    : builderDesignStrategy === 'rfd4' && builderPeptideDesignMode === 'bicyclic'
+    ? ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"bicyclic","peptideChirality":"l","peptideProposerBackend":"rfd4","peptideScorerBackend":"${effectivePredictionBackend}","peptideBicyclicLinkerCcd":"${builderBicyclicLinkerCcd}","peptideSequenceMask":"${builderSeedMask.trim() || 'AARFKVWW'}","peptideNcaaCcds":"${builderNcaaCcds.trim()}","peptideLengthMin":${builderPeptideLenMin},"peptideLengthMax":${builderPeptideLenMax}}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\\n  -F "msa_mode=${builderMsaMode}"`
+    : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideScorerBackend":"${effectivePredictionBackend}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\\n  -F "msa_mode=${builderMsaMode}"`;
 
 
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
-  -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag}${isPeptideDesignWorkflow && builderDesignStrategy === 'rfd4' ? ' \\\\\n  -F "template_files=@./seed_target_combined.cif" \\\\\n  -F "rfd4_spec=@./rfd4_spec.yaml"' : ''} \\
+  -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectiveSubmitBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : isPredictionWorkflow && builderDesignStrategy === 'esm3' ? 'peptide_design' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
   -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \
@@ -1855,7 +1860,7 @@ ${submitTaskIdCapture}`;
                     </select>
                   </Field>
                 )}
-                {isPeptideDesignWorkflow && builderDesignStrategy === 'esm3' && (
+                {isPeptideDesignWorkflow && (
                   <>
                     <Field label="Design Mode">
                       <select
@@ -1867,14 +1872,66 @@ ${submitTaskIdCapture}`;
                         <option value="bicyclic">bicyclic</option>
                       </select>
                     </Field>
-                    <Field label="Peptide Chirality">
+                    {builderDesignStrategy === 'rfd4' ? (
+                      <Field label="Peptide Chirality" hint="rfd4 supports L only">
+                        <select value="l" disabled>
+                          <option value="l">L (natural)</option>
+                        </select>
+                      </Field>
+                    ) : (
+                      <Field label="Peptide Chirality">
+                        <select
+                          value={builderPeptideChirality}
+                          onChange={(e) => setBuilderPeptideChirality(e.target.value as 'l' | 'd')}
+                        >
+                          <option value="l">L (natural)</option>
+                          <option value="d">D (mirror)</option>
+                        </select>
+                      </Field>
+                    )}
+                  </>
+                )}
+                {isPeptideDesignWorkflow && builderDesignStrategy === 'rfd4' && builderPeptideDesignMode === 'bicyclic' && (
+                  <>
+                    <Field label="Seed Sequence" hint="one-letter pharmacophore ring; 3 Cys + NCAA placed automatically">
+                      <input
+                        value={builderSeedMask}
+                        onChange={(e) => setBuilderSeedMask(e.target.value)}
+                        placeholder="AARFKVWW"
+                      />
+                    </Field>
+                    <Field label="NCAA CCDs" hint="comma-separated; one design variant each (e.g. NLE,AIB,HYP)">
+                      <input
+                        value={builderNcaaCcds}
+                        onChange={(e) => setBuilderNcaaCcds(e.target.value)}
+                        placeholder="NLE,AIB,HYP"
+                      />
+                    </Field>
+                    <Field label="Bicyclic Linker">
                       <select
-                        value={builderPeptideChirality}
-                        onChange={(e) => setBuilderPeptideChirality(e.target.value as 'l' | 'd')}
+                        value={builderBicyclicLinkerCcd}
+                        onChange={(e) => setBuilderBicyclicLinkerCcd(e.target.value)}
                       >
-                        <option value="l">L (natural)</option>
-                        <option value="d">D (mirror)</option>
+                        <option value="SEZ">SEZ</option>
+                        <option value="29N">29N</option>
+                        <option value="BS3">BS3</option>
                       </select>
+                    </Field>
+                    <Field label="Length Min / Max" hint="total; >= seed + 7 (closure ring span)">
+                      <div className="field-row">
+                        <input
+                          type="number"
+                          min={10}
+                          value={builderPeptideLenMin}
+                          onChange={(e) => setBuilderPeptideLenMin(Number(e.target.value) || 0)}
+                        />
+                        <input
+                          type="number"
+                          min={10}
+                          value={builderPeptideLenMax}
+                          onChange={(e) => setBuilderPeptideLenMax(Number(e.target.value) || 0)}
+                        />
+                      </div>
                     </Field>
                   </>
                 )}

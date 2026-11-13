@@ -1079,9 +1079,17 @@ def predict_task(self, predict_args: dict):
         tracker.update_status("starting", "Initializing task")
         _raise_if_task_cancelled(self, redis_client, task_id)
         normalized_workflow = _normalize_prediction_workflow(predict_args.get('workflow'))
-        is_peptide_design = normalized_workflow == 'peptide_design'
+        peptide_options = predict_args.get('peptide_design_options') or {}
+        proposer_backend = str(
+            peptide_options.get('peptideProposerBackend')
+            or peptide_options.get('peptide_proposer_backend') or 'esm3'
+        ).strip().lower()
+        # RFD4 strategy generates inside the parent task: it needs a GPU like
+        # any prediction, unlike the ESM3 loop whose heavy work runs per candidate.
+        is_peptide_design = (normalized_workflow == 'peptide_design'
+                             and proposer_backend != 'rfd4')
         low_vram = coerce_bool(predict_args.get("low_vram"), False)
-        if is_peptide_design:
+        if normalized_workflow == 'peptide_design':
             subprocess_timeout = _resolve_peptide_parent_subprocess_timeout(predict_args)
         if is_peptide_design:
             logger.info(

@@ -88,6 +88,8 @@ from backend.core.config import (
     PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
     PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
     RESULTS_BASE_DIR,
+    VBIO_API_TOKEN,
+    VBIO_GATEWAY_URL,
 )
 from backend.scheduling.capability_router import build_capability_queue
 from backend.services.common_utils import (
@@ -927,6 +929,14 @@ def prepare_template_payloads(
         except Exception as exc:
             print(f"[WARN] 保存模板文件失败 {raw_path}: {exc}", file=sys.stderr)
             continue
+        # The single-chain conversion writes into cif_path, which for cif
+        # uploads equals raw_path and would clobber it; keep a copy with the
+        # original author numbering for pocket-residue translation.
+        author_path = templates_dir / f"{Path(file_name).stem}_author{Path(file_name).suffix or '.cif'}"
+        try:
+            author_path.write_bytes(raw_bytes)
+        except Exception as exc:
+            print(f"[WARN] 保存原始模板失败 {author_path}: {exc}", file=sys.stderr)
 
         if fmt == "pdb":
             filtered_path = templates_dir / f"{Path(file_name).stem}_chain{template_chain_id}.pdb"
@@ -974,10 +984,9 @@ def prepare_template_payloads(
 
         # Boltz template entry
         boltz_entry: Dict[str, Any] = {"cif": str(cif_path)}
-        if fmt == "pdb":
-            # the converted mmcif renumbers residues 1..N; pocket-residue
-            # translation needs the author numbering of the original upload
-            boltz_entry["author_pdb"] = str(raw_path)
+        # pocket-residue translation needs the author numbering of the
+        # original upload; the converted mmcif renumbers residues 1..N
+        boltz_entry["author_pdb"] = str(author_path)
         if target_chain_ids:
             boltz_entry["chain_id"] = target_chain_ids if len(target_chain_ids) > 1 else target_chain_ids[0]
         boltz_templates.append(boltz_entry)
@@ -4503,6 +4512,42 @@ def _load_template_residue_number_mapping(
     return "".join(sequence_chars), residue_numbers
 
 
+def _load_template_chain_mappings(
+    template_path: Path,
+    preferred_chain: Optional[str] = None,
+) -> List[Tuple[str, str, List[int]]]:
+    """All polymer chains of a template as (chain name, sequence, author
+    residue numbers); the preferred chain, if present, comes first."""
+    structure = gemmi.read_structure(str(template_path))
+    structure.setup_entities()
+    if len(structure) == 0:
+        return []
+    aa3_to1 = {
+        "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q", "GLU": "E", "GLY": "G",
+        "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P", "SER": "S",
+        "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V", "SEC": "U", "PYL": "O",
+    }
+    preferred = str(preferred_chain or "").strip()
+    chains: List[Tuple[str, str, List[int]]] = []
+    for chain in structure[0]:
+        seen: set[Tuple[int, str]] = set()
+        sequence_chars: List[str] = []
+        residue_numbers: List[int] = []
+        for residue in chain:
+            if residue.het_flag != "A":
+                continue
+            residue_key = (int(residue.seqid.num), str(residue.seqid.icode or "").strip())
+            if residue_key in seen:
+                continue
+            seen.add(residue_key)
+            residue_numbers.append(int(residue.seqid.num))
+            sequence_chars.append(aa3_to1.get(str(residue.name or "").strip().upper(), "X"))
+        if sequence_chars:
+            chains.append((str(chain.name or "").strip(), "".join(sequence_chars), residue_numbers))
+    chains.sort(key=lambda c: c[0] != preferred)
+    return chains
+
+
 def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[int, int]]:
     """Author-to-sequence residue numbering per YAML chain.
 
@@ -4532,31 +4577,42 @@ def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[in
         if not template_path.exists():
             continue
         chain_ids = _normalize_chain_id_list(entry.get("chain_id") or entry.get("target_chain_ids"))
-        if not chain_ids:
-            continue
         preferred_chain = str(entry.get("template_id") or entry.get("template_chain_id") or "").strip() or None
         try:
-            template_seq, residue_numbers = _load_template_residue_number_mapping(template_path, preferred_chain)
+            template_chains = _load_template_chain_mappings(template_path, preferred_chain)
         except Exception:
             continue
-        if not template_seq or not residue_numbers:
+        if not template_chains:
             continue
 
-        for query_chain in chain_ids:
+        # No chain meta (bare template_files upload): align every YAML chain
+        # against every template chain and keep the best match per query
+        # chain. Contacts then use template chain names/author numbers, so
+        # each template chain's map is stored under its own name as well.
+        query_candidates = chain_ids or sorted(chain_seq_map)
+        for query_chain in query_candidates:
             query_seq = str(chain_seq_map.get(query_chain) or "").strip()
             if not query_seq:
                 continue
-            query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
-            if not query_indices or not template_indices:
-                continue
-            template_to_query = {int(t): int(q) + 1 for q, t in zip(query_indices, template_indices)}
-            residue_map: Dict[int, int] = {}
-            for template_idx, residue_number in enumerate(residue_numbers):
-                mapped_pos = template_to_query.get(int(template_idx))
-                if mapped_pos is not None:
-                    residue_map[int(residue_number)] = int(mapped_pos)
-            if residue_map:
-                mapping_by_chain[query_chain] = residue_map
+            for template_chain_name, template_seq, residue_numbers in template_chains:
+                query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
+                if not query_indices or not template_indices:
+                    continue
+                template_to_query = {int(t): int(q) + 1 for q, t in zip(query_indices, template_indices)}
+                residue_map: Dict[int, int] = {}
+                for template_idx, residue_number in enumerate(residue_numbers):
+                    mapped_pos = template_to_query.get(int(template_idx))
+                    if mapped_pos is not None:
+                        residue_map[int(residue_number)] = int(mapped_pos)
+                if not residue_map:
+                    continue
+                existing = mapping_by_chain.get(query_chain)
+                if not existing or len(residue_map) > len(existing):
+                    mapping_by_chain[query_chain] = residue_map
+                if not chain_ids:
+                    existing_by_name = mapping_by_chain.get(template_chain_name)
+                    if not existing_by_name or len(residue_map) > len(existing_by_name):
+                        mapping_by_chain[template_chain_name] = residue_map
 
     return mapping_by_chain
 
@@ -4896,8 +4952,9 @@ def run_rfd4_backend(
         "-v", f"{RFD4_DATA_DIR}/hf_cache:/workspace/hf_cache",
         "-v", f"{RFD4_DATA_DIR}/runs:/workspace/runs",
         "-v", f"{input_dir}:/workspace/input:ro",
-        # atomworks CCD 解析走容器内 biotite 自带词典（含 NLE/AIB/HYP 等非标准残基），
-        # 勿设 CCD_MIRROR_PATH：镜像一旦存在即为排他源，缺标准残基会全线失败。
+        # CCD via the image's bundled biotite dictionary (covers NLE/AIB/HYP).
+        # Never set CCD_MIRROR_PATH: it becomes the exclusive CCD source and
+        # standard residues fail.
         "-w", "/workspace",
         "--entrypoint", "python3",
         image, "/app/rfd4_generate.py",
@@ -4973,19 +5030,45 @@ def run_rfd4_design_strategy(
     seed: Optional[int],
     target_chain_id: Optional[str],
     template_inputs: Optional[List[Dict[str, Any]]] = None,
+    options: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """RFD4 设计策略：一次性生成候选，随后经网关自动派发共折叠验证任务。
+    """RFD4 design strategy: one-shot generation, then verification dispatch.
 
-    生成产物（CIF + summary.json）即父任务归档；候选 binder 序列取自
-    summary（每输出最短聚合链，与 verify_designs.py 约定一致）。验证任务
-    以所选打分引擎经网关提交到同一项目（"RFD4 verify <engine> <label>"），
-    失败逐条记录进 verification_manifest.json，不阻断父任务。
+    Generation products (CIFs + summary.json) become the parent archive;
+    candidate binder sequences come from the summary (shortest polymer chain
+    per output, same convention as verify_designs.py). Verification tasks are
+    submitted to the selected scoring engine through the gateway into the
+    same project ("RFD4 verify <engine> <label>"); per-candidate failures are
+    recorded in verification_manifest.json without blocking the rest.
+
+    Bicyclic mode (peptideDesignMode=bicyclic) is fully automatic: seed,
+    NCAA, pocket and lengths drive in-runtime construction of the bicyclic
+    inputs and spec (rfd4_bicyclic), and verification carries the linker
+    ligand plus three SG bonds.
     """
-    gateway_base = config.VBIO_GATEWAY_URL
-    platform_token = config.VBIO_API_TOKEN.strip()
+    options = options or {}
+    design_mode = _normalize_peptide_design_mode(
+        options.get("peptideDesignMode") or options.get("peptide_design_mode") or "linear")
+    gateway_base = VBIO_GATEWAY_URL
+    platform_token = VBIO_API_TOKEN.strip()
     if not gateway_base or not platform_token:
         raise RuntimeError(
             "RFD4 设计策略需要网关地址与平台令牌（VBIO_GATEWAY_URL / VBIO_API_TOKEN）。")
+
+    if design_mode == "bicyclic":
+        _run_rfd4_bicyclic_strategy(
+            temp_dir=temp_dir,
+            yaml_content=yaml_content,
+            output_archive_path=output_archive_path,
+            score_backend=score_backend,
+            project_id=project_id,
+            predict_args=predict_args,
+            seed=seed,
+            target_chain_id=target_chain_id,
+            template_inputs=template_inputs,
+            options=options,
+        )
+        return
 
     gen_dir = Path(temp_dir) / "rfd4_strategy"
     gen_dir.mkdir(parents=True, exist_ok=True)
@@ -5079,6 +5162,223 @@ def run_rfd4_design_strategy(
         zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=1))
         zf.writestr("verification_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
     print(f"[rfd4-strategy] {dispatched}/{len(candidates)} verification tasks dispatched",
+          file=sys.stderr)
+
+
+def _run_rfd4_bicyclic_strategy(
+    temp_dir: str,
+    yaml_content: str,
+    output_archive_path: str,
+    *,
+    score_backend: str,
+    project_id: str,
+    predict_args: Dict[str, Any],
+    seed: Optional[int],
+    target_chain_id: Optional[str],
+    template_inputs: Optional[List[Dict[str, Any]]],
+    options: Dict[str, Any],
+) -> None:
+    """Bicyclic RFD4 strategy: build inputs in-runtime, generate, dispatch.
+
+    All inputs come from the form/upload (no user-prepared spec or combined
+    structure). Required: target structure (template_files), seed sequence
+    (peptideSequenceMask), pocket (peptidePocketResidues/Center), length
+    window (peptideLengthMin/Max, >= |seed|+7). Optional: NCAA list
+    (peptideNcaaCcds, one variant each), linker CCD (default SEZ). Each
+    (NCAA x length) pair generates independently; every candidate is verified
+    with the linker ligand, three Cys-SG bonds and NCAA modifications.
+    """
+    from backend.runtime.rfd4_bicyclic import (
+        MIN_CLOSURE_RESIDUES,
+        binder_from_cif_text,
+        build_bicyclic_skeleton,
+        build_spec,
+        build_verify_yaml,
+        chain_centroids,
+        combined_template_input,
+        load_anchor_skeleton,
+        pocket_centroid,
+        write_combined_cif,
+    )
+
+    base_yaml = yaml.safe_load(yaml_content) or {}
+    seed_letters = re.sub(r"[^A-Z]", "",
+                          str(options.get("peptideSequenceMask")
+                              or options.get("peptide_sequence_mask") or "").upper())
+    if not seed_letters:
+        raise ValueError(
+            "双环 rfd4 策略需要种子序列：peptide_design_options.peptideSequenceMask"
+            "（一字母，如 AARFKVWW）。")
+
+    ncaa_raw = options.get("peptideNcaaCcds") or options.get("peptide_ncaa_ccds") or []
+    if isinstance(ncaa_raw, str):
+        ncaa_list = [x.strip().upper() for x in ncaa_raw.split(",") if x.strip()]
+    else:
+        ncaa_list = [str(x).strip().upper() for x in ncaa_raw if str(x).strip()]
+
+    linker_ccd = str(options.get("peptideBicyclicLinkerCcd")
+                     or options.get("peptide_bicyclic_linker_ccd") or "SEZ").strip().upper()
+    if linker_ccd not in BICYCLIC_LINKER_ATOM_MAP:
+        raise ValueError(f"未知双环 linker CCD：{linker_ccd}"
+                         f"（可用：{sorted(BICYCLIC_LINKER_ATOM_MAP)}）")
+    linker_arms = BICYCLIC_LINKER_ATOM_MAP[linker_ccd]
+
+    len_lo = int(options.get("peptideLengthMin") or options.get("peptide_length_min") or 0)
+    len_hi = int(options.get("peptideLengthMax") or options.get("peptide_length_max") or 0)
+    if len_lo <= 0 or len_hi < len_lo:
+        raise ValueError("双环 rfd4 策略需要 peptideLengthMin/Max（Min>0 且 Max≥Min）。")
+    min_len = len(seed_letters) + 3 + MIN_CLOSURE_RESIDUES
+    if len_lo < min_len:
+        raise ValueError(
+            f"双环总长窗口过短：种子 {seed_letters}（{len(seed_letters)}）要求总长 ≥"
+            f" {min_len}（闭环环 ~8.4Å 跨距至少 {MIN_CLOSURE_RESIDUES} 残基），"
+            f"得到 Min={len_lo}。")
+
+    if not template_inputs:
+        raise ValueError(
+            "双环 rfd4 策略需要带坐标靶标结构（template_files）；仅有序列时请先"
+            "提交预测任务，再以产物结构作为输入。")
+    pocket_author_contacts, _pocket_seq_contacts = _pocket_contacts_for_staged_space(
+        base_yaml, options, target_chain_id)
+    if not pocket_author_contacts:
+        raise ValueError(
+            "双环 rfd4 策略需要口袋定位：peptidePocketResidues（作者编号，如 "
+            "\"A:41,D:92,...\"）或 peptidePocketCenter。无口袋的 motif 漂浮生成"
+            "无意义。")
+
+    target_sequence = _dpeptide_target_sequence(base_yaml, target_chain_id or "")
+    if not target_sequence:
+        raise ValueError("双环 rfd4 策略需要 yaml 中的靶标蛋白序列。")
+
+    runtime_dir = Path(__file__).resolve().parent
+    anchors, sez_atoms = load_anchor_skeleton(runtime_dir)
+
+    prep_dir = Path(temp_dir) / "bicyclic_prep"
+    prep_dir.mkdir(parents=True, exist_ok=True)
+    staged_target = _stage_rfd4_target(prep_dir, template_inputs)
+    pocket_center = pocket_centroid(staged_target, pocket_author_contacts)
+
+    gateway_base = VBIO_GATEWAY_URL
+    platform_token = VBIO_API_TOKEN.strip()
+    if not gateway_base or not platform_token:
+        raise RuntimeError(
+            "RFD4 bicyclic strategy needs the gateway URL and API token "
+            "(VBIO_GATEWAY_URL / VBIO_API_TOKEN).")
+
+    verify_seed = int(seed) if isinstance(seed, int) else 101
+    headers = {"X-API-Token": platform_token}
+    manifest: Dict[str, Any] = {
+        "strategy": "rfd4-bicyclic",
+        "score_backend": score_backend,
+        "linker_ccd": linker_ccd,
+        "seed": seed_letters,
+        "ncaa": ncaa_list,
+        "project_id": project_id,
+        "generations": [],
+        "verifications": [],
+    }
+    dispatched = 0
+    archive_files: Dict[str, bytes] = {}
+
+    for ncaa in (ncaa_list or [None]):
+        for length in range(len_lo, len_hi + 1):
+            stem = f"bicyc_{ncaa or 'none'}_L{length}"
+            gen_dir = Path(temp_dir) / "rfd4_strategy" / stem
+            gen_dir.mkdir(parents=True, exist_ok=True)
+
+            residues, sez, _letters, bonds = build_bicyclic_skeleton(
+                seed_letters, ncaa, length, anchors, sez_atoms)
+            pep_len = len(residues)
+            motif_pts = np.array([p for _c, atoms in residues for p in atoms.values()])
+            shift = pocket_center - motif_pts.mean(axis=0)
+            shifted = [(c, {k: v + shift for k, v in atoms.items()})
+                       for c, atoms in residues]
+            shifted_sez = [(n, p + shift) for n, p in sez]
+            combined_cif = gen_dir / f"{stem}_combined.cif"
+            target_chains = write_combined_cif(combined_cif, stem, shifted, shifted_sez,
+                                               linker_ccd, staged_target)
+            spec = build_spec(stem, len(seed_letters), bool(ncaa), pep_len,
+                              target_chains, chain_centroids(combined_cif))
+            spec_path = gen_dir / f"{stem}_spec.yaml"
+            spec_path.write_text(spec, encoding="utf-8")
+            archive_files[f"{stem}_combined.cif"] = combined_cif.read_bytes()
+            archive_files[f"{stem}_spec.yaml"] = spec.encode("utf-8")
+
+            gen_archive = gen_dir / "generation.zip"
+            print(f"[rfd4-bicyclic] {stem}: generating (bonds={bonds})", file=sys.stderr)
+            run_rfd4_backend(
+                temp_dir=str(gen_dir),
+                yaml_content=yaml_content,
+                output_archive_path=str(gen_archive),
+                template_inputs=[combined_template_input(combined_cif)],
+                rfd4_spec=spec,
+                seed=seed,
+                task_id=str(predict_args.get("task_id") or ""),
+            )
+            if not gen_archive.is_file():
+                raise RuntimeError(f"{stem}: 生成归档缺失")
+            manifest["generations"].append({
+                "stem": stem, "ncaa": ncaa, "length": length, "bonds": bonds})
+
+            with zipfile.ZipFile(gen_archive) as zf:
+                cifs = sorted(n for n in zf.namelist() if n.endswith("_generated.cif"))
+                archived = {n: zf.read(n) for n in cifs}
+            if not cifs:
+                raise RuntimeError(f"{stem}: 生成未产出任何设计")
+            for name in cifs:
+                archive_files[f"gen/{stem}/{Path(name).name}"] = archived[name]
+            for name in cifs:
+                label = f"{stem}_{Path(name).parent.name}"
+                binder_seq, mods, cys_positions = binder_from_cif_text(
+                    archived[name].decode("utf-8"))
+                verify_yaml = build_verify_yaml(
+                    target_sequence, binder_seq, mods, cys_positions,
+                    linker_ccd, linker_arms)
+                fields = {
+                    "project_id": project_id,
+                    "backend": score_backend,
+                    "workflow": "prediction",
+                    "use_msa_server": "true",
+                    "msa_mode": "uniref",
+                    "seed": str(verify_seed),
+                    "task_name": f"RFD4 verify {score_backend} {label} {binder_seq[:16]}",
+                }
+                entry = {"design": label, "sequence": binder_seq,
+                         "modifications": mods, "backend": score_backend}
+                try:
+                    response = requests.post(
+                        f"{VBIO_GATEWAY_URL}/predict",
+                        data=fields,
+                        files={"yaml_file": ("design.yaml", verify_yaml,
+                                             "application/x-yaml")},
+                        headers=headers, timeout=(10, 120))
+                    response.raise_for_status()
+                    payload = response.json() if response.content else {}
+                    task_id = str(payload.get("task_id") or "").strip()
+                    if not task_id:
+                        raise RuntimeError(
+                            f"gateway response missing task_id: {str(payload)[:160]}")
+                    entry["task_id"] = task_id
+                    dispatched += 1
+                    print(f"[rfd4-bicyclic] {label} {score_backend} -> {task_id}",
+                          file=sys.stderr)
+                except Exception as exc:  # noqa: BLE001 — 单条失败不阻断其余候选
+                    entry["error"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
+                    print(f"[rfd4-bicyclic] {label} dispatch FAILED: {entry['error']}",
+                          file=sys.stderr)
+                manifest["verifications"].append(entry)
+
+    if dispatched == 0:
+        raise RuntimeError("双环候选验证派发全部失败；检查网关可达性后重试。")
+
+    if os.path.exists(output_archive_path):
+        os.remove(output_archive_path)
+    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in archive_files.items():
+            zf.writestr(name, data)
+        zf.writestr("verification_manifest.json",
+                    json.dumps(manifest, ensure_ascii=False, indent=1))
+    print(f"[rfd4-bicyclic] {dispatched} verification tasks dispatched",
           file=sys.stderr)
 
 
@@ -13136,9 +13436,10 @@ def run_alphafold3_backend(
 
     af3_results_root = _resolve_backend_results_root("alphafold3", task_id, temp_dir)
     af3_work_root = _resolve_backend_work_root(af3_results_root)
-    # AF3 3.0.0 内置全量 RCSB CCD（含 AIB/NLE/HYP 等），preset 修饰分子无需注入
-    # userCCD（生成的 cif 缺 descriptor 类目会触发 AF3 解析 KeyError）；
-    # 显式 custom_ccd_molecules（自定义配体/链接子）仍然透传。
+    # AF3 ships the full RCSB CCD (NLE/AIB/HYP included); preset modification
+    # molecules must not be injected as userCCD (their generated cif lacks the
+    # descriptor category and breaks AF3 parsing). Explicit custom molecules
+    # (ligands, linkers) still pass through.
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
     user_ccd_text = None
@@ -13835,6 +14136,7 @@ def main():
                         seed=seed,
                         target_chain_id=peptide_design_target_chain,
                         template_inputs=template_inputs if isinstance(template_inputs, list) else None,
+                        options=peptide_design_options,
                     )
                 else:
                     try:
