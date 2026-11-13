@@ -177,7 +177,10 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     form.append('msa_mode', input.msaMode);
   }
   const rfd4Spec = String(input.rfd4Spec || '').trim();
-  if (backend === 'rfd4' && rfd4Spec) {
+  const proposerUsesRfd4 = String(
+    input.peptideDesignOptions?.peptideProposerBackend
+    || input.peptideDesignOptions?.peptide_proposer_backend || '').trim().toLowerCase() === 'rfd4';
+  if (rfd4Spec && (backend === 'rfd4' || proposerUsesRfd4)) {
     form.append('rfd4_spec', rfd4Spec);
   }
   if (input.notifyEmail && isValidNotifyEmail(input.notifyEmail)) {

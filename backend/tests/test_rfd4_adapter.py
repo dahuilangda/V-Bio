@@ -54,6 +54,33 @@ def _bond_violations(residues, limit=4.0):
     return out
 
 
+class TestChirality:
+    def test_bridge_residues_are_l_form(self):
+        # CB reference atom must be the same-residue C: alternating/degenerate
+        # triple products would mean D-amino staging geometry
+        import numpy as np
+        anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR, "ZBR")
+        residues, _sez, _letters, bonds = build()
+        signs = []
+        for comp, atoms in residues:
+            if comp in ("CYS",) and "SG" in atoms:
+                continue
+            if not {"N", "CA", "C", "CB"} <= set(atoms):
+                continue
+            signs.append(round(float(np.dot(
+                np.cross(atoms["N"] - atoms["CA"], atoms["C"] - atoms["CA"]),
+                atoms["CB"] - atoms["CA"])), 2))
+        assert signs and all(s > 0.5 for s in signs), signs
+
+    def test_too_wide_span_rejected_fast(self):
+        # a span beyond per-residue reach must fail before the optimizer runs
+        anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR, "ZBR")
+        stretched = {1: dict(anchors[1]), 2: dict(anchors[2]), 3: dict(anchors[3])}
+        stretched[1]["C"] = anchors[1]["C"] + np.array([40.0, 0.0, 0.0])
+        with pytest.raises(ValueError, match="unreachable"):
+            rb.build_bicyclic_skeleton(SEED, "NLE", 15, stretched, sez)
+
+
 class TestSkeleton:
     def test_load_anchor_skeleton(self):
         anchors, sez = rb.load_anchor_skeleton(RUNTIME_DIR, "ZBR")

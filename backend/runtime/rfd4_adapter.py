@@ -41,7 +41,7 @@ NCAA_ATOMS = {
 }
 NCAA_ONE_LETTER = {"NLE": "L", "AIB": "A", "HYP": "P", "ORN": "R", "CIT": "R"}
 
-CLOSURE_TOL = 0.3  # max deviation of the closed peptide bond from ideal
+CLOSURE_TOL = 0.1  # max deviation of the closed peptide bond from ideal
 # Closure-ring span ~8.4 A; 3 residues cannot span it (closure stalls near
 # 3.6 A bond), 4 can -- verified by the optimizer
 MIN_CLOSURE_RESIDUES = 4
@@ -69,8 +69,6 @@ def stage_target(input_dir: Path, template_inputs: Optional[List[dict]]) -> Path
     """Persist the RFD4 target structure (first uploaded template). RFD4 is a
     structure-conditioned engine: PDB uploads are converted to mmCIF, other
     formats pass through unchanged."""
-    import base64
-
     for idx, template in enumerate(template_inputs or []):
         content_b64 = template.get("content_base64")
         if not content_b64:
@@ -205,10 +203,15 @@ def binder_from_cif_text(cif_text: str) -> Tuple[str, List[Dict[str, Any]], List
     polymers = [c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3]
     if not polymers:
         raise ValueError("no polymer chain in generated structure")
-    chain = min(polymers, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
+    lengths = [sum(1 for r in c if r.het_flag != "H") for c in polymers]
+    shortest = min(lengths)
+    if lengths.count(shortest) > 1:
+        raise ValueError("ambiguous binder: multiple shortest polymer chains")
+    chain = polymers[lengths.index(shortest)]
     letters: List[str] = []
     mods: List[Dict[str, Any]] = []
     cys: List[int] = []
+    unknown: List[str] = []
     for res in chain:
         if res.het_flag == "H":
             continue
@@ -218,10 +221,15 @@ def binder_from_cif_text(cif_text: str) -> Tuple[str, List[Dict[str, Any]], List
             mods.append({"position": pos, "ccd": name,
                          "baseResidue": NCAA_ONE_LETTER[name]})
             letters.append(NCAA_ONE_LETTER[name])
-        else:
-            letters.append(AA3_TO_AA1.get(name, "A"))
+        elif name in AA3_TO_AA1:
+            letters.append(AA3_TO_AA1[name])
             if name == "CYS":
                 cys.append(pos)
+        else:
+            unknown.append(name)
+    if unknown:
+        # silent mapping would shift every downstream mod/bond position
+        raise ValueError(f"unrecognized residues in binder chain: {sorted(set(unknown))}")
     return "".join(letters), mods, cys
 
 
@@ -270,7 +278,7 @@ def _closure_segment(start_n, start_ca, start_c, target_n, n, obstacles):
             cur_ca = _nerf(prev_ca, prev_c, cur_n, B_N_CA, A_C_N_CA, math.pi)
             cur_c = _nerf(prev_c, cur_n, cur_ca, B_CA_C, A_N_CA_C, phi)
             cur_o = _nerf(cur_n, cur_ca, cur_c, B_CA_C_O, A_CA_C_O, psi + math.pi)
-            cur_cb = _nerf(prev_c, cur_n, cur_ca, B_CA_CB, A_N_CA_CB, T_C_N_CA_CB)
+            cur_cb = _nerf(cur_c, cur_n, cur_ca, B_CA_CB, A_N_CA_CB, T_C_N_CA_CB)
             out.append({"N": cur_n, "CA": cur_ca, "C": cur_c,
                         "O": cur_o, "CB": cur_cb})
             prev_n, prev_ca, prev_c = cur_n, cur_ca, cur_c
@@ -374,6 +382,15 @@ def build_bicyclic_skeleton(
     cys1, cys2, cys3 = anchors[1], anchors[2], anchors[3]
     obstacles = [cys1["SG"], cys2["SG"], cys3["SG"]] + [p for _, p in linker_atoms]
 
+    # reach pre-check: ~3.5 A per residue; fail fast instead of grinding L-BFGS
+    span1 = float(np.linalg.norm(cys1["C"] - cys2["N"]))
+    span2 = float(np.linalg.norm(cys2["C"] - cys3["N"]))
+    if span1 > (len(seed) + 1) * 3.5 or span2 > (closure_n + 1) * 3.5:
+        raise ValueError(
+            f"bicyclic spans unreachable: seed-ring {span1:.1f} A over {len(seed)}"
+            f" residues / closure-ring {span2:.1f} A over {closure_n} residues"
+            f" (reach ~3.5 A per residue)")
+
     seed_ring, bond1 = _closure_segment(
         cys1["N"], cys1["CA"], cys1["C"], cys2["N"], len(seed), obstacles)
     closure_ring, bond2 = _closure_segment(
@@ -385,12 +402,15 @@ def build_bicyclic_skeleton(
             f"on this skeleton")
 
     def _ncaa_sidechain(atoms: Dict[str, np.ndarray], ccd: str) -> Dict[str, np.ndarray]:
-        d = atoms["CA"] - atoms["C"]
+        # first sidechain atom placed as a proper L-CB (same reference as the
+        # backbone builder); the rest stack outward along the CB direction
+        cb = _nerf(atoms["C"], atoms["N"], atoms["CA"],
+                   B_CA_CB, A_N_CA_CB, T_C_N_CA_CB)
+        d = cb - atoms["CA"]
         d = d / np.linalg.norm(d)
-        base = atoms["CA"] + 1.5 * d
         out = {k: v for k, v in atoms.items() if k != "CB"}
         for k, name in enumerate(NCAA_ATOMS[ccd]):
-            out[name] = base + 0.9 * k * d
+            out[name] = cb + 0.9 * k * d
         return out
 
     residues: List[Tuple[str, Dict[str, np.ndarray]]] = [("CYS", cys1)]
@@ -418,14 +438,13 @@ def pocket_centroid(target_cif: Path,
     wanted = {(c.strip(), int(n)) for c, n in author_contacts}
     pts: List[np.ndarray] = []
     seen = set()
-    for model in st:
-        for ch in model:
-            for res in ch:
-                seen.add((ch.name, res.seqid.num))
-                if (ch.name, res.seqid.num) in wanted:
-                    ca = res.find_atom("CA", "*")
-                    if ca is not None:
-                        pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
+    for ch in st[0]:
+        for res in ch:
+            seen.add((ch.name, res.seqid.num))
+            if (ch.name, res.seqid.num) in wanted:
+                ca = res.find_atom("CA", "*")
+                if ca is not None:
+                    pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
     missing = wanted - seen
     if missing:
         raise ValueError(f"pocket residues not found in target (author numbering): "
@@ -471,33 +490,37 @@ def write_combined_cif(path: Path, stem: str, residues, linker_heavy,
         sym = "S" if name.startswith("S") else "C"
         emit("HETATM", sym, name, linker_ccd, "C", "2", 1, p[0], p[1], p[2])
 
-    occupied = {"B", "C"}
+    # polymer rows only: waters/ligands carry non-numeric or '.' seq ids and
+    # would otherwise inflate residue counts (and contig) with fake chains
+    polymer_rows = [r for r in rows
+                    if r[0] == "ATOM" and str(r[5]).strip().lstrip("-").isdigit()]
+    occupied = {"B", "C"} | {r[4] for r in polymer_rows}
     rename_pool = iter(c for c in "ADEFGHIJKLMNOPQRSTUVWXYZ" if c not in occupied)
     chain_map: Dict[str, str] = {}
     entity_map: Dict[str, str] = {}
     residue_ids: Dict[str, set] = {}
-    for row in rows:
-        src = row[4]
-        if src not in chain_map:
-            if src in occupied:
+    for row in polymer_rows:
+        src_chain = row[4]
+        if src_chain not in chain_map:
+            dst = src_chain
+            if dst in {"B", "C"}:
                 try:
                     dst = next(rename_pool)
                 except StopIteration:
                     raise ValueError(
-                        f"target chain {src} collides with peptide/linker names "
+                        f"target chain {src_chain} collides with peptide/linker names "
                         f"and no letter is left for renaming") from None
-            else:
-                dst = src
-            chain_map[src] = dst
-            entity_map[src] = str(3 + len(entity_map))
+            chain_map[src_chain] = dst
+            entity_map[src_chain] = str(3 + len(entity_map))
             residue_ids[dst] = set()
-        residue_ids[chain_map[src]].add(str(row[5]))
-    for row in rows:
+        residue_ids[chain_map[src_chain]].add(str(row[5]))
+    for row in polymer_rows:
         emit(row[0], row[1], row[2], row[3], chain_map[row[4]],
              entity_map[row[4]], row[5],
              float(row[6]), float(row[7]), float(row[8]))
     path.write_text("\n".join(lines) + "\n")
-    return [(chain_map[src], len(residue_ids[chain_map[src]])) for src in chain_map]
+    return [(chain_map[src_chain], len(residue_ids[chain_map[src_chain]]))
+            for src_chain in chain_map]
 
 
 def chain_centroids(combined_cif: Path) -> Dict[str, Tuple[float, float, float]]:
@@ -523,6 +546,14 @@ def build_verify_yaml(target_sequence: str, binder_sequence: str,
     if len(cys_positions) != 3:
         raise ValueError(
             f"bicyclic verification needs 3 Cys, got {len(cys_positions)}: {cys_positions}")
+    if len(linker_atoms) != 3:
+        raise ValueError(
+            f"linker {linker_ccd} must provide exactly 3 arm atoms, got {len(linker_atoms)}")
+    if cys_positions != sorted(cys_positions):
+        raise ValueError(f"Cys positions must be ascending, got {cys_positions}")
+    if any(pos < 1 or pos > len(binder_sequence) for pos in cys_positions):
+        raise ValueError(
+            f"Cys positions {cys_positions} outside binder sequence length {len(binder_sequence)}")
     mod_lines = ""
     if mods:
         mod_lines = "    modifications:\n" + "".join(

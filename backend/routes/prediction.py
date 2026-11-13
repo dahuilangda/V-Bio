@@ -491,12 +491,28 @@ def register_prediction_routes(
                 design_mode = 'bicyclic'
             elif design_mode != 'linear':
                 design_mode = 'linear'
+            if design_mode == 'bicyclic':
+                from backend.runtime import bicyclic_linkers as _bcl
+                seed_mask = str(peptide_design_options.get('peptideSequenceMask')
+                                or peptide_design_options.get('peptide_sequence_mask') or '').strip()
+                if not seed_mask:
+                    return jsonify({'error': 'bicyclic mode requires peptideSequenceMask (seed sequence).'}), 400
+                try:
+                    _bcl.get_linker(str(peptide_design_options.get('peptideBicyclicLinkerCcd') or 'ZBR'))
+                except ValueError as exc:
+                    return jsonify({'error': str(exc)}), 400
+                len_min = int(peptide_design_options.get('peptideLengthMin') or 0)
+                len_max = int(peptide_design_options.get('peptideLengthMax') or 0)
+                if len_min <= 0 or len_max < len_min:
+                    return jsonify({'error': 'bicyclic mode requires peptideLengthMin/Max (Min>0, Max>=Min).'}), 400
 
         priority = request.form.get('priority', 'default').lower()
         if priority not in ['high', 'default']:
             logger.warning("Invalid priority '%s' provided by client %s. Defaulting to 'default'.", priority, request.remote_addr)
             priority = 'default'
         requested_capability = capability_from_prediction_backend(backend)
+        if proposer_uses_rfd4:
+            requested_capability = 'rfd4'
         queue_selection = select_queue_for_capability(requested_capability, priority)
         if not bool(queue_selection.get('online', False)):
             return jsonify({
@@ -672,7 +688,12 @@ def register_prediction_routes(
             predict_args['template_inputs'] = template_inputs
         if custom_ccd_molecules:
             predict_args['custom_ccd_molecules'] = custom_ccd_molecules
-        if backend == 'rfd4':
+        proposer_uses_rfd4 = (
+            workflow == 'peptide_design'
+            and str(peptide_design_options.get('peptideProposerBackend')
+                    or peptide_design_options.get('peptide_proposer_backend') or 'esm3').strip().lower() == 'rfd4'
+        )
+        if backend == 'rfd4' or proposer_uses_rfd4:
             # rfd4_spec: 完整条件 spec 透传（motif 条件化生成）；
             # 缺省时由 runtime 按靶标自动生成固定 binder spec
             rfd4_spec = str(request.form.get('rfd4_spec') or '').strip()

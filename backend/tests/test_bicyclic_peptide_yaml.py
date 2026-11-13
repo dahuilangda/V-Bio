@@ -62,15 +62,14 @@ class BicyclicCandidateYamlTests(unittest.TestCase):
             self._build("CWAGHIKXLMNAP")
 
     def test_supported_linkers_are_product_form_only(self):
-        # SEZ = mesitylene (TBMB product form), 29N = triazinane tripropanone (LFI
-        # product form). BS3 is the Bi(III) ion linker: all three Cys-SG coordinate to
-        # the same atom ("BI"), unlike the covalent linkers' three distinct anchors.
-        self.assertEqual(sorted(BICYCLIC_LINKER_ATOM_MAP), ["29N", "BS3", "SEZ"])
+        # Registry linkers carry three distinct arm atoms. ZBR = mesitylene
+        # (TBMB product form), SEZ/29N are protenix-only product forms. BS3's
+        # symmetric "BI" arm cannot express three distinct bonds and is not a
+        # registered bicyclic linker.
+        self.assertEqual(sorted(BICYCLIC_LINKER_ATOM_MAP), ["29N", "SEZ", "ZBR"])
         for code, atoms in BICYCLIC_LINKER_ATOM_MAP.items():
             self.assertEqual(len(atoms), 3, code)
-        self.assertEqual(len(set(BICYCLIC_LINKER_ATOM_MAP["BS3"])), 1)
-        for code in ("SEZ", "29N"):
-            self.assertEqual(len(set(BICYCLIC_LINKER_ATOM_MAP[code])), 3, code)
+            self.assertEqual(len(set(atoms)), 3, code)
 
 
 def _identity_resolve(length, fixed, cys_positions, cys_layout):

@@ -1,4 +1,4 @@
-"""Regenerate the bicyclic-linker CCD resources (SEZ/29N/BS3 .cif + linker_mols.pkl).
+"""Regenerate the bicyclic-linker CCD resources (ZBR/SEZ/29N/BS3 .cif + linker_mols.pkl).
 
 Source of truth is Boltz's CCD cache (ccd.pkl): its Mols carry the atom ``name`` props that
 ``run_single_prediction.BICYCLIC_LINKER_ATOM_MAP`` references, so the generated mmcif matches
@@ -16,6 +16,9 @@ from rdkit import Chem
 
 from backend.runtime.custom_ccd_builder import build_ligand_ccd_mmcif
 
+# Only codes missing from the engines' own standard CCDs need regenerated
+# cif/overlay resources. ZBR (standard TBMB) ships everywhere and its complete
+# entry is maintained verbatim from components.cif.
 LINKERS = ("SEZ", "29N", "BS3")
 
 

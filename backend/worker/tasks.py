@@ -731,6 +731,35 @@ def _normalize_prediction_workflow(raw_workflow: Any) -> str:
     return 'prediction'
 
 
+def _resolve_rfd4_parent_subprocess_timeout(predict_args: dict) -> int:
+    """RFD4 strategy parent: stems (NCAA x length) x per-run generation budget,
+    plus the verify-dispatch tail. Unrelated to the ESM3 wave formula."""
+    options = predict_args.get('peptide_design_options')
+    if not isinstance(options, dict):
+        options = {}
+
+    def _int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    seed_len = len(str(options.get('peptideSequenceMask')
+                       or options.get('peptide_sequence_mask') or '').strip())
+    len_lo = max(1, _int(options.get('peptideLengthMin') or options.get('peptide_length_min')))
+    len_hi = max(len_lo, _int(options.get('peptideLengthMax') or options.get('peptide_length_max')))
+    ncaa_raw = options.get('peptideNcaaCcds') or options.get('peptide_ncaa_ccds') or []
+    ncaa_count = len(ncaa_raw.split(',')) if isinstance(ncaa_raw, str) and ncaa_raw.strip() else len(ncaa_raw) if isinstance(ncaa_raw, list) else 0
+    stems = max(1, (ncaa_count or 1)) * max(1, len_hi - len_lo + 1)
+    per_run_budget = 2 * 3600  # run_rfd4_backend --timeout-min 120
+    estimated = stems * per_run_budget + 1800
+    resolved = max(SUBPROCESS_TIMEOUT, estimated)
+    logger.info(
+        "Resolved rfd4 parent subprocess timeout: %ss (stems=%s per_run=%ss)",
+        resolved, stems, per_run_budget)
+    return resolved
+
+
 def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
     options = predict_args.get('peptide_design_options')
     if not isinstance(options, dict):
@@ -1090,7 +1119,10 @@ def predict_task(self, predict_args: dict):
                              and proposer_backend != 'rfd4')
         low_vram = coerce_bool(predict_args.get("low_vram"), False)
         if normalized_workflow == 'peptide_design':
-            subprocess_timeout = _resolve_peptide_parent_subprocess_timeout(predict_args)
+            if proposer_backend == 'rfd4':
+                subprocess_timeout = _resolve_rfd4_parent_subprocess_timeout(predict_args)
+            else:
+                subprocess_timeout = _resolve_peptide_parent_subprocess_timeout(predict_args)
         if is_peptide_design:
             logger.info(
                 f"Task {task_id}: Peptide workflow detected. "

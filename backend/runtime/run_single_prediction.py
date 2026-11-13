@@ -99,6 +99,7 @@ from backend.services.common_utils import (
     infer_use_msa_server_from_yaml_text,
     is_msa_disabled,
 )
+from backend.runtime import bicyclic_linkers, rfd4_adapter
 from backend.runtime.nesso_backend import run_nesso_backend
 from backend.runtime import rfd4_adapter
 from backend.runtime.af3_adapter import (
@@ -5110,6 +5111,51 @@ def run_rfd4_design_strategy(
           file=sys.stderr)
 
 
+def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
+    """Cyclic/bicyclic ring constraints require a backend with covalent-bond
+    priors; Boltz2 cannot guarantee the ring bond lengths (same rule as the
+    ESM3 path)."""
+    if design_mode not in ("cyclic", "bicyclic"):
+        return
+    backend = str(score_backend or "").strip().lower()
+    if backend in ("mol1", "mol-1", "protenix", "protenix2dock",
+                   "protenix-2-dock", "alphafold3"):
+        return
+    raise ValueError(
+        f"模式 {design_mode} 的成环约束需要共价键先验：打分后端 {score_backend} "
+        "不支持；可用 mol1 / protenix / protenix2dock / alphafold3。")
+
+
+def _pair_arms_by_distance(anchors: Dict[int, Dict[str, np.ndarray]],
+                           linker_atoms: List[Tuple[str, np.ndarray]],
+                           linker_ccd: str) -> List[str]:
+    """Greedy one-to-one pairing of anchor SG atoms to linker arm atoms by
+    distance; returns arm names in anchor order for the verify bonds."""
+    import numpy as _np
+    linker = bicyclic_linkers.get_linker(linker_ccd)
+    by_name = dict(linker_atoms)
+    arms = [(name, by_name[name]) for name in linker.arm_atoms if name in by_name]
+    if len(arms) != 3:
+        raise ValueError(f"linker {linker_ccd} 臂原子在骨架资产中不完整: "
+                         f"{[n for n, _ in arms]}")
+    pairs: List[Tuple[float, int, int]] = []
+    for si, s_idx in enumerate((1, 2, 3)):
+        sg = anchors[s_idx]["SG"]
+        for ai, (_name, pos) in enumerate(arms):
+            pairs.append((float(_np.linalg.norm(sg - pos)), si, ai))
+    pairs.sort()
+    used_s, used_a, order = set(), set(), [None] * 3
+    for _d, si, ai in pairs:
+        if si in used_s or ai in used_a:
+            continue
+        used_s.add(si)
+        used_a.add(ai)
+        order[si] = arms[ai][0]
+    if len(used_a) != 3:
+        raise ValueError("linker 臂与 Cys SG 的一对一配对失败")
+    return order
+
+
 def run_bicyclic_strategy(
     temp_dir: str,
     yaml_content: str,
@@ -5134,6 +5180,7 @@ def run_bicyclic_strategy(
     with the linker ligand, three Cys-SG bonds and NCAA modifications.
     """
     from backend.runtime import rfd4_adapter
+    from backend.runtime.rfd4_adapter import MIN_CLOSURE_RESIDUES
 
     base_yaml = yaml.safe_load(yaml_content) or {}
     seed_letters = re.sub(r"[^A-Z]", "",
@@ -5143,6 +5190,11 @@ def run_bicyclic_strategy(
         raise ValueError(
             "双环 rfd4 策略需要种子序列：peptide_design_options.peptideSequenceMask"
             "（一字母，如 AARFKVWW）。")
+    bad_letters = sorted(set(seed_letters) - set(rfd4_adapter.AA1_TO_AA3) | ({"C"} & set(seed_letters)))
+    if bad_letters:
+        raise ValueError(
+            f"种子序列含不支持字母 {bad_letters}：只允许标准氨基酸一字母且不含 C"
+            "（三个 Cys 锚点由平台自动放置）。")
 
     ncaa_raw = options.get("peptideNcaaCcds") or options.get("peptide_ncaa_ccds") or []
     if isinstance(ncaa_raw, str):
@@ -5152,10 +5204,7 @@ def run_bicyclic_strategy(
 
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd")
                      or options.get("peptide_bicyclic_linker_ccd") or "ZBR").strip().upper()
-    if linker_ccd not in BICYCLIC_LINKER_ATOM_MAP:
-        raise ValueError(f"未知双环 linker CCD：{linker_ccd}"
-                         f"（可用：{sorted(BICYCLIC_LINKER_ATOM_MAP)}）")
-    linker_arms = BICYCLIC_LINKER_ATOM_MAP[linker_ccd]
+    bicyclic_linkers.get_linker(linker_ccd)
 
     len_lo = int(options.get("peptideLengthMin") or options.get("peptide_length_min") or 0)
     len_hi = int(options.get("peptideLengthMax") or options.get("peptide_length_max") or 0)
@@ -5592,7 +5641,8 @@ def run_protenix_backend(
         yaml_content,
     )
     _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
-    linker_codes = _detect_bicyclic_linker_codes(yaml_content)
+    linker_codes = [c for c in _detect_bicyclic_linker_codes(yaml_content)
+                    if bicyclic_linkers.get_linker(c).protenix_overlay]
     linker_extra_cif = _linker_ccd_mmcif_bundle(linker_codes) if linker_codes else ""
     linker_extra_mols = _linker_ccd_mols(linker_codes) if linker_codes else {}
     protenix_common_overlay_root: Optional[Path] = None
@@ -6082,6 +6132,11 @@ def _normalize_peptide_design_mode(raw: Any) -> str:
 
 def _normalize_peptide_backend(raw: Any) -> str:
     token = str(raw or "").strip().lower()
+    if token == "rfd4":
+        # rfd4 是设计引擎，不是打分后端；静默映射成 boltz 会误导验证结论
+        raise ValueError(
+            "rfd4 不能作为打分后端：请用 peptideProposerBackend=rfd4 指定设计引擎，"
+            "并以 peptideScorerBackend 选择 mol1/protenix/alphafold3。")
     if token in {"alphafold3", "protenix", "mol1"}:
         return token
     # docking engines map onto their corresponding full predictors at the
@@ -6108,13 +6163,8 @@ mol1dock 已下线，token 仅为历史任务行保留).
                                               "mol1dock", "mol-1-dock"}
 
 
-# Bicyclic linkers and the 3 linker atoms each Cys-SG bonds to (matches the atom names in
-# backend/runtime/linker_ccd/<code>.cif, generated from Boltz's CCD cache).
-BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = {
-    "SEZ": ["CD", "C1", "C2"],
-    "29N": ["C16", "C19", "C25"],
-    "BS3": ["BI", "BI", "BI"],
-}
+# Legacy shape derived from the unified linker registry (bicyclic_linkers.py)
+BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = bicyclic_linkers.atom_map()
 
 
 def _detect_bicyclic_linker_codes(yaml_content: str) -> List[str]:
@@ -13904,16 +13954,6 @@ def main():
                         use_msa_server=bool(worker_predict_args.get("use_msa_server", False)),
                         pocket_sequence_contacts=predict_args.pop(
                             "mol1_pocket_sequence_contacts", None),
-                        seed=worker_seed,
-                        task_id=worker_task_id,
-                    )
-                elif worker_backend == "rfd4":
-                    run_rfd4_backend(
-                        temp_dir=worker_temp_dir,
-                        yaml_content=worker_yaml_content,
-                        output_archive_path=worker_output_archive_path,
-                        template_inputs=worker_predict_args.get("template_inputs")
-                        if isinstance(worker_predict_args.get("template_inputs"), list) else None,
                         seed=worker_seed,
                         task_id=worker_task_id,
                     )
