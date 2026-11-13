@@ -402,13 +402,33 @@ def build_bicyclic_skeleton(
             f"on this skeleton")
 
     def _ncaa_sidechain(atoms: Dict[str, np.ndarray], ccd: str) -> Dict[str, np.ndarray]:
-        # first sidechain atom placed as a proper L-CB (same reference as the
-        # backbone builder); the rest stack outward along the CB direction
+        # First sidechain atom placed as a proper L-CB (same reference as the
+        # backbone builder); the rest stack outward along the CB direction.
+        # HYP's pyrrolidine ring (CD bonds back to N) instead uses a regular
+        # pentagon over N-CA-CB-CG-CD so the ring-closure bond stays valid.
+        out = {k: v for k, v in atoms.items() if k != "CB"}
+        if ccd == "HYP":
+            ring_side = 1.5
+            n, ca = atoms["N"], atoms["CA"]
+            axis = np.cross(ca - n, np.array([0.0, 0.0, 1.0]))
+            axis /= (np.linalg.norm(axis) or 1.0)
+            centre = (n + ca) / 2 + axis * (ring_side / (2 * math.tan(math.pi / 5)))
+            radius = ring_side / (2 * math.sin(math.pi / 5))
+            base_dir = (n - centre) / np.linalg.norm(n - centre)
+            perp = np.cross(base_dir, axis)
+            for k, name in enumerate(("N", "CA", "CB", "CG", "CD")):
+                angle = math.radians(72 * k)
+                pos = centre + radius * (math.cos(angle) * base_dir
+                                         + math.sin(angle) * perp)
+                if name not in out:  # N/CA already staged by the backbone
+                    out[name] = pos
+            od = out["CD"] + 1.4 * (out["CD"] - out["CG"]) / np.linalg.norm(out["CD"] - out["CG"])
+            out["OD1"] = od
+            return out
         cb = _nerf(atoms["C"], atoms["N"], atoms["CA"],
                    B_CA_CB, A_N_CA_CB, T_C_N_CA_CB)
         d = cb - atoms["CA"]
         d = d / np.linalg.norm(d)
-        out = {k: v for k, v in atoms.items() if k != "CB"}
         for k, name in enumerate(NCAA_ATOMS[ccd]):
             out[name] = cb + 0.9 * k * d
         return out
