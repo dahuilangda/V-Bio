@@ -177,6 +177,13 @@ class RuntimeProxy:
                 continue
             for value in request_obj.form.getlist(key):
                 data.append((key, value))
+        if upstream_path == "/predict":
+            # the runtime re-dispatches derived jobs (rfd4 strategy verify
+            # tasks) through the management api with project binding; without
+            # project_id those forwards fail authorization
+            project_id = str(request_obj.form.get("project_id") or "").strip()
+            if project_id:
+                data.append(("project_id", project_id))
 
         if upstream_path == "/predict":
             raw_msa_mode = request_obj.form.get("msa_mode")

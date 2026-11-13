@@ -5240,6 +5240,8 @@ def run_bicyclic_strategy(
     prep_dir.mkdir(parents=True, exist_ok=True)
     staged_target = rfd4_adapter.stage_target(prep_dir, template_inputs)
     pocket_center = rfd4_adapter.pocket_centroid(staged_target, pocket_author_contacts)
+    parent_task_id = str(predict_args.get("task_id")
+                         or os.environ.get("VBIO_TASK_ID") or "")
 
     gateway_base = VBIO_GATEWAY_URL
     platform_token = VBIO_API_TOKEN.strip()
@@ -5247,6 +5249,7 @@ def run_bicyclic_strategy(
         raise RuntimeError(
             "RFD4 bicyclic strategy needs the gateway URL and API token "
             "(VBIO_GATEWAY_URL / VBIO_API_TOKEN).")
+    design_mode = "bicyclic"
 
     verify_seed = int(seed) if isinstance(seed, int) else 101
     headers = {"X-API-Token": platform_token}
@@ -5296,7 +5299,7 @@ def run_bicyclic_strategy(
                 template_inputs=[rfd4_adapter.combined_template_input(combined_cif)],
                 rfd4_spec=spec,
                 seed=seed,
-                task_id=str(predict_args.get("task_id") or ""),
+                task_id=f"{parent_task_id}-{stem}",
             )
             if not gen_archive.is_file():
                 raise RuntimeError(f"{stem}: 生成归档缺失")
@@ -5310,44 +5313,69 @@ def run_bicyclic_strategy(
                 raise RuntimeError(f"{stem}: 生成未产出任何设计")
             for name in cifs:
                 archive_files[f"gen/{stem}/{Path(name).name}"] = archived[name]
+            # SG-臂几何配对：按骨架坐标贪心一对一，替代文档约定序
+            arm_order = _pair_arms_by_distance(anchors, sez, linker_ccd)
             for name in cifs:
-                label = f"{stem}_{Path(name).parent.name}"
-                binder_seq, mods, cys_positions = rfd4_adapter.binder_from_cif_text(
-                    archived[name].decode("utf-8"))
-                verify_yaml = rfd4_adapter.build_verify_yaml(
-                    target_sequence, binder_seq, mods, cys_positions,
-                    linker_ccd, linker_arms)
-                fields = {
-                    "project_id": project_id,
-                    "backend": score_backend,
-                    "workflow": "prediction",
-                    "use_msa_server": "true",
-                    "msa_mode": "uniref",
-                    "seed": str(verify_seed),
-                    "task_name": f"RFD4 verify {score_backend} {label} {binder_seq[:16]}",
-                }
-                entry = {"design": label, "sequence": binder_seq,
-                         "modifications": mods, "backend": score_backend}
+                label = Path(name).parent.name
+                entry = {"design": label, "backend": score_backend}
                 try:
-                    response = requests.post(
-                        f"{VBIO_GATEWAY_URL}/predict",
-                        data=fields,
-                        files={"yaml_file": ("design.yaml", verify_yaml,
-                                             "application/x-yaml")},
-                        headers=headers, timeout=(10, 120))
-                    response.raise_for_status()
-                    payload = response.json() if response.content else {}
-                    task_id = str(payload.get("task_id") or "").strip()
-                    if not task_id:
-                        raise RuntimeError(
-                            f"gateway response missing task_id: {str(payload)[:160]}")
-                    entry["task_id"] = task_id
-                    dispatched += 1
-                    print(f"[rfd4-bicyclic] {label} {score_backend} -> {task_id}",
-                          file=sys.stderr)
+                    binder_seq, mods, cys_positions = rfd4_adapter.binder_from_cif_text(
+                        archived[name].decode("utf-8"))
+                    entry["sequence"] = binder_seq
+                    entry["modifications"] = mods
+                    verify_yaml = rfd4_adapter.build_verify_yaml(
+                        target_sequence, binder_seq, mods, cys_positions,
+                        linker_ccd, arm_order)
+                    fields = {
+                        "project_id": project_id,
+                        "backend": score_backend,
+                        "workflow": "prediction",
+                        "use_msa_server": "true",
+                        "msa_mode": "uniref",
+                        "seed": str(verify_seed),
+                        "task_name": f"RFD4 verify {score_backend} {label} {binder_seq[:16]}",
+                    }
+                    last_error: Optional[Exception] = None
+                    for attempt in range(3):
+                        try:
+                            response = requests.post(
+                                f"{gateway_base}/predict",
+                                data=fields,
+                                files={"yaml_file": ("design.yaml", verify_yaml,
+                                                     "application/x-yaml")},
+                                headers=headers, timeout=(10, 120))
+                            response.raise_for_status()
+                            payload = response.json() if response.content else {}
+                            task = str(payload.get("task_id") or "").strip()
+                            if not task:
+                                raise RuntimeError(
+                                    f"gateway response missing task_id: {str(payload)[:160]}")
+                            entry["task_id"] = task
+                            dispatched += 1
+                            print(f"[rfd4-bicyclic] {label} {score_backend} -> {task}",
+                                  file=sys.stderr)
+                            last_error = None
+                            break
+                        except requests.HTTPError as exc:
+                            body = ""
+                            try:
+                                body = str(response.text[:200])
+                            except Exception:
+                                pass
+                            last_error = RuntimeError(
+                                f"HTTP {response.status_code}: {body or exc}")
+                            if attempt < 2:
+                                time.sleep(5 * (attempt + 1))
+                        except Exception as exc:  # noqa: BLE001 — 网关瞬时抖动重试
+                            last_error = exc
+                            if attempt < 2:
+                                time.sleep(5 * (attempt + 1))
+                    if last_error is not None:
+                        raise last_error
                 except Exception as exc:  # noqa: BLE001 — 单条失败不阻断其余候选
                     entry["error"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
-                    print(f"[rfd4-bicyclic] {label} dispatch FAILED: {entry['error']}",
+                    print(f"[rfd4-bicyclic] {label} dispatch FAILED: {entry['error']}"
+                          f" | fields keys={sorted(fields)} project_id={project_id!r}",
                           file=sys.stderr)
                 manifest["verifications"].append(entry)
 
