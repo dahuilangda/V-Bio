@@ -209,12 +209,12 @@ export function compactConfidenceForStorage(
   const next = { ...input };
   const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
   const pae = next.pae;
-  // Full PAE matrices dominate payload size; scalar summaries remain in confidence.
+  // Full token-level PAE dominates payload size; scalar summaries remain in confidence.
   if (Array.isArray(pae) || (pae && typeof pae === 'object')) {
     delete next.pae;
   }
-  delete next.pae_matrix;
-  delete next.pae_chain_bounds;
+  // pae_matrix (downsampled) / pae_chain_bounds / msa stay: the results view
+  // renders the PAE heatmap and MSA depth straight from the task row.
 
   const compactCandidateRows = compactPeptideCandidateRows(
     collectPeptideCandidateRows(input),
