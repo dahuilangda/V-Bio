@@ -1592,40 +1592,41 @@ async function parsePeptideDesignCandidatesFromBundle(
       sources.push({ path: summaryPath, payload: payload as Record<string, unknown> });
     }
   }
-  const rows = selectPeptideCandidateRowsFromSummaries(sources);
-  if (rows.length > 0) return rows;
+  let rows = selectPeptideCandidateRowsFromSummaries(sources);
 
   // RFD4 strategy archives carry no design_results summaries; the
   // verification manifest is the candidate list (one row per dispatched
   // verification, linked to its mol1 task and generated structure).
-  const manifestPath = names.find((name) => getBaseName(name).toLowerCase() === 'verification_manifest.json');
-  if (!manifestPath) return [];
-  const manifest = await readZipJson(zip, manifestPath);
-  const verifications = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
-    ? (manifest as Record<string, unknown>).verifications
-    : null;
-  if (!Array.isArray(verifications) || verifications.length === 0) return [];
-  const manifestRows: Array<Record<string, unknown>> = [];
-  for (const raw of verifications) {
-    if (!raw || typeof raw !== 'object') continue;
-    const v = raw as Record<string, unknown>;
-    const label = String(v.design ?? '').trim();
-    const sequence = String(v.sequence ?? '').trim();
-    if (!label || !sequence) continue;
-    manifestRows.push({
-      id: label,
-      label,
-      name: label,
-      sequence,
-      peptide_sequence: sequence,
-      backend: String(v.backend ?? ''),
-      task_id: String(v.task_id ?? ''),
-      modifications: Array.isArray(v.modifications) ? v.modifications : [],
-      structure_name: `gen/${label}/${label}_generated.cif`,
-      source: 'rfd4_verification'
-    });
+  if (rows.length === 0) {
+    const manifestPath = names.find((name) => getBaseName(name).toLowerCase() === 'verification_manifest.json');
+    if (!manifestPath) return [];
+    const manifest = await readZipJson(zip, manifestPath);
+    const verifications = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+      ? (manifest as Record<string, unknown>).verifications
+      : null;
+    if (!Array.isArray(verifications) || verifications.length === 0) return [];
+    const manifestRows: Array<Record<string, unknown>> = [];
+    for (const raw of verifications) {
+      if (!raw || typeof raw !== 'object') continue;
+      const v = raw as Record<string, unknown>;
+      const label = String(v.design ?? '').trim();
+      const sequence = String(v.sequence ?? '').trim();
+      if (!label || !sequence) continue;
+      manifestRows.push({
+        id: label,
+        label,
+        name: label,
+        sequence,
+        peptide_sequence: sequence,
+        backend: String(v.backend ?? ''),
+        task_id: String(v.task_id ?? ''),
+        modifications: Array.isArray(v.modifications) ? v.modifications : [],
+        structure_name: `gen/${label}/${label}_generated.cif`,
+        source: 'rfd4_verification'
+      });
+    }
+    rows = manifestRows;
   }
-  return manifestRows;
 
   const structureFiles = names
     .filter((name) => {
@@ -1685,11 +1686,12 @@ async function parsePeptideDesignCandidatesFromBundle(
     // rank_02.pdb"), so it is only safe when rows and files are 1:1 aligned.
     const positionalStructureFile =
       structureFiles.length === rows.length ? structureFiles[index]?.name || '' : '';
+    // Manifest rows name their own gen/<label> structure; a rank or positional
+    // guess would stamp unrelated files onto them.
+    const isManifestRow = asString(row.source) === 'rfd4_verification';
     const structurePath =
       resolveDesignStructurePathFromRow(row, structureByName, structurePathByBaseName) ||
-      byRank.get(rank) ||
-      positionalStructureFile ||
-      '';
+      (!isManifestRow ? byRank.get(rank) || positionalStructureFile || '' : '');
     const structureFormat: 'cif' | 'pdb' = getBaseName(structurePath).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
     const residuePayload = extractPeptideCandidateResiduePayload(row);
     const modificationPayload = extractPeptideCandidateModificationPayload(row);
@@ -1744,7 +1746,7 @@ async function parsePeptideDesignCandidatesFromBundle(
       linker_chain_id: asString(row.linker_chain_id),
       ...modificationPayload,
       ...residuePayload,
-      structure_name: getBaseName(structurePath),
+      structure_name: getBaseName(structurePath) || asString(row.structure_name).trim(),
       structure_format: structureFormat
     };
     if (preservePeptideCandidateStructureText && structureText.trim()) {
