@@ -77,7 +77,9 @@ function pickNumber(data: Record<string, unknown>, keys: string[]): number | nul
 
 type Tone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 
-function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'iptm' | 'pae' | 'fraction'): Tone {
+type MetricScale = 'plddt' | 'probability' | 'iptm' | 'ipsae' | 'pae' | 'fraction' | 'sc';
+
+function toneForScale(value: number | null, scale: MetricScale): Tone {
   if (value === null) return 'neutral';
 
   if (scale === 'plddt') {
@@ -97,6 +99,21 @@ function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'ip
     return 'low';
   }
 
+  if (scale === 'ipsae') {
+    if (value >= 0.8) return 'excellent';
+    if (value >= 0.7) return 'good';
+    if (value >= 0.6) return 'medium';
+    if (value >= 0.4) return 'medium';
+    return 'low';
+  }
+
+  if (scale === 'sc') {
+    if (value >= 0.65) return 'excellent';
+    if (value >= 0.55) return 'good';
+    if (value >= 0.45) return 'medium';
+    return 'low';
+  }
+
   if (scale === 'probability') {
     const pct = value <= 1 ? value * 100 : value;
     if (pct >= 90) return 'excellent';
@@ -106,9 +123,9 @@ function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'ip
   }
 
   if (scale === 'pae') {
-    if (value <= 5) return 'excellent';
-    if (value <= 10) return 'good';
-    if (value <= 20) return 'medium';
+    if (value <= 3) return 'excellent';
+    if (value <= 5) return 'good';
+    if (value <= 10) return 'medium';
     return 'low';
   }
 
@@ -504,7 +521,6 @@ function ConfidencePanel({
   const preferredInterfaceMetricScale: 'probability' | 'iptm' =
     preferredInterfaceMetric.source === 'ipsae' ? 'probability' : 'iptm';
   const rankingScore = pickNumber(data, ['ranking_score']);
-  const fractionDisordered = pickNumber(data, ['fraction_disordered']);
   // 方向性 ipSAE：i→j 与 j→i 条件子集不同，值可能明显不同
   const p2lIpsae = readProbabilityMetric(data, ['protein_to_ligand_ipsae', 'proteinToLigandIpsae']);
   const l2pIpsae = readProbabilityMetric(data, ['ligand_to_protein_ipsae', 'ligandToProteinIpsae']);
@@ -512,17 +528,29 @@ function ConfidencePanel({
     ? (data.msa as Record<string, unknown>)
     : null;
   const msaDepth = msaRecord ? Number(msaRecord.depth) : NaN;
+  const interfaceSc = pickNumber(data, ['interface_sc']);
+  const hasClash = typeof data.has_clash === 'boolean' ? data.has_clash : null;
+  const chainPairIptmGlobal = pickNumber(data, ['chain_pair_iptm_global']);
 
   const pairRows = useMemo(() => extractPairIptmRows(data, chainIds), [data, chainIds]);
 
+  // 模态判定：SMILES 配体为小分子；ipSAE 家族为多肽/蛋白配体验证；其余按蛋白-蛋白处理
+  const ligandSmiles = typeof data.ligand_smiles === 'string' ? data.ligand_smiles.trim() : '';
+  const modality: 'small_molecule' | 'peptide' | 'protein' = ligandSmiles !== ''
+    ? 'small_molecule'
+    : ipsaeDom !== null || ligandIpsaeMax !== null || p2lIpsae !== null || l2pIpsae !== null
+      ? 'peptide'
+      : 'protein';
+  const plddtLabel = modality === 'protein' ? 'Mean pLDDT' : 'Ligand pLDDT';
+
   const cards = [
     {
-      label: 'Mean pLDDT',
+      label: plddtLabel,
       help:
         selectedLigandChainPlddt !== null
-          ? 'Selected ligand component confidence from 0 to 100. Blue is higher confidence.'
+          ? 'Selected ligand chain per-atom confidence (0-100). >=80 is the usual design gate (BindCraft); <50 indicates a wrong model. Measures geometry confidence, not affinity.'
           : ligandMeanPlddt !== null
-            ? 'Ligand atom confidence from 0 to 100. Blue is higher confidence.'
+            ? 'Ligand per-atom confidence (0-100). For ligand atoms the engine scores error against the protein pocket, so this doubles as pocket-placement confidence: >90 high, 70-90 confident, <50 probably wrong. Geometry confidence, not affinity.'
             : 'Per-residue confidence from 0 to 100. Blue is higher confidence.',
       value: meanPlddt,
       display: meanPlddt === null ? '-' : `${meanPlddt.toFixed(2)}`,
@@ -532,26 +560,46 @@ function ConfidencePanel({
       label: preferredInterfaceMetric.label,
       help:
         preferredInterfaceMetric.kind === 'ligand_ipsae'
-          ? 'Strongest ligand-contact IPSAE signal. Higher values indicate more confident local ligand contacts.'
+          ? 'Strongest ligand-contact ipSAE. Higher is better; >=0.7 confident, <0.6 unreliable.'
           : preferredInterfaceMetric.kind === 'ipsae_dom'
-            ? 'Interface predicted structural alignment error score for the selected complex. Higher is better.'
+            ? modality === 'peptide'
+              ? 'Interface ipSAE of the selected complex. Consensus gates: >0.61 predicts experimental success (3766-binder meta-analysis), >=0.7 confident, 0.6-0.7 cautious, <0.6 unreliable. Peptides under ~20 residues read low by construction - read together with PAE. Geometry confidence only, not affinity.'
+              : 'Interface ipSAE of the selected complex; fixes ipTM chain/interface conflation. >=0.8 very high, 0.7-0.8 confident, 0.6-0.7 cautious, <0.6 unreliable.'
             : selectedPairIptm !== null
-              ? 'Selected target-ligand component pair interface confidence (0 to 1). Higher is better.'
-              : 'Interface confidence between chains (0 to 1). Higher is better.',
+              ? 'Interface confidence (ipTM) of the selected target-ligand pair (0-1). >0.8 confident, 0.6-0.8 gray zone, <0.6 likely failed.'
+              : 'Interface confidence between chains (0 to 1). Higher is better.'
+          ,
       value: preferredInterfaceMetric.value,
       display: formatMetricValue(preferredInterfaceMetric.value, 4),
-      scale: preferredInterfaceMetricScale
+      scale: preferredInterfaceMetricScale === 'probability' ? ('ipsae' as const) : ('iptm' as const)
     },
-    {
-      label: 'pTM',
-      help: 'Global fold confidence (0 to 1). Higher is better.',
-      value: ptm,
-      display: formatMetricValue(ptm, 4),
-      scale: 'probability' as const
-    },
+    ...(modality === 'protein'
+      ? [
+          {
+            label: 'pTM',
+            help: 'Global fold confidence (0-1) over all tokens. When chain sizes differ strongly it follows the larger chain - prefer the interface metric for binder calls.',
+            value: ptm,
+            display: formatMetricValue(ptm, 4),
+            scale: 'iptm' as const
+          }
+        ]
+      : []),
+    ...(modality === 'small_molecule' && chainPairIptmGlobal !== null
+      ? [
+          {
+            label: 'Ligand ipTM',
+            help: 'ipTM aggregated at the protein-ligand interface (0-1) - the metric AF3-class engines use to rank ligand poses. >0.8 confident, 0.6-0.8 gray zone, <0.6 likely failed.',
+            value: chainPairIptmGlobal,
+            display: formatMetricValue(chainPairIptmGlobal, 4),
+            scale: 'iptm' as const
+          }
+        ]
+      : []),
     {
       label: 'PAE (A)',
-      help: 'Expected alignment error in angstrom. Lower is better.',
+      help: modality === 'peptide'
+        ? 'Expected interface alignment error (A). <3 A strong, <5 A acceptable; normalized interface PAE <=0.3 is the BindCraft/AfCycDesign gate. PAE calibration differs per engine - thresholds are not transferable across backends.'
+        : 'Expected alignment error (A). <3 A strong, <5 A acceptable interface packing; check the PAE matrix for localized mispredictions. Lower is better.',
       value: pae,
       display: formatMetricValue(pae, 2),
       scale: 'pae' as const
@@ -562,35 +610,54 @@ function ConfidencePanel({
             label: preferredInterfaceMetric.kind === 'ligand_ipsae' ? 'Interface IPSAE' : 'Ligand IPSAE',
             help:
               preferredInterfaceMetric.kind === 'ligand_ipsae'
-                ? 'Domain-level IPSAE for the selected complex. Higher is better.'
-                : 'Strongest ligand-contact IPSAE signal. Higher values indicate more confident local ligand contacts.',
+                ? 'Domain-level ipSAE for the selected complex. >=0.8 very high, 0.7-0.8 confident, <0.6 unreliable.'
+                : 'Strongest ligand-contact ipSAE signal. Higher values indicate more confident local ligand contacts.',
             value: preferredInterfaceMetric.kind === 'ligand_ipsae' ? ipsaeDom : ligandIpsaeMax,
             display: formatMetricValue(preferredInterfaceMetric.kind === 'ligand_ipsae' ? ipsaeDom : ligandIpsaeMax, 4),
+            scale: 'ipsae' as const
+          }
+        ]
+      : []),
+    ...(modality === 'small_molecule'
+      ? [
+          {
+            label: 'Ranking Score',
+            help: 'Engine-native composite for ranking samples within one task (ipTM/pLDDT terms, -100 clash penalty). Do not compare across engines.',
+            value: rankingScore,
+            display: formatMetricValue(rankingScore, 4),
             scale: 'probability' as const
           }
         ]
       : []),
-    {
-      label: 'Ranking Score',
-      help: 'AlphaFold3 ranking score. Higher values generally rank better.',
-      value: rankingScore,
-      display: formatMetricValue(rankingScore, 4),
-      scale: 'probability' as const
-    },
-    {
-      label: 'Fraction Disordered',
-      help: 'Predicted disordered proportion (0 to 1). Lower means more ordered structure.',
-      value: fractionDisordered,
-      display: formatMetricValue(fractionDisordered, 3),
-      scale: 'fraction' as const
-    },
+    ...(interfaceSc !== null
+      ? [
+          {
+            label: 'Shape Compl.',
+            help: 'Lawrence-Colman shape complementarity of the predicted interface (0-1). Protein-peptide interfaces typically 0.50-0.65; >=0.55 is the BindCraft peptide gate, >=0.62 the meta-analysis pre-filter. Soft ranking signal on predicted structures, not a confidence metric.',
+            value: interfaceSc,
+            display: formatMetricValue(interfaceSc, 4),
+            scale: 'sc' as const
+          }
+        ]
+      : []),
     ...(Number.isFinite(msaDepth) && msaDepth > 0
       ? [
           {
             label: 'MSA Depth',
-            help: 'Number of sequences in the self-MSA used by the engine. Higher means richer co-evolution context.',
+            help: 'Sequences in the self-MSA. Informational only - no consensus threshold; designed binders are expected to have shallow MSA. Shallow MSA on the TARGET lowers fold reliability; judge that via target pLDDT instead.',
             value: msaDepth,
             display: String(Math.round(msaDepth)),
+            scale: 'fraction' as const
+          }
+        ]
+      : []),
+    ...(hasClash === true
+      ? [
+          {
+            label: 'Clash',
+            help: 'Engine steric-clash flag. AF3 penalizes its ranking score by -100 when set; treat clash-positive predictions as rejected.',
+            value: 1,
+            display: 'detected',
             scale: 'fraction' as const
           }
         ]
@@ -599,21 +666,21 @@ function ConfidencePanel({
       ? [
           {
             label: 'ipSAE (Protein → Ligand)',
-            help: 'Directional interface ipSAE conditioned on the protein. Higher is better.',
+            help: 'Directional ipSAE conditioned on the protein - the screening-relevant direction: >0.4 likely true, <0.2 likely false at screening stage.',
             value: p2lIpsae,
             display: formatMetricValue(p2lIpsae, 4),
-            scale: 'probability' as const
+            scale: 'ipsae' as const
           },
           {
             label: 'ipSAE (Ligand → Protein)',
-            help: 'Directional interface ipSAE conditioned on the ligand. Higher is better.',
+            help: 'Directional ipSAE conditioned on the ligand. Conditioned subsets differ from the reverse direction, so the two need not agree.',
             value: l2pIpsae,
             display: formatMetricValue(l2pIpsae, 4),
-            scale: 'probability' as const
+            scale: 'ipsae' as const
           }
         ]
       : [])
-  ].filter((item) => item.value !== null || ['Mean pLDDT', preferredInterfaceMetric.label, 'pTM', 'PAE (A)'].includes(item.label));
+  ].filter((item) => item.value !== null || [plddtLabel, preferredInterfaceMetric.label, 'PAE (A)'].includes(item.label));
 
   return (
     <>
@@ -655,7 +722,7 @@ function ConfidencePanel({
       {pairRows.length > 0 && (
         <div className="confidence-pair-block">
           <div className="confidence-pair-head">
-            {renderHelp('Pair ipTM', 'Interface confidence for each chain pair. Higher is better.')}
+            {renderHelp('Pair ipTM', 'Interface confidence (ipTM) per chain pair; directional arrows mark conditioned direction. >0.8 confident, 0.6-0.8 gray zone, <0.6 likely failed.')}
             <span className="muted small">{pairRows.length} pairs</span>
           </div>
           <div className="confidence-pair-list">

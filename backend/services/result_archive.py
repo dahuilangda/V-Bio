@@ -1037,6 +1037,99 @@ class ResultArchiveService:
         return None
 
     @staticmethod
+    def _extract_interface_sc(src_zip) -> Optional[Dict[str, Any]]:
+        """Lawrence-Colman shape complementarity of the best-ranked sample.
+
+        Sides follow the classical definition: target is the largest polymeric
+        chain, binder is every other polymeric chain in contact with it.
+        Outputs without a second polymeric chain (protein-small-molecule
+        complexes) yield None -- the metric is undefined there and is never
+        defaulted.
+        """
+        import gemmi
+        import numpy as np
+        from shape_complementarity import compute_sc
+
+        best_conf_name = None
+        best_rank = None
+        for name in src_zip.namelist():
+            base = os.path.basename(name)
+            if 'summary_confidence' not in base or not base.endswith('.json'):
+                continue
+            try:
+                rank = float(json.loads(src_zip.read(name)).get('ranking_score'))
+            except Exception:  # noqa: BLE001 — unreadable sample entries are skipped
+                continue
+            if not math.isfinite(rank):
+                continue
+            if best_rank is None or rank > best_rank:
+                best_rank, best_conf_name = rank, name
+        if best_conf_name is None:
+            return None
+        structure_name = os.path.splitext(best_conf_name)[0].replace(
+            'summary_confidence_', '') + '.cif'
+        try:
+            structure_text = src_zip.read(structure_name).decode('utf-8', errors='replace')
+        except KeyError:
+            return None
+        try:
+            structure = gemmi.make_structure_from_block(
+                gemmi.cif.read_string(structure_text).sole_block())
+            structure.setup_entities()
+        except Exception:  # noqa: BLE001 — malformed sample structure: no Sc
+            return None
+        model = structure[0] if len(structure) else None
+        if model is None:
+            return None
+
+        def side(chains):
+            coords, atoms, residues = [], [], []
+            for chain in chains:
+                for res in chain:
+                    if res.het_flag == 'H':
+                        continue
+                    info = gemmi.find_tabulated_residue(res.name)
+                    if info is None or not info.is_amino_acid():
+                        continue
+                    for atom in res:
+                        if atom.element == 'H':
+                            continue
+                        coords.append((atom.pos.x, atom.pos.y, atom.pos.z))
+                        atoms.append(atom.name)
+                        residues.append(res.name.strip())
+            return coords, atoms, residues
+
+        polymer_chains = list(model)
+        if len(polymer_chains) < 2:
+            return None
+        target_chain = max(polymer_chains, key=lambda ch: sum(
+            1 for res in ch
+            if res.het_flag != 'H'
+            and gemmi.find_tabulated_residue(res.name) is not None
+            and gemmi.find_tabulated_residue(res.name).is_amino_acid()))
+        binder_chains = [ch for ch in polymer_chains if ch is not target_chain]
+        if not binder_chains:
+            return None
+        target_side, binder_side = side([target_chain]), side(binder_chains)
+        if not target_side[0] or not binder_side[0]:
+            return None
+        target_coords = np.asarray(target_side[0])
+        binder_coords = np.asarray(binder_side[0])
+        contacts = (np.linalg.norm(
+            target_coords[:, None, :] - binder_coords[None, :, :], axis=-1) <= 8.0).any()
+        if not contacts:
+            return None
+        result = compute_sc(target_side[0], target_side[1], target_side[2],
+                            binder_side[0], binder_side[1], binder_side[2])
+        sc_value = float(result.sc)
+        if not math.isfinite(sc_value):
+            return None
+        return {
+            'interface_sc': sc_value,
+            'interface_sc_median': float(result.median_distance),
+        }
+
+    @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
         """MSA depth from self_msa a3m files inside the archive."""
         total = 0
@@ -1110,44 +1203,44 @@ class ResultArchiveService:
                     ligand_plddt = self._extract_ligand_plddt(payload, ligand_atom_plddts=ligand_atom_plddts)
                     ipsae_dom = self._to_finite_float(payload.get('ipsae_dom'))
                     ligand_ipsae_max = self._to_finite_float(payload.get('ligand_ipsae_max'))
+                    protein_to_ligand_ipsae = self._to_finite_float(payload.get('protein_to_ligand_ipsae'))
+                    ligand_to_protein_ipsae = self._to_finite_float(payload.get('ligand_to_protein_ipsae'))
+                    chain_pair_iptm_global = self._to_finite_float(payload.get('chain_pair_iptm_global'))
+                    has_clash = payload.get('has_clash')
                     coverage = (
                         int(pair_iptm is not None)
                         + int(pair_pae is not None)
                         + int(ligand_plddt is not None)
                         + int(ipsae_dom is not None)
                         + int(ligand_ipsae_max is not None)
+                        + int(protein_to_ligand_ipsae is not None)
+                        + int(ligand_to_protein_ipsae is not None)
+                        + int(chain_pair_iptm_global is not None)
                     )
                     if coverage <= 0:
                         continue
                     score = coverage * 100 - len(name)
-                    if score <= best_score:
-                        parsed_entries.append((
-                            score,
-                            {
-                                'pair_iptm': pair_iptm,
-                                'pair_pae': pair_pae,
-                                'ligand_plddt': ligand_plddt,
-                                'ipsae_dom': ipsae_dom,
-                                'ligand_ipsae_max': ligand_ipsae_max,
-                                'ligand_atom_plddts': ligand_atom_plddts,
-                                'ligand_smiles': ligand_smiles,
-                                'ligand_display_smiles': ligand_display_smiles,
-                                'ligand_display_atom_plddts': ligand_display_atom_plddts,
-                            }
-                        ))
-                        continue
-                    best_score = score
-                    best = {
+                    metrics_block = {
                         'pair_iptm': pair_iptm,
                         'pair_pae': pair_pae,
                         'ligand_plddt': ligand_plddt,
                         'ipsae_dom': ipsae_dom,
                         'ligand_ipsae_max': ligand_ipsae_max,
+                        'protein_to_ligand_ipsae': protein_to_ligand_ipsae,
+                        'ligand_to_protein_ipsae': ligand_to_protein_ipsae,
+                        'chain_pair_iptm_global': chain_pair_iptm_global,
                         'ligand_atom_plddts': ligand_atom_plddts,
                         'ligand_smiles': ligand_smiles,
                         'ligand_display_smiles': ligand_display_smiles,
                         'ligand_display_atom_plddts': ligand_display_atom_plddts,
                     }
+                    if has_clash is not None:
+                        metrics_block['has_clash'] = bool(has_clash)
+                    if score <= best_score:
+                        parsed_entries.append((score, metrics_block))
+                        continue
+                    best_score = score
+                    best = metrics_block
                     parsed_entries.append((score, dict(best)))
                 if not best:
                     return None
@@ -1158,6 +1251,9 @@ class ResultArchiveService:
                     'ligand_plddt',
                     'ipsae_dom',
                     'ligand_ipsae_max',
+                    'protein_to_ligand_ipsae',
+                    'ligand_to_protein_ipsae',
+                    'chain_pair_iptm_global',
                     'ligand_atom_plddts',
                     'ligand_smiles',
                     'ligand_display_smiles',
@@ -1201,6 +1297,9 @@ class ResultArchiveService:
                 if pae_block:
                     merged.setdefault('pae_matrix', pae_block['pae_matrix'])
                     merged.setdefault('pae_chain_bounds', pae_block['pae_chain_bounds'])
+                sc_block = self._extract_interface_sc(src_zip)
+                if sc_block:
+                    merged.update(sc_block)
                 try:
                     summary_name = next(n for n in src_zip.namelist()
                                         if n.lower().endswith('output/summary.json'))

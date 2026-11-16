@@ -12,6 +12,7 @@ gemmi
 rdkit
 openpyxl
 pillow
+shape-complementarity  # Lawrence-Colman Sc in result_archive interface metrics
 
 # HALO lead-optimization module (capabilities/halo)
 torch
