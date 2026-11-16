@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 rsp = importlib.import_module("backend.runtime.run_single_prediction")
 
 _dpeptide_target_sequence = rsp._dpeptide_target_sequence
-_rfd4_candidates_from_summary = rsp._rfd4_candidates_from_summary
+from backend.runtime.rfd4_adapter import candidates_from_summary as _rfd4_candidates_from_summary
 
 
 def test_candidates_pick_shortest_polymer_per_output():
