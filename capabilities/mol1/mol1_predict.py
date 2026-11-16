@@ -366,6 +366,31 @@ def run_inference(input_json: Path, output_dir: Path, seed: int,
         raise RuntimeError(f"mol inference exited {result.returncode}")
 
 
+def _compact_pae_block(full_data: dict, max_dim: int = 134) -> dict | None:
+    """token 级 PAE 矩阵降采样到 ≤max_dim，附带链边界，供 2D 热图直读。"""
+    pae = full_data.get("token_pair_pae")
+    asym = full_data.get("token_asym_id")
+    if not isinstance(pae, list) or not pae or not isinstance(asym, list):
+        return None
+    n0 = len(pae)
+    if n0 == 0 or not isinstance(pae[0], list):
+        return None
+    down = max(1, -(-n0 // max_dim))
+    matrix, bounds = [], []
+    for i in range(0, n0, down):
+        row = []
+        for j in range(0, n0, down):
+            row.append(round(float(pae[i][j]), 2))
+        matrix.append(row)
+    for idx, chain in enumerate(asym):
+        last = bounds[-1] if bounds else None
+        if last and last["chain"] == chain:
+            last["end"] = idx
+        else:
+            bounds.append({"chain": int(chain), "start": idx, "end": idx})
+    return {"pae_matrix": matrix, "pae_chain_bounds": bounds}
+
+
 def collect_summaries(output_dir: Path) -> tuple[list[dict], list[str]]:
     """读全部样本置信度；损坏文件不进结果，路径返回给调用方显式上报。"""
     summaries, skipped = [], []
@@ -376,12 +401,20 @@ def collect_summaries(output_dir: Path) -> tuple[list[dict], list[str]]:
         except (json.JSONDecodeError, OSError):
             skipped.append(str(conf))
             continue
+        full = conf.parent / conf.name.replace(
+            "_summary_confidence", "_full_data").replace(".json", ".json")
+        pae_block = None
+        try:
+            pae_block = _compact_pae_block(json.loads(full.read_text()))
+        except (json.JSONDecodeError, OSError):
+            pae_block = None
         cif = conf.parent / conf.name.replace(
             "_summary_confidence", "").replace(".json", ".cif")
         summaries.append({
             "seed": conf.parent.parent.name,
             "confidence": data,
             "cif": str(cif) if cif.exists() else None,
+            **({"pae_block": pae_block} if pae_block else {}),
         })
     return summaries, skipped
 
@@ -439,13 +472,33 @@ def main() -> None:
                   use_msa=not args.no_msa, atom_confidence=args.atom_confidence)
 
     summaries, skipped = collect_summaries(output_dir)
+
+    # MSA 深度：自体 a3m 的序列行数（> 行为链名），供前端 MSA 面板展示
+    msa_stats = None
+    a3m_dir = work_dir / "self_msa"
+    if a3m_dir.is_dir():
+        seq_count = 0
+        for a3m in sorted(a3m_dir.rglob("*.a3m")):
+            try:
+                rows = [l for l in a3m.read_text().splitlines() if l and not l.startswith(">")]
+                seq_count += max(1, len(rows))
+            except OSError:
+                continue
+        if seq_count > 0:
+            msa_stats = {"depth": seq_count}
+
+    # pae_block 进 confidence（confidence 整体会作为任务行 confidence 存储）
+    best = (max(summaries, key=lambda s: s["confidence"].get("ranking_score", 0))
+            if summaries else None)
+    if best and best.get("pae_block"):
+        best["confidence"].update(best["pae_block"])
     summary = {
         "engine": "mol1",
         "input": str(input_json),
         "n_summaries": len(summaries),
         "skipped": skipped,
-        "best": (max(summaries, key=lambda s: s["confidence"].get("ranking_score", 0))
-                 if summaries else None),
+        "best": best,
+        "msa": msa_stats,
         "summaries": summaries,
     }
     (output_dir / "summary.json").write_text(

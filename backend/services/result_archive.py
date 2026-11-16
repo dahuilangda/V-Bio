@@ -997,6 +997,64 @@ class ResultArchiveService:
             return self._normalize_01_or_100(fallback)
         return None
 
+    @staticmethod
+    def _extract_compact_pae_from_zip(src_zip) -> Optional[Dict[str, Any]]:
+        """Best-effort compact PAE matrix (≤134²) + chain bounds from mol1/af3
+        full_data samples; None when absent."""
+        import json as _json
+        fd_names = [n for n in src_zip.namelist()
+                    if 'full_data' in n.lower() and n.lower().endswith('.json')]
+        for name in sorted(fd_names):
+            try:
+                data = _json.loads(src_zip.read(name))
+            except Exception:  # noqa: BLE001
+                continue
+            pae = data.get('token_pair_pae')
+            asym = data.get('token_asym_id')
+            if not isinstance(pae, list) or not pae or not isinstance(asym, list):
+                continue
+            n0 = len(pae)
+            if n0 == 0 or not isinstance(pae[0], list):
+                continue
+            down = max(1, -(-n0 // 134))
+            matrix, bounds = [], []
+            for i in range(0, n0, down):
+                row_vals = pae[i]
+                row = []
+                for j in range(0, n0, down):
+                    try:
+                        row.append(round(float(row_vals[j]), 2))
+                    except (IndexError, TypeError, ValueError):
+                        row.append(25.0)
+                matrix.append(row)
+            for idx, chain in enumerate(asym):
+                last = bounds[-1] if bounds else None
+                if last and last.get('chain') == chain:
+                    last['end'] = idx
+                else:
+                    bounds.append({'chain': int(chain), 'start': idx, 'end': idx})
+            return {'pae_matrix': matrix, 'pae_chain_bounds': bounds}
+        return None
+
+    @staticmethod
+    def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
+        """MSA depth from self_msa a3m files inside the archive."""
+        total = 0
+        found = False
+        for name in src_zip.namelist():
+            if not name.lower().endswith('.a3m'):
+                continue
+            found = True
+            try:
+                rows = [line for line in src_zip.read(name).decode('utf-8', errors='replace').splitlines()
+                        if line and not line.startswith('>')]
+                total += max(1, len(rows))
+            except Exception:  # noqa: BLE001
+                continue
+        if not found or total <= 0:
+            return None
+        return {'depth': total}
+
     def _extract_compact_prediction_metrics_from_zip(self, source_zip_path: str) -> Optional[Dict[str, Any]]:
         try:
             with zipfile.ZipFile(source_zip_path, 'r') as src_zip:
@@ -1138,6 +1196,20 @@ class ResultArchiveService:
                     for alias in ('complex_pde', 'complex_pae', 'pae'):
                         if self._to_finite_float(merged.get(alias)) is None:
                             merged[alias] = pair_pae
+                # PAE 矩阵（降采样）+ MSA 深度：任务行直读，前端热图/MSA 面板免解析
+                pae_block = self._extract_compact_pae_from_zip(src_zip)
+                if pae_block:
+                    merged.setdefault('pae_matrix', pae_block['pae_matrix'])
+                    merged.setdefault('pae_chain_bounds', pae_block['pae_chain_bounds'])
+                try:
+                    summary_name = next(n for n in src_zip.namelist()
+                                        if n.lower().endswith('output/summary.json'))
+                    root_summary = json.loads(src_zip.read(summary_name))
+                    msa_stats = root_summary.get('msa')
+                    if isinstance(msa_stats, dict) and msa_stats.get('depth'):
+                        merged['msa'] = msa_stats
+                except Exception:  # noqa: BLE001 — zip 无 summary.json 时跳过
+                    pass
                 return merged or None
         except Exception as exc:
             self.logger.debug('Failed to extract compact prediction metrics from %s: %s', source_zip_path, exc)

@@ -392,27 +392,27 @@ interface PairRow {
   chainA: string;
   chainB: string;
   value: number;
+  directional?: boolean;
 }
 
 function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: string[]): PairRow[] {
   const rows: PairRow[] = [];
   const pairMap = readByPath(data, 'pair_chains_iptm');
   if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
-    const best = new Map<string, PairRow>();
+    // mol1 的链对 ipTM 是方向性的（i→j ≠ j→i），双向各占一行
+    const seen = new Set<string>();
+    const rows: PairRow[] = [];
     for (const [chainA, chainBMap] of Object.entries(pairMap as Record<string, unknown>)) {
       if (!chainBMap || typeof chainBMap !== 'object' || Array.isArray(chainBMap)) continue;
       for (const [chainB, raw] of Object.entries(chainBMap as Record<string, unknown>)) {
         const value = normalizeProbability(toNumber(raw));
-        if (value === null || chainTokenEquals(chainA, chainB)) continue;
-        const [a, b] = chainA < chainB ? [chainA, chainB] : [chainB, chainA];
-        const key = `${a}|${b}`;
-        const current = best.get(key);
-        if (!current || value > current.value) {
-          best.set(key, { chainA: a, chainB: b, value });
-        }
+        const key = `${chainA}|${chainB}`;
+        if (value === null || chainTokenEquals(chainA, chainB) || seen.has(key)) continue;
+        seen.add(key);
+        rows.push({ chainA, chainB, value, directional: true });
       }
     }
-    return Array.from(best.values()).sort((a, b) => b.value - a.value);
+    return rows.sort((a, b) => b.value - a.value);
   }
 
   const pairMatrixRaw = readByPath(data, 'chain_pair_iptm') ?? readByPath(data, 'chain_pair_iptm_global');
@@ -426,14 +426,15 @@ function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: st
       : fallbackChainIds;
 
   for (let i = 0; i < pairMatrix.length; i += 1) {
-    const row = pairMatrix[i];
-    if (!Array.isArray(row)) continue;
-    for (let j = i + 1; j < row.length; j += 1) {
-      const value = normalizeProbability(toNumber(row[j]));
+    const rowI = pairMatrix[i];
+    if (!Array.isArray(rowI)) continue;
+    for (let j = 0; j < rowI.length; j += 1) {
+      if (j === i) continue;
+      const value = normalizeProbability(toNumber(rowI[j]));
       if (value === null) continue;
       const chainA = chainIds[i] || `Chain ${i + 1}`;
       const chainB = chainIds[j] || `Chain ${j + 1}`;
-      rows.push({ chainA, chainB, value });
+      rows.push({ chainA, chainB, value, directional: true });
     }
   }
 
@@ -493,6 +494,10 @@ function ConfidencePanel({
     preferredInterfaceMetric.source === 'ipsae' ? 'probability' : 'iptm';
   const rankingScore = pickNumber(data, ['ranking_score']);
   const fractionDisordered = pickNumber(data, ['fraction_disordered']);
+  const msaRecord = data.msa && typeof data.msa === 'object' && !Array.isArray(data.msa)
+    ? (data.msa as Record<string, unknown>)
+    : null;
+  const msaDepth = msaRecord ? Number(msaRecord.depth) : NaN;
 
   const pairRows = useMemo(() => extractPairIptmRows(data, chainIds), [data, chainIds]);
 
@@ -564,7 +569,18 @@ function ConfidencePanel({
       value: fractionDisordered,
       display: formatMetricValue(fractionDisordered, 3),
       scale: 'fraction' as const
-    }
+    },
+    ...(Number.isFinite(msaDepth) && msaDepth > 0
+      ? [
+          {
+            label: 'MSA Depth',
+            help: 'Number of sequences in the self-MSA used by the engine. Higher means richer co-evolution context.',
+            value: msaDepth,
+            display: String(Math.round(msaDepth)),
+            scale: 'fraction' as const
+          }
+        ]
+      : [])
   ].filter((item) => item.value !== null || ['Mean pLDDT', preferredInterfaceMetric.label, 'pTM', 'PAE (A)'].includes(item.label));
 
   return (
@@ -616,7 +632,7 @@ function ConfidencePanel({
               const pct = Math.max(0, Math.min(100, (row.value <= 1 ? row.value : row.value / 100) * 100));
               return (
                 <div key={`${row.chainA}-${row.chainB}`} className={`confidence-pair-line tone-${toneForPair}`}>
-                  <span className="confidence-pair-label">{`${row.chainA} ↔ ${row.chainB}`}</span>
+                  <span className="confidence-pair-label">{`${row.chainA} ${row.directional ? '→' : '↔'} ${row.chainB}`}</span>
                   <div className="confidence-pair-meter">
                     <span style={{ width: `${pct.toFixed(1)}%` }} />
                   </div>
