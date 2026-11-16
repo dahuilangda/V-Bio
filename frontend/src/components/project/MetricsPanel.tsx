@@ -8,7 +8,7 @@ import {
 } from '../../pages/projectDetail/projectMetrics';
 import { isNumericToken } from '../../pages/projectTasks/taskDataConfidence';
 import { normalizeProbability } from '../../pages/projectTasks/taskDataCore';
-import { normalizeChainToken } from '../../pages/projectDetail/projectMetrics';
+import { normalizeChainToken, readProbabilityMetric } from '../../pages/projectDetail/projectMetrics';
 import { normalizePlddt } from '../../pages/projectTasks/taskDataConfidence';
 
 interface MetricsPanelProps {
@@ -399,19 +399,30 @@ function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: st
   const rows: PairRow[] = [];
   const pairMap = readByPath(data, 'pair_chains_iptm');
   if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
-    // mol1 的链对 ipTM 是方向性的（i→j ≠ j→i），双向各占一行
-    const seen = new Set<string>();
+    // 引擎链对矩阵对称时每个链对一行（↔）；不对称的值按方向分行（→）
     const rows: PairRow[] = [];
+    const byKey = new Map<string, PairRow>();
+    const directionalRows: PairRow[] = [];
     for (const [chainA, chainBMap] of Object.entries(pairMap as Record<string, unknown>)) {
       if (!chainBMap || typeof chainBMap !== 'object' || Array.isArray(chainBMap)) continue;
       for (const [chainB, raw] of Object.entries(chainBMap as Record<string, unknown>)) {
         const value = normalizeProbability(toNumber(raw));
-        const key = `${chainA}|${chainB}`;
-        if (value === null || chainTokenEquals(chainA, chainB) || seen.has(key)) continue;
-        seen.add(key);
-        rows.push({ chainA, chainB, value, directional: true });
+        if (value === null || chainTokenEquals(chainA, chainB)) continue;
+        const [low, high] = chainA < chainB ? [chainA, chainB] : [chainB, chainA];
+        const key = `${low}|${high}`;
+        const current = byKey.get(key);
+        if (!current) {
+          byKey.set(key, { chainA: low, chainB: high, value, directional: false });
+          continue;
+        }
+        // 同一对第二方向：与已存值一致则丢弃，不一致则两个方向都出 → 行
+        if (Math.abs(value - current.value) > 1e-6) {
+          directionalRows.push({ chainA: high, chainB: low, value, directional: true });
+        }
       }
     }
+    rows.push(...Array.from(byKey.values()));
+    rows.push(...directionalRows);
     return rows.sort((a, b) => b.value - a.value);
   }
 
@@ -494,6 +505,9 @@ function ConfidencePanel({
     preferredInterfaceMetric.source === 'ipsae' ? 'probability' : 'iptm';
   const rankingScore = pickNumber(data, ['ranking_score']);
   const fractionDisordered = pickNumber(data, ['fraction_disordered']);
+  // 方向性 ipSAE：i→j 与 j→i 条件子集不同，值可能明显不同
+  const p2lIpsae = readProbabilityMetric(data, ['protein_to_ligand_ipsae', 'proteinToLigandIpsae']);
+  const l2pIpsae = readProbabilityMetric(data, ['ligand_to_protein_ipsae', 'ligandToProteinIpsae']);
   const msaRecord = data.msa && typeof data.msa === 'object' && !Array.isArray(data.msa)
     ? (data.msa as Record<string, unknown>)
     : null;
@@ -578,6 +592,24 @@ function ConfidencePanel({
             value: msaDepth,
             display: String(Math.round(msaDepth)),
             scale: 'fraction' as const
+          }
+        ]
+      : []),
+    ...(p2lIpsae !== null && l2pIpsae !== null && Math.abs(p2lIpsae - l2pIpsae) > 0.005
+      ? [
+          {
+            label: 'ipSAE (Protein → Ligand)',
+            help: 'Directional interface ipSAE conditioned on the protein. Higher is better.',
+            value: p2lIpsae,
+            display: formatMetricValue(p2lIpsae, 4),
+            scale: 'probability' as const
+          },
+          {
+            label: 'ipSAE (Ligand → Protein)',
+            help: 'Directional interface ipSAE conditioned on the ligand. Higher is better.',
+            value: l2pIpsae,
+            display: formatMetricValue(l2pIpsae, 4),
+            scale: 'probability' as const
           }
         ]
       : [])
