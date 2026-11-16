@@ -473,19 +473,23 @@ def main() -> None:
 
     summaries, skipped = collect_summaries(output_dir)
 
-    # MSA 深度：自体 a3m 的序列行数（> 行为链名），供前端 MSA 面板展示
+    # MSA 深度：受体链实际使用的 a3m 序列行数（缓存/搜索/自体三条路径统一），
+    # 供前端 MSA 面板展示
     msa_stats = None
-    a3m_dir = work_dir / "self_msa"
-    if a3m_dir.is_dir():
-        seq_count = 0
-        for a3m in sorted(a3m_dir.rglob("*.a3m")):
+    depth = 0
+    for job in jobs:
+        for entry in job["sequences"]:
+            entity = entry.get("proteinChain")
+            if not entity or not entity.get("unpairedMsaPath"):
+                continue
             try:
-                rows = [l for l in a3m.read_text().splitlines() if l and not l.startswith(">")]
-                seq_count += max(1, len(rows))
+                rows = [l for l in Path(entity["unpairedMsaPath"]).read_text().splitlines()
+                        if l and not l.startswith(">")]
             except OSError:
                 continue
-        if seq_count > 0:
-            msa_stats = {"depth": seq_count}
+            depth += max(1, len(rows))
+    if depth > 0:
+        msa_stats = {"depth": depth}
 
     # pae_block 进 confidence（confidence 整体会作为任务行 confidence 存储）
     best = (max(summaries, key=lambda s: s["confidence"].get("ranking_score", 0))
