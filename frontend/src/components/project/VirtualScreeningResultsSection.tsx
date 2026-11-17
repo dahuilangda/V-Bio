@@ -431,7 +431,7 @@ export function VirtualScreeningResultsSection({
 
   const renderMetricProfile = (record: VirtualScreeningPredictionRecord | null) => {
     const interfaceValue = record?.interfaceMetricValue ?? record?.pairIptm ?? null;
-    const interfaceLabel = record?.interfaceMetricLabel || 'IPSAE';
+    const interfaceLabel = record?.interfaceMetricLabel || 'ipSAE';
     return (
       <div className="lead-opt-info-col lead-opt-info-col--profile virtual-screening-model-profile">
         <div className={`lead-opt-confidence-row ${metricTone(record?.ligandPlddt ?? null)}`}>
@@ -623,7 +623,7 @@ export function VirtualScreeningResultsSection({
                         <strong>{formatNumber(record.ligandPlddt, 1)}</strong>
                       </span>
                       <span className="lead-opt-card-pill">
-                        <span className="lead-opt-card-pill-key">{record.interfaceMetricLabel || 'IPSAE'}</span>
+                        <span className="lead-opt-card-pill-key">{record.interfaceMetricLabel || 'ipSAE'}</span>
                         <strong>{formatNumber(record.interfaceMetricValue ?? record.pairIptm, 3)}</strong>
                       </span>
                       <span className="lead-opt-card-pill">

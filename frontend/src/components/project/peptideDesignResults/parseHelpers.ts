@@ -50,7 +50,7 @@ export interface PeptideDesignCandidate {
   plddt: number | null;
   residuePlddts: number[];
   interfaceMetric: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   iptm: number | null;
   ipsae: number | null;
@@ -423,7 +423,7 @@ export function readPreferredInterfaceMetricForCandidate(
   row: Record<string, unknown>,
   preferredTargetChainId: string | undefined,
   preferredLigandChainId: string | undefined
-): { value: number | null; label: 'IPSAE' | 'ipTM'; source: 'ipsae' | 'iptm' | 'none' } {
+): { value: number | null; label: 'ipSAE' | 'ipTM'; source: 'ipsae' | 'iptm' | 'none' } {
   const nested = [
     asRecord(row.result),
     asRecord(row.prediction),
@@ -438,22 +438,21 @@ export function readPreferredInterfaceMetricForCandidate(
   for (const payload of payloads) {
     const ligandIpsaeMax = normalizeIptm(firstFiniteMetric(payload, ['ligand_ipsae_max', 'ligandIpsaeMax']));
     if (ligandIpsaeMax !== null) {
-      return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae' };
+      return { value: ligandIpsaeMax, label: 'ipSAE', source: 'ipsae' };
     }
     const ipsaeDom = normalizeIptm(firstFiniteMetric(payload, ['ipsae_dom', 'ipsaeDom']));
     if (ipsaeDom !== null) {
-      return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
+      return { value: ipsaeDom, label: 'ipSAE', source: 'ipsae' };
     }
     // interface_metric carries its own label (IPSAE or IPTM).
     const interfaceMetric = normalizeIptm(firstFiniteMetric(payload, ['interface_metric', 'interfaceMetric']));
     if (interfaceMetric !== null) {
+      // Declared labels are normalized to uppercase before comparison.
       const label = firstNonEmptyText(payload, ['interface_metric_label', 'interfaceMetricLabel']).toUpperCase();
-      if (label === 'IPSAE') {
-        return { value: interfaceMetric, label: 'IPSAE', source: 'ipsae' };
-      }
       if (label === 'IPTM') {
         return { value: interfaceMetric, label: 'ipTM', source: 'iptm' };
       }
+      return { value: interfaceMetric, label: 'ipSAE', source: 'ipsae' };
     }
   }
 
@@ -461,7 +460,7 @@ export function readPreferredInterfaceMetricForCandidate(
   if (iptm !== null) {
     return { value: iptm, label: 'ipTM', source: 'iptm' };
   }
-  return { value: null, label: 'IPSAE', source: 'none' };
+  return { value: null, label: 'ipSAE', source: 'none' };
 }
 
 export function normalizeWeight(value: number | null): number | null {

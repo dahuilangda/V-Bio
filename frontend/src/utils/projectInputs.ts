@@ -558,7 +558,7 @@ function normalizeVirtualScreeningPredictions(value: unknown): Record<string, Vi
       state: state as VirtualScreeningPredictionRecord['state'],
       ligandPlddt: numberOrNull(record.ligandPlddt ?? record.ligand_plddt),
       interfaceMetricValue: numberOrNull(record.interfaceMetricValue ?? record.interface_metric_value),
-      interfaceMetricLabel: String(record.interfaceMetricLabel ?? record.interface_metric_label) === 'ipTM' ? 'ipTM' : 'IPSAE',
+      interfaceMetricLabel: String(record.interfaceMetricLabel ?? record.interface_metric_label) === 'ipTM' ? 'ipTM' : 'ipSAE',
       pairIptm: numberOrNull(record.pairIptm ?? record.pair_iptm),
       pairPae: numberOrNull(record.pairPae ?? record.pair_pae),
       error: String(record.error || '').trim().slice(0, 800),

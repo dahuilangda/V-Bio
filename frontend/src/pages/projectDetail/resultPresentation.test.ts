@@ -13,7 +13,7 @@ const BASE = {
   snapshotPlddtTone: 'good' as const,
   preferredInterfaceMetric: {
     kind: 'ipsae_dom' as const,
-    label: 'IPSAE' as const,
+    label: 'ipSAE' as const,
     source: 'ipsae' as const,
     value: 0.72,
     tone: 'good' as const,
@@ -56,7 +56,7 @@ describe('buildSnapshotCards — pIC50 card', () => {
 
 // The D-peptide design loop reports its refined interface score through the
 // unified interface_metric channel (interface_metric + interface_metric_label
-// 'IPSAE'); the legacy ligand_ipsae_max / ipsae_dom keys stay absent. The
+// 'ipSAE'); the legacy ligand_ipsae_max / ipsae_dom keys stay absent. The
 // detail/metrics resolvers must surface it as IPSAE instead of degrading to
 // ipTM (regression: 2026-09-04 demo run showed ipTM where ipSAE belonged).
 describe('interface_metric channel — ipSAE display', () => {
@@ -64,7 +64,7 @@ describe('interface_metric channel — ipSAE display', () => {
     iptm: 0.6547,
     pair_iptm: 0.6547,
     interface_metric: 0.3812953531742096,
-    interface_metric_label: 'IPSAE',
+    interface_metric_label: 'ipSAE',
     chain_mean_plddt: { A: 94.2, B: 82.3 }
   };
 
@@ -84,7 +84,7 @@ describe('interface_metric channel — ipSAE display', () => {
       interfaceMetric: readInterfaceMetricIpsaeChannel(DPEPTIDE_CONFIDENCE)
     });
     expect(resolved.source).toBe('ipsae');
-    expect(resolved.label).toBe('IPSAE');
+    expect(resolved.label).toBe('ipSAE');
     expect(resolved.kind).toBe('interface_metric');
     expect(resolved.value).toBeCloseTo(0.3813, 4);
   });
@@ -108,7 +108,7 @@ describe('interface_metric channel — ipSAE display', () => {
     const cards = buildSnapshotCards({ ...BASE, preferredInterfaceMetric: resolved });
     const interfaceCard = cards.find((c) => c.key === 'ipsae');
     expect(interfaceCard).toBeDefined();
-    expect(interfaceCard!.label).toBe('IPSAE');
+    expect(interfaceCard!.label).toBe('ipSAE');
     expect(interfaceCard!.value).toBe('0.3813');
   });
 });

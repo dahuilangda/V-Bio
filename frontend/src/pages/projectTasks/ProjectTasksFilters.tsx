@@ -274,7 +274,7 @@ export function ProjectTasksFilters({
                   <div className="advanced-filter-checkbox-stack">
                     {([
                       ['plddt', 'pLDDT'],
-                      ['ipsae', 'IPSAE'],
+                      ['ipsae', 'ipSAE'],
                       ['iptm', 'ipTM'],
                       ['pae', 'PAE']
                     ] as const).map(([key, label]) => (

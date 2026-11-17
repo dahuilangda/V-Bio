@@ -508,7 +508,7 @@ export function mergePredictionInterfaceMetric(
   const preferredSource = normalizePredictionInterfaceSource(preferred.interfaceMetricSource);
   const fallbackSource = normalizePredictionInterfaceSource(fallback.interfaceMetricSource);
   const mergedSource = preferredSource !== 'none' ? preferredSource : fallbackSource;
-  const mergedLabel = mergedSource === 'iptm' ? 'ipTM' : 'IPSAE';
+  const mergedLabel = mergedSource === 'iptm' ? 'ipTM' : 'ipSAE';
   return {
     interfaceMetricValue: preferredValue ?? fallbackValue,
     interfaceMetricLabel: mergedLabel,
@@ -697,7 +697,7 @@ export function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): 
     backend,
     pairIptm: toFiniteNumber(value.pairIptm),
     interfaceMetricValue: toFiniteNumber(value.interfaceMetricValue),
-    interfaceMetricLabel: value.interfaceMetricLabel === 'ipTM' ? 'ipTM' : 'IPSAE',
+    interfaceMetricLabel: value.interfaceMetricLabel === 'ipTM' ? 'ipTM' : 'ipSAE',
     interfaceMetricSource:
       value.interfaceMetricSource === 'ipsae' ? 'ipsae' : value.interfaceMetricSource === 'iptm' ? 'iptm' : 'none',
     pairPae: toFiniteNumber(value.pairPae),

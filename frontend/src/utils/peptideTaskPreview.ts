@@ -26,22 +26,22 @@ function normalizeIptmValue(value: number | null): number | null {
 
 function readPreferredInterfaceMetric(row: Record<string, unknown>): {
   value: number | null;
-  label: 'IPSAE' | 'ipTM';
+  label: 'ipSAE' | 'ipTM';
   source: 'ipsae' | 'iptm' | 'none';
 } {
   const ligandIpsaeMax = normalizeIptmValue(firstFiniteMetric([row], ['ligand_ipsae_max', 'ligandIpsaeMax']));
   if (ligandIpsaeMax !== null) {
-    return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae' };
+    return { value: ligandIpsaeMax, label: 'ipSAE', source: 'ipsae' };
   }
   const ipsaeDom = normalizeIptmValue(firstFiniteMetric([row], ['ipsae_dom', 'ipsaeDom']));
   if (ipsaeDom !== null) {
-    return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
+    return { value: ipsaeDom, label: 'ipSAE', source: 'ipsae' };
   }
   const iptm = normalizeIptmValue(firstFiniteMetric([row], ['pair_iptm_target_binder', 'pair_iptm', 'iptm']));
   if (iptm !== null) {
     return { value: iptm, label: 'ipTM', source: 'iptm' };
   }
-  return { value: null, label: 'IPSAE', source: 'none' };
+  return { value: null, label: 'ipSAE', source: 'none' };
 }
 
 function normalizeInt(value: number | null): number | null {

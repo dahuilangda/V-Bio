@@ -28,7 +28,7 @@ export interface LeadOptPredictionRecord {
   backend: string;
   pairIptm: number | null;
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pairPae: number | null;
   pairIptmResolved?: boolean;
@@ -51,7 +51,7 @@ function resolveLeadOptPreferredInterfaceMetric(params: {
   pairIptm: number | null;
 }): {
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
 } {
   const confidence = params.confidence || {};
@@ -229,7 +229,7 @@ function extractPredictionMetricsFromStatusInfo(
 ): {
   pairIptm: number | null;
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pairPae: number | null;
   ligandPlddt: number | null;
@@ -690,7 +690,7 @@ function extractPredictionResultPayload(
 ): {
   pairIptm: number | null;
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pairPae: number | null;
   ligandPlddt: number | null;

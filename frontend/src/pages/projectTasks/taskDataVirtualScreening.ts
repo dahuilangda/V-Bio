@@ -10,7 +10,7 @@ interface VirtualScreeningPredictionEntry {
   state: string;
   ligandPlddt: number | null;
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   pairIptm: number | null;
   pairPae: number | null;
   updatedAt: number;
@@ -97,7 +97,7 @@ function readPredictionEntries(task: ProjectTask): VirtualScreeningPredictionEnt
       interfaceMetricLabel:
         String(record.interfaceMetricLabel ?? record.interface_metric_label) === 'ipTM'
           ? 'ipTM'
-          : 'IPSAE',
+          : 'ipSAE',
       pairIptm: finiteNumber(record.pairIptm ?? record.pair_iptm),
       pairPae: finiteNumber(record.pairPae ?? record.pair_pae),
       updatedAt: finiteNumber(record.updatedAt ?? record.updated_at) ?? 0,
@@ -198,7 +198,7 @@ export function readVirtualScreeningTaskRowSummary(
   const interfaceMetricValue = normalizedProbability(
     prediction?.interfaceMetricValue ?? null
   );
-  const interfaceMetricLabel = prediction?.interfaceMetricLabel || 'IPSAE';
+  const interfaceMetricLabel = prediction?.interfaceMetricLabel || 'ipSAE';
   const pairIptm = normalizedProbability(prediction?.pairIptm ?? null);
   const iptm =
     pairIptm ??
@@ -207,12 +207,12 @@ export function readVirtualScreeningTaskRowSummary(
   return {
     metrics: {
       plddt: normalizedPlddt(prediction?.ligandPlddt ?? null),
-      ipsae: interfaceMetricLabel === 'IPSAE' ? interfaceMetricValue : null,
+      ipsae: interfaceMetricLabel !== 'ipTM' ? interfaceMetricValue : null,
       iptm,
       interfaceMetricValue,
       interfaceMetricLabel,
       interfaceMetricSource: prediction
-        ? interfaceMetricLabel === 'IPSAE'
+        ? interfaceMetricLabel !== 'ipTM'
           ? 'ipsae'
           : 'iptm'
         : 'none',

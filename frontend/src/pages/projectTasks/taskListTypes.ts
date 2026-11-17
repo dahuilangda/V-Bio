@@ -26,7 +26,7 @@ export interface TaskConfidenceMetrics {
   ipsae: number | null;
   iptm: number | null;
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pae: number | null;
 }

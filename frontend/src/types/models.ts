@@ -134,7 +134,7 @@ export interface VirtualScreeningPredictionRecord {
   state: VirtualScreeningStructureState;
   ligandPlddt: number | null;
   interfaceMetricValue: number | null;
-  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricLabel: 'ipSAE' | 'ipTM';
   pairIptm: number | null;
   pairPae: number | null;
   error: string;

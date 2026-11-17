@@ -164,6 +164,19 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
   }
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  // bounds are in original-token space; the matrix is downsampled to n rows.
+  // Everything that indexes the matrix (boundary lines, track, hover) works
+  // in matrix space via this rescale.
+  const n = Array.isArray(matrix) ? matrix.length : 0;
+  const scaledBounds = useMemo<PaeBounds[] | null>(() => {
+    if (!Array.isArray(bounds) || bounds.length === 0 || !n) return null;
+    const tokenTotal = Math.max(...bounds.map((b) => b.end)) + 1;
+    return bounds.map((b) => ({
+      chain: b.chain,
+      start: Math.round((b.start / tokenTotal) * n),
+      end: Math.min(n - 1, Math.round((b.end / tokenTotal) * n))
+    }));
+  }, [bounds, n]);
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
@@ -197,40 +210,33 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
         }
       }
       ctx.putImageData(image, 0, 0);
-      if (bounds && bounds.length > 1) {
+      if (scaledBounds && scaledBounds.length > 1) {
         ctx.strokeStyle = 'rgba(70, 90, 80, 0.55)';
         ctx.lineWidth = 1.5;
-        let acc = 0;
-        bounds.forEach((b, idx) => {
-          acc += b.end - b.start + 1;
-          if (idx < bounds.length - 1) {
-            const pos = (acc / n) * size;
-            ctx.beginPath();
-            ctx.moveTo(pos, 0);
-            ctx.lineTo(pos, size);
-            ctx.moveTo(0, pos);
-            ctx.lineTo(size, pos);
-            ctx.stroke();
-          }
+        scaledBounds.slice(0, -1).forEach((b) => {
+          const pos = (b.end / n) * size;
+          ctx.beginPath();
+          ctx.moveTo(pos, 0);
+          ctx.lineTo(pos, size);
+          ctx.moveTo(0, pos);
+          ctx.lineTo(size, pos);
+          ctx.stroke();
         });
       }
       // Chain track under the matrix: hue per chain, letter when wide enough.
       const trackY = size + 6;
       ctx.fillStyle = '#eef3ef';
       ctx.fillRect(0, trackY, size, trackH - 6);
-      let acc2 = 0;
       ctx.font = '600 22px sans-serif';
-      bounds?.forEach((b, idx) => {
-        const len = b.end - b.start + 1;
-        const x0 = (acc2 / n) * size;
-        const w = (len / n) * size;
+      scaledBounds?.forEach((b, idx) => {
+        const x0 = (b.start / n) * size;
+        const w = Math.max(1, ((b.end - b.start + 1) / n) * size);
         ctx.fillStyle = PAE_TRACK_HUES[idx % PAE_TRACK_HUES.length];
-        ctx.fillRect(x0, trackY, Math.max(1, w - 2), trackH - 6);
+        ctx.fillRect(x0, trackY, w - 2, trackH - 6);
         if (w >= 26) {
           ctx.fillStyle = '#3d5a4c';
           ctx.fillText(chainLetter(b.chain), x0 + w / 2 - 8, trackY + 28);
         }
-        acc2 += len;
       });
     };
     return observeOnce(wrap, paint);
@@ -251,7 +257,7 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
     const j = Math.min(n - 1, Math.max(0, Math.floor(fracX * n)));
     const value = matrix[i]?.[j];
     const chainAt = (idx: number) => {
-      const b = Array.isArray(bounds) ? bounds.find((entry) => idx >= entry.start && idx <= entry.end) : null;
+      const b = scaledBounds ? scaledBounds.find((entry) => idx >= entry.start && idx <= entry.end) : null;
       return b ? chainLetter(b.chain) : '';
     };
     wrap.title = `${chainAt(i)}→${chainAt(j)} PAE ${Number(value ?? 0).toFixed(1)}Å`;

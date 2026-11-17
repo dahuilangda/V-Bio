@@ -117,7 +117,7 @@ export function PeptideDesignResultsWorkspace({
   const interfaceMetricHeaderLabel = useMemo(() => {
     const hasIptm = candidates.some((candidate) => candidate.interfaceMetricSource === 'iptm');
     if (hasAnyIpsae && hasIptm) return 'Interface';
-    if (hasAnyIpsae) return 'IPSAE';
+    if (hasAnyIpsae) return 'ipSAE';
     return 'ipTM';
   }, [candidates, hasAnyIpsae]);
 

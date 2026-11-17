@@ -6,7 +6,7 @@ export type InterfaceMetricSource = 'ipsae' | 'iptm' | 'none';
 export type InterfaceMetricKind = 'ligand_ipsae' | 'ipsae_dom' | 'interface_metric' | 'pair_iptm' | 'iptm' | 'none';
 
 export interface PreferredInterfaceMetric {
-  label: 'IPSAE' | 'ipTM';
+  label: 'ipSAE' | 'ipTM';
   source: InterfaceMetricSource;
   kind: InterfaceMetricKind;
   value: number | null;
@@ -416,7 +416,7 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
 
   if (ligandIpsaeMax !== null) {
     return {
-      label: 'IPSAE',
+      label: 'ipSAE',
       source: 'ipsae',
       kind: 'ligand_ipsae',
       value: ligandIpsaeMax,
@@ -431,7 +431,7 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
 
   if (ipsaeDom !== null) {
     return {
-      label: 'IPSAE',
+      label: 'ipSAE',
       source: 'ipsae',
       kind: 'ipsae_dom',
       value: ipsaeDom,
@@ -446,7 +446,7 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
 
   if (interfaceMetric !== null) {
     return {
-      label: 'IPSAE',
+      label: 'ipSAE',
       source: 'ipsae',
       kind: 'interface_metric',
       value: interfaceMetric,
@@ -476,7 +476,7 @@ export function resolvePreferredInterfaceMetricFromValues(params: {
   }
 
   return {
-    label: 'IPSAE',
+    label: 'ipSAE',
     source: 'none',
     kind: 'none',
     value: null,

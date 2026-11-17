@@ -204,28 +204,28 @@ function readInterfaceIpsaeMetric(confidence: Record<string, unknown>): number |
 function resolvePreferredInterfaceMetric(
   confidence: Record<string, unknown>,
   context?: TaskMetricContext
-): { value: number | null; label: 'IPSAE' | 'ipTM'; source: 'ipsae' | 'iptm' | 'none'; pairIptm: number | null } {
+): { value: number | null; label: 'ipSAE' | 'ipTM'; source: 'ipsae' | 'iptm' | 'none'; pairIptm: number | null } {
   const pairIptm = context
     ? readPairIptmForChains(confidence, context.targetChainId, context.ligandChainId, context.chainIds)
     : null;
   const ligandIpsaeMax = readLigandIpsaeMaxMetric(confidence);
   if (ligandIpsaeMax !== null) {
-    return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae', pairIptm };
+    return { value: ligandIpsaeMax, label: 'ipSAE', source: 'ipsae', pairIptm };
   }
   const ipsaeDom = readIpsaeDomMetric(confidence);
   if (ipsaeDom !== null) {
-    return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae', pairIptm };
+    return { value: ipsaeDom, label: 'ipSAE', source: 'ipsae', pairIptm };
   }
   const interfaceIpsae = readInterfaceIpsaeMetric(confidence);
   if (interfaceIpsae !== null) {
-    return { value: interfaceIpsae, label: 'IPSAE', source: 'ipsae', pairIptm };
+    return { value: interfaceIpsae, label: 'ipSAE', source: 'ipsae', pairIptm };
   }
   const scalarIptm = normalizeProbability(readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']));
   const preferredIptm = pairIptm ?? scalarIptm;
   if (preferredIptm !== null) {
     return { value: preferredIptm, label: 'ipTM', source: 'iptm', pairIptm };
   }
-  return { value: null, label: 'IPSAE', source: 'none', pairIptm };
+  return { value: null, label: 'ipSAE', source: 'none', pairIptm };
 }
 
 function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContext): TaskConfidenceMetrics {

@@ -10,7 +10,7 @@ import type { SortKey, TaskListRow, TaskMetricColumnKey, TaskTableMode } from '.
 
 const METRIC_COLUMN_LABELS: Record<TaskMetricColumnKey, string> = {
   plddt: 'pLDDT',
-  ipsae: 'IPSAE',
+  ipsae: 'ipSAE',
   iptm: 'ipTM',
   pae: 'PAE'
 };

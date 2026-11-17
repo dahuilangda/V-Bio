@@ -107,11 +107,11 @@ export function buildSnapshotCards(params: {
       value: preferredInterfaceMetric.value === null ? '-' : preferredInterfaceMetric.value.toFixed(4),
       detail:
         preferredInterfaceMetric.kind === 'ligand_ipsae'
-          ? 'Best ligand contact IPSAE'
+          ? 'Best ligand contact ipSAE'
           : preferredInterfaceMetric.kind === 'ipsae_dom'
-            ? 'Interface IPSAE'
+            ? 'Interface ipSAE'
             : preferredInterfaceMetric.kind === 'interface_metric'
-              ? 'Interface IPSAE'
+              ? 'Interface ipSAE'
               : preferredInterfaceMetric.pairIptm !== null && selectedResultTargetLabel !== selectedResultLigandLabel
           ? selectedResultPairLabel
             : 'Interface conf',

@@ -596,7 +596,7 @@ function ConfidencePanel({
         ]
       : []),
     {
-      label: 'PAE (A)',
+      label: 'PAE (Å)',
       help: modality === 'peptide'
         ? 'Expected interface alignment error (A). <3 A strong, <5 A acceptable; normalized interface PAE <=0.3 is the BindCraft/AfCycDesign gate. PAE calibration differs per engine - thresholds are not transferable across backends.'
         : 'Expected alignment error (A). <3 A strong, <5 A acceptable interface packing; check the PAE matrix for localized mispredictions. Lower is better.',
@@ -607,7 +607,7 @@ function ConfidencePanel({
     ...(preferredInterfaceMetric.source === 'ipsae' && ipsaeDom !== null && ligandIpsaeMax !== null && ipsaeDom !== ligandIpsaeMax
       ? [
           {
-            label: preferredInterfaceMetric.kind === 'ligand_ipsae' ? 'Interface IPSAE' : 'Ligand IPSAE',
+            label: preferredInterfaceMetric.kind === 'ligand_ipsae' ? 'Interface ipSAE' : 'Ligand ipSAE',
             help:
               preferredInterfaceMetric.kind === 'ligand_ipsae'
                 ? 'Domain-level ipSAE for the selected complex. >=0.8 very high, 0.7-0.8 confident, <0.6 unreliable.'
@@ -632,7 +632,7 @@ function ConfidencePanel({
     ...(interfaceSc !== null
       ? [
           {
-            label: 'Shape Compl.',
+            label: 'Sc',
             help: 'Lawrence-Colman shape complementarity of the predicted interface (0-1). Protein-peptide interfaces typically 0.50-0.65; >=0.55 is the BindCraft peptide gate, >=0.62 the meta-analysis pre-filter. Soft ranking signal on predicted structures, not a confidence metric.',
             value: interfaceSc,
             display: formatMetricValue(interfaceSc, 4),
@@ -643,7 +643,7 @@ function ConfidencePanel({
     ...(Number.isFinite(msaDepth) && msaDepth > 0
       ? [
           {
-            label: 'MSA Depth',
+            label: 'MSA depth',
             help: 'Sequences in the self-MSA. Informational only - no consensus threshold; designed binders are expected to have shallow MSA. Shallow MSA on the TARGET lowers fold reliability; judge that via target pLDDT instead.',
             value: msaDepth,
             display: String(Math.round(msaDepth)),
@@ -680,7 +680,7 @@ function ConfidencePanel({
           }
         ]
       : [])
-  ].filter((item) => item.value !== null || [plddtLabel, preferredInterfaceMetric.label, 'PAE (A)'].includes(item.label));
+  ].filter((item) => item.value !== null || [plddtLabel, preferredInterfaceMetric.label, 'PAE (Å)'].includes(item.label));
 
   return (
     <>

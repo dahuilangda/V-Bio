@@ -38,21 +38,21 @@ function normalizeProbability(value: number | null): number | null {
 
 function readPreferredInterfaceMetric(payload: Record<string, unknown> | null): {
   value: number | null;
-  label: 'IPSAE' | 'ipTM';
+  label: 'ipSAE' | 'ipTM';
   source: 'ipsae' | 'iptm' | 'none';
 } {
   if (!payload) {
-    return { value: null, label: 'IPSAE', source: 'none' };
+    return { value: null, label: 'ipSAE', source: 'none' };
   }
   const ligandIpsaeMax = normalizeProbability(typeof payload.ligand_ipsae_max === 'number' ? payload.ligand_ipsae_max : null);
   if (ligandIpsaeMax !== null) {
-    return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae' };
+    return { value: ligandIpsaeMax, label: 'ipSAE', source: 'ipsae' };
   }
   const ipsaeDom = normalizeProbability(
     typeof payload.ipsae_dom === 'number' ? payload.ipsae_dom : typeof payload.ipsaeDom === 'number' ? payload.ipsaeDom : null
   );
   if (ipsaeDom !== null) {
-    return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
+    return { value: ipsaeDom, label: 'ipSAE', source: 'ipsae' };
   }
   const interfaceLabel = asString(payload.interface_metric_label || payload.interfaceMetricLabel).trim().toLowerCase();
   const interfaceSource = asString(payload.interface_metric_source || payload.interfaceMetricSource).trim().toLowerCase();
@@ -66,13 +66,13 @@ function readPreferredInterfaceMetric(payload: Record<string, unknown> | null): 
           : null
   );
   if (interfaceMetric !== null && (interfaceLabel === 'ipsae' || interfaceSource === 'ipsae')) {
-    return { value: interfaceMetric, label: 'IPSAE', source: 'ipsae' };
+    return { value: interfaceMetric, label: 'ipSAE', source: 'ipsae' };
   }
   const iptm = normalizeProbability(typeof payload.iptm === 'number' ? payload.iptm : null);
   if (iptm !== null) {
     return { value: iptm, label: 'ipTM', source: 'iptm' };
   }
-  return { value: null, label: 'IPSAE', source: 'none' };
+  return { value: null, label: 'ipSAE', source: 'none' };
 }
 
 function choosePreferredPath(candidates: string[]): string | null {
@@ -1777,7 +1777,7 @@ async function parsePeptideDesignCandidatesFromBundle(
         readFiniteNumberLoose(row.pair_iptm) ??
         readFiniteNumberLoose(row.iptm),
       interface_metric_label:
-        readFiniteNumberLoose(row.ligand_ipsae_max) !== null || readFiniteNumberLoose(row.ipsae_dom) !== null ? 'IPSAE' : 'ipTM',
+        readFiniteNumberLoose(row.ligand_ipsae_max) !== null || readFiniteNumberLoose(row.ipsae_dom) !== null ? 'ipSAE' : 'ipTM',
       iptm: readFiniteNumberLoose(row.pair_iptm_target_binder) ?? readFiniteNumberLoose(row.pair_iptm) ?? readFiniteNumberLoose(row.iptm),
       pair_iptm: readFiniteNumberLoose(row.pair_iptm),
       pair_iptm_target_binder: readFiniteNumberLoose(row.pair_iptm_target_binder),
