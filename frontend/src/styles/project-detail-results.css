@@ -706,6 +706,10 @@
   margin-top: 8px;
 }
 .pae-matrix-chart canvas {
+  display: block;
+  width: min(100%, 340px);
+  aspect-ratio: 1 / 1;
+  height: auto;
   border-radius: 8px;
   border: 1px solid #d6e4dc;
 }
@@ -720,5 +724,52 @@
 .pae-matrix-legend-bar {
   flex: 1;
   height: 8px;
+  border-radius: 4px;
+}
+
+.msa-coverage-chart {
+  margin-top: 10px;
+  border: 1px solid #d6e4dc;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+}
+
+.msa-coverage-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: #243d32;
+  margin-bottom: 6px;
+}
+
+.msa-coverage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.msa-coverage-row:last-child {
+  margin-bottom: 0;
+}
+
+.msa-coverage-label {
+  flex: 0 0 auto;
+  min-width: 88px;
+  font-size: 11px;
+  color: #4a6a5a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msa-coverage-row canvas {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 30px;
   border-radius: 4px;
 }

@@ -473,23 +473,45 @@ def main() -> None:
 
     summaries, skipped = collect_summaries(output_dir)
 
-    # MSA 深度：受体链实际使用的 a3m 序列行数（缓存/搜索/自体三条路径统一），
-    # 供前端 MSA 面板展示
+    # MSA stats per protein chain: depth plus per-column coverage (0-100 int),
+    # both from the a3m the inference actually consumed (cache / search /
+    # self). Feeds the results-view MSA coverage plot.
     msa_stats = None
-    depth = 0
+    total_depth = 0
+    chain_stats = []
     for job in jobs:
         for entry in job["sequences"]:
             entity = entry.get("proteinChain")
             if not entity or not entity.get("unpairedMsaPath"):
                 continue
             try:
-                rows = [l for l in Path(entity["unpairedMsaPath"]).read_text().splitlines()
+                rows = [l.strip() for l in Path(entity["unpairedMsaPath"]).read_text().splitlines()
                         if l and not l.startswith(">")]
             except OSError:
                 continue
-            depth += max(1, len(rows))
-    if depth > 0:
-        msa_stats = {"depth": depth}
+            # Lowercase = insertion vs the query; coverage is per alignment
+            # column of the query sequence.
+            aligned = ["".join(ch for ch in r if not ch.islower()) for r in rows]
+            depth = max(1, len(aligned))
+            total_depth += depth
+            seq_len = len(aligned[0]) if aligned else 0
+            coverage = []
+            if aligned and seq_len:
+                filled = [0] * seq_len
+                for r in aligned:
+                    for c, ch in enumerate(r):
+                        if ch not in ("-", "."):
+                            filled[c] += 1
+                coverage = [round(100 * n / depth) for n in filled]
+            raw_id = entity.get("id")
+            chain_stats.append({
+                "chain": str(raw_id[0] if isinstance(raw_id, list) and raw_id else (raw_id or "")),
+                "length": len(str(entity.get("sequence") or "")) or seq_len,
+                "depth": depth,
+                "coverage": coverage,
+            })
+    if total_depth > 0:
+        msa_stats = {"depth": total_depth, "chains": chain_stats}
 
     # pae_block 进 confidence（confidence 整体会作为任务行 confidence 存储）
     best = (max(summaries, key=lambda s: s["confidence"].get("ranking_score", 0))

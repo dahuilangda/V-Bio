@@ -736,7 +736,7 @@ class ResultArchiveService:
 
     def build_or_get_view_archive(self, source_zip_path: str, preferred_structure_name: str | None = None) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v13-compact-metrics'
+        cache_schema_version = 'view-v14-msa-chains'
         preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}|{preferred_structure_token}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
@@ -1317,6 +1317,16 @@ class ResultArchiveService:
                     if isinstance(msa_stats, dict) and msa_stats.get('depth'):
                         merged['msa'] = msa_stats
                 except Exception:  # noqa: BLE001 — zip 无 summary.json 时跳过
+                    pass
+                # The zipped summary predates per-chain MSA stats on older
+                # tasks; the on-disk summary is refreshed by backfill/mainte-
+                # nance and wins when it is the richer one.
+                msa_path = Path(source_zip_path).parent / 'mol1' / Path(source_zip_path).stem / 'output' / 'summary.json'
+                try:
+                    disk_msa = json.loads(msa_path.read_text()).get('msa')
+                    if isinstance(disk_msa, dict) and disk_msa.get('depth'):
+                        merged['msa'] = disk_msa
+                except Exception:  # noqa: BLE001 — no on-disk summary: keep zip value
                     pass
                 return merged or None
         except Exception as exc:

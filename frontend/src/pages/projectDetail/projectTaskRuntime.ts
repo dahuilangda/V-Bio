@@ -426,6 +426,20 @@ function mergePeptideRuntimeStatusIntoConfidence(
 
 const viewerPullInFlight = new Set<string>();
 
+function isSuperset(rich: unknown, poor: unknown): boolean {
+  if (
+    rich && poor && typeof rich === 'object' && typeof poor === 'object'
+    && !Array.isArray(rich) && !Array.isArray(poor)
+  ) {
+    const richRecord = rich as Record<string, unknown>;
+    const poorRecord = poor as Record<string, unknown>;
+    if (Object.keys(poorRecord).length === 0) return false;
+    return Object.entries(poorRecord).every(([key, value]) => key in richRecord
+      && JSON.stringify(richRecord[key]) === JSON.stringify(value));
+  }
+  return false;
+}
+
 // LRU over downloaded view archives so revisiting a candidate skips the
 // ~300 KB refetch. Bounded: memory stays flat in long sessions.
 const VIEW_BLOB_CACHE_MAX = 3;
@@ -539,11 +553,12 @@ export async function pullResultForViewerTask(params: {
     });
     const persistedProjectConfidence = persistedConfidence.projectConfidence;
     const persistedTaskConfidenceBase = persistedConfidence.taskConfidence;
-    // Rows from the list endpoint carry no confidence column, so the patch
-    // below would drop server-written keys (interface_sc, msa, ...). Re-fetch
-    // the row and union-preserve what the parse does not produce.
+    // The persisted patch would otherwise drop server-written keys the parse
+    // does not produce (interface_sc, msa.chains, ...). Re-fetch the row and
+    // union-preserve: keys only the row has survive; keys both sides hold
+    // resolve to whichever value is the superset.
     let persistedTaskConfidence = persistedTaskConfidenceBase;
-    if (options?.taskRowId && Object.keys(asRecord(baseTaskConfidence)).length === 0) {
+    if (options?.taskRowId) {
       try {
         const freshRow = await getProjectTaskById(options.taskRowId, {
           includeComponents: false,
@@ -555,11 +570,14 @@ export async function pullResultForViewerTask(params: {
           includeProteinSequence: false
         });
         const rowConfidence = asRecord(freshRow?.confidence);
-        const preserved = Object.fromEntries(Object.entries(rowConfidence).filter(
-          ([key, value]) => !(key in persistedTaskConfidenceBase)
-            && value !== null && value !== undefined
-        ));
-        persistedTaskConfidence = { ...preserved, ...persistedTaskConfidenceBase };
+        const merged: Record<string, unknown> = { ...persistedTaskConfidenceBase };
+        for (const [key, rowValue] of Object.entries(rowConfidence)) {
+          if (rowValue === null || rowValue === undefined) continue;
+          const parsedValue = merged[key];
+          if (parsedValue === undefined) merged[key] = rowValue;
+          else if (isSuperset(rowValue, parsedValue)) merged[key] = rowValue;
+        }
+        persistedTaskConfidence = merged;
       } catch {
         // Read-only session or row vanished: persist the parsed subset as-is.
       }
