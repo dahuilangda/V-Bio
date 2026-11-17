@@ -61,14 +61,22 @@ export interface ProjectResultsSectionProps {
 }
 
 
-function PaeMatrixSection({ snapshotConfidence }: { snapshotConfidence: Record<string, unknown> | null }) {
+function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: Record<string, unknown> | null; taskId: string }) {
   const conf = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: Array<{ chain: number; start: number; end: number }> };
   let matrix = conf.pae_matrix;
   let bounds = conf.pae_chain_bounds;
   if (!Array.isArray(matrix) || matrix.length === 0) {
     try {
       const cached = JSON.parse(localStorage.getItem('vbio:pae:latest') || 'null');
-      if (cached && Array.isArray(cached.pae_matrix)) {
+      // Only the task that captured this cache may render it.
+      const cachedTaskId = String(cached?.task_id || '');
+      const activeTaskId = String(taskId || '');
+      if (
+        cached &&
+        Array.isArray(cached.pae_matrix) &&
+        cachedTaskId &&
+        cachedTaskId === activeTaskId
+      ) {
         matrix = cached.pae_matrix;
         bounds = cached.pae_chain_bounds;
       }
@@ -77,56 +85,92 @@ function PaeMatrixSection({ snapshotConfidence }: { snapshotConfidence: Record<s
     }
   }
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !Array.isArray(matrix) || matrix.length === 0) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const size = 300;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = size * dpr;
-    canvas.height = size * dpr;
-    canvas.style.width = `${size}px`;
-    canvas.style.height = `${size}px`;
-    ctx.scale(dpr, dpr);
-    const n = matrix.length;
-    const cell = size / n;
-    for (let i = 0; i < n; i += 1) {
-      for (let j = 0; j < n; j += 1) {
-        const t = Math.min(1, Math.max(0, (matrix[i][j] ?? 25) / 25));
-        ctx.fillStyle = `rgb(${Math.round(20 + 235 * t)},${Math.round(80 + 60 * Math.abs(t - 0.5))},${Math.round(240 - 210 * t)})`;
-        ctx.fillRect(j * cell, i * cell, cell + 0.5, cell + 0.5);
-      }
-    }
-    if (bounds && bounds.length > 1) {
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-      ctx.lineWidth = 1.5;
-      let acc = 0;
-      bounds.forEach((b, idx) => {
-        acc += b.end - b.start + 1;
-        if (idx < bounds.length - 1) {
-          const pos = (acc / n) * size;
-          ctx.beginPath();
-          ctx.moveTo(pos, 0);
-          ctx.lineTo(pos, size);
-          ctx.moveTo(0, pos);
-          ctx.lineTo(size, pos);
-          ctx.stroke();
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    // Paint once scrolled into view; idle callback keeps it off interaction frames.
+    let painted = false;
+    let observer: IntersectionObserver | null = null;
+    const paint = () => {
+      if (painted) return;
+      painted = true;
+      const canvas = canvasRef.current;
+      if (!canvas || !Array.isArray(matrix) || matrix.length === 0) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const size = 300;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = size * dpr;
+      canvas.height = size * dpr;
+      canvas.style.width = `${size}px`;
+      canvas.style.height = `${size}px`;
+      const n = matrix.length;
+      // Single ImageData pass instead of n² fillRect calls.
+      const image = ctx.createImageData(size * dpr, size * dpr);
+      const px = image.data;
+      const scale = (size * dpr) / n;
+      for (let y = 0; y < size * dpr; y += 1) {
+        const i = Math.min(n - 1, Math.floor(y / scale));
+        const row = matrix[i] || [];
+        for (let x = 0; x < size * dpr; x += 1) {
+          const j = Math.min(n - 1, Math.floor(x / scale));
+          const t = Math.min(1, Math.max(0, (row[j] ?? 25) / 25));
+          const o = (y * size * dpr + x) * 4;
+          px[o] = Math.round(20 + 235 * t);
+          px[o + 1] = Math.round(80 + 60 * Math.abs(t - 0.5));
+          px[o + 2] = Math.round(240 - 210 * t);
+          px[o + 3] = 255;
         }
-      });
-      ctx.fillStyle = 'rgba(255,255,255,0.95)';
-      ctx.font = '11px sans-serif';
-      let acc2 = 0;
-      bounds.forEach((b) => {
-        const mid = ((acc2 + (b.end - b.start) / 2) / n) * size;
-        ctx.fillText(`链${b.chain}`, mid - 10, 12);
-        acc2 += b.end - b.start + 1;
-      });
+      }
+      ctx.putImageData(image, 0, 0);
+      if (bounds && bounds.length > 1) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 1.5;
+        let acc = 0;
+        bounds.forEach((b, idx) => {
+          acc += b.end - b.start + 1;
+          if (idx < bounds.length - 1) {
+            const pos = (acc / n) * size * dpr;
+            ctx.beginPath();
+            ctx.moveTo(pos, 0);
+            ctx.lineTo(pos, size * dpr);
+            ctx.moveTo(0, pos);
+            ctx.lineTo(size * dpr, pos);
+            ctx.stroke();
+          }
+        });
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.font = `${11 * dpr}px sans-serif`;
+        let acc2 = 0;
+        bounds.forEach((b) => {
+          const mid = ((acc2 + (b.end - b.start) / 2) / n) * size * dpr;
+          ctx.fillText(`链${b.chain}`, mid - 10, 12 * dpr);
+          acc2 += b.end - b.start + 1;
+        });
+      }
+    };
+    if (typeof IntersectionObserver === 'undefined') {
+      paint();
+      return;
     }
+    observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        const idle = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+        if (idle) idle(paint, { timeout: 500 });
+        else requestAnimationFrame(paint);
+        observer?.disconnect();
+        observer = null;
+      }
+    }, { rootMargin: '120px' });
+    observer.observe(wrap);
+    return () => {
+      observer?.disconnect();
+    };
   }, [matrix, bounds]);
   if (!Array.isArray(matrix) || matrix.length === 0) return null;
   return (
-    <div className="pae-matrix-chart">
+    <div className="pae-matrix-chart" ref={wrapRef}>
       <canvas ref={canvasRef} aria-label="PAE matrix heatmap" />
       <div className="pae-matrix-legend">
         <span>0Å</span>
@@ -355,7 +399,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                   </div>
                 ))}
               </div>
-              <PaeMatrixSection snapshotConfidence={snapshotConfidence} />
+              <PaeMatrixSection snapshotConfidence={snapshotConfidence} taskId={projectTaskId} />
             </section>
           </aside>
         </div>

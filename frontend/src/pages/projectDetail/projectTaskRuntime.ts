@@ -5,6 +5,7 @@ import {
 } from '../../api/backendApi';
 import { parseResultBundle } from '../../api/backendResultParserApi';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
+import { getProjectTaskById } from '../../api/supabase/taskDetail';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import { hasStoredTaskInputOptions, readTaskInputOptions } from './projectTaskSnapshot';
@@ -425,6 +426,44 @@ function mergePeptideRuntimeStatusIntoConfidence(
 
 const viewerPullInFlight = new Set<string>();
 
+// LRU over downloaded view archives so revisiting a candidate skips the
+// ~300 KB refetch. Bounded: memory stays flat in long sessions.
+const VIEW_BLOB_CACHE_MAX = 3;
+const viewBlobCache = new Map<string, Blob>();
+
+function viewBlobCacheKey(
+  taskId: string,
+  resultMode: DownloadResultMode,
+  options?: { preferredStructureName?: string; projectId?: string | null }
+): string {
+  return [taskId, resultMode, options?.preferredStructureName || '', options?.projectId || ''].join('|');
+}
+
+async function fetchResultBlobCached(
+  taskId: string,
+  resultMode: DownloadResultMode,
+  options?: { preferredStructureName?: string; projectId?: string | null }
+): Promise<Blob> {
+  const key = viewBlobCacheKey(taskId, resultMode, options);
+  const cached = viewBlobCache.get(key);
+  if (cached) {
+    viewBlobCache.delete(key);
+    viewBlobCache.set(key, cached);
+    return cached;
+  }
+  const blob = await downloadResultBlob(taskId, {
+    mode: resultMode,
+    preferredStructureName: options?.preferredStructureName,
+    projectId: options?.projectId
+  });
+  viewBlobCache.set(key, blob);
+  if (viewBlobCache.size > VIEW_BLOB_CACHE_MAX) {
+    const oldest = [...viewBlobCache.keys()][0];
+    viewBlobCache.delete(oldest);
+  }
+  return blob;
+}
+
 export async function pullResultForViewerTask(params: {
   taskId: string;
   options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string; projectId?: string | null };
@@ -465,11 +504,7 @@ export async function pullResultForViewerTask(params: {
   viewerPullInFlight.add(taskId);
   setResultError(null);
   try {
-    const blob = await downloadResultBlob(taskId, {
-      mode: resultMode,
-      preferredStructureName: options?.preferredStructureName,
-      projectId: options?.projectId
-    });
+    const blob = await fetchResultBlobCached(taskId, resultMode, options);
     const parsed = await parseResultBundle(blob, {
       preservePeptideCandidateStructureText: false,
       preferredStructureName: options?.preferredStructureName
@@ -481,12 +516,14 @@ export async function pullResultForViewerTask(params: {
     const baseTaskInputOptions = baseTaskProperties && hasStoredTaskInputOptions({ properties: baseTaskProperties })
       ? readTaskInputOptions({ properties: baseTaskProperties } as unknown as ProjectTask)
       : {};
-    // PAE 矩阵不进 DB，按任务存 localStorage 供结果视图热图读取
+    // PAE matrix stays out of the DB (server-side compact merge strips it
+    // too); cache per task for the heatmap, scoped by task_id on read.
     try {
       const paeMatrix = asRecord(parsedConfidence).pae_matrix;
       const chainBounds = asRecord(parsedConfidence).pae_chain_bounds;
       if (Array.isArray(paeMatrix) && paeMatrix.length > 0) {
         localStorage.setItem('vbio:pae:latest', JSON.stringify({
+          task_id: taskId,
           pae_matrix: paeMatrix,
           pae_chain_bounds: Array.isArray(chainBounds) ? chainBounds : []
         }));
@@ -501,7 +538,38 @@ export async function pullResultForViewerTask(params: {
       baseTaskInputOptions
     });
     const persistedProjectConfidence = persistedConfidence.projectConfidence;
-    const persistedTaskConfidence = persistedConfidence.taskConfidence;
+    const persistedTaskConfidenceBase = persistedConfidence.taskConfidence;
+    // Rows from the list endpoint carry no confidence column, so the patch
+    // below would drop server-written keys (interface_sc, msa, ...). Re-fetch
+    // the row and union-preserve what the parse does not produce.
+    let persistedTaskConfidence = persistedTaskConfidenceBase;
+    if (options?.taskRowId && Object.keys(asRecord(baseTaskConfidence)).length === 0) {
+      try {
+        const freshRow = await getProjectTaskById(options.taskRowId, {
+          includeComponents: false,
+          includeConstraints: false,
+          includeProperties: false,
+          includeLeadOptSummary: false,
+          includeLeadOptCandidates: false,
+          includeAffinity: false,
+          includeProteinSequence: false
+        });
+        const rowConfidence = asRecord(freshRow?.confidence);
+        const preserved = Object.fromEntries(Object.entries(rowConfidence).filter(
+          ([key, value]) => !(key in persistedTaskConfidenceBase)
+            && value !== null && value !== undefined
+        ));
+        persistedTaskConfidence = { ...preserved, ...persistedTaskConfidenceBase };
+      } catch {
+        // Read-only session or row vanished: persist the parsed subset as-is.
+      }
+    }
+    // ~100 KB of matrix that every client re-derives from the view archive
+    // anyway; persisting it would 10x the PATCH for no reader benefit.
+    const leanConfidence = { ...persistedTaskConfidence };
+    delete leanConfidence.pae_matrix;
+    delete leanConfidence.pae_chain_bounds;
+    persistedTaskConfidence = leanConfidence;
 
     setStructureText(parsed.structureText);
     setStructureFormat(parsed.structureFormat);

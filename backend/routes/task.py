@@ -51,13 +51,16 @@ def _pick_structure_name_from_archive(zip_path: str) -> str:
     return (best_ranked or (None, first_sample or first_any or ""))[1]
 
 
-def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> None:
+def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_,
+                                      compact_metrics: Optional[Dict[str, Any]] = None) -> None:
     """Mirror terminal state into project_tasks when the row exists.
 
     API-submitted tasks have no browser session to backfill completed_at /
     structure_name; the upload endpoint is the one server-side point that
-    observes real completion, so the write happens here. Best-effort: any
-    failure is logged and ignored so the upload itself never fails.
+    observes real completion, so the write happens here. compact_metrics
+    merges into confidence so task rows carry the result-view metrics even
+    without a browser visit. Best-effort: failures are logged and ignored so
+    the upload itself never fails.
     """
     database_url = os.environ.get("VBIO_MONITOR_DATABASE_URL", "").strip()
     if not database_url:
@@ -97,6 +100,14 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_) -> N
                     (submitted_at, submitted_at, structure_name, structure_name, task_id),
                 )
                 updated = cur.rowcount
+                if isinstance(compact_metrics, dict) and compact_metrics:
+                    cur.execute(
+                        "UPDATE project_tasks SET "
+                        "confidence = COALESCE(confidence, '{}'::jsonb) || %s::jsonb, "
+                        "updated_at = NOW() "
+                        "WHERE task_id = %s AND task_id <> ''",
+                        (json.dumps(compact_metrics), task_id),
+                    )
         if updated == 0:
             logger_.info(
                 "terminal sync updated 0 rows (row already terminal), task %s skipped", task_id)
@@ -839,7 +850,12 @@ def register_task_routes(
                 except Exception as view_exc:
                     logger.warning('Failed to prebuild view archive for %s (task %s): %s', filename, task_id, view_exc)
 
-            _sync_project_task_terminal_state(task_id, save_path, logger)
+            compact = None
+            try:
+                compact = get_compact_prediction_metrics(task_id)
+            except Exception as compact_exc:
+                logger.warning('compact metrics extraction failed for task %s: %s', task_id, compact_exc)
+            _sync_project_task_terminal_state(task_id, save_path, logger, compact_metrics=compact)
             _sync_project_task_design_candidates(task_id, save_path, logger)
 
             logger.info("Result file '%s' for task %s received and saved to %s.", filename, task_id, save_path)

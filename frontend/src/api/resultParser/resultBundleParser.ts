@@ -1480,6 +1480,53 @@ export interface PeptideCandidateSummarySource {
   payload: Record<string, unknown>;
 }
 
+/** Downsampled PAE matrix + chain bounds from a full_data sample json. */
+async function attachPaeMatrixFromFullData(
+  zip: JSZip,
+  names: string[],
+  confidence: Record<string, unknown>
+): Promise<void> {
+  const fullName = names.find(
+    (n) => n.includes('full_data') && n.toLowerCase().endsWith('.json')
+  );
+  if (!fullName) return;
+  try {
+    const fdRaw = (await readZipJson(zip, fullName)) as {
+      token_pair_pae?: unknown;
+      token_asym_id?: unknown;
+    } | null;
+    if (!fdRaw) return;
+    const pae = flattenNumberMatrix(fdRaw.token_pair_pae);
+    const asym = Array.isArray(fdRaw.token_asym_id)
+      ? (fdRaw.token_asym_id as number[])
+      : null;
+    if (pae.length === 0 || !asym || asym.length !== pae.length) return;
+    // flattenNumberMatrix returns a row-major flat array; re-rasterize at the
+    // downsample stride into a square matrix.
+    const n0 = Math.round(Math.sqrt(pae.length));
+    const down = Math.max(1, Math.ceil(n0 / 256));
+    const n = Math.floor(n0 / down) * down;
+    const matrix: number[][] = [];
+    for (let i = 0; i < n; i += down) {
+      const row: number[] = [];
+      for (let j = 0; j < n; j += down) {
+        row.push(pae[i * n0 + j]);
+      }
+      matrix.push(row);
+    }
+    const bounds: Array<{ chain: number; start: number; end: number }> = [];
+    asym.forEach((a, idx) => {
+      const last = bounds[bounds.length - 1];
+      if (last && last.chain === a) last.end = idx;
+      else bounds.push({ chain: a, start: idx, end: idx });
+    });
+    confidence.pae_matrix = matrix;
+    confidence.pae_chain_bounds = bounds;
+  } catch {
+    // Missing or malformed full_data: the heatmap simply stays hidden.
+  }
+}
+
 /**
  * Pick the candidate rows a peptide-design archive should display.
  *
@@ -1895,47 +1942,7 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
 
     if (summary) confidence = { ...summary };
 
-    // mol1 full_data：保留 PAE 矩阵与链边界，供结果视图渲染 PAE 热图
-    const mol1FullDataName = names.find(
-      (n) => n.includes('full_data') && n.toLowerCase().endsWith('.json')
-    );
-    if (mol1FullDataName) {
-      try {
-        const fdRaw = (await readZipJson(zip, mol1FullDataName)) as {
-          token_pair_pae?: unknown;
-          token_asym_id?: unknown;
-        } | null;
-        if (!fdRaw) throw new Error('empty full_data');
-        const pae = flattenNumberMatrix(fdRaw.token_pair_pae);
-        const asym = Array.isArray(fdRaw.token_asym_id)
-          ? (fdRaw.token_asym_id as number[])
-          : null;
-        if (pae.length > 0 && asym && asym.length === pae.length) {
-          // flattenNumberMatrix 返回行优先扁平数组，按 down 采样重排为方阵
-          const n0 = Math.round(Math.sqrt(pae.length));
-          const down = Math.max(1, Math.ceil(n0 / 256));
-          const n = Math.floor(n0 / down) * down;
-          const matrix: number[][] = [];
-          for (let i = 0; i < n; i += down) {
-            const row: number[] = [];
-            for (let j = 0; j < n; j += down) {
-              row.push(pae[i * n0 + j]);
-            }
-            matrix.push(row);
-          }
-          const bounds: Array<{ chain: number; start: number; end: number }> = [];
-          asym.forEach((a, idx) => {
-            const last = bounds[bounds.length - 1];
-            if (last && last.chain === a) last.end = idx;
-            else bounds.push({ chain: a, start: idx, end: idx });
-          });
-          confidence.pae_matrix = matrix;
-          confidence.pae_chain_bounds = bounds;
-        }
-      } catch {
-        // full_data 缺失或格式不符时跳过热图数据
-      }
-    }
+    await attachPaeMatrixFromFullData(zip, names, confidence);
 
     const af3Metrics: Record<string, unknown> = {};
     if (confidencesRaw) {
@@ -2027,6 +2034,14 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       const rfd4Consistency = await readZipJson(zip, 'mol1/rfd4_consistency.json');
       if (rfd4Consistency && typeof rfd4Consistency === 'object' && !Array.isArray(rfd4Consistency)) {
         confidence = { ...confidence, rfd4_consistency: rfd4Consistency };
+      }
+      await attachPaeMatrixFromFullData(zip, names, confidence);
+      // Server-extracted metrics baked into the prebuilt view archive;
+      // original archives fall back to the full_data extraction above.
+      const compactName = names.find((n) => getBaseName(n).toLowerCase() === 'compact_metrics.json');
+      const compactMetrics = compactName ? await readZipJson(zip, compactName) : null;
+      if (compactMetrics && typeof compactMetrics === 'object' && !Array.isArray(compactMetrics)) {
+        confidence = { ...confidence, ...(compactMetrics as Record<string, unknown>) };
       }
       const raw = confidence as Record<string, unknown>;
       const paeScalar =

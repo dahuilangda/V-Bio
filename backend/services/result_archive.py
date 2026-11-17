@@ -722,12 +722,21 @@ class ResultArchiveService:
                     if member_name.lower().endswith('.json'):
                         payload = _sanitize_json_bytes(payload)
                     out_zip.writestr(member_name, payload)
+                # Result-view metrics (interface Sc, MSA depth, downsampled
+                # PAE) the SPA cannot derive from the slim archive itself.
+                try:
+                    compact = self._extract_compact_prediction_metrics_from_zip(source_zip_path)
+                except Exception:  # noqa: BLE001 — view archive must build even without metrics
+                    compact = None
+                if isinstance(compact, dict) and compact:
+                    out_zip.writestr('compact_metrics.json',
+                                     json.dumps(compact, ensure_ascii=False))
             out_buffer.seek(0)
             return out_buffer.getvalue()
 
     def build_or_get_view_archive(self, source_zip_path: str, preferred_structure_name: str | None = None) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v12-nesso-screening'
+        cache_schema_version = 'view-v13-compact-metrics'
         preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}|{preferred_structure_token}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
@@ -1292,7 +1301,7 @@ class ResultArchiveService:
                     for alias in ('complex_pde', 'complex_pae', 'pae'):
                         if self._to_finite_float(merged.get(alias)) is None:
                             merged[alias] = pair_pae
-                # PAE 矩阵（降采样）+ MSA 深度：任务行直读，前端热图/MSA 面板免解析
+                # Downsampled PAE matrix + MSA depth for the results view.
                 pae_block = self._extract_compact_pae_from_zip(src_zip)
                 if pae_block:
                     merged.setdefault('pae_matrix', pae_block['pae_matrix'])
@@ -1318,6 +1327,7 @@ class ResultArchiveService:
         self,
         task_id: str,
         source_zip_path: Optional[str] = None,
+        include_pae_matrix: bool = False,
     ) -> Optional[Dict[str, Any]]:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
@@ -1341,7 +1351,10 @@ class ResultArchiveService:
         with self._compact_metrics_lock:
             cached = self._compact_metrics_cache.get(cache_key)
             if cached is not None:
-                return dict(cached)
+                result = dict(cached)
+                if not include_pae_matrix:
+                    result.pop('pae_matrix', None)
+                return result
 
         parsed = self._extract_compact_prediction_metrics_from_zip(source_zip_path)
         if not parsed:
@@ -1350,4 +1363,8 @@ class ResultArchiveService:
             if len(self._compact_metrics_cache) > 512:
                 self._compact_metrics_cache.clear()
             self._compact_metrics_cache[cache_key] = dict(parsed)
-        return dict(parsed)
+        result = dict(parsed)
+        if not include_pae_matrix:
+            # ~100 KB; only the results view consumes it, via the view archive.
+            result.pop('pae_matrix', None)
+        return result
