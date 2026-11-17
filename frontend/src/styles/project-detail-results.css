@@ -708,7 +708,6 @@
 .pae-matrix-chart canvas {
   display: block;
   width: min(100%, 340px);
-  aspect-ratio: 1 / 1;
   height: auto;
   border-radius: 8px;
   border: 1px solid #d6e4dc;

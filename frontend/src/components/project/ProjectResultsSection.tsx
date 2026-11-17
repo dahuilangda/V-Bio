@@ -82,9 +82,35 @@ function viridis(t: number): [number, number, number] {
   ];
 }
 
-const VIRIDIS_CSS = `linear-gradient(90deg, ${VIRIDIS_STOPS.map(
-  ([r, g, b], i) => `rgb(${r},${g},${b}) ${(i / (VIRIDIS_STOPS.length - 1)) * 100}%`
+// AlphaFold-DB-style ramp for PAE: light = confident (blends with the card),
+// deep blue = high error. Keeps a saturated high-error linker band readable
+// instead of glaring.
+const PAE_STOPS: Array<[number, number, number]> = [
+  [247, 249, 251],
+  [198, 219, 239],
+  [107, 174, 214],
+  [43, 109, 161],
+  [12, 48, 97]
+];
+
+function paeColor(t: number): [number, number, number] {
+  const x = Math.min(1, Math.max(0, t)) * (PAE_STOPS.length - 1);
+  const i = Math.min(PAE_STOPS.length - 2, Math.floor(x));
+  const f = x - i;
+  const a = PAE_STOPS[i];
+  const b = PAE_STOPS[i + 1];
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * f),
+    Math.round(a[1] + (b[1] - a[1]) * f),
+    Math.round(a[2] + (b[2] - a[2]) * f)
+  ];
+}
+
+const PAE_CSS = `linear-gradient(90deg, ${PAE_STOPS.map(
+  ([r, g, b], i) => `rgb(${r},${g},${b}) ${(i / (PAE_STOPS.length - 1)) * 100}%`
 ).join(', ')})`;
+
+const PAE_TRACK_HUES = ['#dfe9e2', '#dce6f4', '#f2e7da', '#eadff0'];
 
 function chainLetter(index: number): string {
   return String.fromCharCode(65 + index);
@@ -150,8 +176,9 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       const size = 600;
+      const trackH = 40;
       canvas.width = size;
-      canvas.height = size;
+      canvas.height = size + trackH;
       const n = matrix.length;
       const image = ctx.createImageData(size, size);
       const px = image.data;
@@ -161,7 +188,7 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
         const row = matrix[i] || [];
         for (let x = 0; x < size; x += 1) {
           const j = Math.min(n - 1, Math.floor(x / scale));
-          const [r, g, b] = viridis((row[j] ?? 25) / 25);
+          const [r, g, b] = paeColor((row[j] ?? 25) / 25);
           const o = (y * size + x) * 4;
           px[o] = r;
           px[o + 1] = g;
@@ -171,8 +198,8 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
       }
       ctx.putImageData(image, 0, 0);
       if (bounds && bounds.length > 1) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(70, 90, 80, 0.55)';
+        ctx.lineWidth = 1.5;
         let acc = 0;
         bounds.forEach((b, idx) => {
           acc += b.end - b.start + 1;
@@ -186,31 +213,45 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
             ctx.stroke();
           }
         });
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        ctx.font = '600 20px sans-serif';
-        let acc2 = 0;
-        bounds.forEach((b) => {
-          const width = ((b.end - b.start + 1) / n) * size;
-          if (width < 16) return;
-          const mid = ((acc2 + (b.end - b.start + 1) / 2) / n) * size;
-          ctx.fillText(chainLetter(b.chain), mid - 7, 24);
-          acc2 += b.end - b.start + 1;
-        });
       }
+      // Chain track under the matrix: hue per chain, letter when wide enough.
+      const trackY = size + 6;
+      ctx.fillStyle = '#eef3ef';
+      ctx.fillRect(0, trackY, size, trackH - 6);
+      let acc2 = 0;
+      ctx.font = '600 22px sans-serif';
+      bounds?.forEach((b, idx) => {
+        const len = b.end - b.start + 1;
+        const x0 = (acc2 / n) * size;
+        const w = (len / n) * size;
+        ctx.fillStyle = PAE_TRACK_HUES[idx % PAE_TRACK_HUES.length];
+        ctx.fillRect(x0, trackY, Math.max(1, w - 2), trackH - 6);
+        if (w >= 26) {
+          ctx.fillStyle = '#3d5a4c';
+          ctx.fillText(chainLetter(b.chain), x0 + w / 2 - 8, trackY + 28);
+        }
+        acc2 += len;
+      });
     };
     return observeOnce(wrap, paint);
   }, [matrix, bounds]);
   if (!Array.isArray(matrix) || matrix.length === 0) return null;
   const cellTooltips = (event: ReactMouseEvent<HTMLDivElement>) => {
     const wrap = wrapRef.current;
-    if (!wrap || !Array.isArray(matrix) || !Array.isArray(bounds) || bounds.length < 2) return;
+    if (!wrap || !Array.isArray(matrix)) return;
     const rect = wrap.getBoundingClientRect();
     const n = matrix.length;
-    const i = Math.floor(((event.clientY - rect.top) / rect.height) * n);
-    const j = Math.floor(((event.clientX - rect.left) / rect.width) * n);
-    const value = matrix[Math.min(n - 1, Math.max(0, i))]?.[Math.min(n - 1, Math.max(0, j))];
+    const fracY = (event.clientY - rect.top) / rect.height;
+    const fracX = (event.clientX - rect.left) / rect.width;
+    if (fracY > 0.94 || fracY < 0 || fracX < 0 || fracX > 1) {
+      wrap.removeAttribute('title');
+      return;
+    }
+    const i = Math.min(n - 1, Math.max(0, Math.floor(fracY * n)));
+    const j = Math.min(n - 1, Math.max(0, Math.floor(fracX * n)));
+    const value = matrix[i]?.[j];
     const chainAt = (idx: number) => {
-      const b = bounds.find((entry) => idx >= entry.start && idx <= entry.end);
+      const b = Array.isArray(bounds) ? bounds.find((entry) => idx >= entry.start && idx <= entry.end) : null;
       return b ? chainLetter(b.chain) : '';
     };
     wrap.title = `${chainAt(i)}→${chainAt(j)} PAE ${Number(value ?? 0).toFixed(1)}Å`;
@@ -220,7 +261,7 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
       <canvas ref={canvasRef} aria-label="PAE matrix heatmap" />
       <div className="pae-matrix-legend">
         <span>0Å</span>
-        <span className="pae-matrix-legend-bar" style={{ background: VIRIDIS_CSS }} />
+        <span className="pae-matrix-legend-bar" style={{ background: PAE_CSS }} />
         <span>25Å</span>
       </div>
     </div>
