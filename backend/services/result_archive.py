@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import sys
 import re
 import tempfile
 import threading
@@ -1139,6 +1140,110 @@ class ResultArchiveService:
         }
 
     @staticmethod
+    def _calc_d0(length: int) -> float:
+        return max(1.0, 1.24 * (length - 15) ** (1.0 / 3.0) - 1.8) if length > 27 else 1.0
+
+    @staticmethod
+    def _extract_pair_ipsae(src_zip) -> Optional[Dict[str, Any]]:
+        """Directional per-chain-pair ipSAE (Dunbrack Eq. 14-16, pure PAE).
+
+        For every ordered chain pair (X aligned, Y scored): per-anchor mean of
+        1/(1+(PAE/d0)^2) over Y tokens with PAE < 10 A, d0 from the count of
+        those tokens, max over X anchors; both directions are reported. The
+        distance cutoff used elsewhere never enters this score (author
+        confirmed); other chains stay in the PAE matrix (paper multi-chain
+        semantics). Non-protein chains (HETATM-only in the sample cif) follow
+        the IPSAE2 ligand rule: d0 fixed at 2.0 A, no PAE cutoff.
+        """
+        full_name = None
+        conf_name = None
+        best_rank = None
+        for name in src_zip.namelist():
+            base = os.path.basename(name)
+            if 'full_data' in base and base.endswith('.json'):
+                try:
+                    rank = float(json.loads(src_zip.read(name)).get('ranking_score') or 0)
+                except Exception:  # noqa: BLE001
+                    continue
+                if best_rank is None or rank > best_rank:
+                    best_rank, full_name = rank, name
+            elif base.startswith('input_sample_') and base.endswith('.cif'):
+                conf_name = name
+        if full_name is None or conf_name is None:
+            return None
+
+        try:
+            full = json.loads(src_zip.read(full_name))
+            pae = full.get('token_pair_pae')
+            asym = [str(a) for a in (full.get('token_asym_id') or [])]
+            if not isinstance(pae, list) or not pae or len(asym) != len(pae) or len(asym) != len(pae[0]):
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+
+        # Ligand chains = asym ids whose atom_site rows are HETATM-only in the
+        # sample cif (polymer chains carry ATOM rows).
+        het_chains: set = set()
+        try:
+            import re as _re
+            in_atom_site = False
+            for line in src_zip.read(conf_name).decode('utf-8', errors='replace').splitlines():
+                if line.startswith('_atom_site.'):
+                    in_atom_site = True
+                    continue
+                if in_atom_site:
+                    parts = line.split()
+                    if len(parts) >= 6 and parts[0] in ('ATOM', 'HETATM'):
+                        if parts[0] == 'HETATM':
+                            het_chains.add(parts[5])
+                    elif parts and not parts[0].startswith('#'):
+                        in_atom_site = False
+        except Exception:  # noqa: BLE001 — cif scan is best-effort
+            pass
+
+        n = len(pae)
+        chain_order: list = []
+        for a in asym:
+            if a not in chain_order:
+                chain_order.append(a)
+        if len(chain_order) < 2:
+            return None
+
+        def direction(aligned: int, scored: int) -> float:
+            is_ligand_aligned = aligned in het_chains
+            best = 0.0
+            for anchor in range(n):
+                if asym[anchor] != aligned:
+                    continue
+                row = pae[anchor]
+                passing = [row[j] for j in range(n) if asym[j] == scored and row[j] < 10.0]
+                if is_ligand_aligned:
+                    passing = [row[j] for j in range(n) if asym[j] == scored]
+                if not passing:
+                    continue
+                length = len(passing)
+                d0 = 2.0 if is_ligand_aligned else ResultArchiveService._calc_d0(length)
+                mean = sum(1.0 / (1.0 + (value / d0) ** 2.0) for value in passing) / length
+                best = max(best, mean)
+            return best
+
+        def chain_letter(asym: str) -> str:
+            # token_asym_id is a 0-based integer index; letter labels match the
+            # PAE heatmap's chain track.
+            return chr(65 + int(asym)) if asym.isdigit() else asym
+
+        pairs = []
+        for i, ci in enumerate(chain_order):
+            for cj in chain_order[i + 1:]:
+                a_to_b = direction(ci, cj)
+                b_to_a = direction(cj, ci)
+                pairs.append({'a': chain_letter(ci), 'b': chain_letter(cj),
+                              'a_to_b': a_to_b, 'b_to_a': b_to_a})
+        if not pairs:
+            return None
+        return {'pair_ipsae': pairs}
+
+    @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
         """MSA depth from self_msa a3m files inside the archive."""
         total = 0
@@ -1309,6 +1414,12 @@ class ResultArchiveService:
                 sc_block = self._extract_interface_sc(src_zip)
                 if sc_block:
                     merged.update(sc_block)
+                try:
+                    pair_block = self._extract_pair_ipsae(src_zip)
+                    if pair_block:
+                        merged.update(pair_block)
+                except Exception:  # noqa: BLE001 — pair ipsae is additive
+                    pass
                 try:
                     summary_name = next(n for n in src_zip.namelist()
                                         if n.lower().endswith('output/summary.json'))

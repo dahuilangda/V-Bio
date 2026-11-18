@@ -70,12 +70,23 @@
 
 .confidence-kv-row {
   display: grid;
-  grid-template-columns: minmax(132px, 160px) auto;
+  grid-template-columns: 10px minmax(148px, 176px) 18px minmax(64px, auto);
   align-items: center;
   justify-content: start;
   gap: 7px;
   padding: 9px 4px;
   border-bottom: 1px solid #eef3f0;
+}
+
+.confidence-kv-label {
+  color: #52695e;
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.confidence-kv-row .metric-help {
+  justify-self: start;
 }
 
 .confidence-kv-row:nth-child(2n + 1) {

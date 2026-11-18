@@ -414,6 +414,25 @@ interface PairRow {
 
 function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: string[]): PairRow[] {
   const rows: PairRow[] = [];
+  // Directional per-chain-pair ipSAE (server-computed, Dunbrack Eq. 14-16)
+  // takes precedence over the symmetric ipTM matrix.
+  const pairIpsae = data.pair_ipsae;
+  if (Array.isArray(pairIpsae)) {
+    for (const item of pairIpsae) {
+      if (!item || typeof item !== 'object') continue;
+      const entry = item as Record<string, unknown>;
+      const a = String(entry.a ?? '');
+      const b = String(entry.b ?? '');
+      const aToB = toNumber(entry.a_to_b);
+      const bToA = toNumber(entry.b_to_a);
+      if (!a || !b) continue;
+      const aToBValue = aToB !== null ? normalizeProbability(aToB) : null;
+      const bToAValue = bToA !== null ? normalizeProbability(bToA) : null;
+      if (aToBValue !== null) rows.push({ chainA: a, chainB: b, value: aToBValue, directional: true });
+      if (bToAValue !== null) rows.push({ chainA: b, chainB: a, value: bToAValue, directional: true });
+    }
+    if (rows.length > 0) return rows.sort((x, y) => y.value - x.value);
+  }
   const pairMap = readByPath(data, 'pair_chains_iptm');
   if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
     // 引擎链对矩阵对称时每个链对一行（↔）；不对称的值按方向分行（→）
@@ -709,10 +728,9 @@ function ConfidencePanel({
           const toneClass = tone === 'neutral' ? 'confidence-dot-neutral' : `confidence-dot-${tone}`;
           return (
             <div key={card.label} className="confidence-kv-row">
-              <div className="confidence-kv-key">
-                <span className={`confidence-dot ${toneClass}`} />
-                {renderHelp(card.label, card.help)}
-              </div>
+              <span className={`confidence-dot ${toneClass}`} />
+              <span className="confidence-kv-label">{card.label}</span>
+              <InfoTip text={card.help} />
               <div className={`metric-value metric-value-${tone}`}>{card.display}</div>
             </div>
           );
@@ -722,8 +740,13 @@ function ConfidencePanel({
       {pairRows.length > 0 && (
         <div className="confidence-pair-block">
           <div className="confidence-pair-head">
-            {renderHelp('Pair ipTM', 'Interface confidence (ipTM) per chain pair; directional arrows mark conditioned direction. >0.8 confident, 0.6-0.8 gray zone, <0.6 likely failed.')}
-            <span className="muted small">{pairRows.length} pairs</span>
+            {renderHelp(
+              Array.isArray(data.pair_ipsae) ? 'Pair ipSAE' : 'Pair ipTM',
+              Array.isArray(data.pair_ipsae)
+                ? 'Directional ipSAE per chain pair (aligned chain -> scored chain, Dunbrack Eq. 14-16, pure PAE). Values are asymmetric by construction. >0.8 confident, <0.6 likely failed.'
+                : 'Interface confidence (ipTM) per chain pair; directional arrows mark conditioned direction. >0.8 confident, 0.6-0.8 gray zone, <0.6 likely failed.'
+            )}
+            <span className="muted small">{pairRows.length} rows</span>
           </div>
           <div className="confidence-pair-list">
             {pairRows.slice(0, 24).map((row) => {
