@@ -553,12 +553,16 @@ export async function pullResultForViewerTask(params: {
     });
     const persistedProjectConfidence = persistedConfidence.projectConfidence;
     const persistedTaskConfidenceBase = persistedConfidence.taskConfidence;
-    // The persisted patch would otherwise drop server-written keys the parse
-    // does not produce (interface_sc, msa.chains, ...). Re-fetch the row and
-    // union-preserve: keys only the row has survive; keys both sides hold
-    // resolve to whichever value is the superset.
+    // Server-side sync writes interface_sc / msa.chains / the PAE matrix into
+    // the row; the parse cannot produce all of them, and PATCH overwrites the
+    // whole confidence column. So for non-peptide results the browser does not
+    // write confidence at all -- the row keeps its server-written values and
+    // the heatmap reads straight from it. Peptide design keeps its legacy
+    // candidate persistence (union-preserved with the row).
+    const hasPeptideConfidencePayload =
+      'peptide_design' in persistedTaskConfidenceBase || 'candidates' in persistedTaskConfidenceBase;
     let persistedTaskConfidence = persistedTaskConfidenceBase;
-    if (options?.taskRowId) {
+    if (hasPeptideConfidencePayload && options?.taskRowId) {
       try {
         const freshRow = await getProjectTaskById(options.taskRowId, {
           includeComponents: false,
@@ -582,12 +586,6 @@ export async function pullResultForViewerTask(params: {
         // Read-only session or row vanished: persist the parsed subset as-is.
       }
     }
-    // ~100 KB of matrix that every client re-derives from the view archive
-    // anyway; persisting it would 10x the PATCH for no reader benefit.
-    const leanConfidence = { ...persistedTaskConfidence };
-    delete leanConfidence.pae_matrix;
-    delete leanConfidence.pae_chain_bounds;
-    persistedTaskConfidence = leanConfidence;
 
     setStructureText(parsed.structureText);
     setStructureFormat(parsed.structureFormat);
@@ -637,7 +635,7 @@ export async function pullResultForViewerTask(params: {
         : null;
       try {
         await patchTask(options.taskRowId, {
-          confidence: persistedTaskConfidence,
+          ...(hasPeptideConfidencePayload ? { confidence: persistedTaskConfidence } : {}),
           affinity: parsed.affinity,
           structure_name: parsed.structureName,
           ...(propertiesPatch ? { properties: propertiesPatch as unknown as ProjectTask['properties'] } : {})
