@@ -362,7 +362,9 @@ export function useProjectResultDisplay({
     affinityResultLigandSmiles,
     affinityResultLigandAtomPlddts: exactLigandConfidencePreview.atomPlddts,
     predictionLigandPreview,
-    predictionLigandRadarSmiles: predictionLigandPreviewSmiles,
+    // Property radar needs a real SMILES; a CCD-code ligand (e.g. ZBR) has
+    // none and would render an empty skeleton with all-dash pills.
+    predictionLigandRadarSmiles: overviewPrimaryLigand.isSmiles ? predictionLigandPreviewSmiles : '',
     affinityDisplayStructureText,
     affinityDisplayStructureFormat,
     hasAffinityDisplayStructure,

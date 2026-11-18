@@ -707,7 +707,7 @@
 }
 .pae-matrix-chart canvas {
   display: block;
-  width: min(100%, 340px);
+  width: 100%;
   height: auto;
   border-radius: 8px;
   border: 1px solid #d6e4dc;
@@ -724,6 +724,12 @@
   flex: 1;
   height: 8px;
   border-radius: 4px;
+}
+
+/* Binder sequence circles: compact fit inside the ligand panel. */
+.ligand-preview-panel .overview-ligand-sequence {
+  min-height: 0;
+  padding: 12px 8px;
 }
 
 .msa-coverage-chart {
