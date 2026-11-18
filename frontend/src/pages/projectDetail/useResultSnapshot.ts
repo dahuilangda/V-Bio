@@ -73,6 +73,8 @@ export interface UseResultSnapshotResult {
   selectedResultLigandComponent: InputComponent | null;
   selectedResultLigandSequence: string;
   designedBinderComponent: InputComponent | null;
+  designedBinderChainId: string | null;
+  designedBinderResiduePlddts: number[] | null;
   overviewPrimaryLigand: {
     smiles: string;
     isSmiles: boolean;
@@ -630,6 +632,11 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     }) || null;
   }, [resultOverviewActiveComponents, selectedResultTargetChainId]);
 
+  const designedBinderChainId = useMemo(() => {
+    if (!designedBinderComponent) return null;
+    return resultComponentOptions.find((option) => option.id === designedBinderComponent.id)?.chainId || null;
+  }, [designedBinderComponent, resultComponentOptions]);
+
   const overviewPrimaryLigand = useMemo(() => {
     if (selectedResultLigandComponent) {
       const selectedSequence = normalizeComponentSequence(
@@ -706,6 +713,13 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     const raw = readResiduePlddtsForChain(snapshotConfidence, selectedResultLigandChainId);
     return alignConfidenceSeriesToLength(raw, selectedResultLigandSequence.length);
   }, [shouldComputeResultMetrics, snapshotConfidence, selectedResultLigandChainId, selectedResultLigandSequence]);
+
+  const designedBinderResiduePlddts = useMemo(() => {
+    if (!shouldComputeResultMetrics || !designedBinderChainId || !designedBinderComponent) return null;
+    const raw = readResiduePlddtsForChain(snapshotConfidence, designedBinderChainId);
+    const length = (designedBinderComponent.sequence || '').replace(/\s+/g, '').length;
+    return alignConfidenceSeriesToLength(raw, length);
+  }, [shouldComputeResultMetrics, snapshotConfidence, designedBinderChainId, designedBinderComponent]);
 
   const snapshotLigandMeanPlddt = useMemo(() => {
     if (!shouldComputeResultMetrics) return null;
@@ -858,6 +872,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     selectedResultLigandComponent,
     selectedResultLigandSequence,
     designedBinderComponent,
+    designedBinderChainId,
+    designedBinderResiduePlddts,
     overviewPrimaryLigand,
     snapshotConfidence,
     resultChainConsistencyWarning,

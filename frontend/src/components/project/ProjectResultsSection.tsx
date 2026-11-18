@@ -51,6 +51,8 @@ export interface ProjectResultsSectionProps {
   affinityLigandConfidenceHint: number | null;
   selectedResultLigandSequence: string;
   designedBinderComponent: InputComponent | null;
+  designedBinderChainId: string | null;
+  designedBinderResiduePlddts: number[] | null;
   peptideFallbackPlddt: number | null;
   peptideFallbackIptm: number | null;
   statusInfo: Record<string, unknown> | null;
@@ -367,6 +369,8 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
   affinityLigandConfidenceHint,
   selectedResultLigandSequence,
   designedBinderComponent,
+  designedBinderChainId: _designedBinderChainId,
+  designedBinderResiduePlddts,
   peptideFallbackPlddt,
   peptideFallbackIptm,
   statusInfo,
@@ -532,16 +536,11 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
               </div>
               <div className="ligand-preview-panel">
                 {designedBinderComponent && designedBinderComponent.sequence ? (
-                  <>
-                    <OverviewLigandSequencePreview
-                      sequence={designedBinderComponent.sequence}
-                      residuePlddts={[]}
-                      modifications={designedBinderComponent.modifications}
-                    />
-                    <div className="ligand-preview-empty">
-                      Selected ligand is a CCD component; no 2D depiction.
-                    </div>
-                  </>
+                  <OverviewLigandSequencePreview
+                    sequence={designedBinderComponent.sequence}
+                    residuePlddts={designedBinderResiduePlddts}
+                    modifications={designedBinderComponent.modifications}
+                  />
                 ) : predictionLigandPreview}
               </div>
               {predictionLigandRadarSmiles ? <LigandPropertyGrid smiles={predictionLigandRadarSmiles} variant="radar" /> : null}
