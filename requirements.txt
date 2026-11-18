@@ -13,6 +13,7 @@ rdkit
 openpyxl
 pillow
 shape-complementarity  # Lawrence-Colman Sc in result_archive interface metrics
+ipsae2  # Dunbrack directional per-pair ipSAE (github.com/DunbrackLab/IPSAE2; needs git install)
 
 # HALO lead-optimization module (capabilities/halo)
 torch

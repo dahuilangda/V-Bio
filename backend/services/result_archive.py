@@ -3,9 +3,13 @@ from __future__ import annotations
 import glob
 import hashlib
 import io
+import csv
 import json
+from collections import Counter
+import logging
 import math
 import os
+import shutil
 import sys
 import re
 import tempfile
@@ -13,6 +17,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
+import tempfile
 from typing import Any, Callable, Dict, Optional
 
 import gemmi
@@ -1140,163 +1145,153 @@ class ResultArchiveService:
         }
 
     @staticmethod
-    def _calc_d0(length: int) -> float:
-        return max(1.0, 1.24 * (length - 15) ** (1.0 / 3.0) - 1.8) if length > 27 else 1.0
-
-    @staticmethod
     def _extract_pair_ipsae(src_zip) -> Optional[Dict[str, Any]]:
-        """Directional per-chain-pair ipSAE (Dunbrack Eq. 14-16, pure PAE).
+        """Directional per-chain-pair ipSAE via the official IPSAE2 CLI.
 
-        For every ordered chain pair (X aligned, Y scored): per-anchor mean of
-        1/(1+(PAE/d0)^2) over Y tokens with PAE < 10 A, d0 from the count of
-        those tokens, max over X anchors; both directions are reported. The
-        distance cutoff used elsewhere never enters this score (author
-        confirmed); other chains stay in the PAE matrix (paper multi-chain
-        semantics). Non-protein chains (HETATM-only in the sample cif) follow
-        the IPSAE2 ligand rule: d0 fixed at 2.0 A, no PAE cutoff.
+        Writes the best-ranked sample (cif + full_data PAE) to a temp dir,
+        runs `python -m ipsae` with the Dunbrack defaults (pae-cutoff 10,
+        binder group = every non-target chain), and parses the result TSV.
+        All scoring math lives in the official package, so values match the
+        reference implementation by construction.
         """
         full_name = None
         conf_name = None
         best_rank = None
         for name in src_zip.namelist():
             base = os.path.basename(name)
-            if 'full_data' in base and base.endswith('.json'):
+            if 'summary_confidence_sample_' in base and 'full_data' not in base:
                 try:
-                    rank = float(json.loads(src_zip.read(name)).get('ranking_score') or 0)
+                    rank = float(json.loads(src_zip.read(name)).get('ranking_score'))
                 except Exception:  # noqa: BLE001
                     continue
-                if best_rank is None or rank > best_rank:
-                    best_rank, full_name = rank, name
-            elif base.startswith('input_sample_') and base.endswith('.cif'):
-                conf_name = name
+                if not math.isfinite(rank):
+                    continue
+                sample = base.split('summary_confidence_sample_')[1].split('.')[0]
+                stem = name.split('summary_confidence_sample_')[0]
+                full = f"{stem}full_data_sample_{sample}.json"
+                cif = f"{stem}sample_{sample}.cif"
+                if full in src_zip.namelist() and cif in src_zip.namelist() and (
+                        best_rank is None or rank > best_rank):
+                    best_rank = rank
+                    full_name, conf_name = full, cif
         if full_name is None or conf_name is None:
             return None
 
+        workdir = Path(tempfile.mkdtemp(prefix='vbio-ipsae-'))
         try:
-            full = json.loads(src_zip.read(full_name))
-            pae = full.get('token_pair_pae')
-            asym = [str(a) for a in (full.get('token_asym_id') or [])]
-            if not isinstance(pae, list) or not pae or len(asym) != len(pae) or len(asym) != len(pae[0]):
-                return None
-        except Exception:  # noqa: BLE001
-            return None
+            cif_path = workdir / 'sample.cif'
+            pae_path = workdir / 'full_data.json'
+            out_path = workdir / 'ipsae.tsv'
+            cif_path.write_bytes(src_zip.read(conf_name))
+            pae_path.write_bytes(src_zip.read(full_name))
 
-        # Ligand chains = asym ids whose atom_site rows are HETATM-only in the
-        # sample cif (polymer chains carry ATOM rows).
-        het_chains: set = set()
-        try:
-            import re as _re
+            # cif chain id -> unit counts (polymer residues / ligand atoms),
+            # by first appearance in the atom_site loop.
+            cif_residues: Counter = Counter()
+            cif_atoms: Counter = Counter()
             in_atom_site = False
-            for line in src_zip.read(conf_name).decode('utf-8', errors='replace').splitlines():
+            seen: dict = {}
+            for line in cif_path.read_text(errors='replace').splitlines():
                 if line.startswith('_atom_site.'):
                     in_atom_site = True
                     continue
                 if in_atom_site:
                     parts = line.split()
-                    if len(parts) >= 6 and parts[0] in ('ATOM', 'HETATM'):
+                    if len(parts) >= 15 and parts[0] in ('ATOM', 'HETATM'):
+                        chain = parts[5]
                         if parts[0] == 'HETATM':
-                            het_chains.add(parts[5])
+                            cif_atoms[chain] += 1
+                        else:
+                            residue = (chain, parts[6], parts[7])
+                            if residue not in seen:
+                                seen[residue] = True
+                                cif_residues[chain] += 1
                     elif parts and not parts[0].startswith('#'):
                         in_atom_site = False
-        except Exception:  # noqa: BLE001 — cif scan is best-effort
-            pass
 
-        n = len(pae)
-        chain_order: list = []
-        for a in asym:
-            if a not in chain_order:
-                chain_order.append(a)
-        if len(chain_order) < 2:
+            # Binder group = every chain except the largest (target); the
+            # official --group scores the union straight from the full PAE
+            # matrix (IPSAE2 virtual-molecule mode).
+            target_chain = max(cif_residues, key=cif_residues.get) if cif_residues else None
+            binder_chains = [c for c in cif_residues if c != target_chain] + list(cif_atoms)
+
+            command = [sys.executable, '-m', 'ipsae', str(cif_path), str(pae_path),
+                       '--pae-cutoff', '10', '--output-file', str(out_path)]
+            if binder_chains:
+                command += ['--group', '+'.join(binder_chains)]
+
+            import subprocess
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0 or not out_path.exists():
+                logging.getLogger(__name__).warning(
+                    'ipsae2 failed on %s: %s', conf_name,
+                    (result.stderr or '')[-200:])
+                return None
+
+            # cif chain id -> token asym index letter, matched by unit counts
+            # (polymer chain: residues; ligand chain: atoms). Falls back to
+            # the raw cif id when counts are ambiguous.
+            full = json.loads(src_zip.read(full_name))
+            asym_counts = Counter(str(a) for a in (full.get('token_asym_id') or []))
+            id_to_letter: dict = {}
+            used: set = set()
+            for chain, count in cif_residues.items():
+                for asym, acount in asym_counts.items():
+                    if acount == count and asym not in used:
+                        id_to_letter[chain] = chr(65 + int(asym)) if asym.isdigit() else asym
+                        used.add(asym)
+                        break
+            for chain, count in cif_atoms.items():
+                for asym, acount in asym_counts.items():
+                    if acount == count and asym not in used:
+                        id_to_letter[chain] = chr(65 + int(asym)) if asym.isdigit() else asym
+                        used.add(asym)
+                        break
+
+            def to_letter(chain_name: str) -> str:
+                # group rows join chains with '+' ('B+L'); map each part.
+                return '+'.join(id_to_letter.get(part, part)
+                                for part in chain_name.split('+'))
+
+            with open(out_path, newline='') as handle:
+                rows_out = list(csv.DictReader(handle, delimiter='\t'))
+
+            pair_rows = []
+            group_values: dict = {}
+            for row in rows_out:
+                chn1, chn2 = row.get('chn1', ''), row.get('chn2', '')
+                try:
+                    ipsae12 = float(row['ipsae12'])
+                    ipsae21 = float(row['ipsae21'])
+                except (KeyError, ValueError):
+                    continue
+                if '+' in chn1 or '+' in chn2:
+                    group_values[(chn1, chn2)] = (ipsae12, ipsae21)
+                    continue
+                pair_rows.append({
+                    'a': to_letter(chn1), 'b': to_letter(chn2),
+                    'a_to_b': ipsae12, 'b_to_a': ipsae21,
+                })
+            if not pair_rows:
+                return None
+
+            out: Dict[str, Any] = {'pair_ipsae': pair_rows}
+            # Binder aggregate: the group row joining the target's complement.
+            binder_group = next(((c1, c2) for (c1, c2) in group_values
+                                 if target_chain and (target_chain in c2.split('+'))), None)
+            if binder_group:
+                i12, i21 = group_values[binder_group]
+                # ipsae12: aligned on the binder group, scoring the target.
+                out['ipsae_protein_to_ligand'] = i21
+                out['ipsae_ligand_to_protein'] = i12
+                out['ipsae_official_max'] = max(i21, i12)
+            return out
+        except Exception:  # noqa: BLE001 — malformed inputs: no pair ipsae
+            logging.getLogger(__name__).exception('pair ipsae extraction failed')
             return None
-
-        def group_direction_multi(aligned_group: list, scored_group: list) -> float:
-            aligned_ligand = all(a in het_chains for a in aligned_group)
-            best = 0.0
-            for anchor in range(n):
-                if asym[anchor] not in aligned_group:
-                    continue
-                row = pae[anchor]
-                if aligned_ligand:
-                    passing = [row[j] for j in range(n) if asym[j] in scored_group]
-                    d0 = 2.0
-                else:
-                    passing = [row[j] for j in range(n)
-                               if asym[j] in scored_group and row[j] < 10.0]
-                    d0 = ResultArchiveService._calc_d0(len(passing)) if passing else 1.0
-                if not passing:
-                    continue
-                best = max(best, sum(1.0 / (1.0 + (value / d0) ** 2.0)
-                                     for value in passing) / len(passing))
-            return best
-
-        def direction(aligned: int, scored: int) -> float:
-            is_ligand_aligned = aligned in het_chains
-            best = 0.0
-            for anchor in range(n):
-                if asym[anchor] != aligned:
-                    continue
-                row = pae[anchor]
-                passing = [row[j] for j in range(n) if asym[j] == scored and row[j] < 10.0]
-                if is_ligand_aligned:
-                    passing = [row[j] for j in range(n) if asym[j] == scored]
-                if not passing:
-                    continue
-                length = len(passing)
-                d0 = 2.0 if is_ligand_aligned else ResultArchiveService._calc_d0(length)
-                mean = sum(1.0 / (1.0 + (value / d0) ** 2.0) for value in passing) / length
-                best = max(best, mean)
-            return best
-
-        def chain_letter(asym: str) -> str:
-            # token_asym_id is a 0-based integer index; letter labels match the
-            # PAE heatmap's chain track.
-            return chr(65 + int(asym)) if asym.isdigit() else asym
-
-        pairs = []
-        for i, ci in enumerate(chain_order):
-            for cj in chain_order[i + 1:]:
-                a_to_b = direction(ci, cj)
-                b_to_a = direction(cj, ci)
-                pairs.append({'a': chain_letter(ci), 'b': chain_letter(cj),
-                              'a_to_b': a_to_b, 'b_to_a': b_to_a})
-
-        # Aggregate binder-design cards under the same official semantics:
-        # protein side = the largest chain (target), ligand side = the union
-        # of the remaining chains (designed binder: peptide + linker, the
-        # IPSAE2 --group pattern scored straight from the full PAE matrix).
-        protein_asym = max(chain_order, key=lambda a: sum(1 for x in asym if x == a))
-        ligand_asyms = [a for a in chain_order if a != protein_asym]
-
-        def group_direction(aligned: int, scored_group: list) -> float:
-            aligned_ligand = aligned in het_chains
-            best = 0.0
-            for anchor in range(n):
-                if asym[anchor] != aligned:
-                    continue
-                row = pae[anchor]
-                if aligned_ligand:
-                    passing = [row[j] for j in range(n) if asym[j] in scored_group]
-                    d0 = 2.0
-                else:
-                    passing = [row[j] for j in range(n)
-                               if asym[j] in scored_group and row[j] < 10.0]
-                    d0 = ResultArchiveService._calc_d0(len(passing)) if passing else 1.0
-                if not passing:
-                    continue
-                best = max(best, sum(1.0 / (1.0 + (value / d0) ** 2.0)
-                                     for value in passing) / len(passing))
-            return best
-
-        p_to_l = group_direction(protein_asym, ligand_asyms)
-        l_to_p = group_direction_multi(ligand_asyms, [protein_asym])
-        if not pairs:
-            return None
-        return {
-            'pair_ipsae': pairs,
-            'ipsae_protein_to_ligand': p_to_l,
-            'ipsae_ligand_to_protein': l_to_p,
-            'ipsae_official_max': max(p_to_l, l_to_p),
-        }
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
