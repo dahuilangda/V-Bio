@@ -685,14 +685,14 @@ function ConfidencePanel({
       ? [
           {
             label: 'ipSAE (Protein → Ligand)',
-            help: 'Directional ipSAE conditioned on the protein - the screening-relevant direction: >0.4 likely true, <0.2 likely false at screening stage.',
+            help: 'Target-anchored ipSAE: aligned on the target, scoring the designed binder (pure PAE, Dunbrack Eq. 14-16). The screening-relevant direction per the IPSAE2 authors; >0.4 likely true, <0.2 likely false at screening stage.',
             value: p2lIpsae,
             display: formatMetricValue(p2lIpsae, 4),
             scale: 'ipsae' as const
           },
           {
             label: 'ipSAE (Ligand → Protein)',
-            help: 'Directional ipSAE conditioned on the ligand. Conditioned subsets differ from the reverse direction, so the two need not agree.',
+            help: 'Binder-anchored ipSAE: aligned on the designed binder, scoring the target. Asymmetric by construction - the reverse direction need not agree.',
             value: l2pIpsae,
             display: formatMetricValue(l2pIpsae, 4),
             scale: 'ipsae' as const

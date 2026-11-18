@@ -1209,6 +1209,26 @@ class ResultArchiveService:
         if len(chain_order) < 2:
             return None
 
+        def group_direction_multi(aligned_group: list, scored_group: list) -> float:
+            aligned_ligand = all(a in het_chains for a in aligned_group)
+            best = 0.0
+            for anchor in range(n):
+                if asym[anchor] not in aligned_group:
+                    continue
+                row = pae[anchor]
+                if aligned_ligand:
+                    passing = [row[j] for j in range(n) if asym[j] in scored_group]
+                    d0 = 2.0
+                else:
+                    passing = [row[j] for j in range(n)
+                               if asym[j] in scored_group and row[j] < 10.0]
+                    d0 = ResultArchiveService._calc_d0(len(passing)) if passing else 1.0
+                if not passing:
+                    continue
+                best = max(best, sum(1.0 / (1.0 + (value / d0) ** 2.0)
+                                     for value in passing) / len(passing))
+            return best
+
         def direction(aligned: int, scored: int) -> float:
             is_ligand_aligned = aligned in het_chains
             best = 0.0
@@ -1239,9 +1259,44 @@ class ResultArchiveService:
                 b_to_a = direction(cj, ci)
                 pairs.append({'a': chain_letter(ci), 'b': chain_letter(cj),
                               'a_to_b': a_to_b, 'b_to_a': b_to_a})
+
+        # Aggregate binder-design cards under the same official semantics:
+        # protein side = the largest chain (target), ligand side = the union
+        # of the remaining chains (designed binder: peptide + linker, the
+        # IPSAE2 --group pattern scored straight from the full PAE matrix).
+        protein_asym = max(chain_order, key=lambda a: sum(1 for x in asym if x == a))
+        ligand_asyms = [a for a in chain_order if a != protein_asym]
+
+        def group_direction(aligned: int, scored_group: list) -> float:
+            aligned_ligand = aligned in het_chains
+            best = 0.0
+            for anchor in range(n):
+                if asym[anchor] != aligned:
+                    continue
+                row = pae[anchor]
+                if aligned_ligand:
+                    passing = [row[j] for j in range(n) if asym[j] in scored_group]
+                    d0 = 2.0
+                else:
+                    passing = [row[j] for j in range(n)
+                               if asym[j] in scored_group and row[j] < 10.0]
+                    d0 = ResultArchiveService._calc_d0(len(passing)) if passing else 1.0
+                if not passing:
+                    continue
+                best = max(best, sum(1.0 / (1.0 + (value / d0) ** 2.0)
+                                     for value in passing) / len(passing))
+            return best
+
+        p_to_l = group_direction(protein_asym, ligand_asyms)
+        l_to_p = group_direction_multi(ligand_asyms, [protein_asym])
         if not pairs:
             return None
-        return {'pair_ipsae': pairs}
+        return {
+            'pair_ipsae': pairs,
+            'ipsae_protein_to_ligand': p_to_l,
+            'ipsae_ligand_to_protein': l_to_p,
+            'ipsae_official_max': max(p_to_l, l_to_p),
+        }
 
     @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
@@ -1418,6 +1473,12 @@ class ResultArchiveService:
                     pair_block = self._extract_pair_ipsae(src_zip)
                     if pair_block:
                         merged.update(pair_block)
+                        # The legacy ligand-ipsae keys were distance-filtered
+                        # with the linker pooled into the protein side; the
+                        # official pure-PAE values above supersede them.
+                        merged['protein_to_ligand_ipsae'] = pair_block['ipsae_protein_to_ligand']
+                        merged['ligand_to_protein_ipsae'] = pair_block['ipsae_ligand_to_protein']
+                        merged['ligand_ipsae_max'] = pair_block['ipsae_official_max']
                 except Exception:  # noqa: BLE001 — pair ipsae is additive
                     pass
                 try:
