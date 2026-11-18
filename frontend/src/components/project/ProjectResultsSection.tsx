@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { useTabsKeyboard } from '../ui/useTabsKeyboard';
+import { OverviewLigandSequencePreview } from '../../pages/projectDetail/OverviewLigandSequencePreview';
 import { AffinityResultsWorkspace } from './AffinityWorkspace';
 import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
@@ -49,6 +50,7 @@ export interface ProjectResultsSectionProps {
   affinityLigandAtomPlddts: number[];
   affinityLigandConfidenceHint: number | null;
   selectedResultLigandSequence: string;
+  designedBinderComponent: InputComponent | null;
   peptideFallbackPlddt: number | null;
   peptideFallbackIptm: number | null;
   statusInfo: Record<string, unknown> | null;
@@ -364,6 +366,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
   affinityLigandAtomPlddts,
   affinityLigandConfidenceHint,
   selectedResultLigandSequence,
+  designedBinderComponent,
   peptideFallbackPlddt,
   peptideFallbackIptm,
   statusInfo,
@@ -527,7 +530,20 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                   </div>
                 )}
               </div>
-              <div className="ligand-preview-panel">{predictionLigandPreview}</div>
+              <div className="ligand-preview-panel">
+                {designedBinderComponent && designedBinderComponent.sequence ? (
+                  <>
+                    <OverviewLigandSequencePreview
+                      sequence={designedBinderComponent.sequence}
+                      residuePlddts={[]}
+                      modifications={designedBinderComponent.modifications}
+                    />
+                    <div className="ligand-preview-empty">
+                      Selected ligand is a CCD component; no 2D depiction.
+                    </div>
+                  </>
+                ) : predictionLigandPreview}
+              </div>
               {predictionLigandRadarSmiles ? <LigandPropertyGrid smiles={predictionLigandRadarSmiles} variant="radar" /> : null}
             </section>
 

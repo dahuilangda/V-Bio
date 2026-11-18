@@ -852,7 +852,7 @@ def register_task_routes(
 
             compact = None
             try:
-                compact = get_compact_prediction_metrics(task_id)
+                compact = get_compact_prediction_metrics(task_id, include_pae_matrix=True)
             except Exception as compact_exc:
                 logger.warning('compact metrics extraction failed for task %s: %s', task_id, compact_exc)
             _sync_project_task_terminal_state(task_id, save_path, logger, compact_metrics=compact)

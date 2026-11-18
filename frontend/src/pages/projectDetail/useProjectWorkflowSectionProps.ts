@@ -69,6 +69,7 @@ interface UseProjectWorkflowSectionPropsInput {
   snapshotIptm: number | null;
   snapshotSelectedPairIptm: number | null;
   selectedResultLigandSequence: string;
+  designedBinderComponent: InputComponent | null;
   canEdit: boolean;
   submitting: boolean;
   affinityTargetFileName: string;
@@ -296,6 +297,7 @@ export function useProjectWorkflowSectionProps({
   snapshotIptm,
   snapshotSelectedPairIptm,
   selectedResultLigandSequence,
+  designedBinderComponent,
   canEdit,
   submitting,
   affinityTargetFileName,
@@ -499,6 +501,7 @@ export function useProjectWorkflowSectionProps({
         affinityLigandAtomPlddts: affinityResultLigandAtomPlddts,
         affinityLigandConfidenceHint: snapshotPlddt,
         selectedResultLigandSequence,
+        designedBinderComponent,
         peptideFallbackPlddt: snapshotPlddt,
         peptideFallbackIptm: snapshotSelectedPairIptm,
         statusInfo,

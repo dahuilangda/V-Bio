@@ -72,6 +72,7 @@ export interface UseResultSnapshotResult {
   selectedResultLigandChainId: string | null;
   selectedResultLigandComponent: InputComponent | null;
   selectedResultLigandSequence: string;
+  designedBinderComponent: InputComponent | null;
   overviewPrimaryLigand: {
     smiles: string;
     isSmiles: boolean;
@@ -616,6 +617,19 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     return normalizeComponentSequence(selectedResultLigandComponent.type, selectedResultLigandComponent.sequence || '');
   }, [selectedResultLigandComponent]);
 
+  // A designed binder enters the input as a short protein component next to a
+  // much longer target; surface it so the results aside can render its
+  // residue-circle preview even when the selected ligand is a CCD linker.
+  const designedBinderComponent = useMemo(() => {
+    const targetComponentId = resultChainInfoById.get(selectedResultTargetChainId || '')?.componentId
+      || (resultOverviewActiveComponents.length > 0 ? resultOverviewActiveComponents[0].id : null);
+    return resultOverviewActiveComponents.find((component) => {
+      if (component.type !== 'protein' || component.id === targetComponentId) return false;
+      const length = (component.sequence || '').replace(/\s+/g, '').length;
+      return length >= 8 && length <= 45;
+    }) || null;
+  }, [resultOverviewActiveComponents, selectedResultTargetChainId]);
+
   const overviewPrimaryLigand = useMemo(() => {
     if (selectedResultLigandComponent) {
       const selectedSequence = normalizeComponentSequence(
@@ -843,6 +857,7 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     selectedResultLigandChainId,
     selectedResultLigandComponent,
     selectedResultLigandSequence,
+    designedBinderComponent,
     overviewPrimaryLigand,
     snapshotConfidence,
     resultChainConsistencyWarning,

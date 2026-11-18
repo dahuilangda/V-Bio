@@ -318,24 +318,26 @@ export function useProjectResultDisplay({
   const hasAffinityDisplayStructure = Boolean(affinityDisplayStructureText.trim());
 
   const predictionLigandPreview = shouldPreparePredictionLigandPreview
-    ? predictionLigandPreviewSmiles ? (
-        <Ligand2DPreview
-          smiles={predictionLigandPreviewSmiles}
-          atomConfidences={exactLigandConfidencePreview.atomPlddts}
-          confidenceHint={snapshotPlddt}
-        />
-      ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
+    ? selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
+        // Sequence ligands (designed peptides) render as the residue-circle
+        // preview; a RDKit 2D depiction is meaningless for them.
         <OverviewLigandSequencePreview
           sequence={selectedResultLigandSequence}
           residuePlddts={snapshotLigandResiduePlddts}
           modifications={selectedResultLigandModifications}
+        />
+      ) : predictionLigandPreviewSmiles ? (
+        <Ligand2DPreview
+          smiles={predictionLigandPreviewSmiles}
+          atomConfidences={exactLigandConfidencePreview.atomPlddts}
+          confidenceHint={snapshotPlddt}
         />
       ) : (
         <div className="ligand-preview-empty">
           {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
             ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
             : overviewPrimaryLigand.selectedComponentType === 'ligand'
-              ? '2D preview requires SMILES input.'
+              ? 'Selected ligand is a CCD component; no 2D depiction.'
               : overviewPrimaryLigand.smiles
               ? '2D preview requires SMILES input.'
               : 'No ligand input.'}
