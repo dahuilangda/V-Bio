@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, '/data/V-Bio')
 DB_URL = os.environ.setdefault(
     'VBIO_MONITOR_DATABASE_URL',
-    'postgresql://postgres:postgres@host.docker.internal:54322/postgres')
+    'postgresql://postgres:postgres@127.0.0.1:54322/postgres')
 import psycopg2
 
 from backend.services.result_archive import ResultArchiveService
