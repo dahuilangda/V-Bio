@@ -285,6 +285,8 @@ SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_SENDER_NAME = os.environ.get("SMTP_SENDER_NAME", "V-Bio")
 # Task-email batching window in seconds; 0 = one immediate email per task.
 NOTIFY_DIGEST_WINDOW_SECONDS = int(os.environ.get("NOTIFY_DIGEST_WINDOW_SECONDS", "900") or 0)
+ESMFOLD2_DOCKER_IMAGE = os.environ.get(
+    "ESMFOLD2_DOCKER_IMAGE", "vbio-esmfold2-runtime:latest")
 MOL1_DOCKER_IMAGE = os.environ.get(
     "MOL1_DOCKER_IMAGE", "vbio-mol1-runtime:1.0.3"
 )

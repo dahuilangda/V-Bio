@@ -76,6 +76,7 @@ from backend.core.config import (
     PROTENIX_INFER_EXTRA_ARGS,
     PROTENIX_PYTHON_BIN,
     MOL1_DOCKER_IMAGE,
+    ESMFOLD2_DOCKER_IMAGE,
     RFD4_DOCKER_IMAGE,
     RFD4_DATA_DIR,
     RFD4_NUM_DESIGNS,
@@ -5119,7 +5120,7 @@ def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
         return
     backend = str(score_backend or "").strip().lower()
     if backend in ("mol1", "mol-1", "protenix", "protenix2dock",
-                   "protenix-2-dock", "alphafold3"):
+                   "protenix-2-dock", "alphafold3", "esmfold2"):
         return
     raise ValueError(
         f"模式 {design_mode} 的成环约束需要共价键先验：打分后端 {score_backend} "
@@ -5391,6 +5392,95 @@ def run_bicyclic_strategy(
                     json.dumps(manifest, ensure_ascii=False, indent=1))
     print(f"[rfd4-bicyclic] {dispatched} verification tasks dispatched",
           file=sys.stderr)
+
+
+def run_esmfold2_backend(
+    temp_dir: str,
+    yaml_content: str,
+    output_archive_path: str,
+    seed: Optional[int] = None,
+    task_id: Optional[str] = None,
+) -> None:
+    """ESMFold2 co-folding engine (MIT weights, multi-chain all-atom).
+
+    Conversion and inference both happen inside the engine container
+    (capabilities/esmfold2/esmfold2_predict.py): platform yaml -> ESMFold2
+    StructurePredictionInput -> fold -> cif + token PAE + confidence
+    summaries, written in the mol1/protenix output contract so the shared
+    downstream (result archive metrics, PAE heatmap, ipSAE) applies.
+    """
+    esmfold2_image = str(ESMFOLD2_DOCKER_IMAGE or "").strip()
+    ensure_image(esmfold2_image)
+    print("Using ESMFold2 backend", file=sys.stderr)
+
+    results_root = _resolve_backend_results_root("esmfold2", task_id, temp_dir)
+    work_root = str(_resolve_backend_work_root(results_root))
+    input_dir = os.path.join(work_root, "input")
+    output_dir = os.path.join(results_root, "output")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    yaml_path = os.path.join(input_dir, "input.yaml")
+    with open(yaml_path, "w", encoding="utf-8") as handle:
+        handle.write(yaml_content)
+
+    seed_value = int(seed) if seed is not None else 101
+
+    from backend.worker.docker_cmd import image_and_python
+
+    image, _ = image_and_python(esmfold2_image)
+    container_name = f"esmfold2-predict-{uuid.uuid4().hex[:12]}"
+    gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    hf_cache = str(Path(RESULTS_BASE_DIR).parent / "esmfold2" / "hf_cache")
+    os.makedirs(hf_cache, exist_ok=True)
+    command = [
+        "docker", "run", "--rm", "--name", container_name, "--entrypoint=",
+        "--runtime", "nvidia", "--shm-size", "16g",
+        "--gpus", gpu_arg,
+        "--add-host", "host.docker.internal:host-gateway",
+        "--volume", f"{hf_cache}:/root/.cache/huggingface",
+        "--volume", "/data/V-Bio:/workspace/vbio:ro",
+        "--volume", f"{RESULTS_BASE_DIR}:{RESULTS_BASE_DIR}",
+        "--env", "HF_HOME=/root/.cache/huggingface",
+        "--env", "PYTHONUNBUFFERED=1",
+        image, "python3", "/workspace/vbio/capabilities/esmfold2/esmfold2_predict.py",
+        "--yaml", yaml_path,
+        "--output-dir", output_dir,
+        "--seed", str(seed_value),
+    ]
+    samples_env = os.environ.get("ESMFOLD2_SAMPLES")
+    if samples_env:
+        command += ["--samples", samples_env]
+
+    started = time.time()
+    completed = subprocess.run(command, check=False)
+    print(f"ESMFold2 inference finished ({time.time() - started:.0f}s, "
+          f"exit={completed.returncode})", file=sys.stderr)
+    if completed.returncode != 0:
+        raise RuntimeError(f"ESMFold2 inference failed (exit {completed.returncode})")
+
+    # Per-sample ipSAE from the shared evaluator, exactly like the mol1 flow;
+    # failures warn only and never block the archive.
+    try:
+        import sys as _sys
+
+        _repo = Path(__file__).resolve().parents[2]
+        _p2d = str(_repo / "capabilities" / "protenix2dock")
+        if _p2d not in _sys.path:
+            _sys.path.insert(0, _p2d)
+        from core.ipsae import compute_ipsae_for_output
+
+        compute_ipsae_for_output(Path(output_dir))
+    except Exception as ipsae_exc:
+        print(f"ipSAE post-processing skipped: {ipsae_exc}", file=sys.stderr)
+
+    if os.path.exists(output_archive_path):
+        os.remove(output_archive_path)
+    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(results_root):
+            for name in files:
+                full = os.path.join(root, name)
+                zf.write(full, os.path.relpath(full, results_root))
 
 
 def run_mol1_backend(
@@ -14210,6 +14300,16 @@ def main():
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
                     use_msa_server=use_msa_server,
+                    seed=seed,
+                    task_id=runtime_task_id,
+                )
+            elif backend == "esmfold2":
+                if template_inputs:
+                    raise ValueError("ESMFold2 does not support template files.")
+                run_esmfold2_backend(
+                    temp_dir=temp_dir,
+                    yaml_content=processed_yaml,
+                    output_archive_path=output_archive_path,
                     seed=seed,
                     task_id=runtime_task_id,
                 )

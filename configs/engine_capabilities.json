@@ -120,6 +120,29 @@
         "ncaa": true
       }
     },
+    "esmfold2": {
+      "label": "ESMFold2",
+      "status": "active",
+      "workflows": [
+        "prediction",
+        "peptide_design"
+      ],
+      "chirality": [
+        "l"
+      ],
+      "design_modes": [
+        "linear"
+      ],
+      "peptide_roles": [
+        "score"
+      ],
+      "features": {
+        "pocket": true,
+        "custom_ccd": true,
+        "msa": false,
+        "ncaa": false
+      }
+    },
     "esm3": {
       "label": "ESM3",
       "status": "active",

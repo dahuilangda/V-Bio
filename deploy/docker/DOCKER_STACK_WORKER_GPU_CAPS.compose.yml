@@ -67,6 +67,15 @@ services:
       MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_BOLTZ2:--1}"
       GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_BOLTZ2:-}"
 
+  gpu-worker-esmfold2:
+    <<: *gpu_worker_base
+    profiles: ["esmfold2"]
+    container_name: vbio-gpu-worker-esmfold2
+    environment:
+      GPU_WORKER_CAPABILITIES: "esmfold2"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_ESMFOLD2:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_ESMFOLD2:-}"
+
   gpu-worker-boltz2score:
     <<: *gpu_worker_base
     profiles: ["boltz2score"]
