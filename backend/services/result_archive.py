@@ -1818,6 +1818,11 @@ class ResultArchiveService:
                     if samples:
                         best = self._best_sample(samples)
                         normalized = self._sample_confidence(best['summary'])
+                        # af3 rounds the summary ranking_score to 2 decimals;
+                        # the csv row carries the full precision.
+                        csv_rank = best.get('csv_rank')
+                        if csv_rank is not None:
+                            normalized['ranking_score'] = float(csv_rank)
                         for key, value in normalized.items():
                             merged.setdefault(key, value)
                 except Exception:  # noqa: BLE001 — scalar supplement is additive
