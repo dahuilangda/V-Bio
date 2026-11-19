@@ -652,7 +652,7 @@ function ConfidencePanel({
       ? [
           {
             label: 'Sc',
-            help: 'Lawrence-Colman shape complementarity of the predicted interface (0-1). Protein-peptide interfaces typically 0.50-0.65; >=0.55 is the BindCraft peptide gate, >=0.62 the meta-analysis pre-filter. Soft ranking signal on predicted structures, not a confidence metric.',
+            help: 'Lawrence-Colman shape complementarity (0-1; pure surface-geometry, not a confidence score). Ranges (CCP4-default parameters): >=0.70 tightly packed, 0.60-0.70 typical protein-protein, 0.45-0.60 loose/transient, protein-ligand lower; <0.45 poor. Peptide design gates: >=0.55 BindCraft, >=0.62 binder meta-analysis pre-filter. Values may run ~0.02-0.05 above CCP4 SC depending on dot sampling.',
             value: interfaceSc,
             display: formatMetricValue(interfaceSc, 4),
             scale: 'sc' as const
