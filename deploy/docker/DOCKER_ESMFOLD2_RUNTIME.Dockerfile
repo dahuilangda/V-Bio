@@ -1,12 +1,16 @@
-# ESMFold2 runtime: torch (CUDA), the esm package, RDKit for SMILES inputs.
-# Weights (biohub/ESMFold2) download on first run into the mounted
-# HF cache (/data/esmfold2/hf_cache on the host). Set HF_ENDPOINT to a
-# mirror when the hub is unreachable. The capability script is read through
-# the /data/V-Bio mount at run time, so the image stays code-free.
-FROM pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
+# ESMFold2 runtime: python 3.12 + torch >= 2.11 (upgraded from the mol1 base)
+# + the esm package + RDKit. Weights (biohub/ESMFold2) download on first run
+# into the mounted HF cache (/data/esmfold2/hf_cache on the host). The
+# capability script is read through the /data/V-Bio mount at run time.
+# Build with proxy build-args when PyPI needs it:
+#   docker build --build-arg HTTP_PROXY=... --build-arg HTTPS_PROXY=...
+FROM vbio-mol1-runtime:1.0.3
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTPS_PROXY}
 
-RUN pip install --no-cache-dir "esm>=3.4.1" rdkit
+RUN python3.12 -m pip install --no-cache-dir --upgrade "torch>=2.11.0" \
+    && python3.12 -m pip install --no-cache-dir "esm>=3.4.1"
+
+ENV HTTP_PROXY= HTTPS_PROXY=

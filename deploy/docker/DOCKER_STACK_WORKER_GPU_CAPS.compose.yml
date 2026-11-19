@@ -27,7 +27,7 @@ x-gpu-worker-base: &gpu_worker_base
     - ${RFD4_DATA_DIR:-/data/rfd4-proteina}:${RFD4_DATA_DIR:-/data/rfd4-proteina}
     - ${VBIO_MSA_CACHE_DIR:-/data/boltz_msa_cache}:${VBIO_MSA_CACHE_DIR:-/data/boltz_msa_cache}
   command: >-
-    bash -lc "cd ${VBIO_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint gpu-worker"
+    bash -lc "cd ${VBIO_HOST_ROOT:-/data/V-Bio} && python -m backend.scripts.runtime_entrypoint gpu-worker"
 
 services:
   esm3-service:
@@ -69,6 +69,8 @@ services:
 
   gpu-worker-esmfold2:
     <<: *gpu_worker_base
+    image: vbio-worker-gpu-caps-gpu-worker-esmfold2:latest
+    pull_policy: never
     profiles: ["esmfold2"]
     container_name: vbio-gpu-worker-esmfold2
     environment:

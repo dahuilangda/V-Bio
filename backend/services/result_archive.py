@@ -1013,43 +1013,233 @@ class ResultArchiveService:
         return None
 
     @staticmethod
-    def _extract_compact_pae_from_zip(src_zip) -> Optional[Dict[str, Any]]:
-        """Best-effort compact PAE matrix (≤134²) + chain bounds from mol1/af3
-        full_data samples; None when absent."""
-        import json as _json
-        fd_names = [n for n in src_zip.namelist()
-                    if 'full_data' in n.lower() and n.lower().endswith('.json')]
-        for name in sorted(fd_names):
+    def _prediction_samples(src_zip, names: list) -> list:
+        """Backend-aware discovery of per-sample artifacts in a result archive.
+
+        Every structure-prediction backend ships, per diffusion sample: a
+        model cif, a PAE carrier (token-level full_data json, AF3 token-level
+        confidences json, or a Boltz token-level pae npz), and a scalar
+        confidence summary. Layouts differ; this normalizes them into one
+        shape so every extractor below is backend-agnostic.
+
+        Returns dicts: {index, letter, cif, summary_name, summary,
+        full_name, full_data, pae_name, pae_bytes, pae_kind}.
+        """
+        import gemmi
+
+        samples: list = []
+        used = set()
+
+        def fetch(name):
+            return json.loads(src_zip.read(name))
+
+        def find_cif(prefix: str) -> Optional[str]:
+            cifs = [n for n in names if n.startswith(prefix)
+                    and n.endswith('.cif') and n not in used]
+            return cifs[0] if cifs else None
+
+        # 1) mol1/esmfold2: <prefix>summary_confidence_sample_<i>.json
+        for name in names:
+            base = os.path.basename(name)
+            if 'summary_confidence_sample_' not in base or not base.endswith('.json'):
+                continue
+            if 'full_data' in base:
+                continue
+            sample = base.split('summary_confidence_sample_')[1].split('.')[0]
+            prefix = name.split('summary_confidence_sample_')[0]
+            full = f"{prefix}full_data_sample_{sample}.json"
+            cif = prefix + f"sample_{sample}.cif"
+            if full not in names or cif not in names or name in used:
+                continue
             try:
-                data = _json.loads(src_zip.read(name))
+                summary = fetch(name)
+                full_data = fetch(full)
             except Exception:  # noqa: BLE001
                 continue
-            pae = data.get('token_pair_pae')
-            asym = data.get('token_asym_id')
-            if not isinstance(pae, list) or not pae or not isinstance(asym, list):
+            used.update({name, full, cif})
+            samples.append({
+                'index': len(samples), 'letter': chr(65 + len(samples)),
+                'cif': cif, 'summary_name': name, 'summary': summary,
+                'full_name': full, 'full_data': full_data,
+                'pae_name': full, 'pae_bytes': None, 'pae_kind': 'json',
+            })
+
+        # 2) alphafold3: <dir>/summary_confidences.json + confidences.json + model.cif
+        for name in names:
+            base = os.path.basename(name)
+            if base != 'summary_confidences.json':
                 continue
-            n0 = len(pae)
-            if n0 == 0 or not isinstance(pae[0], list):
+            parent = name[:name.rfind('/') + 1]
+            cif = parent + 'model.cif'
+            conf = parent + 'confidences.json'
+            if cif not in names or conf not in names or name in used:
                 continue
-            down = max(1, -(-n0 // 134))
-            matrix, bounds = [], []
-            for i in range(0, n0, down):
-                row_vals = pae[i]
-                row = []
-                for j in range(0, n0, down):
-                    try:
-                        row.append(round(float(row_vals[j]), 2))
-                    except (IndexError, TypeError, ValueError):
-                        row.append(25.0)
-                matrix.append(row)
+            try:
+                summary = fetch(name)
+                conf_payload = fetch(conf)
+            except Exception:  # noqa: BLE001
+                continue
+            used.update({name, cif, conf})
+            # token plddt: mean of atom plddts per token (atoms grouped by
+            # atom_chain_ids + token_res_ids matching).
+            token_plddt = None
+            atom_plddts = conf_payload.get('atom_plddts')
+            if isinstance(atom_plddts, list) and atom_plddts:
+                token_plddt = float(sum(atom_plddts) / len(atom_plddts))
+            samples.append({
+                'index': len(samples), 'letter': chr(65 + len(samples)),
+                'cif': cif, 'summary_name': name, 'summary': summary,
+                'full_name': conf, 'full_data': conf_payload,
+                'pae_name': conf, 'pae_bytes': None, 'pae_kind': 'json',
+                'token_plddt': token_plddt,
+            })
+
+        # 3) boltz: confidence_data_model_<i>.json + pae_data_model_<i>.npz
+        #    + data_model_<i>.cif
+        confs = [n for n in names
+                 if os.path.basename(n).startswith('confidence_data_model_')
+                 and n.endswith('.json') and n not in used]
+        for conf in confs:
+            model = os.path.basename(conf)[len('confidence_data_model_'):-len('.json')]
+            pae = next((n for n in names
+                        if os.path.basename(n) == f'pae_data_model_{model}.npz'), None)
+            cif = next((n for n in names
+                        if os.path.basename(n) == f'data_model_{model}.cif'), None)
+            if not pae or not cif or conf in used:
+                continue
+            try:
+                summary = fetch(conf)
+            except Exception:  # noqa: BLE001
+                continue
+            used.update({conf, pae, cif})
+            samples.append({
+                'index': len(samples), 'letter': chr(65 + len(samples)),
+                'cif': cif, 'summary_name': conf, 'summary': summary,
+                'full_name': pae, 'full_data': None,
+                'pae_name': pae, 'pae_bytes': src_zip.read(pae), 'pae_kind': 'npz',
+            })
+        return samples
+
+    @staticmethod
+    def _sample_token_matrix(full_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """token_pair_pae + token_asym_id (+ chain ids) from a sample payload."""
+        pae = full_data.get('token_pair_pae') or full_data.get('pae')
+        if not isinstance(pae, list) or not pae or not isinstance(pae[0], list):
+            return None
+        chain_ids = full_data.get('token_asym_id')
+        if chain_ids is None:
+            raw = full_data.get('token_chain_ids')
+            if isinstance(raw, list) and raw and len(raw) == len(pae):
+                uniq = []
+                for value in raw:
+                    s = str(value)
+                    if s not in uniq:
+                        uniq.append(s)
+                chain_ids = [uniq.index(str(v)) for v in raw]
+            else:
+                chain_ids = None
+        if chain_ids is not None and len(chain_ids) != len(pae):
+            chain_ids = None
+        out = {'token_pair_pae': pae}
+        if chain_ids is not None:
+            out['token_asym_id'] = chain_ids
+        return out
+
+    @staticmethod
+    def _sample_confidence(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalized scalar summary from any backend confidence payload."""
+        def pick(*keys):
+            for k in keys:
+                v = payload.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+            return None
+        out = {}
+        iptm = pick('iptm', 'complex_iptm')
+        ptm = pick('ptm', 'complex_ptm')
+        ranking = pick('ranking_score', 'confidence_score')
+        plddt = pick('complex_plddt', 'plddt')
+        if iptm is not None:
+            out['iptm'] = iptm
+        if ptm is not None:
+            out['ptm'] = ptm
+        if ranking is not None:
+            out['ranking_score'] = ranking
+        if plddt is not None:
+            # boltz stores 0-1; mol1 stores 0-100. Keep native scale; the
+            # frontend normalizes.
+            out['plddt'] = plddt
+        for k in ('has_clash', 'fraction_disordered'):
+            v = payload.get(k)
+            if isinstance(v, (int, float)):
+                out[k] = v
+        pair = payload.get('chain_pair_iptm')
+        if isinstance(pair, list) and pair:
+            out['chain_pair_iptm'] = pair
+        ligand_iptm = pick('ligand_iptm')
+        if ligand_iptm is not None:
+            out['ligand_iptm'] = ligand_iptm
+        protein_iptm = pick('protein_iptm')
+        if protein_iptm is not None:
+            out['protein_iptm'] = protein_iptm
+        return out
+
+    @staticmethod
+    def _extract_compact_pae_from_zip(src_zip) -> Optional[Dict[str, Any]]:
+        """Compact PAE matrix (≤134²) + chain bounds for ANY backend, via the
+        backend-aware samples abstraction."""
+        names = [n for n in src_zip.namelist() if not n.endswith('/')]
+        samples = ResultArchiveService._prediction_samples(src_zip, names)
+        candidates = [s for s in samples
+                      if isinstance(s.get('full_data'), dict) or s.get('pae_bytes')]
+        if not candidates:
+            return None
+
+        def rank(s):
+            v = s['summary'].get('ranking_score')
+            if not isinstance(v, (int, float)):
+                v = s['summary'].get('confidence_score')
+            return float(v) if isinstance(v, (int, float)) else 0.0
+
+        best = max(candidates, key=rank)
+        import numpy as _np
+        matrix_full = None
+        asym = None
+        if isinstance(best.get('full_data'), dict):
+            block = ResultArchiveService._sample_token_matrix(best['full_data'])
+            if block:
+                matrix_full = block['token_pair_pae']
+                asym = block.get('token_asym_id')
+        if matrix_full is None and best.get('pae_bytes'):
+            try:
+                loaded = _np.load(io.BytesIO(best['pae_bytes']))
+                key = 'pae' if 'pae' in loaded.files else next(iter(loaded.files))
+                matrix_full = _np.asarray(loaded[key], dtype=float).tolist()
+            except Exception:  # noqa: BLE001
+                return None
+        if not matrix_full:
+            return None
+        n0 = len(matrix_full)
+        down = max(1, -(-n0 // 134))
+        matrix = []
+        for i in range(0, n0, down):
+            row_vals = matrix_full[i]
+            row = []
+            for j in range(0, n0, down):
+                try:
+                    row.append(round(float(row_vals[j]), 2))
+                except (IndexError, TypeError, ValueError):
+                    row.append(25.0)
+            matrix.append(row)
+        bounds = []
+        if asym:
             for idx, chain in enumerate(asym):
                 last = bounds[-1] if bounds else None
                 if last and last.get('chain') == chain:
                     last['end'] = idx
                 else:
                     bounds.append({'chain': int(chain), 'start': idx, 'end': idx})
-            return {'pae_matrix': matrix, 'pae_chain_bounds': bounds}
-        return None
+        return {'pae_matrix': matrix, 'pae_chain_bounds': bounds}
 
     @staticmethod
     def _extract_interface_sc(src_zip) -> Optional[Dict[str, Any]]:
@@ -1065,29 +1255,22 @@ class ResultArchiveService:
         import numpy as np
         from shape_complementarity import compute_sc
 
-        best_conf_name = None
-        best_rank = None
-        for name in src_zip.namelist():
-            base = os.path.basename(name)
-            if 'summary_confidence' not in base or not base.endswith('.json'):
-                continue
-            try:
-                rank = float(json.loads(src_zip.read(name)).get('ranking_score'))
-            except Exception:  # noqa: BLE001 — unreadable sample entries are skipped
-                continue
-            if not math.isfinite(rank):
-                continue
-            if best_rank is None or rank > best_rank:
-                best_rank, best_conf_name = rank, name
-        if best_conf_name is None:
+        names = [n for n in src_zip.namelist() if not n.endswith('/')]
+        samples = ResultArchiveService._prediction_samples(src_zip, names)
+        candidates = [s for s in samples if s.get('cif')]
+        if not candidates:
             return None
-        structure_name = os.path.splitext(best_conf_name)[0].replace(
-            'summary_confidence_', '') + '.cif'
+
+        def rank(s):
+            v = s['summary'].get('ranking_score')
+            if not isinstance(v, (int, float)):
+                v = s['summary'].get('confidence_score')
+            return float(v) if isinstance(v, (int, float)) else 0.0
+
+        best = max(candidates, key=rank)
+        cif_name = best['cif']
         try:
-            structure_text = src_zip.read(structure_name).decode('utf-8', errors='replace')
-        except KeyError:
-            return None
-        try:
+            structure_text = src_zip.read(cif_name).decode('utf-8', errors='replace')
             structure = gemmi.make_structure_from_block(
                 gemmi.cif.read_string(structure_text).sole_block())
             structure.setup_entities()
@@ -1148,91 +1331,88 @@ class ResultArchiveService:
     def _extract_pair_ipsae(src_zip) -> Optional[Dict[str, Any]]:
         """Directional per-chain-pair ipSAE via the official IPSAE2 CLI.
 
-        Writes the best-ranked sample (cif + full_data PAE) to a temp dir,
-        runs `python -m ipsae` with the Dunbrack defaults (pae-cutoff 10,
-        binder group = every non-target chain), and parses the result TSV.
-        All scoring math lives in the official package, so values match the
-        reference implementation by construction.
+        The best-ranked sample (cif + PAE carrier) is staged and handed to
+        `python -m ipsae`; the official reader natively understands every
+        backend's carrier (mol1/esmfold2 and protenix token-level json,
+        AF3 confidences json, Boltz pae npz). All scoring math lives in the
+        official package, so values match the reference by construction.
         """
-        full_name = None
-        conf_name = None
-        best_rank = None
-        for name in src_zip.namelist():
-            base = os.path.basename(name)
-            if 'summary_confidence_sample_' in base and 'full_data' not in base:
-                try:
-                    rank = float(json.loads(src_zip.read(name)).get('ranking_score'))
-                except Exception:  # noqa: BLE001
-                    continue
-                if not math.isfinite(rank):
-                    continue
-                sample = base.split('summary_confidence_sample_')[1].split('.')[0]
-                stem = name.split('summary_confidence_sample_')[0]
-                full = f"{stem}full_data_sample_{sample}.json"
-                cif = f"{stem}sample_{sample}.cif"
-                if full in src_zip.namelist() and cif in src_zip.namelist() and (
-                        best_rank is None or rank > best_rank):
-                    best_rank = rank
-                    full_name, conf_name = full, cif
-        if full_name is None or conf_name is None:
+        import subprocess
+
+        names = [n for n in src_zip.namelist() if not n.endswith('/')]
+        samples = ResultArchiveService._prediction_samples(src_zip, names)
+        candidates = [s for s in samples if s.get('cif') and s.get('pae_name')]
+        if not candidates:
             return None
 
+        def rank(s):
+            v = s['summary'].get('ranking_score')
+            if not isinstance(v, (int, float)):
+                v = s['summary'].get('confidence_score')
+            return float(v) if isinstance(v, (int, float)) else 0.0
+
+        best = max(candidates, key=rank)
         workdir = Path(tempfile.mkdtemp(prefix='vbio-ipsae-'))
         try:
             cif_path = workdir / 'sample.cif'
-            pae_path = workdir / 'full_data.json'
-            out_path = workdir / 'ipsae.tsv'
-            cif_path.write_bytes(src_zip.read(conf_name))
-            pae_path.write_bytes(src_zip.read(full_name))
+            pae_path = workdir / ('pae.' + best['pae_kind'])
+            suffix = '.json' if best['pae_kind'] == 'json' else '.npz'
+            pae_path = workdir / f'pae{suffix}'
+            cif_path.write_bytes(src_zip.read(best['cif']))
+            pae_path.write_bytes(src_zip.read(best['pae_name']))
 
-            # cif chain id -> unit counts (polymer residues / ligand atoms),
-            # by first appearance in the atom_site loop.
+            # Binder group = every chain except the largest (target); the
+            # official --group scores the union straight from the full PAE
+            # matrix (IPSAE2 virtual-molecule mode).
             cif_residues: Counter = Counter()
             cif_atoms: Counter = Counter()
+            tag_index: dict = {}
             in_atom_site = False
             seen: dict = {}
             for line in cif_path.read_text(errors='replace').splitlines():
                 if line.startswith('_atom_site.'):
                     in_atom_site = True
+                    tag_index[line.strip().split('.', 1)[1]] = len(tag_index)
                     continue
                 if in_atom_site:
                     parts = line.split()
-                    if len(parts) >= 15 and parts[0] in ('ATOM', 'HETATM'):
-                        chain = parts[5]
+                    if len(parts) == len(tag_index) and parts and parts[0] in ('ATOM', 'HETATM'):
+                        chain_col = (tag_index.get('auth_asym_id', tag_index.get('label_asym_id', -1)))
+                        chain = parts[chain_col]
                         if parts[0] == 'HETATM':
                             cif_atoms[chain] += 1
                         else:
-                            residue = (chain, parts[6], parts[7])
+                            residue = (chain, parts[tag_index.get('label_seq_id', 6)],
+                                       parts[tag_index.get('label_comp_id', 5)])
                             if residue not in seen:
                                 seen[residue] = True
                                 cif_residues[chain] += 1
                     elif parts and not parts[0].startswith('#'):
                         in_atom_site = False
 
-            # Binder group = every chain except the largest (target); the
-            # official --group scores the union straight from the full PAE
-            # matrix (IPSAE2 virtual-molecule mode).
             target_chain = max(cif_residues, key=cif_residues.get) if cif_residues else None
             binder_chains = [c for c in cif_residues if c != target_chain] + list(cif_atoms)
 
+            out_path = workdir / 'ipsae.tsv'
             command = [sys.executable, '-m', 'ipsae', str(cif_path), str(pae_path),
                        '--pae-cutoff', '10', '--output-file', str(out_path)]
-            if binder_chains:
+            # IPSAE2 rejects a single-chain group (a group needs 2+ chains);
+            # for one binder chain the pair rows already carry both directions.
+            if len(binder_chains) >= 2:
                 command += ['--group', '+'.join(binder_chains)]
-
-            import subprocess
             result = subprocess.run(
                 command, capture_output=True, text=True, timeout=300)
             if result.returncode != 0 or not out_path.exists():
                 logging.getLogger(__name__).warning(
-                    'ipsae2 failed on %s: %s', conf_name,
+                    'ipsae2 failed on %s: %s', best['cif'],
                     (result.stderr or '')[-200:])
                 return None
 
-            # cif chain id -> token asym index letter, matched by unit counts
-            # (polymer chain: residues; ligand chain: atoms). Falls back to
-            # the raw cif id when counts are ambiguous.
-            full = json.loads(src_zip.read(full_name))
+            # cif chain id -> token asym index letter, matched by unit counts.
+            # Falls back to the raw cif id when counts are ambiguous.
+            full = json.loads(src_zip.read(best['full_name'])) \
+                if best.get('full_name', '').endswith('.json') and best.get('full_data') is None \
+                else (best.get('full_data') or {})
             asym_counts = Counter(str(a) for a in (full.get('token_asym_id') or []))
             id_to_letter: dict = {}
             used: set = set()
@@ -1277,7 +1457,9 @@ class ResultArchiveService:
                 return None
 
             out: Dict[str, Any] = {'pair_ipsae': pair_rows}
-            # Binder aggregate: the group row joining the target's complement.
+            # Binder aggregate: prefer the official group row; for a single
+            # binder chain (no group emitted) derive it from the target pair.
+            target_letter = id_to_letter.get(target_chain)
             binder_group = next(((c1, c2) for (c1, c2) in group_values
                                  if target_chain and (target_chain in c2.split('+'))), None)
             if binder_group:
@@ -1286,6 +1468,20 @@ class ResultArchiveService:
                 out['ipsae_protein_to_ligand'] = i21
                 out['ipsae_ligand_to_protein'] = i12
                 out['ipsae_official_max'] = max(i21, i12)
+            elif target_chain:
+                target_letter = id_to_letter.get(target_chain, target_chain)
+                p2l = [r['a_to_b'] for r in pair_rows
+                       if r['a'] == target_letter and r['b'] != target_letter]
+                l2p = [r['b_to_a'] for r in pair_rows
+                       if r['a'] == target_letter and r['b'] != target_letter]
+                if p2l:
+                    out['ipsae_protein_to_ligand'] = max(p2l)
+                if l2p:
+                    out['ipsae_ligand_to_protein'] = max(l2p)
+                if out.get('ipsae_protein_to_ligand') is not None or out.get('ipsae_ligand_to_protein') is not None:
+                    out['ipsae_official_max'] = max(
+                        out.get('ipsae_protein_to_ligand', 0.0),
+                        out.get('ipsae_ligand_to_protein', 0.0))
             return out
         except Exception:  # noqa: BLE001 — malformed inputs: no pair ipsae
             logging.getLogger(__name__).exception('pair ipsae extraction failed')
@@ -1476,6 +1672,36 @@ class ResultArchiveService:
                         merged['ligand_ipsae_max'] = pair_block['ipsae_official_max']
                 except Exception:  # noqa: BLE001 — pair ipsae is additive
                     pass
+                # Backend-uniform scalars: boltz/af3/protenix confidence
+                # payloads use different scalar spellings; normalize from the
+                # best sample so every backend fills the same metric cards.
+                try:
+                    names = [n for n in src_zip.namelist() if not n.endswith('/')]
+                    samples = self._prediction_samples(src_zip, names)
+                    if samples:
+                        def _rank(s):
+                            v = s['summary'].get('ranking_score')
+                            if not isinstance(v, (int, float)):
+                                v = s['summary'].get('confidence_score')
+                            return float(v) if isinstance(v, (int, float)) else 0.0
+                        best = max(samples, key=_rank)
+                        normalized = self._sample_confidence(best['summary'])
+                        token_plddt = best.get('token_plddt')
+                        if token_plddt is not None:
+                            normalized['plddt'] = token_plddt * 100.0
+                        for key, value in normalized.items():
+                            merged.setdefault(key, value)
+                except Exception:  # noqa: BLE001 — scalar supplement is additive
+                    pass
+                # MSA depth fallback: a3m rows in the archive when the backend
+                # has no summary-level msa block.
+                if 'msa' not in merged:
+                    try:
+                        msa_block = self._extract_msa_stats_from_zip(src_zip)
+                        if msa_block:
+                            merged['msa'] = msa_block
+                    except Exception:  # noqa: BLE001 — msa is additive
+                        pass
                 try:
                     summary_name = next(n for n in src_zip.namelist()
                                         if n.lower().endswith('output/summary.json'))
