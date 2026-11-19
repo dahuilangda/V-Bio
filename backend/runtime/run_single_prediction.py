@@ -13167,6 +13167,8 @@ def run_boltz_backend(
     cli_args.pop("msa_mode", None)
     # notify_email is consumed by the task layer after the run; never a flag.
     cli_args.pop("notify_email", None)
+    # project_id is platform bookkeeping forwarded with every submit.
+    cli_args.pop("project_id", None)
     requires_external_msa = infer_use_msa_server_from_yaml_text(normalized_yaml)
     # low_vram is consumed here, not by the Boltz CLI — drop it so it isn't forwarded unknown.
     cli_args.pop("low_vram", None)
