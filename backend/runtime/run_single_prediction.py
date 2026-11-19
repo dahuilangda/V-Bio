@@ -5454,7 +5454,7 @@ def run_esmfold2_backend(
         if env_value:
             command += ["--env", f"{env_key}={env_value}"]
     command += [
-        image, "python3", "/workspace/vbio/capabilities/esmfold2/esmfold2_predict.py",
+        image, "python3.12", "/workspace/vbio/capabilities/esmfold2/esmfold2_predict.py",
         "--yaml", yaml_path,
         "--output-dir", output_dir,
         "--seed", str(seed_value),
@@ -14150,7 +14150,8 @@ def main():
             backend = "protenix"
         elif backend == "boltz2dock":
             backend = "boltz"
-        if backend not in ("boltz", "alphafold3", "protenix", "nesso", "mol1", "rfd4"):
+        if backend not in ("boltz", "alphafold3", "protenix", "nesso", "mol1",
+                           "rfd4", "esmfold2"):
             raise ValueError(f"Unsupported backend '{backend}'.")
         low_vram = resolve_low_vram(predict_args)
         workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
