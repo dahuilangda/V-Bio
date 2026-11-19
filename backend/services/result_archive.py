@@ -1156,28 +1156,38 @@ class ResultArchiveService:
         if not csv_name:
             return {}
         try:
-            text = src_zip.read(csv_name).decode('utf-8', errors='replace')
+            # utf-8-sig strips a leading BOM that survives .strip() and
+            # would otherwise poison the first header cell.
+            text = src_zip.read(csv_name).decode('utf-8-sig', errors='replace')
             rows = list(csv.DictReader(io.StringIO(text)))
         except Exception:  # noqa: BLE001
             return {}
         if not rows:
             return {}
-        columns = {str(k).strip().lower(): k for k in rows[0] if k}
+        columns = {str(k).strip().lstrip('\ufeff').strip().lower(): k
+                   for k in rows[0] if k}
         score_key = columns.get('ranking_score')
         if score_key is None:
             return {}
         seed_key = columns.get('seed')
         sample_key = columns.get('sample')
+        if sample_key is None:
+            return {}
+        has_seed = seed_key is not None
         ranks: Dict[str, float] = {}
         for row in rows:
             try:
                 value = float(str(row.get(score_key) or '').strip())
             except (TypeError, ValueError):
                 continue
-            seed = str(row.get(seed_key) or '').strip() if seed_key else ''
-            sample = str(row.get(sample_key) or '').strip() if sample_key else ''
+            seed = str(row.get(seed_key) or '').strip() if has_seed else ''
+            if seed.lower().startswith('seed-'):
+                seed = seed[len('seed-'):]
+            sample = str(row.get(sample_key) or '').strip()
             if sample:
-                ranks[f"{seed}-{sample}"] = value
+                # Seedless CSVs key on the sample number alone; label
+                # lookup falls back to that shape.
+                ranks[f"{sample}" if not has_seed else f"{seed}-{sample}"] = value
         return ranks
 
     @staticmethod
@@ -1191,7 +1201,10 @@ class ResultArchiveService:
             seed = parts[0]
             if seed.startswith('seed-'):
                 seed = seed[len('seed-'):]
-            return csv_ranks.get(f"{seed}-{parts[1]}")
+            value = csv_ranks.get(f"{seed}-{parts[1]}")
+            if value is None and not any('-' in key for key in csv_ranks):
+                value = csv_ranks.get(parts[1])
+            return value
         return None
 
     @classmethod
@@ -1229,6 +1242,8 @@ class ResultArchiveService:
         labels: list = []
         for ch in structure[0]:
             for res in ch:
+                if res.name.strip() in _BOLTZ_WATER_RESNAMES:
+                    continue  # PAE carriers carry no water tokens
                 info = gemmi.find_tabulated_residue(res.name)
                 polymer = (info is not None
                            and (info.is_amino_acid() or info.is_nucleic_acid())
@@ -1486,8 +1501,11 @@ class ResultArchiveService:
                         if res.name.strip() in ('HOH', 'WAT', 'DOD'):
                             continue
                         info = gemmi.find_tabulated_residue(res.name)
-                        if info is not None and info.is_amino_acid():
-                            cif_residues[ch.name] += 1
+                        polymer = (info is not None
+                                   and (info.is_amino_acid() or info.is_nucleic_acid())
+                                   and res.het_flag != 'H')
+                        if polymer:
+                            cif_residues[ch.name] += 1  # PAE: 1 token per polymer residue
                         else:
                             cif_atoms[ch.name] += len(res)  # atom-token per het residue
             if not cif_residues and not cif_atoms:
@@ -1496,31 +1514,14 @@ class ResultArchiveService:
             target_chain = max(cif_residues, key=cif_residues.get) if cif_residues else None
             binder_chains = [c for c in cif_residues if c != target_chain] + list(cif_atoms)
 
-            out_path = workdir / 'ipsae.tsv'
-            command = [sys.executable, '-m', 'ipsae', str(cif_path), str(pae_path),
-                       '--pae-cutoff', '10', '--output-file', str(out_path)]
-            # IPSAE2 rejects a single-chain group (a group needs 2+ chains);
-            # for one binder chain the pair rows already carry both directions.
-            if len(binder_chains) >= 2:
-                command += ['--group', '+'.join(binder_chains)]
-            result = subprocess.run(
-                command, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0 or not out_path.exists():
-                logging.getLogger(__name__).warning(
-                    'ipsae2 failed on %s: %s', best['cif'],
-                    (result.stderr or '')[-200:])
-                return None
-
-            # cif chain id -> token asym index letter, matched by unit counts.
-            # Falls back to the raw cif id when counts are ambiguous.
+            # cif id -> token asym letter up front, so the --group string
+            # speaks ipsae2's chain language (raw cif ids may not exist there).
             full = best.get('full_data')
             if full is None and best.get('full_name'):
                 try:
                     full = json.loads(src_zip.read(best['full_name']))
                 except Exception:  # noqa: BLE001
                     full = {}
-            # Layout 3 (boltz npz) has no full_data json: letters fall back
-            # to the cif chain ids, which are already letters.
             asym_counts = Counter(str(a) for a in ((full or {}).get('token_asym_id') or []))
             id_to_letter: dict = {}
             used: set = set()
@@ -1544,6 +1545,25 @@ class ResultArchiveService:
                                 int(asym)) if asym.isdigit() else asym
                             used.add(asym)
                             break
+
+            out_path = workdir / 'ipsae.tsv'
+            command = [sys.executable, '-m', 'ipsae', str(cif_path), str(pae_path),
+                       '--pae-cutoff', '10', '--output-file', str(out_path)]
+            # IPSAE2 rejects a single-chain group (a group needs 2+ chains);
+            # for one binder chain the pair rows already carry both directions.
+            # Chains whose token mapping failed would only feed ipsae2 an
+            # unknown id — drop them instead of failing the whole run.
+            binder_letters = sorted({id_to_letter[c] for c in binder_chains
+                                     if c in id_to_letter})
+            if len(binder_letters) >= 2:
+                command += ['--group', '+'.join(binder_letters)]
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0 or not out_path.exists():
+                logging.getLogger(__name__).warning(
+                    'ipsae2 failed on %s: %s', best['cif'],
+                    (result.stderr or '')[-200:])
+                return None
 
             def to_letter(chain_name: str) -> str:
                 # group rows join chains with '+' ('B+L'); map each part.
@@ -1709,7 +1729,11 @@ class ResultArchiveService:
                         rank_value = self._to_finite_float(payload.get('ranking_score'))
                     if rank_value is None:
                         rank_value = self._to_finite_float(payload.get('confidence_score'))
-                    score = (coverage, rank_value if rank_value is not None else 0.0)
+                    # Equal (coverage, rank): the token-level carrier wins
+                    # over the rounded per-sample summary — zip member order
+                    # must not decide which pair_pae ships.
+                    carrier = 0 if os.path.basename(name).lower().startswith('summary') else 1
+                    score = (coverage, rank_value if rank_value is not None else 0.0, carrier)
                     metrics_block = {
                         'pair_iptm': pair_iptm,
                         'pair_pae': pair_pae,
@@ -1725,7 +1749,10 @@ class ResultArchiveService:
                         'ligand_display_atom_plddts': ligand_display_atom_plddts,
                     }
                     if has_clash is not None:
-                        metrics_block['has_clash'] = bool(has_clash)
+                        if isinstance(has_clash, str):
+                            metrics_block['has_clash'] = has_clash.strip().lower() == 'true'
+                        elif isinstance(has_clash, (bool, int, float)):
+                            metrics_block['has_clash'] = bool(has_clash)
                     if score <= best_score:
                         parsed_entries.append((score, metrics_block))
                         continue
