@@ -611,6 +611,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
         resultChainIds={resultChainIds}
         selectedTargetChainId={selectedResultTargetChainId || affinityPrimaryTargetChainId}
         selectedLigandChainId={selectedResultLigandChainId || null}
+        selectedLigandComponentType={selectedLigandComponentType || null}
         resultsGridRef={resultsGridRef}
         isResultsResizing={isResultsResizing}
         resultsGridStyle={resultsGridStyle}

@@ -387,6 +387,7 @@ interface AffinityResultsWorkspaceProps {
   resultChainIds: string[];
   selectedTargetChainId: string | null;
   selectedLigandChainId: string | null;
+  selectedLigandComponentType?: 'protein' | 'dna' | 'rna' | 'ligand' | null;
   resultsGridRef: RefObject<HTMLDivElement>;
   isResultsResizing: boolean;
   resultsGridStyle: ResultsGridStyle;
@@ -410,6 +411,7 @@ export function AffinityResultsWorkspace({
   resultChainIds,
   selectedTargetChainId,
   selectedLigandChainId,
+  selectedLigandComponentType,
   resultsGridRef,
   isResultsResizing,
   resultsGridStyle,
@@ -661,6 +663,7 @@ export function AffinityResultsWorkspace({
           chainIds={resultChainIds}
           selectedTargetChainId={selectedTargetChainId}
           selectedLigandChainId={selectedLigandChainId}
+          selectedLigandComponentType={selectedLigandComponentType || null}
         />
       </div>
     </>

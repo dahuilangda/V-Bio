@@ -8426,7 +8426,8 @@ def _relax_staged_bicyclic_strain(
     # ——原有 sweeps 只动 SG 不动锚,无法修复模型把 Bi 埋进骨架的摆放。
     single_atom_rebuild = None
     if sum(1 for a in linker_res if a.element != gemmi.Element("H")) == 1:
-        single_atom_rebuild = _rebuild_single_atom_linker_anchor(staged_path)
+        single_atom_rebuild = _rebuild_single_atom_linker_anchor(
+            staged_path, prefer_code=linker_res.name)
         # 重建重写了文件, 重读以同步内存中的结构
         st = gemmi.read_structure(str(staged_path))
         st.setup_entities()
@@ -10190,8 +10191,10 @@ def _pocket_collect_refine(
     integrity = _structure_integrity_report(Path(refined_path))
 
     if require_bonds:
-        rebuild_info = _rebuild_single_atom_linker_anchor(Path(refined_path))
-        bond_report = _dpeptide_linker_bond_report(Path(refined_path))
+        rebuild_info = _rebuild_single_atom_linker_anchor(
+            Path(refined_path), prefer_code=linker_ccd)
+        bond_report = _dpeptide_linker_bond_report(
+            Path(refined_path), prefer_code=linker_ccd)
         if not bond_report.get("all_bonded"):
             prefix = (f"anchor rebuild {rebuild_info}; " if rebuild_info else "")
             raise ValueError(
@@ -10374,7 +10377,7 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
     }
 
 
-def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[str, Any]]:
+def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str | None = None) -> Optional[Dict[str, Any]]:
     """Deterministic geometry repair for single-atom bicyclic linkers (BS3=Bi).
 
     The model has no chemical prior for a one-atom ligand and may leave the
@@ -10394,7 +10397,7 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[st
     path = Path(structure_path)
     st = gemmi.read_structure(str(path))
     st.setup_entities()
-    anchor_map = _structure_linker_anchor_map(st)
+    anchor_map = _structure_linker_anchor_map(st, prefer_code=prefer_code)
     linker_res = None
     linker_chain = None
     for chain in st[0]:
@@ -10563,35 +10566,47 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[st
     }
 
 
-def _structure_linker_anchor_map(st) -> Dict[str, List[str]]:
+def _structure_linker_anchor_map(st, prefer_code: str | None = None) -> Dict[str, List[str]]:
     """Registry anchors overlaid with single-atom metal anchors shipped in
     the structure. BS3 (bare Bi3+) is not offered as a design linker — its
     symmetric arms cannot express three distinct covalent bonds — but
     custom-CCD bicyclics arrive with it, and the bond gate / anchor rebuild
-    must still measure Bi-S coordination instead of reporting "no linker"."""
+    must still measure Bi-S coordination instead of reporting "no linker".
+
+    A registry residue always wins: a stray Bi ion must never shadow the
+    real linker (or pass the gate on fake coordination). Overlay codes are
+    only collected when no registry residue exists, and — when the caller
+    knows the design's linker CCD — only that code qualifies."""
+    registry_present = any(
+        residue.name in BICYCLIC_LINKER_ATOM_MAP
+        for chain in st[0] for residue in chain)
     overlay: Dict[str, List[str]] = {}
-    for chain in st[0]:
-        for residue in chain:
-            code = residue.name
-            if code in BICYCLIC_LINKER_ATOM_MAP or code in overlay:
-                continue
-            heavy = [a.name for a in residue
-                     if a.element != gemmi.Element("H")]
-            # one physical atom, three anchor slots (['BI','BI','BI'])
-            if len(heavy) == 1 and heavy[0] == "BI":
-                overlay[code] = [heavy[0]] * 3
+    if not registry_present:
+        want = str(prefer_code).strip().upper() if prefer_code else None
+        for chain in st[0]:
+            for residue in chain:
+                code = residue.name
+                if code in overlay:
+                    continue
+                if want and code.upper() != want:
+                    continue
+                heavy = [a.name for a in residue
+                         if a.element != gemmi.Element("H")]
+                # one physical atom, three anchor slots (['BI','BI','BI'])
+                if len(heavy) == 1 and heavy[0].upper() == "BI":
+                    overlay[code] = [heavy[0].upper()] * 3
     if not overlay:
         return BICYCLIC_LINKER_ATOM_MAP
     return {**BICYCLIC_LINKER_ATOM_MAP, **overlay}
 
 
-def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
+def _dpeptide_linker_bond_report(structure_path: Path, *, prefer_code: str | None = None) -> Dict[str, Any]:
     """Measure whether the bicyclic linker is actually bonded in a shipped
     structure: for every linker anchor atom, the distance to the nearest
     Cys-SG. Bonded C-S distances are ~1.8 A; 2.5 A is the reporting cut-off."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
-    anchor_map = _structure_linker_anchor_map(st)
+    anchor_map = _structure_linker_anchor_map(st, prefer_code=prefer_code)
 
     linker_res = None
     linker_code = ""
@@ -11897,12 +11912,15 @@ def run_peptide_design_backend(
             composite_score = ctx["composite_score"]
             structure_file = ctx["structure_file"]
             staged_path = ctx["staged_path"]
-            # 兜底锚点重建: 任何直接出原生预测的路径(未过 refine)也拿到
+            # 兜底锚点重建: 直接出原生预测的双环路径(未过 refine)也拿到
             # 几何正确的单原子链接器;refine 路线在各自门禁前已重建。
-            if structure_file is not None and Path(structure_file).is_file():
+            # 非 bicyclic 布局没有链接器 — 绝不改动结构里的游离离子。
+            if (design_mode == "bicyclic"
+                    and structure_file is not None
+                    and Path(structure_file).is_file()):
                 try:
                     native_rebuild = _rebuild_single_atom_linker_anchor(
-                        Path(structure_file))
+                        Path(structure_file), prefer_code=linker_ccd)
                     if native_rebuild:
                         metrics.setdefault(
                             "linker_anchor_rebuild", native_rebuild)
@@ -11978,14 +11996,15 @@ def run_peptide_design_backend(
                         if design_mode == "bicyclic":
                             try:
                                 d_rebuild = _rebuild_single_atom_linker_anchor(
-                                    Path(d_space_refined))
+                                    Path(d_space_refined), prefer_code=linker_ccd)
                                 if d_rebuild:
                                     metrics.setdefault(
                                         "linker_anchor_rebuild", d_rebuild)
                             except Exception as rebuild_exc:
                                 print(f"[d-peptide] anchor rebuild failed: "
                                       f"{rebuild_exc}", file=sys.stderr)
-                            bond_report = _dpeptide_linker_bond_report(Path(d_space_refined))
+                            bond_report = _dpeptide_linker_bond_report(
+                                Path(d_space_refined), prefer_code=linker_ccd)
                             if not (bond_report and bond_report.get("all_bonded")):
                                 print(
                                     f"[d-peptide] candidate {candidate_sequence[:12]}… "
@@ -12107,13 +12126,13 @@ def run_peptide_design_backend(
                         # deterministic circumcenter placement decides the
                         # chemistry-feasible side, the gate then judges.
                         rebuild_info = _rebuild_single_atom_linker_anchor(
-                            Path(d_space_refined))
+                            Path(d_space_refined), prefer_code=linker_ccd)
                         if rebuild_info:
                             metrics["linker_anchor_rebuild"] = rebuild_info
                         # Same require_bonds guarantee the pocket route and
                         # the D route enforce on their collects.
                         bond_report = _dpeptide_linker_bond_report(
-                            Path(d_space_refined))
+                            Path(d_space_refined), prefer_code=linker_ccd)
                         if not bond_report.get("all_bonded"):
                             raise ValueError(
                                 "linker covalent integrity gate: "
