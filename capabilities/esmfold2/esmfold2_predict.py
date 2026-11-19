@@ -65,17 +65,20 @@ def parse_platform_yaml(path: str) -> dict:
 
 
 def check_constraints(constraints: list) -> None:
+    supported = set()
     for c in constraints:
-        if isinstance(c, dict) and "bond" in c:
-            raise ValueError(
-                "constraints.bond is not supported by the esmfold2 backend; "
-                "use protenix2dock for bond-constrained designs")
+        if isinstance(c, dict):
+            keys = {k for k in c if k not in supported}
+            if keys:
+                raise ValueError(
+                    f"constraints {sorted(keys)} are not supported by the "
+                    "esmfold2 backend")
 
 
 def build_inputs(entries: list):
     from esm.models.esmfold2 import (
-        DNAInput, ESMFold2InputBuilder, LigandInput, ProteinInput,
-        RNAInput, StructurePredictionInput,
+        DNAInput, ESMFold2InputBuilder, LigandInput, Modification,
+        ProteinInput, RNAInput, StructurePredictionInput,
     )
     from string import ascii_uppercase
 
@@ -89,7 +92,13 @@ def build_inputs(entries: list):
         if isinstance(copies, list) and len(copies) > 1:
             ids = [f"{chain}{n + 1}" for n in range(len(copies))]
         if kind == "protein":
-            sequences.append(ProteinInput(id=ids, sequence=entity["sequence"]))
+            modifications = [
+                Modification(position=int(m["position"]) - 1, ccd=str(m["ccd"]))
+                for m in (entity.get("modifications") or [])
+                if isinstance(m, dict) and m.get("ccd")
+            ]
+            sequences.append(ProteinInput(
+                id=ids, sequence=entity["sequence"], modifications=modifications))
         elif kind == "rna":
             sequences.append(RNAInput(id=ids, sequence=entity["sequence"]))
         elif kind == "dna":
@@ -119,19 +128,27 @@ def main() -> None:
     from esm.models.esmfold2 import ESMFold2InputBuilder, EsmFold2Model
 
     model = EsmFold2Model.from_pretrained(args.weights, device="cuda").eval()
-    spi, chain_names = build_inputs(spec["inputs"])
+    spi, _chain_names = build_inputs(spec["inputs"])
     builder = ESMFold2InputBuilder()
 
     predictions = output_dir / "input" / f"seed_{seed}" / "predictions"
     predictions.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
-    results = builder.fold(
-        model, spi,
-        num_loops=args.num_loops,
-        num_sampling_steps=args.num_sampling_steps,
+    # prepare/forward/decode kept separate so chain_infos (per-token asym ids)
+    # survives the decode — fold() hides it and the PAE contract needs it.
+    features, chain_infos = builder.prepare_input(spi, seed=seed, device=model.device)
+    with torch.no_grad():
+        output = model(
+            **features,
+            num_loops=args.num_loops,
+            num_sampling_steps=args.num_sampling_steps,
+            num_diffusion_samples=args.samples,
+        )
+    results = builder.decode(
+        output, features, chain_infos,
         num_diffusion_samples=args.samples,
-        seed=seed,
+        complex_id="pred",
     )
     if not isinstance(results, list):
         results = [results]
@@ -140,29 +157,31 @@ def main() -> None:
 
     summaries = []
     for index, result in enumerate(results):
-        sample_cif = (result.complex.to_mmcif()
-                      if hasattr(result.complex, "to_mmcif")
-                      else result.complex.model_dump())
-        chain_id = result.complex.chain_id
-        chain_names_by_index = list(result.complex.chain_names)
-        token_chain_ids = [chain_names_by_index[int(c)] for c in chain_id]
+        sample_cif = result.complex.to_mmcif()
+        # Per-token asym ids from chain_infos (token grid), NOT the collapsed
+        # per-residue complex.chain_id — PAE/plddt live on the token grid.
+        token_asym = []
+        for ci in chain_infos:
+            token_asym.extend([ci.asym_id] * len(ci.tokens))
         pae = result.pae.detach().cpu().numpy() if result.pae is not None else None
         plddt = (result.plddt.detach().cpu().numpy()
                  if result.plddt is not None else None)
-        iptm = float(result.iptm) if result.iptm is not None else 0.0
-        ptm = float(result.ptm) if result.ptm is not None else 0.0
-        mean_plddt = float(plddt.mean()) if plddt is not None else 0.0
-        ranking_score = 0.8 * mean_plddt + 0.2 * iptm
+        if plddt is not None and len(token_asym) != len(plddt):
+            raise RuntimeError(
+                f"token asym count {len(token_asym)} != plddt count {len(plddt)}")
+        iptm = float(result.iptm) if result.iptm is not None else None
+        ptm = float(result.ptm) if result.ptm is not None else None
+        mean_plddt = float(plddt.mean()) if plddt is not None else None
+        ranking_score = (
+            0.8 * mean_plddt + 0.2 * iptm
+            if mean_plddt is not None and iptm is not None else None)
 
-        (predictions / f"input_sample_{index}.cif").write_text(
-            sample_cif if isinstance(sample_cif, str) else str(sample_cif))
+        (predictions / f"input_sample_{index}.cif").write_text(sample_cif)
 
         full_data = {
             "token_pair_pae": pae.tolist() if pae is not None else [],
-            "token_asym_id": [int(c) for c in chain_id],
-            "token_chain_ids": token_chain_ids,
+            "token_asym_id": token_asym,
             "token_plddt": plddt.tolist() if plddt is not None else [],
-            "atom_plddt": plddt.tolist() if plddt is not None else [],
             "ranking_score": ranking_score,
         }
         (predictions / f"input_full_data_sample_{index}.json").write_text(
@@ -171,7 +190,7 @@ def main() -> None:
         summary = {
             "iptm": iptm,
             "ptm": ptm,
-            "plddt": mean_plddt * 100.0,
+            "plddt": mean_plddt * 100.0 if mean_plddt is not None else None,
             "ranking_score": ranking_score,
             "chain_iptm": (
                 [float(x) for x in result.pair_chains_iptm.diagonal()]
@@ -184,7 +203,9 @@ def main() -> None:
             json.dumps(summary))
         summaries.append({
             "sample": index,
-            "confidence": {**summary, "iptm": iptm, "plddt": mean_plddt * 100.0},
+            "confidence": {**summary, "iptm": iptm,
+                           "plddt": (mean_plddt * 100.0
+                                     if mean_plddt is not None else None)},
         })
 
     best = max(summaries, key=lambda s: s["confidence"]["ranking_score"])

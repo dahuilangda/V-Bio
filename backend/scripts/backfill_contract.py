@@ -42,12 +42,12 @@ for tid in rows:
         if not compact:
             skip += 1
             continue
-        payload = json.dumps(compact, ensure_ascii=False).replace("'", "''")
+        payload = json.dumps(compact, ensure_ascii=False)
         with conn.cursor() as cur:
             cur.execute("SET ROLE anon")
             cur.execute(
                 "UPDATE project_tasks SET confidence = COALESCE(confidence, '{}'::jsonb) "
-                "|| %s::jsonb, updated_at = NOW() WHERE task_id = %s",
+                "|| %s::jsonb WHERE task_id = %s",
                 (payload, tid))
         ok += 1
     except Exception as exc:

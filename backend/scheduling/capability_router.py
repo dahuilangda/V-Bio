@@ -19,6 +19,7 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     "mol1",
     "rfd4",
     "export",
+    "esmfold2",
 )
 
 GPU_CAPABILITIES = {

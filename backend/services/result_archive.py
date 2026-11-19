@@ -1027,32 +1027,40 @@ class ResultArchiveService:
         return None
 
     @staticmethod
+    def _chain_letter(index: int) -> str:
+        """Spreadsheet-style chain label: A..Z, AA, AB, ..."""
+        label = ""
+        n = index
+        while True:
+            label = chr(65 + n % 26) + label
+            n = n // 26 - 1
+            if n < 0:
+                return label
+
+    @staticmethod
     def _prediction_samples(src_zip, names: list) -> list:
         """Backend-aware discovery of per-sample artifacts in a result archive.
 
         Every structure-prediction backend ships, per diffusion sample: a
         model cif, a PAE carrier (token-level full_data json, AF3 token-level
         confidences json, or a Boltz token-level pae npz), and a scalar
-        confidence summary. Layouts differ; this normalizes them into one
-        shape so every extractor below is backend-agnostic.
-
-        Returns dicts: {index, letter, cif, summary_name, summary,
-        full_name, full_data, pae_name, pae_bytes, pae_kind}.
+        confidence summary. Layouts differ; this normalizes the discovery into
+        one shape. Summaries are parsed eagerly (small); PAE/full_data
+        payloads are NOT — consumers fetch them for the chosen sample via
+        _sample_full_data, so a multi-sample archive never pays for more
+        than one PAE parse.
         """
-        import gemmi
-
         samples: list = []
         used = set()
 
-        def fetch(name):
-            return json.loads(src_zip.read(name))
-
         def find_cif(prefix: str) -> Optional[str]:
-            cifs = [n for n in names if n.startswith(prefix)
-                    and n.endswith('.cif') and n not in used]
-            return cifs[0] if cifs else None
+            for ext in ('.cif', '.mmcif'):
+                for n in names:
+                    if n.startswith(prefix) and n.endswith(ext) and n not in used:
+                        return n
+            return None
 
-        # 1) mol1/esmfold2: <prefix>summary_confidence_sample_<i>.json
+        # 1) mol1/esmfold2/protenix: <prefix>summary_confidence_sample_<i>.json
         for name in names:
             base = os.path.basename(name)
             if 'summary_confidence_sample_' not in base or not base.endswith('.json'):
@@ -1062,20 +1070,18 @@ class ResultArchiveService:
             sample = base.split('summary_confidence_sample_')[1].split('.')[0]
             prefix = name.split('summary_confidence_sample_')[0]
             full = f"{prefix}full_data_sample_{sample}.json"
-            cif = prefix + f"sample_{sample}.cif"
-            if full not in names or cif not in names or name in used:
+            cif = find_cif(prefix + f"sample_{sample}.")
+            if full not in names or not cif or name in used:
                 continue
             try:
-                summary = fetch(name)
-                full_data = fetch(full)
+                summary = json.loads(src_zip.read(name))
             except Exception:  # noqa: BLE001
                 continue
-            used.update({name, full, cif})
+            used.update({name, cif})
             samples.append({
-                'index': len(samples), 'letter': chr(65 + len(samples)),
+                'sample': sample,
                 'cif': cif, 'summary_name': name, 'summary': summary,
-                'full_name': full, 'full_data': full_data,
-                'pae_name': full, 'pae_bytes': None, 'pae_kind': 'json',
+                'full_name': full, 'pae_name': full, 'pae_kind': 'json',
             })
 
         # 2) alphafold3: <dir>/summary_confidences.json + confidences.json + model.cif
@@ -1089,50 +1095,54 @@ class ResultArchiveService:
             if cif not in names or conf not in names or name in used:
                 continue
             try:
-                summary = fetch(name)
-                conf_payload = fetch(conf)
+                summary = json.loads(src_zip.read(name))
             except Exception:  # noqa: BLE001
                 continue
             used.update({name, cif, conf})
-            # token plddt: mean of atom plddts per token (atoms grouped by
-            # atom_chain_ids + token_res_ids matching).
-            token_plddt = None
-            atom_plddts = conf_payload.get('atom_plddts')
-            if isinstance(atom_plddts, list) and atom_plddts:
-                token_plddt = float(sum(atom_plddts) / len(atom_plddts))
             samples.append({
-                'index': len(samples), 'letter': chr(65 + len(samples)),
+                'sample': os.path.basename(parent.rstrip('/')),
                 'cif': cif, 'summary_name': name, 'summary': summary,
-                'full_name': conf, 'full_data': conf_payload,
-                'pae_name': conf, 'pae_bytes': None, 'pae_kind': 'json',
-                'token_plddt': token_plddt,
+                'full_name': conf, 'pae_name': conf, 'pae_kind': 'json',
             })
 
         # 3) boltz: confidence_data_model_<i>.json + pae_data_model_<i>.npz
-        #    + data_model_<i>.cif
+        #    + data_model_<i>.cif, paired within the conf's own directory.
         confs = [n for n in names
                  if os.path.basename(n).startswith('confidence_data_model_')
                  and n.endswith('.json') and n not in used]
         for conf in confs:
+            parent = conf[:conf.rfind('/') + 1]
             model = os.path.basename(conf)[len('confidence_data_model_'):-len('.json')]
-            pae = next((n for n in names
-                        if os.path.basename(n) == f'pae_data_model_{model}.npz'), None)
-            cif = next((n for n in names
-                        if os.path.basename(n) == f'data_model_{model}.cif'), None)
-            if not pae or not cif or conf in used:
+            pae = parent + f'pae_data_model_{model}.npz'
+            cif = parent + f'data_model_{model}.cif'
+            if pae not in names or cif not in names or conf in used:
                 continue
             try:
-                summary = fetch(conf)
+                summary = json.loads(src_zip.read(conf))
             except Exception:  # noqa: BLE001
                 continue
             used.update({conf, pae, cif})
             samples.append({
-                'index': len(samples), 'letter': chr(65 + len(samples)),
+                'sample': model,
                 'cif': cif, 'summary_name': conf, 'summary': summary,
-                'full_name': pae, 'full_data': None,
-                'pae_name': pae, 'pae_bytes': src_zip.read(pae), 'pae_kind': 'npz',
+                'pae_name': pae, 'pae_kind': 'npz',
             })
         return samples
+
+    @staticmethod
+    def _sample_rank(sample: Dict[str, Any]) -> float:
+        v = sample['summary'].get('ranking_score')
+        if not isinstance(v, (int, float)):
+            v = sample['summary'].get('confidence_score')
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    @staticmethod
+    def _sample_full_data(src_zip, sample: Dict[str, Any]) -> Dict[str, Any]:
+        return json.loads(src_zip.read(sample['full_name']))
+
+    @staticmethod
+    def _sample_pae_bytes(src_zip, sample: Dict[str, Any]) -> bytes:
+        return src_zip.read(sample['pae_name'])
 
     @staticmethod
     def _sample_token_matrix(full_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1201,50 +1211,47 @@ class ResultArchiveService:
     @staticmethod
     def _extract_compact_pae_from_zip(src_zip) -> Optional[Dict[str, Any]]:
         """Compact PAE matrix (≤134²) + chain bounds for ANY backend, via the
-        backend-aware samples abstraction."""
+        backend-aware samples abstraction. Downsamples in numpy before
+        materializing Python floats."""
+        import numpy as _np
         names = [n for n in src_zip.namelist() if not n.endswith('/')]
         samples = ResultArchiveService._prediction_samples(src_zip, names)
-        candidates = [s for s in samples
-                      if isinstance(s.get('full_data'), dict) or s.get('pae_bytes')]
+        candidates = [s for s in samples if s.get('pae_name')]
         if not candidates:
             return None
-
-        def rank(s):
-            v = s['summary'].get('ranking_score')
-            if not isinstance(v, (int, float)):
-                v = s['summary'].get('confidence_score')
-            return float(v) if isinstance(v, (int, float)) else 0.0
-
-        best = max(candidates, key=rank)
-        import numpy as _np
-        matrix_full = None
-        asym = None
-        if isinstance(best.get('full_data'), dict):
-            block = ResultArchiveService._sample_token_matrix(best['full_data'])
-            if block:
-                matrix_full = block['token_pair_pae']
-                asym = block.get('token_asym_id')
-        if matrix_full is None and best.get('pae_bytes'):
-            try:
-                loaded = _np.load(io.BytesIO(best['pae_bytes']))
-                key = 'pae' if 'pae' in loaded.files else next(iter(loaded.files))
-                matrix_full = _np.asarray(loaded[key], dtype=float).tolist()
-            except Exception:  # noqa: BLE001
-                return None
-        if not matrix_full:
+        best = max(candidates, key=ResultArchiveService._sample_rank)
+        try:
+            payload = None
+            arr = None
+            asym = None
+            if best['pae_kind'] == 'npz':
+                with _np.load(io.BytesIO(src_zip.read(best['pae_name']))) as loaded:
+                    key = 'pae' if 'pae' in loaded.files else next(iter(loaded.files))
+                    arr = _np.asarray(loaded[key], dtype=float)
+            else:
+                payload = json.loads(src_zip.read(best['pae_name']))
+                pae = payload.get('token_pair_pae') or payload.get('pae')
+                arr = _np.asarray(pae, dtype=float)
+                asym = payload.get('token_asym_id')
+                if asym is None:
+                    raw = payload.get('token_chain_ids')
+                    if isinstance(raw, list) and raw and len(raw) == len(pae):
+                        uniq = []
+                        for value in raw:
+                            sval = str(value)
+                            if sval not in uniq:
+                                uniq.append(sval)
+                        asym = [uniq.index(str(v)) for v in raw]
+        except Exception:  # noqa: BLE001
             return None
-        n0 = len(matrix_full)
+        if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[0] != arr.shape[1]:
+            return None
+        if asym is not None and len(asym) != arr.shape[0]:
+            asym = None
+        n0 = arr.shape[0]
         down = max(1, -(-n0 // 134))
-        matrix = []
-        for i in range(0, n0, down):
-            row_vals = matrix_full[i]
-            row = []
-            for j in range(0, n0, down):
-                try:
-                    row.append(round(float(row_vals[j]), 2))
-                except (IndexError, TypeError, ValueError):
-                    row.append(25.0)
-            matrix.append(row)
+        # Numpy downsample before materializing Python floats.
+        matrix = arr[::down, ::down].round(2).tolist()
         bounds = []
         if asym:
             for idx, chain in enumerate(asym):
@@ -1252,18 +1259,22 @@ class ResultArchiveService:
                 if last and last.get('chain') == chain:
                     last['end'] = idx
                 else:
-                    bounds.append({'chain': int(chain), 'start': idx, 'end': idx})
+                    try:
+                        numeric = int(chain)
+                    except (TypeError, ValueError):
+                        numeric = len(bounds)
+                    bounds.append({'chain': numeric, 'start': idx, 'end': idx})
         return {'pae_matrix': matrix, 'pae_chain_bounds': bounds}
 
     @staticmethod
     def _extract_interface_sc(src_zip) -> Optional[Dict[str, Any]]:
         """Lawrence-Colman shape complementarity of the best-ranked sample.
 
-        Sides follow the classical definition: target is the largest polymeric
-        chain, binder is every other polymeric chain in contact with it.
-        Outputs without a second polymeric chain (protein-small-molecule
-        complexes) yield None -- the metric is undefined there and is never
-        defaulted.
+        Sides follow the classical definition: target is the largest amino-
+        acid chain, the binder surface is every other chain's heavy atoms
+        (binder polymers, covalently bound linkers, ligands and cofactors;
+        waters excluded). Covers protein-protein, protein-peptide and
+        protein-small-molecule interfaces.
         """
         import gemmi
         import numpy as np
@@ -1274,14 +1285,7 @@ class ResultArchiveService:
         candidates = [s for s in samples if s.get('cif')]
         if not candidates:
             return None
-
-        def rank(s):
-            v = s['summary'].get('ranking_score')
-            if not isinstance(v, (int, float)):
-                v = s['summary'].get('confidence_score')
-            return float(v) if isinstance(v, (int, float)) else 0.0
-
-        best = max(candidates, key=rank)
+        best = max(candidates, key=ResultArchiveService._sample_rank)
         cif_name = best['cif']
         try:
             structure_text = src_zip.read(cif_name).decode('utf-8', errors='replace')
@@ -1295,6 +1299,12 @@ class ResultArchiveService:
             return None
 
         water = {'HOH', 'WAT', 'DOD'}
+
+        def amino_count(chain):
+            return sum(1 for res in chain
+                       if res.het_flag != 'H'
+                       and gemmi.find_tabulated_residue(res.name) is not None
+                       and gemmi.find_tabulated_residue(res.name).is_amino_acid())
 
         def side(chains):
             coords, atoms, residues = [], [], []
@@ -1325,19 +1335,9 @@ class ResultArchiveService:
                             residues.append(res_key)
             return coords, atoms, residues
 
-        def amino_count(chain):
-            return sum(1 for res in chain
-                       if res.het_flag != 'H'
-                       and gemmi.find_tabulated_residue(res.name) is not None
-                       and gemmi.find_tabulated_residue(res.name).is_amino_acid())
-
         polymer_chains = [ch for ch in model if amino_count(ch) > 0]
-        if len(polymer_chains) < 1:
+        if not polymer_chains:
             return None
-        # Target = the largest amino-acid chain; the binder surface is every
-        # other chain's heavy atoms: binder polymers, covalently bound
-        # linkers, ligands and cofactors (waters excluded). Covers protein-
-        # protein, protein-peptide and protein-small-molecule interfaces.
         target_chain = max(polymer_chains, key=amino_count)
         binder_chains = [ch for ch in model if ch is not target_chain]
         if not binder_chains:
@@ -1686,14 +1686,21 @@ class ResultArchiveService:
                     for alias in ('complex_pde', 'complex_pae', 'pae'):
                         if self._to_finite_float(merged.get(alias)) is None:
                             merged[alias] = pair_pae
-                # Downsampled PAE matrix + MSA depth for the results view.
-                pae_block = self._extract_compact_pae_from_zip(src_zip)
-                if pae_block:
-                    merged.setdefault('pae_matrix', pae_block['pae_matrix'])
-                    merged.setdefault('pae_chain_bounds', pae_block['pae_chain_bounds'])
-                sc_block = self._extract_interface_sc(src_zip)
-                if sc_block:
-                    merged.update(sc_block)
+                # Downsampled PAE matrix + MSA depth + interface Sc for the
+                # results view; each is additive and must not sink the merge.
+                try:
+                    pae_block = self._extract_compact_pae_from_zip(src_zip)
+                    if pae_block:
+                        merged.setdefault('pae_matrix', pae_block['pae_matrix'])
+                        merged.setdefault('pae_chain_bounds', pae_block['pae_chain_bounds'])
+                except Exception as exc:  # noqa: BLE001 — pae is additive
+                    self.logger.warning('pae extraction skipped: %s', exc)
+                try:
+                    sc_block = self._extract_interface_sc(src_zip)
+                    if sc_block:
+                        merged.update(sc_block)
+                except Exception as exc:  # noqa: BLE001 — sc is additive
+                    self.logger.warning('interface sc extraction skipped: %s', exc)
                 try:
                     pair_block = self._extract_pair_ipsae(src_zip)
                     if pair_block:

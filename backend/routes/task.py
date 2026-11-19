@@ -165,6 +165,17 @@ def _sync_project_task_design_candidates(task_id: str, zip_path: str, logger_) -
                     return
                 current = (row[0] or "").strip()
                 if current not in ("", "{}", "null"):
+                    # Merge so server-written metric keys survive.
+                    cur.execute(
+                        "UPDATE project_tasks SET confidence = COALESCE(confidence, '{}'::jsonb) "
+                        "|| jsonb_build_object('peptide_design', jsonb_build_object("
+                        "'candidates', %s::jsonb)), updated_at = NOW() "
+                        "WHERE task_id = %s AND task_id <> ''",
+                        (Json(candidates), task_id),
+                    )
+                    logger_.info(
+                        "Merged %d design candidates into existing confidence for task %s.",
+                        len(candidates), task_id)
                     return
                 cur.execute(
                     "UPDATE project_tasks SET confidence = %s, updated_at = NOW() "

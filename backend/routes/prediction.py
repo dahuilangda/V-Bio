@@ -641,6 +641,11 @@ def register_prediction_routes(
                 'error': 'Nesso does not support structure template uploads.',
                 'backend': backend,
             }), 400
+        if backend == 'esmfold2' and template_inputs:
+            return jsonify({
+                'error': 'ESMFold2 does not support structure template uploads.',
+                'backend': backend,
+            }), 400
 
         # Initial peptide structure for mode-anchored design; uploaded in the
         # target's coordinate frame, it switches the D-route to reference-pose

@@ -5120,7 +5120,7 @@ def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
         return
     backend = str(score_backend or "").strip().lower()
     if backend in ("mol1", "mol-1", "protenix", "protenix2dock",
-                   "protenix-2-dock", "alphafold3", "esmfold2"):
+                   "protenix-2-dock", "alphafold3"):
         return
     raise ValueError(
         f"模式 {design_mode} 的成环约束需要共价键先验：打分后端 {score_backend} "
@@ -5418,6 +5418,9 @@ def run_esmfold2_backend(
     input_dir = os.path.join(work_root, "input")
     output_dir = os.path.join(results_root, "output")
     os.makedirs(input_dir, exist_ok=True)
+    # Stale samples from a retried attempt would mix into the new archive.
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir, ignore_errors=True)
     os.makedirs(output_dir, exist_ok=True)
 
     yaml_path = os.path.join(input_dir, "input.yaml")
@@ -5433,16 +5436,24 @@ def run_esmfold2_backend(
     gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
     hf_cache = str(Path(RESULTS_BASE_DIR).parent / "esmfold2" / "hf_cache")
     os.makedirs(hf_cache, exist_ok=True)
+    project_root = str(Path(__file__).resolve().parents[2])
     command = [
         "docker", "run", "--rm", "--name", container_name, "--entrypoint=",
         "--runtime", "nvidia", "--shm-size", "16g",
         "--gpus", gpu_arg,
         "--add-host", "host.docker.internal:host-gateway",
         "--volume", f"{hf_cache}:/root/.cache/huggingface",
-        "--volume", "/data/V-Bio:/workspace/vbio:ro",
+        "--volume", f"{project_root}:/workspace/vbio:ro",
         "--volume", f"{RESULTS_BASE_DIR}:{RESULTS_BASE_DIR}",
         "--env", "HF_HOME=/root/.cache/huggingface",
         "--env", "PYTHONUNBUFFERED=1",
+    ]
+    for env_key in ("ESMFOLD2_WEIGHTS", "ESMFOLD2_NUM_LOOPS",
+                    "ESMFOLD2_NUM_SAMPLING_STEPS"):
+        env_value = os.environ.get(env_key)
+        if env_value:
+            command += ["--env", f"{env_key}={env_value}"]
+    command += [
         image, "python3", "/workspace/vbio/capabilities/esmfold2/esmfold2_predict.py",
         "--yaml", yaml_path,
         "--output-dir", output_dir,
@@ -5477,10 +5488,15 @@ def run_esmfold2_backend(
     if os.path.exists(output_archive_path):
         os.remove(output_archive_path)
     with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _dirs, files in os.walk(results_root):
+        # output/ plus the input yaml — mirrors mol1 and keeps stale files
+        # from retried attempts out of the archive.
+        for root, _dirs, files in os.walk(output_dir):
             for name in files:
                 full = os.path.join(root, name)
                 zf.write(full, os.path.relpath(full, results_root))
+        yaml_src = os.path.join(input_dir, "input.yaml")
+        if os.path.exists(yaml_src):
+            zf.write(yaml_src, os.path.relpath(yaml_src, results_root))
 
 
 def run_mol1_backend(
@@ -6255,7 +6271,7 @@ def _normalize_peptide_backend(raw: Any) -> str:
         raise ValueError(
             "rfd4 不能作为打分后端：请用 peptideProposerBackend=rfd4 指定设计引擎，"
             "并以 peptideScorerBackend 选择 mol1/protenix/alphafold3。")
-    if token in {"alphafold3", "protenix", "mol1"}:
+    if token in {"alphafold3", "protenix", "mol1", "esmfold2"}:
         return token
     # docking engines map onto their corresponding full predictors at the
     # engine level (queue selection, prediction calls); the docking semantics
@@ -14220,6 +14236,7 @@ def main():
                     score_backend_sel = str(
                         peptide_design_options.get("peptideScorerBackend")
                         or peptide_design_options.get("peptide_scorer_backend") or "protenix").strip().lower()
+                    _assert_bond_capable_scorer(peptide_design_mode, score_backend_sel)
                     run_rfd4_design_strategy(
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
@@ -14234,6 +14251,7 @@ def main():
                     )
                 else:
                     try:
+                        _assert_bond_capable_scorer(peptide_design_mode, backend)
                         run_peptide_design_backend(
                             temp_dir=temp_dir,
                             yaml_content=processed_yaml,
@@ -14306,6 +14324,9 @@ def main():
             elif backend == "esmfold2":
                 if template_inputs:
                     raise ValueError("ESMFold2 does not support template files.")
+                if custom_ccd_molecules:
+                    raise ValueError(
+                        "ESMFold2 does not support custom CCD residue uploads.")
                 run_esmfold2_backend(
                     temp_dir=temp_dir,
                     yaml_content=processed_yaml,

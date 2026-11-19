@@ -137,8 +137,8 @@
         "score"
       ],
       "features": {
-        "pocket": true,
-        "custom_ccd": true,
+        "pocket": false,
+        "custom_ccd": false,
         "msa": false,
         "ncaa": false
       }
