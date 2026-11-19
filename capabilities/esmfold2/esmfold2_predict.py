@@ -62,7 +62,7 @@ def parse_platform_yaml(path: str) -> dict:
         raise ValueError("yaml has no sequences")
     inputs = []
     for item in sequences:
-        for kind in ("protein", "rna", "dna", "ligand"):
+        for kind in ("protein", "rna", "dna", "ligand", "ion"):
             entity = item.get(kind)
             if isinstance(entity, dict):
                 inputs.append((kind, entity))
@@ -93,14 +93,22 @@ def build_inputs(entries: list):
     sequences = []
     chain_names = []
     for index, (kind, entity) in enumerate(entries):
-        chain = (ascii_uppercase[index]
-                 if index < 26
-                 else ascii_uppercase[index // 26 - 1] + ascii_uppercase[index % 26])
+        # Use the yaml entity ids verbatim (one per copy) so output cif chain
+        # names match mol1/protenix for the same yaml; generated letters are
+        # the fallback when the yaml omits id.
+        raw_ids = entity.get("id")
+        if isinstance(raw_ids, list) and raw_ids:
+            ids = [str(x) for x in raw_ids]
+            chain = ids[0]
+        elif raw_ids:
+            ids = [str(raw_ids)]
+            chain = ids[0]
+        else:
+            chain = (ascii_uppercase[index]
+                     if index < 26
+                     else ascii_uppercase[index // 26 - 1] + ascii_uppercase[index % 26])
+            ids = [chain]
         chain_names.append(chain)
-        ids = [chain]
-        copies = entity.get("id")
-        if isinstance(copies, list) and len(copies) > 1:
-            ids = [f"{chain}{n + 1}" for n in range(len(copies))]
         if kind in ("protein", "rna", "dna"):
             mods = []
             seq_len = len(entity.get("sequence") or "")
@@ -129,6 +137,11 @@ def build_inputs(entries: list):
             else:
                 sequences.append(DNAInput(
                     id=ids, sequence=entity["sequence"], modifications=mods))
+        elif kind == "ion":
+            ccd_code = str(entity.get("ccd") or "").upper()
+            if not ccd_code:
+                raise ValueError(f"ion chain {chain} needs a ccd")
+            sequences.append(LigandInput(id=ids, ccd=[ccd_code]))
         else:
             smiles = str(entity.get("smiles") or "").strip()
             ccd = entity.get("ccd")
@@ -164,7 +177,11 @@ def main() -> None:
     # prepare/forward/decode kept separate so chain_infos (per-token asym ids)
     # survives the decode — fold() hides it and the PAE contract needs it.
     features, chain_infos = builder.prepare_input(spi, seed=seed, device=model.device)
-    with torch.no_grad():
+    # prepare_input consumed the seed for conformer generation; re-seed
+    # around the forward so diffusion sampling is reproducible too
+    # (mirrors the SDK's fold(), processor.py:426).
+    from esm.models.esmfold2.processor import _seed_context
+    with torch.no_grad(), _seed_context(seed):
         output = model(
             **features,
             num_loops=args.num_loops,

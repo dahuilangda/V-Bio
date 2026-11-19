@@ -172,6 +172,12 @@ MOL1_DOCKER_IMAGE = "vbio-mol1-runtime:1.0.3"
 MOL1_DATA_DIR = "/data/mol1"
 MOL1_ATOM_CONFIDENCE = ""
 
+[esmfold2]
+ESMFOLD2_DOCKER_IMAGE = "vbio-esmfold2-runtime:latest"
+# 容器内 diffusion 样本数；其余调优键（ESMFOLD2_WEIGHTS /
+# ESMFOLD2_NUM_LOOPS / ESMFOLD2_NUM_SAMPLING_STEPS）按需在环境中设置
+ESMFOLD2_SAMPLES = "5"
+
 [rfd4]
 RFD4_DOCKER_IMAGE = "rfd4-proteina-engine:cu13"
 RFD4_DATA_DIR = "/data/rfd4-proteina"

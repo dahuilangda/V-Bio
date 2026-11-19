@@ -33,6 +33,7 @@ export interface ProjectResultsSectionProps {
   resultChainIds: string[];
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
+  selectedLigandComponentType?: 'protein' | 'dna' | 'rna' | 'ligand' | null;
   displayStructureText: string;
   displayStructureConfidenceText: string;
   displayStructureFormat: 'cif' | 'pdb';
@@ -265,7 +266,6 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
     const matrixFrac = 600 / 640;
     const fracY = (event.clientY - rect.top) / rect.height;
     const fracX = (event.clientX - rect.left) / rect.width;
-    const yInMatrix = fracY / matrixFrac;
     if (fracY >= matrixFrac || fracY < 0 || fracX < 0 || fracX > 1) {
       wrap.removeAttribute('title');
       return;
@@ -364,6 +364,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
   resultChainIds,
   selectedResultTargetChainId,
   selectedResultLigandChainId,
+  selectedLigandComponentType,
   displayStructureText,
   displayStructureConfidenceText,
   displayStructureFormat,
@@ -583,9 +584,10 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
             title="Confidence"
             data={snapshotConfidence || {}}
             chainIds={resultChainIds}
-            selectedTargetChainId={selectedResultTargetChainId}
-            selectedLigandChainId={selectedResultLigandChainId}
-          />
+        selectedTargetChainId={selectedResultTargetChainId}
+        selectedLigandChainId={selectedResultLigandChainId}
+        selectedLigandComponentType={selectedLigandComponentType || null}
+      />
         </div>
       </>
     );

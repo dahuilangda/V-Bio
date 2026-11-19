@@ -1315,6 +1315,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     resultChainIds,
     selectedResultTargetChainId,
     selectedResultLigandChainId,
+    selectedResultLigandComponentType: selectedResultLigandComponent?.type || null,
     displayStructureText: isPeptideDesignWorkflow ? structureText : displayStructureText,
     displayStructureConfidenceText,
     displayStructureFormat,

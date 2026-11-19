@@ -503,12 +503,14 @@ function ConfidencePanel({
   data,
   chainIds,
   selectedTargetChainId,
-  selectedLigandChainId
+  selectedLigandChainId,
+  selectedLigandComponentType
 }: {
   data: Record<string, unknown>;
   chainIds: string[];
   selectedTargetChainId?: string | null;
   selectedLigandChainId?: string | null;
+  selectedLigandComponentType?: 'protein' | 'dna' | 'rna' | 'ligand' | null;
 }) {
   const ligandAtomPlddts = pickNumberArray(data, [
     'ligand_atom_plddts',
@@ -555,12 +557,12 @@ function ConfidencePanel({
   const pairRows = useMemo(() => extractPairIptmRows(data, chainIds), [data, chainIds]);
 
   // 模态判定：SMILES 配体为小分子；ipSAE 家族为多肽/蛋白配体验证；其余按蛋白-蛋白处理
-  const ligandSmiles = typeof data.ligand_smiles === 'string' ? data.ligand_smiles.trim() : '';
-  const modality: 'small_molecule' | 'peptide' | 'protein' = ligandSmiles !== ''
-    ? 'small_molecule'
-    : ipsaeDom !== null || ligandIpsaeMax !== null || p2lIpsae !== null || l2pIpsae !== null
-      ? 'peptide'
-      : 'protein';
+  const modality: 'small_molecule' | 'peptide' | 'protein' =
+    selectedLigandComponentType === 'ligand'
+      ? 'small_molecule'
+      : ipsaeDom !== null || ligandIpsaeMax !== null || p2lIpsae !== null || l2pIpsae !== null
+        ? 'peptide'
+        : 'protein';
   const plddtLabel = modality === 'protein' ? 'Mean pLDDT' : 'Ligand pLDDT';
 
   const cards = [
@@ -775,7 +777,8 @@ export function MetricsPanel({
   data,
   chainIds = [],
   selectedTargetChainId = null,
-  selectedLigandChainId = null
+  selectedLigandChainId = null,
+  selectedLigandComponentType = null
 }: MetricsPanelProps) {
   const rows = useMemo(() => flattenObject(data).slice(0, 16), [data]);
 
@@ -791,6 +794,7 @@ export function MetricsPanel({
             chainIds={chainIds}
             selectedTargetChainId={selectedTargetChainId}
             selectedLigandChainId={selectedLigandChainId}
+            selectedLigandComponentType={selectedLigandComponentType}
           />
         )}
       </section>

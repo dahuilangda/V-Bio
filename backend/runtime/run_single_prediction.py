@@ -10394,11 +10394,12 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[st
     path = Path(structure_path)
     st = gemmi.read_structure(str(path))
     st.setup_entities()
+    anchor_map = _structure_linker_anchor_map(st)
     linker_res = None
     linker_chain = None
     for chain in st[0]:
         for residue in chain:
-            if residue.name in BICYCLIC_LINKER_ATOM_MAP:
+            if residue.name in anchor_map:
                 linker_res = residue
                 linker_chain = chain
                 break
@@ -10424,7 +10425,7 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[st
 
     sgs = [(r.seqid.num, r.find_atom("SG", "*"))
            for r in pep if r.name == "CYS" and r.find_atom("SG", "*") is not None]
-    anchors_wanted = BICYCLIC_LINKER_ATOM_MAP[linker_res.name]
+    anchors_wanted = anchor_map[linker_res.name]
     remaining = list(sgs)
     matched: List[Tuple[int, Any]] = []
     for _ in anchors_wanted:  # one-to-one greedy; symmetric linkers repeat
@@ -10562,18 +10563,41 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path) -> Optional[Dict[st
     }
 
 
+def _structure_linker_anchor_map(st) -> Dict[str, List[str]]:
+    """Registry anchors overlaid with single-atom metal anchors shipped in
+    the structure. BS3 (bare Bi3+) is not offered as a design linker — its
+    symmetric arms cannot express three distinct covalent bonds — but
+    custom-CCD bicyclics arrive with it, and the bond gate / anchor rebuild
+    must still measure Bi-S coordination instead of reporting "no linker"."""
+    overlay: Dict[str, List[str]] = {}
+    for chain in st[0]:
+        for residue in chain:
+            code = residue.name
+            if code in BICYCLIC_LINKER_ATOM_MAP or code in overlay:
+                continue
+            heavy = [a.name for a in residue
+                     if a.element != gemmi.Element("H")]
+            # one physical atom, three anchor slots (['BI','BI','BI'])
+            if len(heavy) == 1 and heavy[0] == "BI":
+                overlay[code] = [heavy[0]] * 3
+    if not overlay:
+        return BICYCLIC_LINKER_ATOM_MAP
+    return {**BICYCLIC_LINKER_ATOM_MAP, **overlay}
+
+
 def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
     """Measure whether the bicyclic linker is actually bonded in a shipped
     structure: for every linker anchor atom, the distance to the nearest
     Cys-SG. Bonded C-S distances are ~1.8 A; 2.5 A is the reporting cut-off."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
+    anchor_map = _structure_linker_anchor_map(st)
 
     linker_res = None
     linker_code = ""
     for chain in st[0]:
         for residue in chain:
-            if residue.het_flag == "H" and residue.name in BICYCLIC_LINKER_ATOM_MAP:
+            if residue.het_flag == "H" and residue.name in anchor_map:
                 linker_res = residue
                 linker_code = residue.name
                 break
@@ -10582,7 +10606,7 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
     if linker_res is None:
         return {"linker": None, "all_bonded": None, "bonds": []}
 
-    anchors = BICYCLIC_LINKER_ATOM_MAP[linker_code]
+    anchors = anchor_map[linker_code]
     # SG pool: peptide-side chains only. The receptor carries its own Cys;
     # letting a receptor SG into the pool lets the one-to-one greedy match
     # a receptor Cys to an anchor and mis-judge the design linkage.
@@ -10591,7 +10615,7 @@ def _dpeptide_linker_bond_report(structure_path: Path) -> Dict[str, Any]:
     }
     linker_chain_name = next(
         (c.name for c in st[0]
-         if any(r.name in BICYCLIC_LINKER_ATOM_MAP for r in c)), None)
+         if any(r.name in anchor_map for r in c)), None)
     peptide_chain_name = min(
         (c for c, n in polymer_lens.items()
          if n >= 3 and c != linker_chain_name),

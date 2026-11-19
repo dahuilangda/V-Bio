@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import glob
 import hashlib
 import io
@@ -1046,9 +1047,8 @@ class ResultArchiveService:
         confidences json, or a Boltz token-level pae npz), and a scalar
         confidence summary. Layouts differ; this normalizes the discovery into
         one shape. Summaries are parsed eagerly (small); PAE/full_data
-        payloads are NOT — consumers fetch them for the chosen sample via
-        _sample_full_data, so a multi-sample archive never pays for more
-        than one PAE parse.
+        payloads are NOT — consumers fetch them for the chosen sample, so a
+        multi-sample archive never pays for more than one PAE parse.
         """
         samples: list = []
         used = set()
@@ -1127,10 +1127,14 @@ class ResultArchiveService:
                 'cif': cif, 'summary_name': conf, 'summary': summary,
                 'pae_name': pae, 'pae_kind': 'npz',
             })
+        ResultArchiveService._apply_csv_ranks(samples, src_zip, names)
         return samples
 
     @staticmethod
     def _sample_rank(sample: Dict[str, Any]) -> float:
+        csv_rank = sample.get('csv_rank')
+        if isinstance(csv_rank, (int, float)) and math.isfinite(csv_rank):
+            return float(csv_rank)
         payload = sample.get('summary') or {}
         for key in ('ranking_score', 'confidence_score'):
             v = payload.get(key)
@@ -1143,37 +1147,97 @@ class ResultArchiveService:
         return 0.0
 
     @staticmethod
-    def _sample_full_data(src_zip, sample: Dict[str, Any]) -> Dict[str, Any]:
-        return json.loads(src_zip.read(sample['full_name']))
+    def _zip_ranking_scores(src_zip, names: list) -> Dict[str, float]:
+        """Full-precision per-sample ranks from ranking_scores.csv — af3
+        rounds the summary ranking_score to 2 decimals, which ties distinct
+        samples and can pick a different one than the displayed structure."""
+        csv_name = next((n for n in names
+                         if os.path.basename(n).lower() == 'ranking_scores.csv'), None)
+        if not csv_name:
+            return {}
+        try:
+            text = src_zip.read(csv_name).decode('utf-8', errors='replace')
+            rows = list(csv.DictReader(io.StringIO(text)))
+        except Exception:  # noqa: BLE001
+            return {}
+        if not rows:
+            return {}
+        columns = {str(k).strip().lower(): k for k in rows[0] if k}
+        score_key = columns.get('ranking_score')
+        if score_key is None:
+            return {}
+        seed_key = columns.get('seed')
+        sample_key = columns.get('sample')
+        ranks: Dict[str, float] = {}
+        for row in rows:
+            try:
+                value = float(str(row.get(score_key) or '').strip())
+            except (TypeError, ValueError):
+                continue
+            seed = str(row.get(seed_key) or '').strip() if seed_key else ''
+            sample = str(row.get(sample_key) or '').strip() if sample_key else ''
+            if sample:
+                ranks[f"{seed}-{sample}"] = value
+        return ranks
 
     @staticmethod
-    def _sample_pae_bytes(src_zip, sample: Dict[str, Any]) -> bytes:
-        return src_zip.read(sample['pae_name'])
-
-    @staticmethod
-    def _sample_token_matrix(full_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """token_pair_pae + token_asym_id (+ chain ids) from a sample payload."""
-        pae = full_data.get('token_pair_pae') or full_data.get('pae')
-        if not isinstance(pae, list) or not pae or not isinstance(pae[0], list):
+    def _csv_rank_for_label(label: str, csv_ranks: Dict[str, float]) -> Optional[float]:
+        if not csv_ranks or not label:
             return None
-        chain_ids = full_data.get('token_asym_id')
-        if chain_ids is None:
-            raw = full_data.get('token_chain_ids')
-            if isinstance(raw, list) and raw and len(raw) == len(pae):
-                uniq = []
-                for value in raw:
-                    s = str(value)
-                    if s not in uniq:
-                        uniq.append(s)
-                chain_ids = [uniq.index(str(v)) for v in raw]
-            else:
-                chain_ids = None
-        if chain_ids is not None and len(chain_ids) != len(pae):
-            chain_ids = None
-        out = {'token_pair_pae': pae}
-        if chain_ids is not None:
-            out['token_asym_id'] = chain_ids
-        return out
+        if label in csv_ranks:
+            return csv_ranks[label]
+        parts = re.split(r'_sample-', label, maxsplit=1)
+        if len(parts) == 2:
+            seed = parts[0]
+            if seed.startswith('seed-'):
+                seed = seed[len('seed-'):]
+            return csv_ranks.get(f"{seed}-{parts[1]}")
+        return None
+
+    @classmethod
+    def _apply_csv_ranks(cls, samples: list, src_zip, names: list) -> None:
+        ranks = cls._zip_ranking_scores(src_zip, names)
+        if not ranks:
+            return
+        for sample in samples:
+            value = cls._csv_rank_for_label(str(sample.get('sample') or ''), ranks)
+            if value is not None:
+                sample['csv_rank'] = value
+
+    @classmethod
+    def _best_sample(cls, samples: list, key=None):
+        """Deterministic best sample: highest rank, lowest index on ties —
+        zip member order is arbitrary and must not pick the sample."""
+        rank = key or cls._sample_rank
+        return samples[min(range(len(samples)),
+                           key=lambda i: (-rank(samples[i]), i))]
+
+    @staticmethod
+    def _cif_asym_tokens(structure_text: str) -> Optional[list]:
+        """Per-token chain labels in cif file order (polymer residue = 1
+        token, het residue = 1 token per atom), mirroring backend PAE
+        tokenization; used when a backend ships no token asym payload."""
+        try:
+            import gemmi
+            structure = gemmi.make_structure_from_block(
+                gemmi.cif.read_string(structure_text).sole_block())
+            structure.setup_entities()
+        except Exception:  # noqa: BLE001
+            return None
+        if not len(structure):
+            return None
+        labels: list = []
+        for ch in structure[0]:
+            for res in ch:
+                info = gemmi.find_tabulated_residue(res.name)
+                polymer = (info is not None
+                           and (info.is_amino_acid() or info.is_nucleic_acid())
+                           and res.het_flag != 'H')
+                if polymer:
+                    labels.append(ch.name)
+                else:
+                    labels.extend([ch.name] * len(res))
+        return labels or None
 
     @staticmethod
     def _sample_confidence(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1225,7 +1289,7 @@ class ResultArchiveService:
         candidates = [s for s in samples if s.get('pae_name')]
         if not candidates:
             return None
-        best = max(candidates, key=ResultArchiveService._sample_rank)
+        best = ResultArchiveService._best_sample(candidates)
         try:
             payload = None
             arr = None
@@ -1234,6 +1298,9 @@ class ResultArchiveService:
                 with _np.load(io.BytesIO(src_zip.read(best['pae_name']))) as loaded:
                     key = 'pae' if 'pae' in loaded.files else next(iter(loaded.files))
                     arr = _np.asarray(loaded[key], dtype=float)
+                if best.get('cif'):
+                    asym = ResultArchiveService._cif_asym_tokens(
+                        src_zip.read(best['cif']).decode('utf-8', errors='replace'))
             else:
                 payload = json.loads(src_zip.read(best['pae_name']))
                 pae = payload.get('token_pair_pae') or payload.get('pae')
@@ -1262,16 +1329,20 @@ class ResultArchiveService:
         # downsampled matrix — do NOT pre-shrink here.
         bounds = []
         if asym:
+            # Merge consecutive tokens of one chain on the raw label; the
+            # stored chain value is the numeric id when possible, else the
+            # ordinal chain index (string labels).
+            prev = object()
             for idx, chain in enumerate(asym):
-                last = bounds[-1] if bounds else None
-                if last and last.get('chain') == chain:
-                    last['end'] = idx
+                if chain == prev and bounds:
+                    bounds[-1]['end'] = idx
                 else:
                     try:
                         numeric = int(chain)
                     except (TypeError, ValueError):
                         numeric = len(bounds)
                     bounds.append({'chain': numeric, 'start': idx, 'end': idx})
+                prev = chain
         return {'pae_matrix': matrix, 'pae_chain_bounds': bounds}
 
     @staticmethod
@@ -1293,7 +1364,7 @@ class ResultArchiveService:
         candidates = [s for s in samples if s.get('cif')]
         if not candidates:
             return None
-        best = max(candidates, key=ResultArchiveService._sample_rank)
+        best = ResultArchiveService._best_sample(candidates)
         cif_name = best['cif']
         try:
             structure_text = src_zip.read(cif_name).decode('utf-8', errors='replace')
@@ -1387,13 +1458,7 @@ class ResultArchiveService:
         if not candidates:
             return None
 
-        def rank(s):
-            v = s['summary'].get('ranking_score')
-            if not isinstance(v, (int, float)):
-                v = s['summary'].get('confidence_score')
-            return float(v) if isinstance(v, (int, float)) else 0.0
-
-        best = max(candidates, key=rank)
+        best = ResultArchiveService._best_sample(candidates)
         workdir = Path(tempfile.mkdtemp(prefix='vbio-ipsae-'))
         try:
             cif_path = workdir / 'sample.cif'
@@ -1424,9 +1489,7 @@ class ResultArchiveService:
                         if info is not None and info.is_amino_acid():
                             cif_residues[ch.name] += 1
                         else:
-                            for _atom in res:
-                                cif_atoms[ch.name] += 1
-                            break  # count each het residue once, not per atom
+                            cif_atoms[ch.name] += len(res)  # atom-token per het residue
             if not cif_residues and not cif_atoms:
                 return None
 
@@ -1461,20 +1524,26 @@ class ResultArchiveService:
             asym_counts = Counter(str(a) for a in ((full or {}).get('token_asym_id') or []))
             id_to_letter: dict = {}
             used: set = set()
-            for chain, count in cif_residues.items():
-                for asym, acount in asym_counts.items():
-                    if acount == count and asym not in used:
-                        id_to_letter[chain] = ResultArchiveService._chain_letter(
-                            int(asym)) if asym.isdigit() else asym
-                        used.add(asym)
-                        break
-            for chain, count in cif_atoms.items():
-                for asym, acount in asym_counts.items():
-                    if acount == count and asym not in used:
-                        id_to_letter[chain] = ResultArchiveService._chain_letter(
-                            int(asym)) if asym.isdigit() else asym
-                        used.add(asym)
-                        break
+            cif_chain_names = set(cif_residues) | set(cif_atoms)
+            if cif_chain_names and cif_chain_names <= set(asym_counts):
+                # cif chain ids already match token labels — map 1:1, no
+                # unit-count guessing.
+                id_to_letter = {name: name for name in cif_chain_names}
+            else:
+                for chain, count in cif_residues.items():
+                    for asym, acount in asym_counts.items():
+                        if acount == count and asym not in used:
+                            id_to_letter[chain] = ResultArchiveService._chain_letter(
+                                int(asym)) if asym.isdigit() else asym
+                            used.add(asym)
+                            break
+                for chain, count in cif_atoms.items():
+                    for asym, acount in asym_counts.items():
+                        if acount == count and asym not in used:
+                            id_to_letter[chain] = ResultArchiveService._chain_letter(
+                                int(asym)) if asym.isdigit() else asym
+                            used.add(asym)
+                            break
 
             def to_letter(chain_name: str) -> str:
                 # group rows join chains with '+' ('B+L'); map each part.
@@ -1538,7 +1607,8 @@ class ResultArchiveService:
 
     @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
-        """MSA depth from self_msa a3m files inside the archive."""
+        """MSA depth from a3m files inside the archive; per-chain files
+        each describe the same alignment family, so the deepest wins."""
         total = 0
         found = False
         for name in src_zip.namelist():
@@ -1548,7 +1618,7 @@ class ResultArchiveService:
             try:
                 rows = [line for line in src_zip.read(name).decode('utf-8', errors='replace').splitlines()
                         if line and not line.startswith('>')]
-                total += max(1, len(rows))
+                total = max(total, len(rows))
             except Exception:  # noqa: BLE001
                 continue
         if not found or total <= 0:
@@ -1576,9 +1646,15 @@ class ResultArchiveService:
                     )
                     if summary_name:
                         json_candidates = [summary_name]
-                parsed_entries: list[tuple[int, Dict[str, Any]]] = []
+                # af3 archives duplicate the best sample at the top level;
+                # per-seed sample dirs are authoritative — drop the copies so
+                # this block and the samples-based supplement read one sample.
+                if any('/seed-' in n for n in json_candidates):
+                    json_candidates = [n for n in json_candidates if '/seed-' in n]
+                csv_ranks = self._zip_ranking_scores(src_zip, names)
+                parsed_entries: list[tuple[tuple, Dict[str, Any]]] = []
                 best: Optional[Dict[str, Any]] = None
-                best_score = -1
+                best_score: tuple = ()
                 for name in json_candidates:
                     try:
                         payload = json.loads(src_zip.read(name))
@@ -1626,7 +1702,14 @@ class ResultArchiveService:
                     )
                     if coverage <= 0:
                         continue
-                    score = coverage * 100 - len(name)
+                    parent = name[:name.rfind('/')] if '/' in name else ''
+                    rank_value = self._csv_rank_for_label(
+                        os.path.basename(parent), csv_ranks)
+                    if rank_value is None:
+                        rank_value = self._to_finite_float(payload.get('ranking_score'))
+                    if rank_value is None:
+                        rank_value = self._to_finite_float(payload.get('confidence_score'))
+                    score = (coverage, rank_value if rank_value is not None else 0.0)
                     metrics_block = {
                         'pair_iptm': pair_iptm,
                         'pair_pae': pair_pae,
@@ -1668,7 +1751,7 @@ class ResultArchiveService:
                 ):
                     if metric_key in merged:
                         continue
-                    best_metric_score = -1
+                    best_metric_score: tuple = ()
                     best_metric_value: Optional[Any] = None
                     for metric_score, metrics in parsed_entries:
                         if metric_key in {'ligand_atom_plddts', 'ligand_display_atom_plddts'}:
@@ -1733,17 +1816,8 @@ class ResultArchiveService:
                     names = [n for n in src_zip.namelist() if not n.endswith('/')]
                     samples = self._prediction_samples(src_zip, names)
                     if samples:
-                        def _rank(s):
-                            v = s['summary'].get('ranking_score')
-                            if not isinstance(v, (int, float)):
-                                v = s['summary'].get('confidence_score')
-                            return float(v) if isinstance(v, (int, float)) else 0.0
-                        best = max(samples, key=_rank)
+                        best = self._best_sample(samples)
                         normalized = self._sample_confidence(best['summary'])
-                        token_plddt = best.get('token_plddt')
-                        if token_plddt is not None and 'plddt' not in normalized:
-                            # Adaptive scale: af3/boltz carry 0-1, mol1 0-100.
-                            normalized['plddt'] = token_plddt * 100.0 if token_plddt <= 1.0 else token_plddt
                         for key, value in normalized.items():
                             merged.setdefault(key, value)
                 except Exception:  # noqa: BLE001 — scalar supplement is additive
@@ -1810,7 +1884,7 @@ class ResultArchiveService:
         with self._compact_metrics_lock:
             cached = self._compact_metrics_cache.get(cache_key)
             if cached is not None:
-                result = dict(cached)
+                result = copy.deepcopy(cached)
                 if not include_pae_matrix:
                     result.pop('pae_matrix', None)
                 return result
@@ -1821,8 +1895,8 @@ class ResultArchiveService:
         with self._compact_metrics_lock:
             if len(self._compact_metrics_cache) > 512:
                 self._compact_metrics_cache.clear()
-            self._compact_metrics_cache[cache_key] = dict(parsed)
-        result = dict(parsed)
+            self._compact_metrics_cache[cache_key] = copy.deepcopy(parsed)
+        result = copy.deepcopy(parsed)
         if not include_pae_matrix:
             # ~100 KB; only the results view consumes it, via the view archive.
             result.pop('pae_matrix', None)

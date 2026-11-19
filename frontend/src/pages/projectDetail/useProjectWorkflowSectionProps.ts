@@ -70,6 +70,7 @@ interface UseProjectWorkflowSectionPropsInput {
   snapshotSelectedPairIptm: number | null;
   selectedResultLigandSequence: string;
   designedBinderComponent: InputComponent | null;
+  selectedResultLigandComponentType: InputComponent['type'] | null;
   designedBinderChainId: string | null;
   designedBinderResiduePlddts: number[] | null;
   canEdit: boolean;
@@ -300,6 +301,7 @@ export function useProjectWorkflowSectionProps({
   snapshotSelectedPairIptm,
   selectedResultLigandSequence,
   designedBinderComponent,
+  selectedResultLigandComponentType,
   designedBinderChainId,
   designedBinderResiduePlddts,
   canEdit,
@@ -506,6 +508,7 @@ export function useProjectWorkflowSectionProps({
         affinityLigandConfidenceHint: snapshotPlddt,
         selectedResultLigandSequence,
         designedBinderComponent,
+        selectedLigandComponentType: selectedResultLigandComponentType,
         designedBinderChainId,
         designedBinderResiduePlddts,
         peptideFallbackPlddt: snapshotPlddt,
