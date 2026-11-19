@@ -1131,10 +1131,16 @@ class ResultArchiveService:
 
     @staticmethod
     def _sample_rank(sample: Dict[str, Any]) -> float:
-        v = sample['summary'].get('ranking_score')
-        if not isinstance(v, (int, float)):
-            v = sample['summary'].get('confidence_score')
-        return float(v) if isinstance(v, (int, float)) else 0.0
+        payload = sample.get('summary') or {}
+        for key in ('ranking_score', 'confidence_score'):
+            v = payload.get(key)
+            if isinstance(v, (int, float)) and math.isfinite(v):
+                return float(v)
+            try:
+                return float(str(v))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
 
     @staticmethod
     def _sample_full_data(src_zip, sample: Dict[str, Any]) -> Dict[str, Any]:
@@ -1252,6 +1258,8 @@ class ResultArchiveService:
         down = max(1, -(-n0 // 134))
         # Numpy downsample before materializing Python floats.
         matrix = arr[::down, ::down].round(2).tolist()
+        # bounds are in full-token space; the frontend rescales to the
+        # downsampled matrix — do NOT pre-shrink here.
         bounds = []
         if asym:
             for idx, chain in enumerate(asym):
@@ -1389,40 +1397,38 @@ class ResultArchiveService:
         workdir = Path(tempfile.mkdtemp(prefix='vbio-ipsae-'))
         try:
             cif_path = workdir / 'sample.cif'
-            pae_path = workdir / ('pae.' + best['pae_kind'])
-            suffix = '.json' if best['pae_kind'] == 'json' else '.npz'
-            pae_path = workdir / f'pae{suffix}'
+            pae_path = workdir / f'pae.{best["pae_kind"]}'
             cif_path.write_bytes(src_zip.read(best['cif']))
             pae_path.write_bytes(src_zip.read(best['pae_name']))
 
             # Binder group = every chain except the largest (target); the
             # official --group scores the union straight from the full PAE
             # matrix (IPSAE2 virtual-molecule mode).
+            import gemmi
+
             cif_residues: Counter = Counter()
             cif_atoms: Counter = Counter()
-            tag_index: dict = {}
-            in_atom_site = False
-            seen: dict = {}
-            for line in cif_path.read_text(errors='replace').splitlines():
-                if line.startswith('_atom_site.'):
-                    in_atom_site = True
-                    tag_index[line.strip().split('.', 1)[1]] = len(tag_index)
-                    continue
-                if in_atom_site:
-                    parts = line.split()
-                    if len(parts) == len(tag_index) and parts and parts[0] in ('ATOM', 'HETATM'):
-                        chain_col = (tag_index.get('auth_asym_id', tag_index.get('label_asym_id', -1)))
-                        chain = parts[chain_col]
-                        if parts[0] == 'HETATM':
-                            cif_atoms[chain] += 1
+            try:
+                structure_text = src_zip.read(best['cif']).decode('utf-8', errors='replace')
+                structure = gemmi.make_structure_from_block(
+                    gemmi.cif.read_string(structure_text).sole_block())
+                structure.setup_entities()
+            except Exception:  # noqa: BLE001 — malformed cif: no group, no letters
+                structure = None
+            if structure is not None:
+                for ch in structure[0]:
+                    for res in ch:
+                        if res.name.strip() in ('HOH', 'WAT', 'DOD'):
+                            continue
+                        info = gemmi.find_tabulated_residue(res.name)
+                        if info is not None and info.is_amino_acid():
+                            cif_residues[ch.name] += 1
                         else:
-                            residue = (chain, parts[tag_index.get('label_seq_id', 6)],
-                                       parts[tag_index.get('label_comp_id', 5)])
-                            if residue not in seen:
-                                seen[residue] = True
-                                cif_residues[chain] += 1
-                    elif parts and not parts[0].startswith('#'):
-                        in_atom_site = False
+                            for _atom in res:
+                                cif_atoms[ch.name] += 1
+                            break  # count each het residue once, not per atom
+            if not cif_residues and not cif_atoms:
+                return None
 
             target_chain = max(cif_residues, key=cif_residues.get) if cif_residues else None
             binder_chains = [c for c in cif_residues if c != target_chain] + list(cif_atoms)
@@ -1444,22 +1450,29 @@ class ResultArchiveService:
 
             # cif chain id -> token asym index letter, matched by unit counts.
             # Falls back to the raw cif id when counts are ambiguous.
-            full = json.loads(src_zip.read(best['full_name'])) \
-                if best.get('full_name', '').endswith('.json') and best.get('full_data') is None \
-                else (best.get('full_data') or {})
-            asym_counts = Counter(str(a) for a in (full.get('token_asym_id') or []))
+            full = best.get('full_data')
+            if full is None and best.get('full_name'):
+                try:
+                    full = json.loads(src_zip.read(best['full_name']))
+                except Exception:  # noqa: BLE001
+                    full = {}
+            # Layout 3 (boltz npz) has no full_data json: letters fall back
+            # to the cif chain ids, which are already letters.
+            asym_counts = Counter(str(a) for a in ((full or {}).get('token_asym_id') or []))
             id_to_letter: dict = {}
             used: set = set()
             for chain, count in cif_residues.items():
                 for asym, acount in asym_counts.items():
                     if acount == count and asym not in used:
-                        id_to_letter[chain] = chr(65 + int(asym)) if asym.isdigit() else asym
+                        id_to_letter[chain] = ResultArchiveService._chain_letter(
+                            int(asym)) if asym.isdigit() else asym
                         used.add(asym)
                         break
             for chain, count in cif_atoms.items():
                 for asym, acount in asym_counts.items():
                     if acount == count and asym not in used:
-                        id_to_letter[chain] = chr(65 + int(asym)) if asym.isdigit() else asym
+                        id_to_letter[chain] = ResultArchiveService._chain_letter(
+                            int(asym)) if asym.isdigit() else asym
                         used.add(asym)
                         break
 
@@ -1728,8 +1741,9 @@ class ResultArchiveService:
                         best = max(samples, key=_rank)
                         normalized = self._sample_confidence(best['summary'])
                         token_plddt = best.get('token_plddt')
-                        if token_plddt is not None:
-                            normalized['plddt'] = token_plddt * 100.0
+                        if token_plddt is not None and 'plddt' not in normalized:
+                            # Adaptive scale: af3/boltz carry 0-1, mol1 0-100.
+                            normalized['plddt'] = token_plddt * 100.0 if token_plddt <= 1.0 else token_plddt
                         for key, value in normalized.items():
                             merged.setdefault(key, value)
                 except Exception:  # noqa: BLE001 — scalar supplement is additive

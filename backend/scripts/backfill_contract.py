@@ -38,6 +38,9 @@ for tid in rows:
         skip += 1
         continue
     try:
+        # Fast pass: skip the per-pair ipSAE CLI subprocess (~1.5s/row);
+        # results view recomputes it on demand from the archive.
+        svc._extract_pair_ipsae = lambda _zip: None
         compact = svc._extract_compact_prediction_metrics_from_zip(zip_path)
         if not compact:
             skip += 1

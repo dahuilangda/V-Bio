@@ -85,10 +85,6 @@
   min-width: 0;
 }
 
-.confidence-kv-row .metric-help {
-  justify-self: start;
-}
-
 .confidence-kv-row:nth-child(2n + 1) {
   border-right: 1px solid #eef3f0;
 }

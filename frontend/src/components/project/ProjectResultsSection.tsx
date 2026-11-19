@@ -145,9 +145,9 @@ function observeOnce(el: HTMLElement, paint: () => void): () => void {
 
 function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: Record<string, unknown> | null; taskId: string }) {
   const conf = (snapshotConfidence || {}) as { pae_matrix?: number[][]; pae_chain_bounds?: PaeBounds[] };
-  let matrix = conf.pae_matrix;
-  let bounds = conf.pae_chain_bounds;
-  if (!Array.isArray(matrix) || matrix.length === 0) {
+  // Memoized so a parent re-render cannot hand the paint effect a fresh
+  // matrix identity (which would tear down and re-arm the observer).
+  const cachedEntry = useMemo(() => {
     try {
       const cached = JSON.parse(localStorage.getItem('vbio:pae:latest') || 'null');
       // Only the task that captured this cache may render it.
@@ -159,11 +159,19 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
         cachedTaskId &&
         cachedTaskId === activeTaskId
       ) {
-        matrix = cached.pae_matrix;
-        bounds = cached.pae_chain_bounds;
+        return { matrix: cached.pae_matrix as number[][], bounds: cached.pae_chain_bounds as PaeBounds[] | undefined };
       }
     } catch {
       // ignore
+    }
+    return null;
+  }, [taskId]);
+  let matrix = conf.pae_matrix;
+  let bounds = conf.pae_chain_bounds;
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    if (cachedEntry) {
+      matrix = cachedEntry.matrix;
+      bounds = cachedEntry.bounds;
     }
   }
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -249,15 +257,20 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
   const cellTooltips = (event: ReactMouseEvent<HTMLDivElement>) => {
     const wrap = wrapRef.current;
     if (!wrap || !Array.isArray(matrix)) return;
-    const rect = wrap.getBoundingClientRect();
+    const canvas = canvasRef.current;
+    if (!canvas || !wrap) return;
+    const rect = canvas.getBoundingClientRect();
     const n = matrix.length;
+    // The canvas is matrix (n rows) + chain track; cut at the track boundary.
+    const matrixFrac = 600 / 640;
     const fracY = (event.clientY - rect.top) / rect.height;
     const fracX = (event.clientX - rect.left) / rect.width;
-    if (fracY > 0.94 || fracY < 0 || fracX < 0 || fracX > 1) {
+    const yInMatrix = fracY / matrixFrac;
+    if (fracY >= matrixFrac || fracY < 0 || fracX < 0 || fracX > 1) {
       wrap.removeAttribute('title');
       return;
     }
-    const i = Math.min(n - 1, Math.max(0, Math.floor(fracY * n)));
+    const i = Math.min(n - 1, Math.max(0, Math.floor((fracY / matrixFrac) * n)));
     const j = Math.min(n - 1, Math.max(0, Math.floor(fracX * n)));
     const value = matrix[i]?.[j];
     const chainAt = (idx: number) => {
@@ -280,9 +293,9 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
 
 function MsaCoverageSection({ snapshotConfidence }: { snapshotConfidence: Record<string, unknown> | null }) {
   const conf = (snapshotConfidence || {}) as { msa?: { depth?: number; chains?: Array<{ chain: string; length: number; depth: number; coverage: number[] }> } };
-  const chains = Array.isArray(conf.msa?.chains) ? conf.msa!.chains!.filter(
+  const chains = useMemo(() => Array.isArray(conf.msa?.chains) ? conf.msa!.chains!.filter(
     (c) => c && Array.isArray(c.coverage) && c.coverage.length > 0
-  ) : [];
+  ) : [], [conf.msa]);
   const sectionRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const section = sectionRef.current;
@@ -318,7 +331,7 @@ function MsaCoverageSection({ snapshotConfidence }: { snapshotConfidence: Record
     <div className="msa-coverage-chart" ref={sectionRef}>
       <div className="msa-coverage-title">
         MSA coverage
-        <span className="muted small">{`total ${Math.round(Number(conf.msa?.depth || 0))} seq`}</span>
+        <span className="muted small">{`total ${Math.round(Number(conf.msa?.depth) || chains.reduce((acc, c) => acc + Math.round(c.depth), 0))} seq`}</span>
       </div>
       {chains.map((c) => (
         <div key={c.chain} className="msa-coverage-row">
@@ -535,7 +548,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                 )}
               </div>
               <div className="ligand-preview-panel">
-                {designedBinderComponent && designedBinderComponent.sequence ? (
+                {designedBinderComponent && designedBinderComponent.sequence && !selectedResultLigandSequence ? (
                   <OverviewLigandSequencePreview
                     sequence={designedBinderComponent.sequence}
                     residuePlddts={designedBinderResiduePlddts}

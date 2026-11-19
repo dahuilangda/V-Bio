@@ -17,6 +17,7 @@ interface MetricsPanelProps {
   chainIds?: string[];
   selectedTargetChainId?: string | null;
   selectedLigandChainId?: string | null;
+  selectedLigandComponentType?: 'protein' | 'dna' | 'rna' | 'ligand' | null;
 }
 
 function flattenObject(obj: Record<string, unknown>, prefix = ''): Array<{ key: string; value: string }> {
@@ -425,7 +426,7 @@ function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: st
       const b = String(entry.b ?? '');
       const aToB = toNumber(entry.a_to_b);
       const bToA = toNumber(entry.b_to_a);
-      if (!a || !b) continue;
+      if (!a || !b || chainTokenEquals(a, b)) continue;
       const aToBValue = aToB !== null ? normalizeProbability(aToB) : null;
       const bToAValue = bToA !== null ? normalizeProbability(bToA) : null;
       if (aToBValue !== null) rows.push({ chainA: a, chainB: b, value: aToBValue, directional: true });

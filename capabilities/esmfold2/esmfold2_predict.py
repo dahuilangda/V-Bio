@@ -10,7 +10,7 @@ MSA depth) consumes it unchanged:
   <output>/input/seed_<seed>/predictions/
     input_sample_<i>.cif                      all-atom model
     input_full_data_sample_<i>.json           token_pair_pae, token_asym_id,
-                                              token_chain_ids, plddt
+                                              token_plddt
     input_summary_confidence_sample_<i>.json  iptm, ptm, ranking_score, plddt
   <output>/summary.json                        engine, best, n_summaries
 
@@ -46,6 +46,14 @@ def parse_args() -> argparse.Namespace:
         "ESMFOLD2_WEIGHTS", "biohub/ESMFold2"))
     return ap.parse_args()
 
+
+
+def esm_ccd_has(ccd: str) -> bool:
+    try:
+        from esm.models.esmfold2.conformers import load_ccd
+        return ccd in load_ccd()
+    except Exception:
+        return True  # CCD table unavailable: let esm decide at tokenization
 
 def parse_platform_yaml(path: str) -> dict:
     data = yaml.safe_load(open(path)) or {}
@@ -85,24 +93,42 @@ def build_inputs(entries: list):
     sequences = []
     chain_names = []
     for index, (kind, entity) in enumerate(entries):
-        chain = ascii_uppercase[index]
+        chain = (ascii_uppercase[index]
+                 if index < 26
+                 else ascii_uppercase[index // 26 - 1] + ascii_uppercase[index % 26])
         chain_names.append(chain)
         ids = [chain]
         copies = entity.get("id")
         if isinstance(copies, list) and len(copies) > 1:
             ids = [f"{chain}{n + 1}" for n in range(len(copies))]
-        if kind == "protein":
-            modifications = [
-                Modification(position=int(m["position"]) - 1, ccd=str(m["ccd"]))
-                for m in (entity.get("modifications") or [])
-                if isinstance(m, dict) and m.get("ccd")
-            ]
-            sequences.append(ProteinInput(
-                id=ids, sequence=entity["sequence"], modifications=modifications))
-        elif kind == "rna":
-            sequences.append(RNAInput(id=ids, sequence=entity["sequence"]))
-        elif kind == "dna":
-            sequences.append(DNAInput(id=ids, sequence=entity["sequence"]))
+        if kind in ("protein", "rna", "dna"):
+            mods = []
+            seq_len = len(entity.get("sequence") or "")
+            for m in (entity.get("modifications") or []):
+                if not isinstance(m, dict) or not m.get("ccd"):
+                    continue
+                pos = int(m["position"])
+                if not 1 <= pos <= seq_len:
+                    raise ValueError(
+                        f"modification position {pos} out of range 1..{seq_len} "
+                        f"for chain {chain} (ccd {m['ccd']})")
+                ccd = str(m["ccd"])
+                # Unknown CCD would silently degrade to a backbone-only
+                # residue — fail loudly instead.
+                if not esm_ccd_has(ccd):
+                    raise ValueError(
+                        f"CCD component {ccd!r} not in the esm CCD table "
+                        f"(chain {chain} position {pos})")
+                mods.append(Modification(position=pos - 1, ccd=ccd))
+            if kind == "protein":
+                sequences.append(ProteinInput(
+                    id=ids, sequence=entity["sequence"], modifications=mods))
+            elif kind == "rna":
+                sequences.append(RNAInput(
+                    id=ids, sequence=entity["sequence"], modifications=mods))
+            else:
+                sequences.append(DNAInput(
+                    id=ids, sequence=entity["sequence"], modifications=mods))
         else:
             smiles = str(entity.get("smiles") or "").strip()
             ccd = entity.get("ccd")
@@ -208,7 +234,7 @@ def main() -> None:
                                      if mean_plddt is not None else None)},
         })
 
-    best = max(summaries, key=lambda s: s["confidence"]["ranking_score"])
+    best = max(summaries, key=lambda s: s["confidence"]["ranking_score"] or -1.0)
     (output_dir / "summary.json").write_text(json.dumps({
         "engine": "esmfold2",
         "input": args.yaml,

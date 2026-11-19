@@ -646,6 +646,14 @@ def register_prediction_routes(
                 'error': 'ESMFold2 does not support structure template uploads.',
                 'backend': backend,
             }), 400
+        if backend == 'esmfold2' and workflow == 'peptide_design':
+            opts = peptide_design_options if isinstance(peptide_design_options, dict) else {}
+            if opts.get('peptidePocketResidues') or opts.get('peptidePocketCenter'):
+                return jsonify({
+                    'error': 'ESMFold2 scoring does not support pocket restraints; '
+                             'use protenix or mol1 as the scoring backend.',
+                    'backend': backend,
+                }), 400
 
         # Initial peptide structure for mode-anchored design; uploaded in the
         # target's coordinate frame, it switches the D-route to reference-pose
