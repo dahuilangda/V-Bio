@@ -56,6 +56,20 @@ def _sanitize_json_bytes(payload: bytes) -> bytes:
         return payload
 
 
+_SC_LIGAND_RADII = {
+    'C': ('ALA', 'CB'),
+    'N': ('ALA', 'N'),
+    'O': ('ALA', 'O'),
+    'S': ('MET', 'SD'),
+    'BR': ('MET', 'SD'),
+    'P': ('MET', 'SD'),
+    'SE': ('MET', 'SE'),
+    'CL': ('ALA', 'O'),
+    'F': ('ALA', 'O'),
+    'I': ('MET', 'SE'),
+}
+
+
 class ResultArchiveService:
     def __init__(self, *, app, celery_app, logger, get_redis_client_fn: Callable[[], Any]):
         self.app = app
@@ -1280,32 +1294,52 @@ class ResultArchiveService:
         if model is None:
             return None
 
+        water = {'HOH', 'WAT', 'DOD'}
+
         def side(chains):
             coords, atoms, residues = [], [], []
             for chain in chains:
                 for res in chain:
-                    if res.het_flag == 'H':
+                    if res.name.strip() in water:
                         continue
                     info = gemmi.find_tabulated_residue(res.name)
-                    if info is None or not info.is_amino_acid():
-                        continue
+                    is_amino = info is not None and info.is_amino_acid()
                     for atom in res:
                         if atom.element == 'H':
                             continue
                         coords.append((atom.pos.x, atom.pos.y, atom.pos.z))
-                        atoms.append(atom.name)
-                        residues.append(res.name.strip())
+                        if is_amino:
+                            # Polymer atoms key directly into the sc-rs radius
+                            # table.
+                            atoms.append(atom.name)
+                            residues.append(res.name.strip())
+                        else:
+                            # Ligand/cofactor atoms: translate to a standard
+                            # residue key with the same vdW radius (Br/P ->
+                            # MET SD 1.85, SE -> MET SE 2.0, C -> ALA CB 1.88,
+                            # N -> ALA N 1.65, O/CL/F -> ALA O 1.46).
+                            element = atom.element.name.upper()
+                            res_key, atom_key = _SC_LIGAND_RADII.get(
+                                element, ('ALA', 'CB'))
+                            atoms.append(atom_key)
+                            residues.append(res_key)
             return coords, atoms, residues
 
-        polymer_chains = list(model)
-        if len(polymer_chains) < 2:
+        def amino_count(chain):
+            return sum(1 for res in chain
+                       if res.het_flag != 'H'
+                       and gemmi.find_tabulated_residue(res.name) is not None
+                       and gemmi.find_tabulated_residue(res.name).is_amino_acid())
+
+        polymer_chains = [ch for ch in model if amino_count(ch) > 0]
+        if len(polymer_chains) < 1:
             return None
-        target_chain = max(polymer_chains, key=lambda ch: sum(
-            1 for res in ch
-            if res.het_flag != 'H'
-            and gemmi.find_tabulated_residue(res.name) is not None
-            and gemmi.find_tabulated_residue(res.name).is_amino_acid()))
-        binder_chains = [ch for ch in polymer_chains if ch is not target_chain]
+        # Target = the largest amino-acid chain; the binder surface is every
+        # other chain's heavy atoms: binder polymers, covalently bound
+        # linkers, ligands and cofactors (waters excluded). Covers protein-
+        # protein, protein-peptide and protein-small-molecule interfaces.
+        target_chain = max(polymer_chains, key=amino_count)
+        binder_chains = [ch for ch in model if ch is not target_chain]
         if not binder_chains:
             return None
         target_side, binder_side = side([target_chain]), side(binder_chains)
