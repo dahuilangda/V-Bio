@@ -611,6 +611,7 @@ export function ApiAccessPage() {
       ? 'boltz'
       : selectedPredictionBackend;
   const isNessoPredictionBackend = isVirtualScreeningWorkflow;
+  const isEsmfold2PredictionBackend = normalizePredictionBackend(builderPredictionBackend) === 'esmfold2';
   const effectiveAffinityBackend: AffinityBackend = normalizeAffinityBackend(builderAffinityBackend);
   const builderWorkflowKey: BuilderWorkflowKey = isAffinityWorkflow
     ? 'affinity'
@@ -1277,11 +1278,11 @@ export function ApiAccessPage() {
       return '# YAML generation failed. Please check component content.';
     }
   })();
-  const predictionTemplateFlags = !isNessoPredictionBackend && predictionTemplateEnabled
+  const predictionTemplateFlags = (!isNessoPredictionBackend && !isEsmfold2PredictionBackend) && predictionTemplateEnabled
     ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
   const allCustomCcdMolecules = collectCustomCcdMoleculesFromComponents(normalizedYamlBuilderComponents, { includeLigandSmiles: false });
-  const customCcdMolecules = isNessoPredictionBackend
+  const customCcdMolecules = (isNessoPredictionBackend || isEsmfold2PredictionBackend)
     ? []
     : allCustomCcdMolecules.filter((item) => looksLikeAminoAcidBackboneSmiles(item.smiles));
   const customCcdFlags = customCcdMolecules.length > 0
