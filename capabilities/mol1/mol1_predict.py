@@ -34,6 +34,117 @@ from pathlib import Path
 import yaml
 
 
+# ---------------------------------------------------------------- CCD 覆盖层
+
+def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | None:
+    """将自定义残基合并进 components.cif + rdkit pkl，返回覆盖目录。
+
+    在 mol1 runtime 容器内执行——/cache/common/components.cif 已挂载。
+    覆盖目录放在 work_dir（结果根）下，通过 --volume 文件绑定挂载。
+    """
+    import pickle
+    from rdkit import Chem
+
+    if not custom_molecules:
+        return None
+
+    source_cif = Path("/cache/common/components.cif")
+    source_pkl = Path("/cache/common/components.cif.rdkit_mol.pkl")
+    if not source_cif.is_file():
+        print(f"[WARN] CCD source not found: {source_cif}", file=sys.stderr)
+        return None
+
+    overlay_dir = work_dir / "ccd_overlay"
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    merged_cif = overlay_dir / "components.cif"
+    merged_pkl = overlay_dir / "components.cif.rdkit_mol.pkl"
+
+    if merged_cif.is_file() and merged_pkl.is_file():
+        return overlay_dir
+
+    # 追加自定义残基块到 components.cif
+    base_text = source_cif.read_text(errors="replace").rstrip()
+    custom_blocks = []
+    for item in custom_molecules:
+        code = str(item.get("ccd") or "").strip().upper()
+        smiles = str(item.get("smiles") or "").strip()
+        if not code or not smiles:
+            continue
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"无法解析自定义残基 SMILES: {smiles}")
+        from rdkit.Chem import rdMolDescriptors
+        mol = Chem.AddHs(mol)
+        Chem.AllChem.EmbedMolecule(mol, randomSeed=42)
+        mol = Chem.RemoveHs(mol)
+        conf = mol.GetConformer()
+        block = _mol_to_ccd_block(mol, code, conf)
+        custom_blocks.append(block)
+    if not custom_blocks:
+        return None
+    merged_cif.write_text(base_text + "\n\n" + "\n\n".join(custom_blocks) + "\n")
+
+    # 合并 pkl
+    mols = {}
+    if source_pkl.is_file():
+        Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+        import pickle
+        with source_pkl.open("rb") as handle:
+            mols = pickle.load(handle)
+    for item in custom_molecules:
+        code = str(item.get("ccd") or "").strip().upper()
+        smiles = str(item.get("smiles") or "").strip()
+        if not code or not smiles:
+            continue
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+            mols[code] = mol
+    with merged_pkl.open("wb") as handle:
+        import pickle
+        pickle.dump(mols, handle)
+
+    print(f"CCD overlay built: {overlay_dir} ({len(custom_molecules)} custom residues)", file=sys.stderr)
+    return overlay_dir
+
+
+def _mol_to_ccd_block(mol, code: str, conf) -> str:
+    """RDKit Mol -> 简化 CCD cif block (chem_comp + chem_comp_atom + chem_comp_bond)。"""
+    lines = [
+        f"data_{code}",
+        "_chem_comp.id " + code,
+        "_chem_comp.type PEPTIDE-LINKING",
+        "_chem_comp.pdbx_formula '(C{})'",
+        "_chem_comp.name custom residue " + code,
+        "loop_",
+        "_chem_comp_atom.comp_id",
+        "_chem_comp_atom.atom_id",
+        "_chem_comp_atom.type_symbol",
+        "_chem_comp_atom.pdbx_leaving_atom_flag",
+        "_chem_comp_atom.Cartn_x",
+        "_chem_comp_atom.Cartn_y",
+        "_chem_comp_atom.Cartn_z",
+    ]
+    atom_map = {}
+    for i, atom in enumerate(mol.GetAtoms()):
+        name = atom.GetProp("name") if atom.HasProp("name") else atom.GetSymbol()
+        pos = conf.GetAtomPosition(i)
+        leaving = "Y" if atom.HasProp("leaving_atom") and atom.GetProp("leaving_atom") == "1" else "N"
+        atom_map[atom.GetIdx()] = name
+        lines.append(f"{code} {name} {atom.GetSymbol()} {leaving} {pos.x:.4f} {pos.y:.4f} {pos.z:.4f}")
+    lines.append("loop_")
+    lines.append("_chem_comp_bond.comp_id")
+    lines.append("_chem_comp_bond.atom_id_1")
+    lines.append("_chem_comp_bond.atom_id_2")
+    lines.append("_chem_comp_bond.value_order")
+    for bond in mol.GetBonds():
+        a1 = atom_map[bond.GetBeginAtomIdx()]
+        a2 = atom_map[bond.GetEndAtomIdx()]
+        bt = str(bond.GetBondType()).replace("SINGLE", "S").replace("DOUBLE", "D").replace("TRIPLE", "T")
+        lines.append(f"{code} {a1} {a2} {bt}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- 输入转换
 
 def _to_mol_modifications(mods: list | None) -> list[dict]:
@@ -432,6 +543,7 @@ def main() -> None:
         "MOL_CHECKPOINT_DIR", "/cache/checkpoint"))
     ap.add_argument("--msa-cache-dir", default=os.environ.get(
         "MOL_MSA_CACHE_DIR", "/data/msa_cache"))
+    ap.add_argument("--ccd-overlay-dir", default=None)
     ap.add_argument("--msa-server-url", default=os.environ.get(
         "MOL_MSA_SERVER_URL", "http://host.docker.internal:8080"))
     ap.add_argument("--no-msa", action="store_true",
@@ -447,6 +559,15 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir = Path(args.work_dir or output_dir.parent / "work")
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # 容器内 CCD 覆盖层：读取 yaml 中的自定义残基，合并 components.cif
+    if args.yaml:
+        yaml_data = yaml.safe_load(Path(args.yaml).read_text()) or {}
+        custom_mols = yaml_data.get("custom_ccd_molecules") or []
+        if custom_mols:
+            overlay = _build_ccd_overlay(custom_mols, work_dir)
+            if overlay:
+                args.checkpoint_dir = str(overlay / "checkpoint") if False else args.checkpoint_dir
 
     if args.yaml:
         jobs = yaml_to_mol_jobs(Path(args.yaml))

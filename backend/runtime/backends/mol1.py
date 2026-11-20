@@ -48,13 +48,18 @@ class Mol1Backend(StructureBackend):
         os.makedirs(input_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
+        # 嵌入自定义残基到 yaml 供 mol1_predict.py 读取注入
+        if custom_ccd_molecules:
+            import yaml as _yaml_mod
+            yaml_data = _yaml_mod.safe_load(yaml_content) or {}
+            yaml_data["custom_ccd_molecules"] = custom_ccd_molecules
+            yaml_content = _yaml_mod.safe_dump(yaml_data, sort_keys=False, allow_unicode=True)
         yaml_path = os.path.join(input_dir, "input.yaml")
         with open(yaml_path, "w", encoding="utf-8") as handle:
             handle.write(yaml_content)
 
         custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
                                 if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
-        overlay_dir = self._build_ccd_overlay(custom_ccd_molecules, work_root) if custom_ccd_molecules else ""
 
         use_msa_server = bool(ctx.options.get("use_msa_server", False))
         pocket_sequence_contacts = ctx.options.get("pocket_sequence_contacts")
@@ -71,10 +76,6 @@ class Mol1Backend(StructureBackend):
             "--gpus", gpu_arg,
             "--add-host", "host.docker.internal:host-gateway",
             "--volume", "/data/mol1/common/common:/cache/common:ro",
-            *([
-                "--volume", f"{overlay_dir}/components.cif:/cache/common/components.cif:ro",
-                "--volume", f"{overlay_dir}/components.cif.rdkit_mol.pkl:/cache/common/components.cif.rdkit_mol.pkl:ro",
-            ] if overlay_dir else []),
             "--volume", "/data/mol1/checkpoint:/cache/checkpoint:ro",
             "--volume", "/data/msa_cache:/data/msa_cache:ro",
             "--volume", "/data/V-Bio:/workspace/vbio:ro",
@@ -116,52 +117,6 @@ class Mol1Backend(StructureBackend):
 
         self._write_archive(work_root, output_dir, yaml_content,
                             ctx.output_archive_path)
-
-    def _build_ccd_overlay(self, custom_ccd_molecules, work_root: str) -> str:
-        """合并 components.cif 与 rdkit pkl，生成 per-task CCD 覆盖目录。"""
-        import pickle as _pickle
-
-        from backend.runtime.custom_ccd_builder import (
-            _build_custom_ccd_bundle,
-            _normalize_custom_ccd_molecules,
-        )
-
-        molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules)
-        cif_text, _ = _build_custom_ccd_bundle(molecules)
-        digest = __import__("hashlib").sha256(cif_text.encode()).hexdigest()[:16]
-
-        source_common = Path("/data/mol1/common/common")
-        source_cif = source_common / "components.cif"
-        source_pkl = source_common / "components.cif.rdkit_mol.pkl"
-        source_pkl = source_common / "components.cif.rdkit_mol.pkl"
-        overlay_root = Path(work_root) / "mol1_ccd_overlay"
-        overlay_root.mkdir(parents=True, exist_ok=True)
-
-        merged_cif = overlay_root / "components.cif"
-        merged_pkl = overlay_root / "components.cif.rdkit_mol.pkl"
-        if merged_cif.is_file() and merged_pkl.is_file():
-            return str(overlay_root)
-
-        text = source_cif.read_text(errors="replace").rstrip() + "\n\n" + cif_text.strip() + "\n"
-        merged_cif.write_text(text)
-
-        mols = {}
-        if source_pkl.is_file():
-            with source_pkl.open("rb") as handle:
-                mols = _pickle.load(handle)
-        for item in molecules:
-            code = str(item.get("ccd") or "").strip().upper()
-            mol = item.get("mol")
-            if mol is None and item.get("smiles"):
-                from rdkit import Chem as _Chem
-                mol = _Chem.MolFromSmiles(item["smiles"])
-            if mol is not None:
-                mols[code] = mol
-            from rdkit import Chem as _Chem
-            _Chem.SetDefaultPickleProperties(_Chem.PropertyPickleOptions.AllProps)
-            with merged_pkl.open("wb") as handle:
-                _pickle.dump(mols, handle)
-        return str(overlay_root)
 
     def _assert_msa_server_configured(self) -> str:
         from backend.runtime.run_single_prediction import _assert_msa_server_configured
