@@ -8,8 +8,18 @@ from backend.runtime.backends.request import PredictionRequest
 class Af3Backend(StructureBackend):
     name = "alphafold3"
 
+    def post_validate(self, request: PredictionRequest) -> PredictionRequest:
+        from backend.runtime.run_single_prediction import (
+            _validate_amidated_terminal_constraints,
+        )
+        yaml_text = request.source_yaml
+        _validate_amidated_terminal_constraints(yaml_text, request.raw.get("custom_ccd_molecules") or [])
+        return request
+
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request)
+        request = self.post_validate(request)
+        ctx.yaml_content = request.source_yaml
         from backend.runtime.run_single_prediction import run_alphafold3_backend
         run_alphafold3_backend(
             ctx.temp_dir,

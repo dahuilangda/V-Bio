@@ -15,10 +15,10 @@ from backend.runtime.backends.request import PredictionRequest
 
 class EsmFold2Backend(StructureBackend):
     name = "esmfold2"
-    supported_chirality = frozenset({"l"})
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request)
+        request = self.post_validate(request)
         image = self._resolve_image()
         results_root, input_dir, output_dir = self._prepare_dirs(ctx)
         yaml_path = os.path.join(input_dir, "input.yaml")

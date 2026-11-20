@@ -56,6 +56,11 @@ class StructureBackend(ABC):
                     raise ValueError(
                         f"bond residue {residue} out of range 1..{expected} for chain {chain}")
 
+    def post_validate(self, request: PredictionRequest) -> PredictionRequest:
+        """引擎约束管线钩子：重映射/清洗/域校验。默认原样返回。"""
+        return request
+
     @abstractmethod
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
-        """执行预测并写出 output_archive_path。"""
+        """执行预测并写出 output_archive_path。实现应先调用
+        self.validate(request) 与 self.post_validate(request)。"""

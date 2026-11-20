@@ -8,8 +8,22 @@ from backend.runtime.backends.request import PredictionRequest
 class ProtenixBackend(StructureBackend):
     name = "protenix"
 
+    def post_validate(self, request: PredictionRequest) -> PredictionRequest:
+        from backend.runtime.run_single_prediction import (
+            _remap_constraints_by_template_alignment,
+            _sanitize_constraints_for_chain_lengths,
+            _validate_amidated_terminal_constraints,
+        )
+        yaml_text = request.source_yaml
+        yaml_text = _remap_constraints_by_template_alignment(yaml_text)
+        yaml_text = _sanitize_constraints_for_chain_lengths(yaml_text)
+        _validate_amidated_terminal_constraints(yaml_text, request.raw.get("custom_ccd_molecules") or [])
+        return PredictionRequest.from_yaml(yaml_text)
+
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request)
+        request = self.post_validate(request)
+        ctx.yaml_content = request.source_yaml
         from backend.runtime.run_single_prediction import run_protenix_backend
         run_protenix_backend(
             temp_dir=ctx.temp_dir,

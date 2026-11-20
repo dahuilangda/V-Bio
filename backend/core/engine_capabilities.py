@@ -37,21 +37,6 @@ def active_engine_ids() -> list[str]:
 
 
 def engine_constraints(backend: str) -> frozenset[str]:
-    """引擎声明的约束类型；未知引擎返回空集。"""
-    engine = get_engine(backend)
-    return frozenset(engine.get("constraints") or []) if engine else frozenset()
-
-
-def engine_design_modes(backend: str) -> frozenset[str]:
-    engine = get_engine(backend)
-    return frozenset(engine.get("design_modes") or []) if engine else frozenset()
-
-
-def engine_supports_constraint(backend: str, constraint: str) -> bool:
-    return constraint in engine_constraints(backend)
-
-
-def engine_constraints(backend: str) -> frozenset[str]:
     """引擎声明的约束类型键集合；未知引擎返回空集。"""
     engine = get_engine(backend)
     return frozenset(engine.get("constraints") or []) if engine else frozenset()
