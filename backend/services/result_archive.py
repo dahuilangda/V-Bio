@@ -1627,23 +1627,46 @@ class ResultArchiveService:
 
     @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
-        """MSA depth from a3m files inside the archive; per-chain files
-        each describe the same alignment family, so the deepest wins."""
-        total = 0
-        found = False
+        """MSA stats from a3m files inside the archive. Per-chain files
+        (protenix msa/<chain>.a3m, af3 <chain>_msa.a3m) each describe one
+        chain's alignment: the deepest row count is the total depth and
+        every chain carries depth + per-position coverage, matching the
+        mol1 summary block so every backend fills the coverage chart."""
+        import numpy as _np
+        per_chain: list = []
         for name in src_zip.namelist():
             if not name.lower().endswith('.a3m'):
                 continue
-            found = True
             try:
-                rows = [line for line in src_zip.read(name).decode('utf-8', errors='replace').splitlines()
+                seqs = [line for line in src_zip.read(name).decode('utf-8', errors='replace').splitlines()
                         if line and not line.startswith('>')]
-                total = max(total, len(rows))
             except Exception:  # noqa: BLE001
                 continue
-        if not found or total <= 0:
+            if not seqs:
+                continue
+            stem = os.path.basename(name)[:-len('.a3m')]
+            if stem.lower().endswith('_msa'):
+                stem = stem[:-len('_msa')]
+            chain = stem.strip() or os.path.basename(os.path.dirname(name))
+            depth = len(seqs)
+            cols = max(1, len(seqs[0]))
+            gap = _np.zeros((depth, cols), dtype=_np.int32)
+            for i, seq in enumerate(seqs):
+                b = _np.frombuffer(
+                    seq[:cols].encode('ascii', errors='ignore').upper(),
+                    dtype=_np.uint8)
+                gap[i, :len(b)] = (b == ord('-')) | (b == 0)
+            coverage = (100 - gap.sum(axis=0) * 100 // depth).tolist()
+            length = cols - int(gap[0].sum())
+            per_chain.append({
+                'chain': chain, 'length': length,
+                'depth': depth, 'coverage': coverage,
+            })
+        if not per_chain:
             return None
-        return {'depth': total}
+        per_chain.sort(key=lambda entry: entry['chain'])
+        deepest = max(entry['depth'] for entry in per_chain)
+        return {'depth': deepest, 'chains': per_chain}
 
     def _extract_compact_prediction_metrics_from_zip(self, source_zip_path: str) -> Optional[Dict[str, Any]]:
         try:
