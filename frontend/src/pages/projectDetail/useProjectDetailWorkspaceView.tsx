@@ -32,7 +32,7 @@ import {
   formatConstraintDetail as formatConstraintDetailForWorkspace
 } from './constraintWorkspaceUtils';
 import { useConstraintWorkspaceActions } from './useConstraintWorkspaceActions';
-import { scrollToEditorBlock } from './editorActions';
+import { scrollToEditorBlockAction } from './editorActions';
 import { useProjectEditorHandlers } from './useProjectEditorHandlers';
 import { useProjectSidebarActions } from './useProjectSidebarActions';
 import { useProjectWorkflowSectionProps } from './useProjectWorkflowSectionProps';
@@ -937,7 +937,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     applyPickToSelectedConstraint
   } = useConstraintWorkspaceActions({
     draft,
-    setDraft,
+    setDraft: (value) => setDraft(value),
     activeConstraintId,
     setActiveConstraintId,
     selectedContactConstraintIds,
@@ -948,7 +948,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     constraintSelectionAnchorRef,
     setWorkspaceTab,
     setSidebarConstraintsOpen,
-    scrollToEditorBlock,
+    scrollToEditorBlockAction,
     constraintPickSlotRef,
     updateConstraintPickSlot,
     activeChainInfos,

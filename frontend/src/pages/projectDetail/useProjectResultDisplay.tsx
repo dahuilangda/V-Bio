@@ -243,7 +243,8 @@ export function useProjectResultDisplay({
       snapshotBindingTone,
       selectedResultTargetLabel,
       selectedResultLigandLabel,
-      selectedResultPairLabel
+      selectedResultPairLabel,
+      snapshotConfidence
     ]
   );
 

@@ -201,12 +201,8 @@ function readStoredCopilotActiveSessionLocal(userId: string): string {
 
 const COPILOT_SETTINGS_FORM_KEY = 'vbio:copilot-settings-form:v1';
 
-export interface SettingsFormValues {
-  proxy: string;
-  api_url: string;
-  api_key: string;
-  model: string;
-}
+export type { SettingsFormValues } from './copilotSettingsHelpers';
+import type { SettingsFormValues } from './copilotSettingsHelpers';
 
 function readStoredSettingsForm(): SettingsFormValues {
   if (typeof window === 'undefined') return { proxy: '', api_url: '', api_key: '', model: '' };

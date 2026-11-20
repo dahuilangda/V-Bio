@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from 'react';
 import { useResizablePane } from './useResizablePane';
 
-type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
+import type { ResultsGridStyle } from '../../components/project/peptideDesignResults/parseHelpers';
 type InputsGridStyle = CSSProperties & { '--inputs-main-width'?: string };
 type ConstraintsGridStyle = CSSProperties & { '--constraints-main-width'?: string };
 

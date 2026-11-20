@@ -23,7 +23,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
   constraintSelectionAnchorRef: MutableRefObject<string | null>;
   setWorkspaceTab: Dispatch<SetStateAction<'results' | 'basics' | 'components' | 'constraints'>>;
   setSidebarConstraintsOpen: Dispatch<SetStateAction<boolean>>;
-  scrollToEditorBlock: (elementId: string) => void;
+  scrollToEditorBlockAction: (elementId: string) => void;
   constraintPickSlotRef: MutableRefObject<Record<string, 'first' | 'second'>>;
   updateConstraintPickSlot: (updater: (prev: Record<string, 'first' | 'second'>) => Record<string, 'first' | 'second'>) => void;
   activeChainInfos: Array<{ id: string; type: 'protein' | 'ligand' | 'dna' | 'rna'; componentId: string; residueCount?: number }>;
@@ -48,7 +48,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     constraintSelectionAnchorRef,
     setWorkspaceTab,
     setSidebarConstraintsOpen,
-    scrollToEditorBlock,
+    scrollToEditorBlockAction,
     constraintPickSlotRef,
     updateConstraintPickSlot,
     activeChainInfos,
@@ -105,7 +105,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     setWorkspaceTab('constraints');
     selectConstraint(constraintId, options);
     setSidebarConstraintsOpen(true);
-    scrollToEditorBlock(`constraint-card-${constraintId}`);
+    scrollToEditorBlockAction(`constraint-card-${constraintId}`);
   };
 
   const navigateConstraint = (step: -1 | 1) => {

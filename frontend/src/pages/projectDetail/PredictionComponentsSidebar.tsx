@@ -9,7 +9,7 @@ export interface PeptidePocketSidebarInfo {
   targetComponentId: string | null;
 }
 
-export interface ComponentBucketEntry {
+export interface SidebarBucketEntry {
   id: string;
   filled: boolean;
   typeLabel: string;
@@ -39,7 +39,7 @@ export interface PredictionComponentsSidebarProps {
   hasIncompleteComponents: boolean;
   componentCompletion: ComponentCompletionSummary;
   sidebarTypeOrder: Array<'protein' | 'ligand' | 'dna' | 'rna'>;
-  componentTypeBuckets: Record<'protein' | 'ligand' | 'dna' | 'rna', ComponentBucketEntry[]>;
+  componentTypeBuckets: Record<'protein' | 'ligand' | 'dna' | 'rna', SidebarBucketEntry[]>;
   sidebarTypeOpen: Record<'protein' | 'ligand' | 'dna' | 'rna', boolean>;
   onSidebarTypeToggle: (type: 'protein' | 'ligand' | 'dna' | 'rna') => void;
   onAddComponent: (type: 'protein' | 'ligand' | 'dna' | 'rna') => void;

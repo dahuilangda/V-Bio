@@ -190,7 +190,7 @@ function hasPeptideDesignOptions(options: NonNullable<DraftLike['inputConfig']['
   );
 }
 
-export function scrollToEditorBlock(elementId: string): void {
+export function scrollToEditorBlockAction(elementId: string): void {
   window.setTimeout(() => {
     const target = document.getElementById(elementId);
     if (!target) return;
@@ -213,7 +213,7 @@ export function jumpToComponentAction(params: {
   if (targetType) {
     setSidebarTypeOpen((prev) => ({ ...prev, [targetType]: true }));
   }
-  scrollToEditorBlock(`component-card-${componentId}`);
+  scrollToEditorBlockAction(`component-card-${componentId}`);
 }
 
 export function addComponentToDraftAction<TDraft extends DraftLike>(params: {

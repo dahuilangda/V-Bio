@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import { CircleCheck, Dna, Eye, FlaskConical, Target } from 'lucide-react';
 import { MolstarViewer, type MolstarAtomHighlight, type MolstarResiduePick } from './MolstarViewer';
 import { JSMEEditor } from './JSMEEditor';
@@ -18,7 +18,8 @@ import { pocketTargetChanged, type PocketTargetSignature } from '../../utils/poc
 import { useTabsKeyboard } from '../ui/useTabsKeyboard';
 import type { MetricTone } from '../../pages/projectDetail/projectMetrics';
 
-export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
+export type { ResultsGridStyle } from './peptideDesignResults/parseHelpers';
+import type { ResultsGridStyle } from './peptideDesignResults/parseHelpers';
 
 function normalizeChainToken(value: string | null | undefined): string {
   return String(value || '').trim().toUpperCase();

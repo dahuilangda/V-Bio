@@ -16,7 +16,7 @@ import { CopilotStreamingBubble } from './CopilotStreamingBubble';
 import { CopilotPlanActionCard } from './CopilotPlanActionCard';
 import { planActionKey } from './copilotPlanHelpers';
 import { TOP_CHROME_PX } from './copilotSessionState';
-import type { SettingsFormValues } from './ProjectCopilotModal';
+import type { SettingsFormValues } from './copilotSettingsHelpers';
 import './CopilotPanelShell.css';
 
 export interface CopilotPanelShellPanelProps {

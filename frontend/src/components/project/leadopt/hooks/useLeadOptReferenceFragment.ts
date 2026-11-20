@@ -47,15 +47,8 @@ interface UseLeadOptReferenceFragmentParams {
   } | null;
 }
 
-export interface LeadOptPersistedUpload {
-  fileName: string;
-  content: string;
-}
-
-export interface LeadOptPersistedUploads {
-  target: LeadOptPersistedUpload | null;
-  ligand: LeadOptPersistedUpload | null;
-}
+export type { LeadOptPersistedUpload, LeadOptPersistedUploads } from '../../../../pages/projectDetail/projectTaskSnapshot';
+import type { LeadOptPersistedUpload, LeadOptPersistedUploads } from '../../../../pages/projectDetail/projectTaskSnapshot';
 
 function readNumber(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
