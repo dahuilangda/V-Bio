@@ -571,8 +571,10 @@ def register_prediction_routes(
         custom_ccd_molecules = _parse_custom_ccd_molecules(request.form.get('custom_ccd_molecules'))
 
         # Dry-run the production CCD builders so bad chemistry fails as 400
-        # here instead of inside a GPU task.
-        if custom_ccd_molecules:
+        # here instead of inside a GPU task. Engines with relaxed CCD parsing
+        # (esmfold2/mol1) skip the strict contract check.
+        strict_ccd_backends = {'boltz', 'alphafold3', 'protenix', 'protenix2dock', 'nesso'}
+        if custom_ccd_molecules and backend in strict_ccd_backends:
             from backend.runtime.custom_ccd_builder import _build_custom_ccd_bundle
             from backend.runtime.ccd_contract import validate_ccd_additions
             try:
