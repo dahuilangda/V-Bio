@@ -55,13 +55,12 @@ class EsmFold2Backend(StructureBackend):
         return image
 
     def _prepare_dirs(self, ctx: BackendRunContext) -> tuple[str, str, str]:
-        from backend.core.config import RESULTS_BASE_DIR
-        from backend.runtime.run_single_prediction import (
-            _resolve_backend_results_root,
-            _resolve_backend_work_root,
+        from backend.runtime.backends.support import (
+            resolve_backend_results_root,
+            resolve_backend_work_root,
         )
-        results_root = _resolve_backend_results_root(self.name, ctx.task_id, ctx.temp_dir)
-        input_dir = os.path.join(_resolve_backend_work_root(results_root), "input")
+        results_root = resolve_backend_results_root(self.name, ctx.task_id, ctx.temp_dir)
+        input_dir = os.path.join(resolve_backend_work_root(results_root), "input")
         output_dir = os.path.join(results_root, "output")
         os.makedirs(input_dir, exist_ok=True)
         if os.path.isdir(output_dir):
@@ -72,7 +71,7 @@ class EsmFold2Backend(StructureBackend):
     def _docker_command(self, image: str, yaml_path: str, output_dir: str,
                         seed: int) -> list:
         from backend.core.config import RESULTS_BASE_DIR
-        from backend.runtime.run_single_prediction import determine_docker_gpu_arg
+        from backend.runtime.backends.support import determine_docker_gpu_arg
 
         hf_cache = str(Path(RESULTS_BASE_DIR).parent / "esmfold2" / "hf_cache")
         os.makedirs(hf_cache, exist_ok=True)

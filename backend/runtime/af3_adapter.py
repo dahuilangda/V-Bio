@@ -16,7 +16,6 @@ if _AF3_SRC_DIR.exists():
     if af3_src not in sys.path:
         sys.path.insert(0, af3_src)
 
-from alphafold3.constants import residue_names as af3_residue_names
 from backend.services.common_utils import ProteinMsaMode, classify_protein_msa
 
 
@@ -315,18 +314,6 @@ def _normalize_protein_modifications(raw_modifications: object, sequence_length:
             normalized_mod["baseResidue"] = base_residue
         normalized.append(normalized_mod)
     return normalized
-
-
-def _af3_ccd_to_one_letter(ccd: object, base_residue: object = "") -> str:
-    base = str(base_residue or "").strip().upper()[:1]
-    if base and base in "ARNDCQEGHILKMFPSTWYV":
-        return base
-    code = str(ccd or "").strip().upper()
-    if code.startswith("CCD_"):
-        code = code[4:]
-    if len(code) == 1 and code.isalpha():
-        return code
-    return af3_residue_names.CCD_NAME_TO_ONE_LETTER.get(code, "X")
 
 
 def _af3_json_modifications(modifications: List[Dict[str, object]]) -> List[Dict[str, object]]:

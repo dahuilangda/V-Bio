@@ -53,7 +53,6 @@ from backend.runtime.design_constants import (  # noqa: E402
     REFINE_ABSOLUTE_PAIR_MIN_A,
     REFINE_INTERPENETRATION_MIN_A,
     REFINE_PACKING_BAND_A,
-    SEZ_RING_BOND_CUTOFF_A,
     plddt_gate_for_chirality,
 )
 from backend.core.config import (
@@ -107,7 +106,6 @@ from backend.runtime.linker_measurement import (
     _dpeptide_linker_bond_report,
     _pdb_link_line,
     _rebuild_single_atom_linker_anchor,
-    _structure_linker_anchor_map,
 )
 from backend.runtime.backends import structure_backend
 from backend.runtime.backends.base import BackendRunContext
@@ -1377,70 +1375,6 @@ def validate_af3_database_files(database_dir: str) -> None:
                         )
         except OSError as e:
             raise RuntimeError(f"无法读取 AF3 数据库文件 {path}: {e}") from e
-
-
-def discover_cuda_devices() -> List[str]:
-    """Return detected CUDA device indices present on the host."""
-    devices: List[str] = []
-
-    try:
-        smi_proc = subprocess.run(
-            ["nvidia-smi", "-L"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        smi_proc = None
-
-    if smi_proc and smi_proc.returncode == 0:
-        for line in smi_proc.stdout.splitlines():
-            line = line.strip()
-            if not line.startswith("GPU "):
-                continue
-            prefix = line.split(':', 1)[0]
-            parts = prefix.split()
-            if len(parts) >= 2 and parts[1].isdigit():
-                devices.append(parts[1])
-
-    if devices:
-        return sorted(set(devices), key=int)
-
-    node_paths = Path('/dev').glob('nvidia[0-9]*')
-    for node in node_paths:
-        suffix = node.name.replace('nvidia', '', 1)
-        if suffix.isdigit():
-            devices.append(suffix)
-
-    return sorted(set(devices), key=int)
-
-
-def determine_docker_gpu_arg(visible_devices: Optional[str]) -> str:
-    """Validate CUDA availability and build docker --gpus argument."""
-    available = discover_cuda_devices()
-    if not available:
-        raise RuntimeError(
-            "当前后端需要 NVIDIA GPU，但当前环境未检测到可用的 CUDA 设备。"
-        )
-
-    if not visible_devices:
-        return "all"
-
-    tokens = [token.strip() for token in visible_devices.split(',') if token.strip()]
-    if not tokens:
-        raise RuntimeError("检测到 CUDA_VISIBLE_DEVICES 已设置，但未包含有效设备索引。")
-
-    numeric_tokens = [token for token in tokens if token.isdigit()]
-    invalid = [token for token in numeric_tokens if token not in available]
-    if invalid:
-        raise RuntimeError(
-            "请求使用的 GPU 索引在当前机器上不可用: "
-            f"{', '.join(invalid)}。可用索引: {', '.join(available)}"
-        )
-
-    return f"device={','.join(tokens)}"
 
 
 def resolve_low_vram(predict_args: Optional[Dict[str, Any]]) -> bool:
@@ -4088,18 +4022,13 @@ def _extract_peptide_candidate_archive_for_metrics(candidate_dir: str, archive_p
 
 
 def _resolve_backend_results_root(backend: str, task_id: Optional[str], temp_dir: str) -> Path:
-    backend_token = str(backend or "unknown").strip().lower() or "unknown"
-    runtime_token = _safe_runtime_token(task_id or os.environ.get("VBIO_TASK_ID") or Path(temp_dir).name)
-    base_dir = Path(str(RESULTS_BASE_DIR or "/data/boltz_central_results")).expanduser()
-    root = base_dir / backend_token / runtime_token
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    from backend.runtime.backends.support import resolve_backend_results_root
+    return resolve_backend_results_root(backend, task_id, temp_dir)
 
 
 def _resolve_backend_work_root(results_root: Path) -> Path:
-    work_root = results_root / "runtime"
-    work_root.mkdir(parents=True, exist_ok=True)
-    return work_root
+    from backend.runtime.backends.support import resolve_backend_work_root
+    return resolve_backend_work_root(results_root)
 
 
 def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> None:
@@ -6055,10 +5984,8 @@ def _normalize_protenix_output_permissions(
 
 
 def _safe_runtime_token(raw: Any) -> str:
-    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(raw or "").strip()).strip("._-")
-    if token:
-        return token[:72]
-    return f"pxm_{int(time.time())}_{random.randint(1000, 9999)}"
+    from backend.runtime.backends.support import safe_runtime_token
+    return safe_runtime_token(raw)
 
 
 def _tail_lines(path: Path, count: int = 80) -> str:
