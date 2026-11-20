@@ -13526,6 +13526,7 @@ def main():
                     worker_predict_args["seed"] = worker_seed
                 worker_options = {
                     **worker_predict_args,
+                    "predict_args": worker_predict_args,
                     "low_vram": worker_low_vram,
                     "custom_ccd_molecules": (
                         worker_custom_ccd_molecules
