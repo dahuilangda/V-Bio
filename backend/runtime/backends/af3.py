@@ -17,7 +17,6 @@ from backend.runtime.backends.request import PredictionRequest
 
 class Af3Backend(StructureBackend):
     name = "alphafold3"
-    supported_constraints = frozenset({"bond"})
 
     def post_validate(self, request: PredictionRequest) -> PredictionRequest:
         from backend.runtime.run_single_prediction import (
@@ -29,7 +28,7 @@ class Af3Backend(StructureBackend):
         return request
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
-        self.validate(request)
+        self.validate(request, ctx.options.get("custom_ccd_molecules"))
         request = self.post_validate(request)
         yaml_content = ctx.yaml_content
         yaml_data = self._load_yaml_for_affinity(yaml_content)

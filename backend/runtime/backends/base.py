@@ -44,6 +44,20 @@ class StructureBackend(ABC):
         if unsupported:
             raise ValueError(
                 f"constraints {unsupported} are not supported by the {self.name} backend")
+        self.validate_modifications(request)
+
+    def validate_modifications(self, request: PredictionRequest,
+                               custom_ccd_molecules=None) -> None:
+        """修饰能力按矩阵强制：standard_ccd / custom_residue_upload。"""
+        from backend.core.engine_capabilities import engine_modification_support
+        support = engine_modification_support(self.name)
+        has_modifications = any(e.modifications for e in request.entities)
+        if has_modifications and not support["standard_ccd"]:
+            raise ValueError(
+                f"{self.name} backend does not support CCD residue modifications")
+        if custom_ccd_molecules and not support["custom_residue_upload"]:
+            raise ValueError(
+                f"{self.name} backend does not support custom residue uploads")
         lengths = request.sequence_lengths()
         chains = set(lengths) | {e.chain_id for e in request.entities}
         for bond in request.bonds:

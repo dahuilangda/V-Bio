@@ -71,3 +71,13 @@ def engine_chirality(backend: str) -> frozenset[str]:
 
 def engine_supports_chirality(backend: str, chirality: str) -> bool:
     return chirality in engine_chirality(backend)
+
+
+def engine_modification_support(backend: str) -> dict:
+    """引擎修饰能力：standard_ccd / custom_residue_upload；未知引擎全 False。"""
+    engine = get_engine(backend)
+    support = (engine or {}).get("modification_support") or {}
+    return {
+        "standard_ccd": bool(support.get("standard_ccd")),
+        "custom_residue_upload": bool(support.get("custom_residue_upload")),
+    }

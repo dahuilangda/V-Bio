@@ -19,12 +19,16 @@
         "pocket": false,
         "custom_ccd": true,
         "msa": true,
-        "ncaa": false
+        "ncaa": true
       },
       "constraints": {
         "bond": "soft",
         "contact": "native",
         "pocket": "native"
+      },
+      "modification_support": {
+        "standard_ccd": true,
+        "custom_residue_upload": true
       }
     },
     "alphafold3": {
@@ -47,10 +51,14 @@
         "pocket": false,
         "custom_ccd": false,
         "msa": true,
-        "ncaa": false
+        "ncaa": true
       },
       "constraints": {
         "bond": "hard"
+      },
+      "modification_support": {
+        "standard_ccd": true,
+        "custom_residue_upload": false
       }
     },
     "protenix": {
@@ -80,6 +88,10 @@
       "constraints": {
         "bond": "hard",
         "pocket": "native"
+      },
+      "modification_support": {
+        "standard_ccd": true,
+        "custom_residue_upload": true
       }
     },
     "protenix2dock": {
@@ -110,6 +122,10 @@
       "constraints": {
         "bond": "hard",
         "pocket": "native"
+      },
+      "modification_support": {
+        "standard_ccd": true,
+        "custom_residue_upload": true
       }
     },
     "mol1": {
@@ -138,6 +154,10 @@
         "bond": "hard",
         "contact": "native",
         "pocket": "native"
+      },
+      "modification_support": {
+        "standard_ccd": true,
+        "custom_residue_upload": false
       }
     },
     "esmfold2": {
@@ -162,10 +182,14 @@
         "pocket": false,
         "custom_ccd": false,
         "msa": false,
-        "ncaa": false
+        "ncaa": true
       },
       "constraints": {
         "bond": "hard"
+      },
+      "modification_support": {
+        "standard_ccd": true,
+        "custom_residue_upload": false
       }
     },
     "esm3": {

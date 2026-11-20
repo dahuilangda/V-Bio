@@ -23,10 +23,9 @@ from backend.runtime.backends.request import PredictionRequest
 
 class Mol1Backend(StructureBackend):
     name = "mol1"
-    supported_constraints = frozenset({"bond", "contact", "pocket"})
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
-        self.validate(request)
+        self.validate(request, ctx.options.get("custom_ccd_molecules"))
         request = self.post_validate(request)
         yaml_content = request.source_yaml
 

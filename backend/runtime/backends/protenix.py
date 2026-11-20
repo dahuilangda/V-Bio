@@ -25,23 +25,24 @@ _PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mm
 
 class ProtenixBackend(StructureBackend):
     name = "protenix"
-    supported_constraints = frozenset({"bond", "pocket"})
 
     def post_validate(self, request: PredictionRequest) -> PredictionRequest:
+        from backend.runtime.constraints_pipeline import (
+            remap_constraints_by_template_alignment,
+            sanitize_constraints_for_chain_lengths,
+        )
         from backend.runtime.run_single_prediction import (
-            _remap_constraints_by_template_alignment,
-            _sanitize_constraints_for_chain_lengths,
             _validate_amidated_terminal_constraints,
         )
         yaml_text = request.source_yaml
-        yaml_text = _remap_constraints_by_template_alignment(yaml_text)
-        yaml_text = _sanitize_constraints_for_chain_lengths(yaml_text)
+        yaml_text = remap_constraints_by_template_alignment(yaml_text)
+        yaml_text = sanitize_constraints_for_chain_lengths(yaml_text)
         _validate_amidated_terminal_constraints(
             yaml_text, request.raw.get("custom_ccd_molecules") or [])
         return PredictionRequest.from_yaml(yaml_text)
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
-        self.validate(request)
+        self.validate(request, ctx.options.get("custom_ccd_molecules"))
         request = self.post_validate(request)
         yaml_content = ctx.yaml_content
 
