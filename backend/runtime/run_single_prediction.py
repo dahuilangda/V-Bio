@@ -3399,6 +3399,8 @@ def main():
                     low_vram=low_vram,
                 )
             elif backend == "mol1":
+                if custom_ccd_molecules:
+                    processed_yaml = _embed_custom_ccd_into_yaml(processed_yaml, custom_ccd_molecules)
                 structure_backend("mol1").execute(
                     PredictionRequest.from_yaml(processed_yaml),
                     BackendRunContext(
@@ -3417,6 +3419,8 @@ def main():
             elif backend == "esmfold2":
                 if template_inputs:
                     raise ValueError("ESMFold2 does not support template files.")
+                if custom_ccd_molecules:
+                    processed_yaml = _embed_custom_ccd_into_yaml(processed_yaml, custom_ccd_molecules)
                 structure_backend("esmfold2").execute(
                     PredictionRequest.from_yaml(processed_yaml),
                     BackendRunContext(
