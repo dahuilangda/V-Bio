@@ -2,10 +2,10 @@
 """ESMFold2 prediction capability.
 
 Runs inside the vbio-esmfold2-runtime container. Parses the platform
-prediction yaml (version 1, boltz-style sequences + constraints), folds it
-with ESMFold2, and writes results in the mol1/protenix output contract so
-the platform's downstream (result archive metrics, PAE heatmap, ipSAE,
-MSA depth) consumes it unchanged:
+prediction request (boltz-style sequences + constraints), folds it with
+ESMFold2, and writes results in the mol1/protenix output contract so the
+platform's downstream (result archive metrics, PAE heatmap, ipSAE, MSA
+depth) consumes it unchanged:
 
   <output>/input/seed_<seed>/predictions/
     input_sample_<i>.cif                      all-atom model
@@ -16,8 +16,9 @@ MSA depth) consumes it unchanged:
 
 Boundary notes (see configs/engine_capabilities.json):
   - L-peptides only; D positions would need D-form CCD modifications.
-  - constraints are rejected: contact/bond constraints are a
-    protenix2dock capability in this integration.
+  - Supported constraints: bond (head-to-tail cyclization, staples, linker
+    anchors) via StructurePredictionInput.covalent_bonds. Contact/pocket
+    belong to protenix2dock.
   - No MSA input (single-sequence mode; the full model still benefits from
     its language-model priors).
 """
@@ -30,7 +31,11 @@ import sys
 import time
 from pathlib import Path
 
-import yaml
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.runtime.backends.request import PredictionRequest  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +52,6 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-
 def esm_ccd_has(ccd: str) -> bool:
     try:
         from esm.models.esmfold2.conformers import load_ccd
@@ -55,131 +59,152 @@ def esm_ccd_has(ccd: str) -> bool:
     except Exception:
         return True  # CCD table unavailable: let esm decide at tokenization
 
-def parse_platform_yaml(path: str) -> dict:
-    data = yaml.safe_load(open(path)) or {}
-    sequences = data.get("sequences") or []
-    if not sequences:
-        raise ValueError("yaml has no sequences")
-    inputs = []
-    for item in sequences:
-        for kind in ("protein", "rna", "dna", "ligand", "ion"):
-            entity = item.get(kind)
-            if isinstance(entity, dict):
-                inputs.append((kind, entity))
-                break
-    if not inputs:
-        raise ValueError("yaml sequences carry no supported entities")
-    return {"inputs": inputs, "constraints": data.get("constraints") or []}
 
-
-def check_constraints(constraints: list) -> None:
-    supported = set()
-    for c in constraints:
-        if isinstance(c, dict):
-            keys = {k for k in c if k not in supported}
-            if keys:
-                raise ValueError(
-                    f"constraints {sorted(keys)} are not supported by the "
-                    "esmfold2 backend")
-
-
-def build_inputs(entries: list):
+def build_sequences(request: PredictionRequest) -> list:
     from esm.models.esmfold2 import (
-        DNAInput, ESMFold2InputBuilder, LigandInput, Modification,
-        ProteinInput, RNAInput, StructurePredictionInput,
+        DNAInput, LigandInput, Modification, ProteinInput, RNAInput,
     )
     from string import ascii_uppercase
 
     sequences = []
-    chain_names = []
-    for index, (kind, entity) in enumerate(entries):
-        # Use the yaml entity ids verbatim (one per copy) so output cif chain
-        # names match mol1/protenix for the same yaml; generated letters are
-        # the fallback when the yaml omits id.
-        raw_ids = entity.get("id")
-        if isinstance(raw_ids, list) and raw_ids:
-            ids = [str(x) for x in raw_ids]
-            chain = ids[0]
-        elif raw_ids:
-            ids = [str(raw_ids)]
-            chain = ids[0]
+    for index, entity in enumerate(request.entities):
+        raw_ids = entity.ids
+        if raw_ids:
+            chain = raw_ids[0]
         else:
             chain = (ascii_uppercase[index]
                      if index < 26
                      else ascii_uppercase[index // 26 - 1] + ascii_uppercase[index % 26])
-            ids = [chain]
-        chain_names.append(chain)
-        if kind in ("protein", "rna", "dna"):
+            raw_ids = [chain]
+
+        if entity.kind in ("protein", "rna", "dna"):
             mods = []
-            seq_len = len(entity.get("sequence") or "")
-            for m in (entity.get("modifications") or []):
-                if not isinstance(m, dict) or not m.get("ccd"):
-                    continue
-                pos = int(m["position"])
-                if not 1 <= pos <= seq_len:
+            seq_len = len(entity.sequence)
+            for mod in entity.modifications:
+                if not 1 <= mod.position <= seq_len:
                     raise ValueError(
-                        f"modification position {pos} out of range 1..{seq_len} "
-                        f"for chain {chain} (ccd {m['ccd']})")
-                ccd = str(m["ccd"])
-                # Unknown CCD would silently degrade to a backbone-only
-                # residue — fail loudly instead.
-                if not esm_ccd_has(ccd):
+                        f"modification position {mod.position} out of range "
+                        f"1..{seq_len} for chain {chain} (ccd {mod.ccd})")
+                if not esm_ccd_has(mod.ccd):
                     raise ValueError(
-                        f"CCD component {ccd!r} not in the esm CCD table "
-                        f"(chain {chain} position {pos})")
-                mods.append(Modification(position=pos - 1, ccd=ccd))
-            if kind == "protein":
+                        f"CCD component {mod.ccd!r} not in the esm CCD table "
+                        f"(chain {chain} position {mod.position})")
+                mods.append(Modification(position=mod.position - 1, ccd=mod.ccd))
+            if entity.kind == "protein":
                 sequences.append(ProteinInput(
-                    id=ids, sequence=entity["sequence"], modifications=mods))
-            elif kind == "rna":
+                    id=raw_ids, sequence=entity.sequence, modifications=mods))
+            elif entity.kind == "rna":
                 sequences.append(RNAInput(
-                    id=ids, sequence=entity["sequence"], modifications=mods))
+                    id=raw_ids, sequence=entity.sequence, modifications=mods))
             else:
                 sequences.append(DNAInput(
-                    id=ids, sequence=entity["sequence"], modifications=mods))
-        elif kind == "ion":
-            ccd_code = str(entity.get("ccd") or "").upper()
-            if not ccd_code:
+                    id=raw_ids, sequence=entity.sequence, modifications=mods))
+        elif entity.kind == "ion":
+            if not entity.ccd:
                 raise ValueError(f"ion chain {chain} needs a ccd")
-            sequences.append(LigandInput(id=ids, ccd=[ccd_code]))
+            sequences.append(LigandInput(id=raw_ids, ccd=entity.ccd))
         else:
-            smiles = str(entity.get("smiles") or "").strip()
-            ccd = entity.get("ccd")
-            ccd_list = [c for c in (ccd if isinstance(ccd, list) else [ccd]) if c]
-            if smiles:
-                sequences.append(LigandInput(id=ids, smiles=smiles))
-            elif ccd_list:
-                sequences.append(LigandInput(id=ids, ccd=ccd_list))
+            if entity.smiles:
+                sequences.append(LigandInput(id=raw_ids, smiles=entity.smiles))
+            elif entity.ccd:
+                sequences.append(LigandInput(id=raw_ids, ccd=entity.ccd))
             else:
                 raise ValueError(f"ligand chain {chain} needs smiles or ccd")
-    return StructurePredictionInput(sequences=sequences), chain_names
+
+    lengths = request.sequence_lengths()
+    for bond in request.bonds:
+        for chain, residue in ((bond.chain1, bond.residue1),
+                               (bond.chain2, bond.residue2)):
+            if chain not in lengths:
+                raise ValueError(f"bond constraint references unknown chain: {chain}")
+            if not 1 <= residue <= lengths[chain]:
+                raise ValueError(
+                    f"bond residue {residue} out of range 1..{lengths[chain]} "
+                    f"for chain {chain}")
+
+    return sequences
+
+
+def build_covalent_bonds(request: PredictionRequest, sequences: list) -> list:
+    """平台 bond 约束 -> SDK CovalentBond；原子名到位置的映射
+    委托 SDK tokenizer 预扫，自动处理离去基剥离与修饰残基原子序。"""
+    from collections import defaultdict
+
+    from esm.models.esmfold2 import CovalentBond, StructurePredictionInput
+    from esm.models.esmfold2.prepare_input import build_chains_from_input
+
+    ends = []
+    placeholder_bonds = []
+    for bond in request.bonds:
+        end1 = (bond.chain1, bond.residue1, bond.atom1)
+        end2 = (bond.chain2, bond.residue2, bond.atom2)
+        ends.append((end1, end2))
+        # 占位键触发共价链的离去基剥离，使原子表与正式运行一致
+        placeholder_bonds.append(CovalentBond(
+            chain_id1=end1[0], res_idx1=end1[1] - 1, atom_idx1=0,
+            chain_id2=end2[0], res_idx2=end2[1] - 1, atom_idx2=0))
+
+    placeholder = StructurePredictionInput(
+        sequences=sequences, covalent_bonds=placeholder_bonds)
+    chains, tokens, atoms = build_chains_from_input(placeholder)
+    chain_by_asym = {c.asym_id: c.chain_id for c in chains}
+    atom_index_by_residue: dict = defaultdict(dict)
+    for atom in atoms:
+        if not atom.is_valid or atom.token_index >= len(tokens):
+            continue
+        token = tokens[atom.token_index]
+        key = (chain_by_asym.get(token.asym_id, token.asym_id), token.residue_index)
+        atom_index_by_residue[key].setdefault(atom.name, len(atom_index_by_residue[key]))
+
+    bonds = []
+    for end1, end2 in ends:
+        resolved = []
+        for chain, residue, atom_name in (end1, end2):
+            atom_map = atom_index_by_residue.get((chain, residue - 1), {})
+            if atom_name not in atom_map:
+                known = sorted(atom_map)
+                raise ValueError(
+                    f"bond atom {atom_name!r} not found at {chain}:{residue} "
+                    f"(known atoms: {known})")
+            resolved.append((chain, residue - 1, atom_map[atom_name]))
+        c1, r1, i1 = resolved[0]
+        c2, r2, i2 = resolved[1]
+        bonds.append(CovalentBond(
+            chain_id1=c1, res_idx1=r1, atom_idx1=i1,
+            chain_id2=c2, res_idx2=r2, atom_idx2=i2))
+    return bonds
+
+
+def build_inputs(request: PredictionRequest):
+    from esm.models.esmfold2 import StructurePredictionInput
+
+    sequences = build_sequences(request)
+    covalent_bonds = build_covalent_bonds(request, sequences)
+    return StructurePredictionInput(
+        sequences=sequences,
+        covalent_bonds=covalent_bonds or None)
 
 
 def main() -> None:
     args = parse_args()
-    spec = parse_platform_yaml(args.yaml)
-    check_constraints(spec["constraints"])
+    request = PredictionRequest.from_yaml(Path(args.yaml).read_text())
 
     output_dir = Path(args.output_dir)
     seed = args.seed
 
     import torch
-    from esm.models.esmfold2 import ESMFold2InputBuilder, EsmFold2Model
+    from esm.models.esmfold2 import EsmFold2Model
 
     model = EsmFold2Model.from_pretrained(args.weights, device="cuda").eval()
-    spi, _chain_names = build_inputs(spec["inputs"])
+    spi = build_inputs(request)
+    from esm.models.esmfold2 import ESMFold2InputBuilder
     builder = ESMFold2InputBuilder()
 
     predictions = output_dir / "input" / f"seed_{seed}" / "predictions"
     predictions.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
-    # prepare/forward/decode kept separate so chain_infos (per-token asym ids)
-    # survives the decode — fold() hides it and the PAE contract needs it.
     features, chain_infos = builder.prepare_input(spi, seed=seed, device=model.device)
-    # prepare_input consumed the seed for conformer generation; re-seed
-    # around the forward so diffusion sampling is reproducible too
-    # (mirrors the SDK's fold(), processor.py:426).
     from esm.models.esmfold2.processor import _seed_context
     with torch.no_grad(), _seed_context(seed):
         output = model(
@@ -201,8 +226,6 @@ def main() -> None:
     summaries = []
     for index, result in enumerate(results):
         sample_cif = result.complex.to_mmcif()
-        # Per-token asym ids from chain_infos (token grid), NOT the collapsed
-        # per-residue complex.chain_id — PAE/plddt live on the token grid.
         token_asym = []
         for ci in chain_infos:
             token_asym.extend([ci.asym_id] * len(ci.tokens))

@@ -77,7 +77,6 @@ from backend.core.config import (
     PROTENIX_INFER_EXTRA_ARGS,
     PROTENIX_PYTHON_BIN,
     MOL1_DOCKER_IMAGE,
-    ESMFOLD2_DOCKER_IMAGE,
     RFD4_DOCKER_IMAGE,
     RFD4_DATA_DIR,
     RFD4_NUM_DESIGNS,
@@ -101,6 +100,9 @@ from backend.services.common_utils import (
     infer_use_msa_server_from_yaml_text,
     is_msa_disabled,
 )
+from backend.runtime.backends import structure_backend
+from backend.runtime.backends.base import BackendRunContext
+from backend.runtime.backends.request import PredictionRequest
 from backend.runtime import bicyclic_linkers, rfd4_adapter
 from backend.runtime.nesso_backend import run_nesso_backend
 from backend.runtime import rfd4_adapter
@@ -5067,11 +5069,11 @@ def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
         return
     backend = str(score_backend or "").strip().lower()
     if backend in ("mol1", "mol-1", "protenix", "protenix2dock",
-                   "protenix-2-dock", "alphafold3"):
+                   "protenix-2-dock", "alphafold3", "esmfold2", "esm-fold-2"):
         return
     raise ValueError(
         f"模式 {design_mode} 的成环约束需要共价键先验：打分后端 {score_backend} "
-        "不支持；可用 mol1 / protenix / protenix2dock / alphafold3。")
+        "不支持；可用 mol1 / protenix / protenix2dock / alphafold3 / esmfold2。")
 
 
 def _pair_arms_by_distance(anchors: Dict[int, Dict[str, np.ndarray]],
@@ -5339,119 +5341,6 @@ def run_bicyclic_strategy(
                     json.dumps(manifest, ensure_ascii=False, indent=1))
     print(f"[rfd4-bicyclic] {dispatched} verification tasks dispatched",
           file=sys.stderr)
-
-
-def run_esmfold2_backend(
-    temp_dir: str,
-    yaml_content: str,
-    output_archive_path: str,
-    seed: Optional[int] = None,
-    task_id: Optional[str] = None,
-) -> None:
-    """ESMFold2 co-folding engine (MIT weights, multi-chain all-atom).
-
-    Conversion and inference both happen inside the engine container
-    (capabilities/esmfold2/esmfold2_predict.py): platform yaml -> ESMFold2
-    StructurePredictionInput -> fold -> cif + token PAE + confidence
-    summaries, written in the mol1/protenix output contract so the shared
-    downstream (result archive metrics, PAE heatmap, ipSAE) applies.
-    """
-    esmfold2_image = str(ESMFOLD2_DOCKER_IMAGE or "").strip()
-    ensure_image(esmfold2_image)
-    print("Using ESMFold2 backend", file=sys.stderr)
-
-    results_root = _resolve_backend_results_root("esmfold2", task_id, temp_dir)
-    work_root = str(_resolve_backend_work_root(results_root))
-    input_dir = os.path.join(work_root, "input")
-    output_dir = os.path.join(results_root, "output")
-    os.makedirs(input_dir, exist_ok=True)
-    # Stale samples from a retried attempt would mix into the new archive.
-    if os.path.isdir(output_dir):
-        shutil.rmtree(output_dir, ignore_errors=True)
-    os.makedirs(output_dir, exist_ok=True)
-
-    yaml_path = os.path.join(input_dir, "input.yaml")
-    with open(yaml_path, "w", encoding="utf-8") as handle:
-        handle.write(yaml_content)
-
-    seed_value = int(seed) if seed is not None else 101
-
-    from backend.worker.docker_cmd import image_and_python
-
-    image, _ = image_and_python(esmfold2_image)
-    container_name = f"esmfold2-predict-{uuid.uuid4().hex[:12]}"
-    gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
-    hf_cache = str(Path(RESULTS_BASE_DIR).parent / "esmfold2" / "hf_cache")
-    os.makedirs(hf_cache, exist_ok=True)
-    project_root = str(Path(__file__).resolve().parents[2])
-    command = [
-        "docker", "run", "--rm", "--name", container_name, "--entrypoint=",
-        "--runtime", "nvidia", "--shm-size", "16g",
-        "--gpus", gpu_arg,
-        "--add-host", "host.docker.internal:host-gateway",
-        "--volume", f"{hf_cache}:/root/.cache/huggingface",
-        "--volume", f"{project_root}:/workspace/vbio:ro",
-        "--volume", f"{RESULTS_BASE_DIR}:{RESULTS_BASE_DIR}",
-        "--env", "HF_HOME=/root/.cache/huggingface",
-        "--env", "PYTHONUNBUFFERED=1",
-    ]
-    for env_key in ("ESMFOLD2_WEIGHTS", "ESMFOLD2_NUM_LOOPS",
-                    "ESMFOLD2_NUM_SAMPLING_STEPS"):
-        env_value = os.environ.get(env_key)
-        if env_value:
-            command += ["--env", f"{env_key}={env_value}"]
-    command += [
-        image, "python3.12", "/workspace/vbio/capabilities/esmfold2/esmfold2_predict.py",
-        "--yaml", yaml_path,
-        "--output-dir", output_dir,
-        "--seed", str(seed_value),
-    ]
-    samples_env = os.environ.get("ESMFOLD2_SAMPLES")
-    if samples_env:
-        command += ["--samples", samples_env]
-
-    started = time.time()
-    # 限制容器时长，防止冷缓存下载挂死占住 worker
-    timeout_seconds = int(os.environ.get("ESMFOLD2_RUN_TIMEOUT_SECONDS") or 14400)
-    try:
-        completed = subprocess.run(command, check=False, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        subprocess.run(["docker", "stop", container_name], capture_output=True)
-        raise RuntimeError(
-            f"ESMFold2 inference timed out after {timeout_seconds}s; "
-            "weights download or inference hung (container stopped)")
-    print(f"ESMFold2 inference finished ({time.time() - started:.0f}s, "
-          f"exit={completed.returncode})", file=sys.stderr)
-    if completed.returncode != 0:
-        raise RuntimeError(f"ESMFold2 inference failed (exit {completed.returncode})")
-
-    # Per-sample ipSAE from the shared evaluator, exactly like the mol1 flow;
-    # failures warn only and never block the archive.
-    try:
-        import sys as _sys
-
-        _repo = Path(__file__).resolve().parents[2]
-        _p2d = str(_repo / "capabilities" / "protenix2dock")
-        if _p2d not in _sys.path:
-            _sys.path.insert(0, _p2d)
-        from core.ipsae import compute_ipsae_for_output
-
-        compute_ipsae_for_output(Path(output_dir))
-    except Exception as ipsae_exc:
-        print(f"ipSAE post-processing skipped: {ipsae_exc}", file=sys.stderr)
-
-    if os.path.exists(output_archive_path):
-        os.remove(output_archive_path)
-    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # output/ plus the input yaml — mirrors mol1 and keeps stale files
-        # from retried attempts out of the archive.
-        for root, _dirs, files in os.walk(output_dir):
-            for name in files:
-                full = os.path.join(root, name)
-                zf.write(full, os.path.relpath(full, results_root))
-        yaml_src = os.path.join(input_dir, "input.yaml")
-        if os.path.exists(yaml_src):
-            zf.write(yaml_src, os.path.relpath(yaml_src, results_root))
 
 
 def run_mol1_backend(
@@ -14087,12 +13976,15 @@ def main():
                         low_vram=worker_low_vram,
                     )
                 elif worker_backend == "esmfold2":
-                    run_esmfold2_backend(
-                        worker_temp_dir,
-                        worker_yaml_content,
-                        worker_output_archive_path,
-                        seed=worker_seed,
-                        task_id=worker_task_id,
+                    esmfold2 = structure_backend("esmfold2")
+                    esmfold2.execute(
+                        PredictionRequest.from_yaml(worker_yaml_content),
+                        BackendRunContext(
+                            temp_dir=worker_temp_dir,
+                            output_archive_path=worker_output_archive_path,
+                            task_id=worker_task_id,
+                            seed=worker_seed or 101,
+                        ),
                     )
                 elif worker_backend == "mol1":
                     run_mol1_backend(
@@ -14337,15 +14229,15 @@ def main():
             elif backend == "esmfold2":
                 if template_inputs:
                     raise ValueError("ESMFold2 does not support template files.")
-                if custom_ccd_molecules:
-                    raise ValueError(
-                        "ESMFold2 does not support custom CCD residue uploads.")
-                run_esmfold2_backend(
-                    temp_dir=temp_dir,
-                    yaml_content=processed_yaml,
-                    output_archive_path=output_archive_path,
-                    seed=seed,
-                    task_id=runtime_task_id,
+                esmfold2 = structure_backend("esmfold2")
+                esmfold2.execute(
+                    PredictionRequest.from_yaml(processed_yaml),
+                    BackendRunContext(
+                        temp_dir=temp_dir,
+                        output_archive_path=output_archive_path,
+                        task_id=runtime_task_id,
+                        seed=seed or 101,
+                    ),
                 )
             elif backend == "rfd4":
                 run_rfd4_backend(

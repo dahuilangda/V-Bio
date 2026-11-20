@@ -130,7 +130,9 @@
         "l"
       ],
       "design_modes": [
-        "linear"
+        "linear",
+        "cyclic",
+        "bicyclic"
       ],
       "peptide_roles": [
         "score"
@@ -140,7 +142,10 @@
         "custom_ccd": false,
         "msa": false,
         "ncaa": false
-      }
+      },
+      "constraints": [
+        "bond"
+      ]
     },
     "esm3": {
       "label": "ESM3",
