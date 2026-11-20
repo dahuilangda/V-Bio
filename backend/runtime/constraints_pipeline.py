@@ -11,6 +11,8 @@ import yaml
 
 
 
+
+
 def validate_unique_sequence_chain_ids(yaml_content: str) -> None:
     try:
         yaml_data = yaml.safe_load(yaml_content) or {}
@@ -18,6 +20,7 @@ def validate_unique_sequence_chain_ids(yaml_content: str) -> None:
         return
     if not isinstance(yaml_data, dict):
         return
+    from backend.runtime.run_single_prediction import _extract_sequence_chain_types_from_yaml
     _extract_sequence_chain_types_from_yaml(yaml_data)
 
 
@@ -140,6 +143,7 @@ def sanitize_constraints_for_chain_lengths(yaml_content: str) -> str:
         return yaml_content
 
     _extract_sequence_chain_types_from_yaml(yaml_data)
+    from backend.runtime.run_single_prediction import _extract_protein_chain_lengths_from_yaml
     chain_lengths = _extract_protein_chain_lengths_from_yaml(yaml_data)
     if not chain_lengths:
         return yaml_content

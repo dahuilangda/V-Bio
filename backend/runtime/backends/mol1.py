@@ -131,6 +131,8 @@ class Mol1Backend(StructureBackend):
         digest = __import__("hashlib").sha256(cif_text.encode()).hexdigest()[:16]
 
         source_common = Path("/data/mol1/common/common")
+        source_cif = source_common / "components.cif"
+        source_pkl = source_common / "components.cif.rdkit_mol.pkl"
         source_pkl = source_common / "components.cif.rdkit_mol.pkl"
         overlay_root = Path(work_root) / "mol1_ccd_overlay"
         overlay_root.mkdir(parents=True, exist_ok=True)
@@ -155,8 +157,10 @@ class Mol1Backend(StructureBackend):
                 mol = _Chem.MolFromSmiles(item["smiles"])
             if mol is not None:
                 mols[code] = mol
-        with merged_pkl.open("wb") as handle:
-            _pickle.dump(mols, handle)
+            from rdkit import Chem as _Chem
+            _Chem.SetDefaultPickleProperties(_Chem.PropertyPickleOptions.AllProps)
+            with merged_pkl.open("wb") as handle:
+                _pickle.dump(mols, handle)
         return str(overlay_root)
 
     def _assert_msa_server_configured(self) -> str:

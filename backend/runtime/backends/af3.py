@@ -24,7 +24,7 @@ class Af3Backend(StructureBackend):
         )
         yaml_text = request.source_yaml
         _validate_amidated_terminal_constraints(
-            yaml_text, request.raw.get("custom_ccd_molecules") or [])
+            yaml_text, request.custom_ccd_molecules)
         return request
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:

@@ -38,7 +38,7 @@ class ProtenixBackend(StructureBackend):
         yaml_text = remap_constraints_by_template_alignment(yaml_text)
         yaml_text = sanitize_constraints_for_chain_lengths(yaml_text)
         _validate_amidated_terminal_constraints(
-            yaml_text, request.raw.get("custom_ccd_molecules") or [])
+            yaml_text, request.custom_ccd_molecules)
         return PredictionRequest.from_yaml(yaml_text)
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
