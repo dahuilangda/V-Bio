@@ -48,6 +48,8 @@ import {
   inferTaskStateFromStatusPayload,
   readTaskRuntimeStatusText as readStatusText
 } from '../../utils/taskRuntime';
+const optionsMarkerCache = new WeakMap<object, string>();
+
 
 import { useResultSnapshot } from './useResultSnapshot';
 import { useProjectRunUiEffects } from './useProjectRunUiEffects';
@@ -884,8 +886,9 @@ export function useProjectDetailRuntimeContext() {
     let cancelled = false;
     const applyTaskSnapshot = (taskRow: ProjectTask) => {
       // updated_at 每 tick 变化；按输入选项内容判断是否重放快照
-      const optionsMarker = JSON.stringify(readTaskInputOptions(taskRow));
-      const marker = `${focusedRowId}|${optionsMarker}`;
+      // （行对象为键缓存序列化结果，tick 间引用未变时零开销）
+      optionsMarkerCache.set(taskRow, JSON.stringify(readTaskInputOptions(taskRow)));
+      const marker = `${focusedRowId}|${optionsMarkerCache.get(taskRow)}`;
       if (componentTaskSwitchRef.current === marker) return;
       componentTaskSwitchRef.current = marker;
       setDraft((prev) => {

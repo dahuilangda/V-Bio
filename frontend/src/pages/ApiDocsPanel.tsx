@@ -33,12 +33,12 @@ const DOC_STEPS: DocStep[] = [
   {
     title: 'Track and download',
     body: 'Poll status, then fetch the result ZIP with the result command — same project_id and token as the submit call.',
-    code: 'GET /vbio-api/status/<task_id>\nGET /vbio-api/result/<task_id>'
+    code: 'GET /vbio-api/status/<task_id>\nGET /vbio-api/results/<task_id>'
   },
   {
     title: 'Cancel or delete safely',
     body: 'Cancel stops a running task and keeps its row; delete removes the record. Both use operation_mode and are permission-checked per token.',
-    code: 'POST /vbio-api/task-action\n{ "operation_mode": "cancel" }'
+    code: 'DELETE /vbio-api/tasks/<task_id>?project_id=<project_id>&operation_mode=cancel'
   },
   {
     title: 'Reuse from history',

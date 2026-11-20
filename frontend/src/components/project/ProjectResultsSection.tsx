@@ -149,6 +149,8 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
   // Memoized so a parent re-render cannot hand the paint effect a fresh
   // matrix identity (which would tear down and re-arm the observer).
   const cachedEntry = useMemo(() => {
+    // 自带矩阵时跳过缓存读取
+    if (Array.isArray(conf.pae_matrix) && conf.pae_matrix.length > 0) return null;
     try {
       const cached = JSON.parse(localStorage.getItem('vbio:pae:latest') || 'null');
       // Only the task that captured this cache may render it.
