@@ -3085,6 +3085,27 @@ def _prepare_task_boltz_custom_mols_dir(
         )
     return task_mols
 
+
+def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
+    if isinstance(raw_gpu_ids, int):
+        return [raw_gpu_ids]
+    if not isinstance(raw_gpu_ids, (list, tuple)):
+        return []
+    normalized: List[int] = []
+    seen = set()
+    for item in raw_gpu_ids:
+        try:
+            parsed = int(item)
+        except (TypeError, ValueError):
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return normalized
+
+
+
 def main():
     """
     Main function to run a single prediction based on arguments provided in a JSON file.
