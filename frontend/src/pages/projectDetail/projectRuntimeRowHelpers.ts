@@ -11,7 +11,7 @@ import {
 import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
 import { hasLeadOptPredictionRuntime, readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
 import { hasObjectContent, asRecord as asObjectRecord } from '../projectTasks/recordReaders';
-import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
+import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/leadOptPredictionHelpers';
 import { mergeConfidencePreservingPeptideCandidates } from '../projectTasks/taskDataPeptide';
 import { mergeTaskPropertiesPreservingInputOptions, readLeadOptUploadsFromComponents } from './projectTaskSnapshot';
 
@@ -418,8 +418,7 @@ export function mergePayloadFields<T extends object, U extends object>(next: T, 
     }
     merged[key] = prevAny[key];
   };
-  // 摘要轮询载荷比 hydration 后的完整 confidence/affinity 更浅；保留键更多
-  // 的一方，避免每 tick 丢失 msa/pae_matrix 并触发下游 memo 风暴。
+  // 保留键更多的一方（完整载荷优先于摘要）
   const richerOf = (nextValue: unknown, prevValue: unknown): unknown => {
     const nextKeys = nextValue && typeof nextValue === 'object' ? Object.keys(nextValue as object).length : 0;
     const prevKeys = prevValue && typeof prevValue === 'object' ? Object.keys(prevValue as object).length : 0;

@@ -4,7 +4,7 @@ import {
   buildLeadOptPredictionRecordKey,
   parseLeadOptPredictionRecordKey,
   type LeadOptPredictionRecord
-} from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
+} from '../../components/project/leadopt/leadOptPredictionHelpers';
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
 import { asRecordArray } from '../projectTasks/recordReaders';
 

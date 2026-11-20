@@ -410,7 +410,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
           smiles: component.sequence,
           sourceIndex: index + 1
         }));
-      // 合并一次 RDKit 校验：化合物 + 上下文配体按序拼接，避免两轮全量遍历
+      // 化合物与上下文配体合并校验一次
       const offset = parsedScreening.compounds.length;
       const combinedValidation = await validateVirtualScreeningSmiles([
         ...parsedScreening.compounds,

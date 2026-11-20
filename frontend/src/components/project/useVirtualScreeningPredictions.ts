@@ -17,7 +17,7 @@ import {
   extractPredictionMetricsFromStatusInfo,
   extractPredictionResultPayload,
   inferPredictionRuntimeStateFromStatusPayload
-} from './leadopt/hooks/leadOptPredictionHelpers';
+} from './leadopt/leadOptPredictionHelpers';
 
 export interface VirtualScreeningPredictionHit {
   id: string;

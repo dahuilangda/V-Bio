@@ -1,4 +1,4 @@
-import type { LigandFragmentItem } from '../../LigandFragmentSketcher';
+import type { LigandFragmentItem } from '../LigandFragmentSketcher';
 
 export interface VariableSelectionResolution {
   mergedFragment: LigandFragmentItem | null;
@@ -26,7 +26,7 @@ function normalizeAtomSet(fragment: LigandFragmentItem): string {
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value >= 0)
     .map((value) => Math.floor(value))
-    .sort((a, b) => a - b);
+    .sort((a: number, b: number) => a - b);
   return normalized.join(',');
 }
 

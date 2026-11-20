@@ -39,7 +39,7 @@ import {
   readFiniteNumber,
   readFiniteNumberArray
 } from './recordReaders';
-import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
+import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/leadOptPredictionHelpers';
 
 function hasLeadOptMmpOnlySnapshot(task: ProjectTask): boolean {
   const confidence =

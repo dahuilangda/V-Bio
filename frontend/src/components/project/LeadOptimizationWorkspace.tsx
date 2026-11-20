@@ -12,7 +12,7 @@ import { Box, RotateCcw } from 'lucide-react';
 import type { AffinityDockPocket, PredictionOptions } from '../../types/models';
 import type { LeadOptPersistedUploads } from './leadopt/hooks/useLeadOptReferenceFragment';
 import { useLeadOptReferenceFragment } from './leadopt/hooks/useLeadOptReferenceFragment';
-import { resolveVariableSelection } from './leadopt/hooks/fragmentVariableSelection';
+import { resolveVariableSelection } from './leadopt/fragmentVariableSelection';
 import { useLeadOptPocketBox } from './leadopt/hooks/useLeadOptPocketBox';
 import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
 import { LeadOptFragmentPanel } from './leadopt/LeadOptFragmentPanel';

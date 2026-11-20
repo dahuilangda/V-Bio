@@ -541,7 +541,7 @@ export async function pullResultForViewerTask(params: {
           pae_matrix: paeMatrix,
           pae_chain_bounds: Array.isArray(chainBounds) ? chainBounds : []
         });
-        // 序列化即为主线程成本；上限 ~2MB，超出直接放弃缓存。
+        // 超过 2MB 放弃缓存
         if (payload.length <= 2 * 1024 * 1024) {
           const write = () => {
             try {

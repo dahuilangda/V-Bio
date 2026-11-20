@@ -5,7 +5,7 @@ import {
 } from '../../../../api/backendApi';
 import { type LigandFragmentItem } from '../../LigandFragmentSketcher';
 import { type MolstarAtomHighlight, type MolstarResidueHighlight, type MolstarResiduePick } from '../../MolstarViewer';
-import { resolveVariableSelection, type LigandAtomBond } from './fragmentVariableSelection';
+import { resolveVariableSelection, type LigandAtomBond } from '../fragmentVariableSelection';
 import { asString } from '../../../../pages/projectTasks/recordReaders';
 
 type PocketResidue = {

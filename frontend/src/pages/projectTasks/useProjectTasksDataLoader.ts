@@ -21,7 +21,7 @@ import { TaskRowDeletionLedger } from './taskRowDeletionLedger';
 import { isSameRowShallow } from '../projectDetail/projectRuntimeRowHelpers';
 import { hydrateTaskMetricsFromResultRows, syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
 import { asRecord, hasObjectContent } from '../../pages/projectTasks/recordReaders';
-import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/hooks/leadOptPredictionHelpers';
+import { mergeLeadOptPredictionMapsByKey } from '../../components/project/leadopt/leadOptPredictionHelpers';
 import { mergeConfidencePreservingPeptideCandidates } from './taskDataPeptide';
 import { taskStatePriority } from '../../utils/taskRuntime';
 

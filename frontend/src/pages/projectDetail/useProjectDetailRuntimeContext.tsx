@@ -883,8 +883,7 @@ export function useProjectDetailRuntimeContext() {
 
     let cancelled = false;
     const applyTaskSnapshot = (taskRow: ProjectTask) => {
-      // 轮询会让 updated_at 每 tick 变化；以行内输入选项的内容做标记，
-      // 只有任务真正切换或选项内容变化时才重放快照，避免覆盖用户编辑。
+      // updated_at 每 tick 变化；按输入选项内容判断是否重放快照
       const optionsMarker = JSON.stringify(readTaskInputOptions(taskRow));
       const marker = `${focusedRowId}|${optionsMarker}`;
       if (componentTaskSwitchRef.current === marker) return;

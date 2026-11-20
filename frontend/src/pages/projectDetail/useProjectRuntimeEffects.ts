@@ -66,8 +66,7 @@ export function useProjectRuntimeEffects({
   const refreshStatusRef = useRef(refreshStatus);
   refreshStatusRef.current = refreshStatus;
   useEffect(() => {
-    // 行轮询器（runtime context）活跃时它已覆盖同一数据；本循环只在
-    // 行轮询暂停（如 lead-opt）时补位，避免同一任务双轮询。
+    // 行轮询器活跃时本循环冗余，仅在其暂停（lead-opt）时补位
     if (isLeadOptimizationWorkflow || suppressStatusPolling) return;
     const pollingTaskId = String(statusContextTaskRow?.task_id || runtimeResultTask?.task_id || projectTaskId || '').trim();
     if (!pollingTaskId) return;

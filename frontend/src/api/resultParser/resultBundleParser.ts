@@ -2078,10 +2078,7 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
     };
   }
 
-  // Server-extracted metrics from the prebuilt view archive are
-  // authoritative for every backend — client-side legacy formulas and the
-  // legacy distance-filtered best_ipsae.json must not override them in
-  // hydration.
+  // best_ipsae 先合并；视图归档的 compact 指标（服务端提取）始终最终权威
   const compactName = names.find((n) => getBaseName(n).toLowerCase() === 'compact_metrics.json');
   const compactMetrics = compactName ? await readZipJson(zip, compactName) : null;
   if (compactMetrics && typeof compactMetrics === 'object' && !Array.isArray(compactMetrics)) {

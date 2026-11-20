@@ -5,14 +5,14 @@ import {
   readObjectPath,
   readPairIptmForChains,
   resolvePreferredInterfaceMetricFromValues
-} from '../../../../pages/projectDetail/projectMetrics';
+} from '../../../pages/projectDetail/projectMetrics';
 import {
   asRecord as asRecordStrict,
   asString
-} from '../../../../pages/projectTasks/recordReaders';
-import type { ParsedResultBundle } from '../../../../types/models';
-import { isNumericToken } from '../../../../pages/projectTasks/taskDataConfidence';
-import { normalizeLeadOptPredictionBackend } from '../../../../utils/leadOptimization';
+} from '../../../pages/projectTasks/recordReaders';
+import type { ParsedResultBundle } from '../../../types/models';
+import { isNumericToken } from '../../../pages/projectTasks/taskDataConfidence';
+import { normalizeLeadOptPredictionBackend } from '../../../utils/leadOptimization';
 
 interface LeadOptPredictionRenderPayload {
   ligandRenderSmiles: string;
