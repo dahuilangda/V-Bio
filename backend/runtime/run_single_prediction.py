@@ -5411,8 +5411,7 @@ def run_esmfold2_backend(
         command += ["--samples", samples_env]
 
     started = time.time()
-    # Cold-cache weight downloads (multi-GB) can exceed any interactive
-    # patience; bound the run so a hung container cannot pin the worker.
+    # 限制容器时长，防止冷缓存下载挂死占住 worker
     timeout_seconds = int(os.environ.get("ESMFOLD2_RUN_TIMEOUT_SECONDS") or 14400)
     try:
         completed = subprocess.run(command, check=False, timeout=timeout_seconds)
@@ -6210,14 +6209,8 @@ def _read_bool_option(options: Dict[str, Any], key: str, default: bool) -> bool:
 
 
 def _normalize_peptide_design_mode(raw: Any) -> str:
-    token = str(raw or "").strip().lower()
-    if token in {"linear"}:
-        return "linear"
-    if token in {"cyclic", "cycle", "ring"}:
-        return "cyclic"
-    if token in {"bicyclic", "bicycle", "bi-cyclic"}:
-        return "bicyclic"
-    return "linear"
+    from backend.services.common_utils import normalize_peptide_design_mode
+    return normalize_peptide_design_mode(raw)
 
 
 def _normalize_peptide_backend(raw: Any) -> str:
@@ -7116,10 +7109,8 @@ def _build_peptide_candidate_yaml(
             if not ccd:
                 continue
             base_residue = str(item.get("baseResidue") or item.get("base_residue") or "").strip().upper()[:1]
-            # Positions are proposed against the proposal-time sequence; the
-            # refined candidate can differ in length. Amidated residues must
-            # sit at the SHIPPED C-term (the terminal validator rejects
-            # anything else), every other modification stays inside the chain.
+            # 修饰位置来自提案期序列；最终链长可能不同。
+            # 酰胺化残基锚到交付 C 端，其余限制在链内。
             seq_len = len(binder_sequence)
             position = int(item.get("position") or item.get("ptmPosition") or 1)
             if amidated_ccds and ccd in amidated_ccds:
@@ -8389,8 +8380,7 @@ def _relax_staged_bicyclic_strain(
             return {"relaxed": False, "reason": f"missing atom for {cys_num}:{anchor_name}"}
         pairs.append((cys_num, anchor_name))
 
-    # 单原子链接器(BS3=Bi): 先确定性重建锚点位置(SG 三角外侧), 后续投影只需微调
-    # ——原有 sweeps 只动 SG 不动锚,无法修复模型把 Bi 埋进骨架的摆放。
+    # 单原子链接器(BS3=Bi): 先确定性重建锚点，后续投影微调
     single_atom_rebuild = None
     if sum(1 for a in linker_res if a.element != gemmi.Element("H")) == 1:
         single_atom_rebuild = _rebuild_single_atom_linker_anchor(
@@ -10346,21 +10336,9 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
 
 
 def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str | None = None) -> Optional[Dict[str, Any]]:
-    """Deterministic geometry repair for single-atom bicyclic linkers (BS3=Bi).
-
-    The model has no chemical prior for a one-atom ligand and may leave the
-    ion inside the peptide backbone; the bond-band relaxers only project
-    distances and never move the anchor. Here the anchor position is REBUILT
-    from the three matched Cys-SG atoms: circumcenter placement at the Bi-S
-    rest length (2.55 A), choosing the triangle side with the larger clearance
-    to the peptide's own heavy atoms, then a capped joint micro-relaxation
-    (anchor + SGs, SG drift limited) settles all three bonds into the band
-    while repelling the anchor from self-clashes.
-
-    In-place file rewrite (cif/pdb preserved). Returns None for multi-atom
-    linkers (SEZ/29N) or when the topology is incomplete — callers proceed
-    unchanged. Diagnostics include the post-repair self-clash clearance so
-    callers/gates can reject rings that cannot host the linker at all.
+    """单原子链接器（BS3=Bi）锚点几何重建：以三个匹配 Cys-SG 的外心、
+    Bi-S 静息长度重摆锚点，再做锚点+SG 受限微松弛。原位改写 cif/pdb；
+    多原子链接器或拓扑不完整时返回 None。
     """
     path = Path(structure_path)
     st = gemmi.read_structure(str(path))
@@ -10569,9 +10547,8 @@ def _structure_linker_anchor_map(st, prefer_code: str | None = None) -> Dict[str
 
 
 def _dpeptide_linker_bond_report(structure_path: Path, *, prefer_code: str | None = None) -> Dict[str, Any]:
-    """Measure whether the bicyclic linker is actually bonded in a shipped
-    structure: for every linker anchor atom, the distance to the nearest
-    Cys-SG. Bonded C-S distances are ~1.8 A; 2.5 A is the reporting cut-off."""
+    """逐锚点测量链接器-Cys SG 距离；C-S 键长约 1.8 A，报告阈值 2.5 A
+    （Bi 配位窗口另计）。"""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     anchor_map = _structure_linker_anchor_map(st, prefer_code=prefer_code)
@@ -11709,8 +11686,7 @@ def run_peptide_design_backend(
                     f"({_msa_seed_exc}); engine-side server fetch remains "
                     "the fallback", file=sys.stderr)
 
-        # Mirror the terminal validator's source of truth: custom molecules
-        # flagged cTerminalAmidated may only ship at a candidate's C-term.
+        # 与终端校验器同一判定来源
         amidated_ccds = {
             str(m.get("ccd") or "").strip().upper()
             for m in custom_molecules or []
@@ -11896,9 +11872,8 @@ def run_peptide_design_backend(
             composite_score = ctx["composite_score"]
             structure_file = ctx["structure_file"]
             staged_path = ctx["staged_path"]
-            # 兜底锚点重建: 直接出原生预测的双环路径(未过 refine)也拿到
-            # 几何正确的单原子链接器;refine 路线在各自门禁前已重建。
-            # 非 bicyclic 布局没有链接器 — 绝不改动结构里的游离离子。
+            # 兜底锚点重建: 双环路径未过 refine 时也拿到几何正确的单原子链接器;
+            # 非双环布局无链接器，不改动游离离子。
             if (design_mode == "bicyclic"
                     and structure_file is not None
                     and Path(structure_file).is_file()):

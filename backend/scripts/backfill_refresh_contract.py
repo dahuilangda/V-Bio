@@ -1,11 +1,5 @@
-"""Refresh pass: re-extract compact metrics for multi-sample backends.
-
-The earlier backfill picked per-sample artifacts by zip member order; the
-extractor now ranks samples (af3 ranking_scores.csv full precision,
-deterministic tie-break). Every alphafold3/protenix/mol1 SUCCESS row is
-re-extracted and merge-overwritten into confidence. Pair ipSAE is stubbed
-here and refreshed by backfill_refresh_ipsae.py.
-"""
+"""重提 alphafold3/protenix/mol1 成功行 compact 指标并合并写入 confidence；
+pair ipSAE 在此跳过，由 backfill_refresh_ipsae.py 补齐。"""
 import json, os, sys, threading, logging
 from concurrent.futures import ThreadPoolExecutor
 

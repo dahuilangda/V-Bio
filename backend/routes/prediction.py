@@ -485,13 +485,8 @@ def register_prediction_routes(
                 or peptide_design_options.get('peptide_design_mode')
                 or 'linear'
             )
-            design_mode = str(design_mode_raw).strip().lower()
-            if design_mode in {'cycle', 'ring'}:
-                design_mode = 'cyclic'
-            elif design_mode in {'bicycle', 'bi-cyclic'}:
-                design_mode = 'bicyclic'
-            elif design_mode != 'linear':
-                design_mode = 'linear'
+            from backend.services.common_utils import normalize_peptide_design_mode
+            design_mode = normalize_peptide_design_mode(design_mode_raw)
             if design_mode == 'bicyclic':
                 from backend.runtime import bicyclic_linkers as _bcl
                 seed_mask = str(peptide_design_options.get('peptideSequenceMask')

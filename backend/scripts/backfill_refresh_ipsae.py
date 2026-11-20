@@ -1,10 +1,4 @@
-"""Refresh pass: recompute pair ipSAE for rows that already carry it.
-
-Runs after backfill_refresh_contract.py: af3 sample selection now reads
-ranking_scores.csv full precision, and the het-chain atom scan / cif letter
-mapping were corrected, so existing pair_ipsae blocks may come from the
-wrong sample or mis-bound chain letters.
-"""
+"""重算已带 pair_ipsae 行的官方聚合值；在 backfill_refresh_contract.py 之后运行。"""
 import json, os, sys, threading, logging, zipfile
 from concurrent.futures import ThreadPoolExecutor
 

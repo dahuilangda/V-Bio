@@ -30,6 +30,18 @@ def to_finite_float(value):
 WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
 
 
+def normalize_peptide_design_mode(raw) -> str:
+    """linear/cyclic/bicyclic 别名归一（cycle/ring、bicycle/bi-cyclic）。"""
+    token = str(raw or "").strip().lower()
+    if token in {"linear"}:
+        return "linear"
+    if token in {"cyclic", "cycle", "ring"}:
+        return "cyclic"
+    if token in {"bicyclic", "bicycle", "bi-cyclic"}:
+        return "bicyclic"
+    return "linear"
+
+
 def error_payload(message: str, details=None) -> dict:
     """用户安全的错误载荷：message 始终返回；内部细节仅在
     EXPOSE_ERROR_DETAILS 开启时附带（服务端日志另由调用点负责）。"""
