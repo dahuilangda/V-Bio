@@ -21,6 +21,7 @@ import { handleLeadOptimizationLigandSmilesChangeAction } from './editorActions'
 import { withLeadOptimizationLigandSmiles } from '../../utils/leadOptimization';
 import type { LeadOptHaloSnapshot } from '../../components/project/LeadOptimizationWorkspace';
 import type { LeadOptHaloCandidate } from '../../components/project/leadopt/hooks/useLeadOptHaloRun';
+import { engineSupportsFeature } from '../../config/engineCapabilities';
 import type { PredictionOptions } from '../../types/models';
 import type { ProjectWorkspaceDraft, WorkspaceTab } from './workspaceTypes';
 
@@ -597,7 +598,7 @@ export function useProjectWorkflowSectionProps({
         components,
         onComponentsChange,
         proteinTemplates,
-        isProteinMsaAllowed: !isNessoBackend,
+        isProteinMsaAllowed: !isNessoBackend && (!projectBackend || engineSupportsFeature(projectBackend, 'msa')),
         isProteinTemplatesAllowed: !isNessoBackend,
         customResidueLibrary,
         onCustomResidueLibraryChange,

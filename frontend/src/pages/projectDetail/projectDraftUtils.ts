@@ -111,7 +111,7 @@ export function allowedConstraintTypesForBackend(backend: string): PredictionCon
     return AF3_CONSTRAINT_TYPES;
   }
   if (normalized === 'nesso') return [];
-  if (normalized === 'esmfold2') return ['contact'];
+  if (normalized === 'esmfold2') return [];
   return ALL_CONSTRAINT_TYPES;
 }
 

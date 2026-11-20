@@ -2067,9 +2067,21 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
     }
   }
 
+  const ipsaeFile = names
+    .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().endsWith('best_ipsae.json'))
+    .sort((a, b) => a.length - b.length)[0];
+  const parsedIpsae = await readZipJson(zip, ipsaeFile || null);
+  if (parsedIpsae && typeof parsedIpsae === 'object' && !Array.isArray(parsedIpsae)) {
+    confidence = {
+      ...confidence,
+      ...(parsedIpsae as Record<string, unknown>)
+    };
+  }
+
   // Server-extracted metrics from the prebuilt view archive are
-  // authoritative for every backend — client-side legacy formulas
-  // (distance-filtered ipSAE) must not override them in hydration.
+  // authoritative for every backend — client-side legacy formulas and the
+  // legacy distance-filtered best_ipsae.json must not override them in
+  // hydration.
   const compactName = names.find((n) => getBaseName(n).toLowerCase() === 'compact_metrics.json');
   const compactMetrics = compactName ? await readZipJson(zip, compactName) : null;
   if (compactMetrics && typeof compactMetrics === 'object' && !Array.isArray(compactMetrics)) {
@@ -2215,16 +2227,6 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       promoteIfAbsent('binder_chain_id', bestCandidate.binder_chain_id);
       promoteIfAbsent('target_chain_id', bestCandidate.target_chain_id);
     }
-  }
-  const ipsaeFile = names
-    .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().endsWith('best_ipsae.json'))
-    .sort((a, b) => a.length - b.length)[0];
-  const parsedIpsae = await readZipJson(zip, ipsaeFile || null);
-  if (parsedIpsae && typeof parsedIpsae === 'object' && !Array.isArray(parsedIpsae)) {
-    confidence = {
-      ...confidence,
-      ...(parsedIpsae as Record<string, unknown>)
-    };
   }
   confidence = compactConfidenceForStorage(confidence, { preservePeptideCandidateStructureText });
 

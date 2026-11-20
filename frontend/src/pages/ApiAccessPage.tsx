@@ -25,7 +25,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { InfoTip } from '../components/common/InfoTip';
-import { ENGINES, engineOptionsFor, peptideEngineOptionsFor } from '../config/engineCapabilities';
+import { ENGINES, engineOptionsFor, engineSupportsFeature, peptideEngineOptionsFor } from '../config/engineCapabilities';
 import { useModalDialog } from '../components/ui/useModalDialog';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
@@ -1417,14 +1417,17 @@ fi
     : ` \\\n  -F 'peptide_design_options={"peptideDesignMode":"${builderPeptideDesignMode}","peptideChirality":"${builderPeptideChirality}","peptideProposerBackend":"${builderDesignStrategy}","peptideScorerBackend":"${effectivePredictionBackend}","peptideLengthMin":16,"peptideLengthMax":20,"peptideIterations":6,"peptidePopulationSize":16,"peptideEliteSize":4}' \\\n  -F "peptide_design_target_chain=A" \\\n  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\\n  -F "msa_mode=${builderMsaMode}"`;
 
 
+  const msaSubmitFlags = engineSupportsFeature(effectiveSubmitBackend, 'msa')
+    ? `-F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \\
+  -F "msa_mode=${builderMsaMode}" \\`
+    : '-F "use_msa_server=false" \\';
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectiveSubmitBackend}" \\
   -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : isPredictionWorkflow && builderDesignStrategy === 'esm3' ? 'peptide_design' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
-  -F "use_msa_server=${builderMsaMode === 'none' ? 'false' : 'true'}" \
-  -F "msa_mode=${builderMsaMode}" \
+  ${msaSubmitFlags}
   -F "priority=${builderPriority}"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinity = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
@@ -2322,6 +2325,7 @@ ${submitTaskIdCapture}`;
             onResizeKeyDown: handleYamlBuilderResizerKeyDown
           }}
           components={{
+            msaAllowed: engineSupportsFeature(selectedBackend, 'msa'),
             builderYamlComponents,
             builderYamlCollapsed,
             builderCustomResidueValidity,

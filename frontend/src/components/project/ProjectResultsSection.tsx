@@ -315,7 +315,7 @@ function MsaCoverageSection({ snapshotConfidence }: { snapshotConfidence: Record
         ctx.fillStyle = '#e3efe8';
         ctx.fillRect(0, 0, width, height);
         const cols = entry.coverage.length;
-        const barW = Math.max(1, width / cols);
+        const barW = width / cols;
         entry.coverage.forEach((value, col) => {
           const h = (Math.min(100, Math.max(0, value)) / 100) * height;
           const [r, g, b] = viridis(0.25 + 0.6 * (Math.min(100, Math.max(0, value)) / 100));

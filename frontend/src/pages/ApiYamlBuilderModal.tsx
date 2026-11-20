@@ -52,6 +52,7 @@ export interface ApiYamlBuilderChromeProps {
 }
 
 export interface ApiYamlBuilderComponentsProps {
+  msaAllowed: boolean;
   builderYamlComponents: InputComponent[];
   builderYamlCollapsed: Record<string, boolean>;
   builderCustomResidueValidity: Record<string, boolean>;
@@ -124,6 +125,7 @@ export function ApiYamlBuilderModal({
     onResizeKeyDown: handleYamlBuilderResizerKeyDown
   } = chrome;
   const {
+    msaAllowed,
     builderYamlComponents,
     builderYamlCollapsed,
     builderCustomResidueValidity,
@@ -319,6 +321,7 @@ export function ApiYamlBuilderModal({
                       {component.type === 'protein' && (
                         <>
                           <div className="api-yaml-component-flags">
+                            {msaAllowed && (
                             <label className="checkbox-inline">
                               <input
                                 type="checkbox"
@@ -327,6 +330,7 @@ export function ApiYamlBuilderModal({
                               />
                               <span>MSA</span>
                             </label>
+                            )}
                             <label className="checkbox-inline">
                               <input
                                 type="checkbox"
