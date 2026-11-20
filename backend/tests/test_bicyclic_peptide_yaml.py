@@ -61,6 +61,45 @@ class BicyclicCandidateYamlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly 3 cysteine"):
             self._build("CWAGHIKXLMNAP")
 
+    def test_amidated_modification_reanchors_to_shipped_c_term(self):
+        """The proposer lays an amidated residue at the proposal-time C-term;
+        a refined candidate can come back longer — the shipped yaml must
+        re-anchor it to the final sequence's last position (the terminal
+        validator rejects mid-chain amidated residues)."""
+        yaml_text = _build_peptide_candidate_yaml(
+            dict(self.BASE),
+            binder_chain_id="B",
+            binder_sequence="ACDEFGHIKLMNPQRSTV",
+            design_mode="linear",
+            linker_ccd="SEZ",
+            linker_chain_id="L",
+            linker_atom_map=BICYCLIC_LINKER_ATOM_MAP,
+            modifications=[{"position": 16, "ccd": "DRG"}],
+            backend="protenix",
+            amidated_ccds={"DRG"},
+        )
+        data = yaml.safe_load(yaml_text)
+        binder = [e["protein"] for e in data["sequences"] if e.get("protein", {}).get("id") == "B"][0]
+        mods = {m["ccd"]: m["position"] for m in binder.get("modifications") or []}
+        self.assertEqual(mods["DRG"], len(binder["sequence"]))
+
+    def test_regular_modification_clamps_into_shipped_chain(self):
+        yaml_text = _build_peptide_candidate_yaml(
+            dict(self.BASE),
+            binder_chain_id="B",
+            binder_sequence="ACDEFG",
+            design_mode="linear",
+            linker_ccd="SEZ",
+            linker_chain_id="L",
+            linker_atom_map=BICYCLIC_LINKER_ATOM_MAP,
+            modifications=[{"position": 16, "ccd": "XYZ"}],
+            backend="protenix",
+        )
+        data = yaml.safe_load(yaml_text)
+        binder = [e["protein"] for e in data["sequences"] if e.get("protein", {}).get("id") == "B"][0]
+        mods = {m["ccd"]: m["position"] for m in binder.get("modifications") or []}
+        self.assertEqual(mods["XYZ"], 6)
+
     def test_supported_linkers_are_product_form_only(self):
         # Registry linkers carry three distinct arm atoms. ZBR = mesitylene
         # (TBMB product form), SEZ/29N are protenix-only product forms. BS3's

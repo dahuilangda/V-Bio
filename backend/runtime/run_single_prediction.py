@@ -7082,6 +7082,7 @@ def _build_peptide_candidate_yaml(
     pocket_constraint: Optional[Dict[str, Any]] = None,
     binder_only: bool = False,
     binder_msa: str = "empty",
+    amidated_ccds: Optional[set] = None,
 ) -> str:
     yaml_data = copy.deepcopy(base_yaml_data)
     if binder_only:
@@ -7117,7 +7118,17 @@ def _build_peptide_candidate_yaml(
             if not ccd:
                 continue
             base_residue = str(item.get("baseResidue") or item.get("base_residue") or "").strip().upper()[:1]
-            mod_entry: Dict[str, Any] = {"position": int(item.get("position") or item.get("ptmPosition") or 1), "ccd": ccd}
+            # Positions are proposed against the proposal-time sequence; the
+            # refined candidate can differ in length. Amidated residues must
+            # sit at the SHIPPED C-term (the terminal validator rejects
+            # anything else), every other modification stays inside the chain.
+            seq_len = len(binder_sequence)
+            position = int(item.get("position") or item.get("ptmPosition") or 1)
+            if amidated_ccds and ccd in amidated_ccds:
+                position = max(1, seq_len)
+            else:
+                position = max(1, min(position, seq_len))
+            mod_entry: Dict[str, Any] = {"position": position, "ccd": ccd}
             if base_residue:
                 mod_entry["baseResidue"] = base_residue
             binder_modifications.append(mod_entry)
@@ -11700,6 +11711,13 @@ def run_peptide_design_backend(
                     f"({_msa_seed_exc}); engine-side server fetch remains "
                     "the fallback", file=sys.stderr)
 
+        # Mirror the terminal validator's source of truth: custom molecules
+        # flagged cTerminalAmidated may only ship at a candidate's C-term.
+        amidated_ccds = {
+            str(m.get("ccd") or "").strip().upper()
+            for m in custom_molecules or []
+            if isinstance(m, dict) and m.get("cTerminalAmidated")
+        }
         generation_jobs: List[Dict[str, Any]] = []
         generation_completed_base = completed_tasks
         for idx, candidate in enumerate(generation_candidates, start=1):
@@ -11729,6 +11747,15 @@ def run_peptide_design_backend(
                     candidate_pocket_sequence = [
                         [c, int(n)] for c, n in pocket_sequence_contacts]
                     candidate_pocket_constraint = None
+            candidate_fixed_modifications: List[Dict[str, Any]] = []
+            for m in fixed_modifications or []:
+                ccd_u = str(m.get("ccd") or "").upper()
+                pos = int(m.get("position") or 1)
+                if amidated_ccds and ccd_u in amidated_ccds:
+                    pos = len(candidate_sequence)
+                elif pos > len(candidate_sequence):
+                    continue
+                candidate_fixed_modifications.append({**m, "position": pos})
             candidate_yaml = _build_peptide_candidate_yaml(
                 candidate_base_yaml_data,
                 binder_chain_id=binder_chain_id,
@@ -11738,10 +11765,10 @@ def run_peptide_design_backend(
                 linker_chain_id=linker_chain_id,
                 linker_atom_map=linker_atom_map,
                 modifications=(
-                    [m for m in fixed_modifications if m["position"] <= len(candidate_sequence)]
-                    + candidate_modifications
-                ) if fixed_modifications else candidate_modifications,
+                    candidate_fixed_modifications + candidate_modifications
+                ) if candidate_fixed_modifications else candidate_modifications,
                 backend=peptide_backend,
+                amidated_ccds=amidated_ccds,
                 cys_positions=candidate.get("cys_positions") if isinstance(candidate.get("cys_positions"), list) else None,
                 pocket_constraint=candidate_pocket_constraint,
                 binder_only=(peptide_chirality == 'd'),
