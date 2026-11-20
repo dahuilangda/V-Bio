@@ -7,7 +7,7 @@ import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
-import { engineOptionsFor, peptideEngineOptionsFor, engineSupportsDesignMode, engineSupportsPeptideRole, type DesignMode } from '../../config/engineCapabilities';
+import { engineOptionsFor, peptideEngineOptionsFor, engineSupportsChirality, engineSupportsDesignMode, engineSupportsPeptideRole, type DesignMode } from '../../config/engineCapabilities';
 import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
@@ -258,6 +258,10 @@ export function WorkflowRuntimeSettingsSection({
   const manualOverrideBackboneRef = useRef(false);
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const isRfd4Strategy = isPeptideDesignWorkflow && peptideProposerBackend === 'rfd4';
+  // D 肽可用性 = 提案引擎与打分引擎的手性声明（能力矩阵同源）
+  const dChiralityAvailable =
+    engineSupportsChirality(peptideProposerBackend, 'd') &&
+    engineSupportsChirality(isRfd4Strategy ? peptideScorerBackend : normalizedBackend, 'd');
   // 肽设计的打分引擎必须声明 score 角色；RFD4 策略下任务路由后端固定为
   // rfd4（生成在 rfd4 队列），不符合的存量选择迁移到 protenix2dock。
   const peptideBackendAllowed = isRfd4Strategy || engineSupportsPeptideRole(normalizedBackend, 'score');
@@ -1045,7 +1049,13 @@ export function WorkflowRuntimeSettingsSection({
                         disabled={!isEditable}
                       >
                         <option value="l">L-peptide (standard)</option>
-                        <option value="d" disabled={normalizedBackend !== 'protenix2dock'}>
+                        <option
+                          value="d"
+                          disabled={!dChiralityAvailable}
+                          title={dChiralityAvailable
+                            ? 'D-design runs the mirror workflow'
+                            : 'D-design requires a proposer and scorer that declare D support'}
+                        >
                           D-peptide
                         </option>
                       </select>

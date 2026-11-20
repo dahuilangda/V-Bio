@@ -76,3 +76,13 @@ def engine_supports_constraint(backend: str, constraint: str) -> bool:
 def engine_design_modes(backend: str) -> frozenset[str]:
     engine = get_engine(backend)
     return frozenset(engine.get("design_modes") or []) if engine else frozenset()
+
+
+def engine_chirality(backend: str) -> frozenset[str]:
+    """引擎声明的手性支持（l/d）；未知引擎返回空集。"""
+    engine = get_engine(backend)
+    return frozenset(engine.get("chirality") or []) if engine else frozenset()
+
+
+def engine_supports_chirality(backend: str, chirality: str) -> bool:
+    return chirality in engine_chirality(backend)

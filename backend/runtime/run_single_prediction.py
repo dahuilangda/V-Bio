@@ -13583,9 +13583,11 @@ def main():
                     chirality_raw = str(
                         peptide_design_options.get("peptideChirality")
                         or peptide_design_options.get("peptide_chirality") or "l").strip().lower()
-                    if chirality_raw != "l":
+                    from backend.core.engine_capabilities import engine_supports_chirality
+                    if not engine_supports_chirality("rfd4", chirality_raw):
                         raise ValueError(
-                            "RFD4-Proteina 仅支持 L 肽设计；D 肽请使用 ESM3 + RL 策略。")
+                            f"RFD4-Proteina 不支持 {chirality_raw.upper()} 肽设计；"
+                            "D 肽请使用 ESM3 + RL 策略。")
                     # 一次性生成后自动派发验证子任务，不进入世代循环
                     score_backend_sel = str(
                         peptide_design_options.get("peptideScorerBackend")

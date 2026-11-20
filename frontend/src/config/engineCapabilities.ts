@@ -86,6 +86,10 @@ export function peptideEngineOptionsFor(options: {
     .map(([id, engine]) => ({ value: id, label: engine.label }));
 }
 
+export function engineSupportsChirality(backend: string, chirality: 'l' | 'd'): boolean {
+  return (ENGINES[backend]?.chirality || []).includes(chirality) === true;
+}
+
 export function engineSupportsPeptideRole(backend: string, role: PeptideRole): boolean {
   return (ENGINES[backend]?.peptide_roles || []).includes(role) === true;
 }
