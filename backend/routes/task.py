@@ -391,11 +391,17 @@ def register_task_routes(
                 chain_means = _archive_chain_mean_plddt_cached(snapshot, filepath, structure_name)
                 if chain_means:
                     info['chain_mean_plddt'] = chain_means
-        compact_metrics = get_compact_prediction_metrics(task_id)
-        if isinstance(compact_metrics, dict) and compact_metrics:
-            info['compact_metrics'] = compact_metrics
-            info['lead_opt_metrics'] = compact_metrics
+        _attach_compact_metrics(info, task_id)
         return info
+
+    def _attach_compact_metrics(target: Dict[str, Any], task_id: str) -> None:
+        """附加 compact 指标（同对象双键）；目标已携带时不再拉取。"""
+        compact = target.get('compact_metrics') or target.get('lead_opt_metrics')
+        if not isinstance(compact, dict):
+            compact = get_compact_prediction_metrics(task_id)
+        if isinstance(compact, dict) and compact:
+            target['compact_metrics'] = compact
+            target['lead_opt_metrics'] = compact
 
     def build_task_status_response(task_id: str) -> Dict[str, Any]:
         # Finished tasks are served from the on-disk archive (source of truth);
@@ -428,11 +434,8 @@ def register_task_routes(
                     'status': 'Task completed (result file found on server).',
                     'result_file': archive_name,
                 }
-                compact_metrics = get_compact_prediction_metrics(task_id)
-                if isinstance(compact_metrics, dict) and compact_metrics:
-                    response['info']['compact_metrics'] = compact_metrics
-                    response['info']['lead_opt_metrics'] = compact_metrics
-                    logger.debug("Task %s marked SUCCESS via result archive '%s'.", task_id, archive_name)
+                _attach_compact_metrics(response['info'], task_id)
+                logger.debug("Task %s marked SUCCESS via result archive '%s'.", task_id, archive_name)
             else:
                 tracker_status, heartbeat = get_tracker_status(task_id)
                 if tracker_status or heartbeat:
@@ -458,10 +461,7 @@ def register_task_routes(
                         archive_name_from_tracker = find_result_archive(task_id)
                         if archive_name_from_tracker:
                             response['info']['result_file'] = archive_name_from_tracker
-                            compact_metrics = get_compact_prediction_metrics(task_id)
-                            if isinstance(compact_metrics, dict) and compact_metrics:
-                                response['info']['compact_metrics'] = compact_metrics
-                                response['info']['lead_opt_metrics'] = compact_metrics
+                            _attach_compact_metrics(response['info'], task_id)
                         logger.debug('Task %s inferred SUCCESS from tracker status while Celery state PENDING.', task_id)
                     elif response['state'] == 'FAILURE':
                         logger.warning('Task %s inferred FAILURE from tracker status while Celery state PENDING.', task_id)
@@ -478,16 +478,7 @@ def register_task_routes(
                 archive_name = find_result_archive(task_id)
                 if archive_name:
                     response['info']['result_file'] = archive_name
-            compact_metrics = None
-            if isinstance(response['info'].get('compact_metrics'), dict):
-                compact_metrics = response['info']['compact_metrics']
-            elif isinstance(response['info'].get('lead_opt_metrics'), dict):
-                compact_metrics = response['info']['lead_opt_metrics']
-            else:
-                compact_metrics = get_compact_prediction_metrics(task_id)
-            if isinstance(compact_metrics, dict) and compact_metrics:
-                response['info']['compact_metrics'] = compact_metrics
-                response['info']['lead_opt_metrics'] = compact_metrics
+            _attach_compact_metrics(response['info'], task_id)
             response['info']['status'] = 'Task completed successfully.'
             logger.debug('Task %s is SUCCESS.', task_id)
         elif task_result.state == 'FAILURE':
@@ -537,16 +528,7 @@ def register_task_routes(
                 if not isinstance(response['info'], dict):
                     response['info'] = {'result': str(response['info'])}
                 response['info']['result_file'] = archive_name
-                compact_metrics = None
-                if isinstance(response['info'].get('compact_metrics'), dict):
-                    compact_metrics = response['info']['compact_metrics']
-                elif isinstance(response['info'].get('lead_opt_metrics'), dict):
-                    compact_metrics = response['info']['lead_opt_metrics']
-                else:
-                    compact_metrics = get_compact_prediction_metrics(task_id)
-                if isinstance(compact_metrics, dict) and compact_metrics:
-                    response['info']['compact_metrics'] = compact_metrics
-                    response['info']['lead_opt_metrics'] = compact_metrics
+                _attach_compact_metrics(response['info'], task_id)
                 response['info']['status'] = 'Task completed successfully.'
                 logger.debug("Task %s marked SUCCESS via result archive '%s' from state %s.", task_id, archive_name, task_result.state)
             else:
