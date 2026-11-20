@@ -32,7 +32,7 @@ class StructureBackend(ABC):
         from backend.core.engine_capabilities import engine_constraints
         return engine_constraints(cls.name)
 
-    def validate(self, request: PredictionRequest) -> None:
+    def validate(self, request: PredictionRequest, custom_ccd_molecules=None) -> None:
         supported = self.supported_constraints()
         present = set()
         if request.bonds:
@@ -44,7 +44,7 @@ class StructureBackend(ABC):
         if unsupported:
             raise ValueError(
                 f"constraints {unsupported} are not supported by the {self.name} backend")
-        self.validate_modifications(request)
+        self.validate_modifications(request, custom_ccd_molecules)
 
     def validate_modifications(self, request: PredictionRequest,
                                custom_ccd_molecules=None) -> None:
