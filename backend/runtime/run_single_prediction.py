@@ -3106,6 +3106,12 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
 
 
 
+
+def _read_bool_option(options: Dict[str, Any], key: str, default: bool = False) -> bool:
+    from backend.services.common_utils import coerce_bool
+    return coerce_bool(options.get(key), default)
+
+
 def main():
     """
     Main function to run a single prediction based on arguments provided in a JSON file.
