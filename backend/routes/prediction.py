@@ -590,12 +590,6 @@ def register_prediction_routes(
                 'backend': backend,
             }), 400
 
-        if backend == 'mol1' and custom_ccd_molecules:
-            return jsonify({
-                'error': 'Mol-1 does not support custom CCD residue uploads; use standard CCD modifications or the Protenix backend.',
-                'backend': backend,
-            }), 400
-
         template_inputs = []
         template_meta_raw = request.form.get('template_meta')
         template_meta = []

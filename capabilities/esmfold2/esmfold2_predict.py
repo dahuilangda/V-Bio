@@ -52,6 +52,35 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+def inject_custom_ccd(request) -> None:
+    """自定义残基注入 esm CCD 表：kind=residue 的条目按 SMILES 构建分子。"""
+    from backend.runtime.custom_ccd_builder import (
+        _build_custom_ccd_mol,
+        _normalize_custom_ccd_molecules,
+    )
+    from esm.models.esmfold2.conformers import load_ccd
+
+    ccd = load_ccd()
+    for item in _normalize_custom_ccd_molecules(request.custom_ccd_molecules):
+        if item.get("kind") != "residue":
+            continue
+        code = str(item.get("ccd") or "").strip().upper()
+        if not code:
+            continue
+        if code in ccd:
+            raise ValueError(
+                f"自定义 CCD {code} 与标准 CCD 组分冲突，请更换编码")
+        mol = _build_custom_ccd_mol(item.get("smiles"), kind="residue",
+                                    backbone=item.get("backbone"),
+                                    amidated=bool(item.get("cTerminalAmidated")))
+        for atom in mol.GetAtoms():
+            props = atom.GetPropsAsDict()
+            if "leaving_atom" in props:
+                atom.ClearProp("leaving_atom")
+                atom.SetProp("leaving_atom", "1" if props["leaving_atom"] else "0")
+        ccd[code] = mol
+
+
 def esm_ccd_has(ccd: str) -> bool:
     try:
         from esm.models.esmfold2.conformers import load_ccd
@@ -188,6 +217,7 @@ def build_inputs(request: PredictionRequest):
 def main() -> None:
     args = parse_args()
     request = PredictionRequest.from_yaml(Path(args.yaml).read_text())
+    inject_custom_ccd(request)
 
     output_dir = Path(args.output_dir)
     seed = args.seed

@@ -77,3 +77,24 @@ class EsmFold2BackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModificationSupportTests(unittest.TestCase):
+    """修饰能力矩阵声明与 base 校验行为一致。"""
+
+    def test_mol1_supports_standard_ccd_and_custom_upload(self):
+        from backend.core.engine_capabilities import engine_modification_support
+        support = engine_modification_support("mol1")
+        self.assertTrue(support["standard_ccd"])
+        self.assertTrue(support["custom_residue_upload"])
+
+    def test_boltz_protenix_accept_custom_upload(self):
+        from backend.core.engine_capabilities import engine_modification_support
+        for name in ("boltz", "protenix"):
+            self.assertTrue(engine_modification_support(name)["custom_residue_upload"])
+
+    def test_esmfold2_declares_both(self):
+        from backend.core.engine_capabilities import engine_modification_support
+        support = engine_modification_support("esmfold2")
+        self.assertTrue(support["standard_ccd"])
+        self.assertTrue(support["custom_residue_upload"])

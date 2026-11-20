@@ -46,6 +46,7 @@ class PredictionRequest:
     bonds: list[BondSpec]
     other_constraints: list[dict]
     source_yaml: str
+    custom_ccd_molecules: list[dict] = field(default_factory=list)
 
     def entity_by_chain(self, chain: str) -> SequenceEntity | None:
         return next((e for e in self.entities if e.chain_id == chain), None)
@@ -84,7 +85,9 @@ class PredictionRequest:
                 other.append(constraint)
 
         return cls(entities=entities, bonds=bonds, other_constraints=other,
-                   source_yaml=yaml_text)
+                   source_yaml=yaml_text,
+                   custom_ccd_molecules=data.get("custom_ccd_molecules")
+                   if isinstance(data.get("custom_ccd_molecules"), list) else [])
 
     def to_yaml(self) -> str:
         sequences = []
@@ -109,6 +112,8 @@ class PredictionRequest:
         data = {"sequences": sequences}
         if constraints:
             data["constraints"] = constraints
+        if self.custom_ccd_molecules:
+            data["custom_ccd_molecules"] = self.custom_ccd_molecules
         return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
