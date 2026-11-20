@@ -15,6 +15,7 @@ from backend.runtime.backends.request import PredictionRequest
 @dataclass
 class BackendRunContext:
     temp_dir: str
+    yaml_content: str
     output_archive_path: str
     seed: int = 101
     task_id: str | None = None

@@ -13965,66 +13965,30 @@ def main():
                     or worker_predict_args.pop("ipsae_ligand_chain_id", None)
                     or ""
                 ).strip() or None
-                if worker_backend == "alphafold3":
-                    run_alphafold3_backend(
-                        worker_temp_dir,
-                        worker_yaml_content,
-                        worker_output_archive_path,
-                        seed=worker_seed,
-                        task_id=worker_task_id,
-                        custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
-                        low_vram=worker_low_vram,
-                    )
-                elif worker_backend == "esmfold2":
-                    esmfold2 = structure_backend("esmfold2")
-                    esmfold2.execute(
-                        PredictionRequest.from_yaml(worker_yaml_content),
-                        BackendRunContext(
-                            temp_dir=worker_temp_dir,
-                            output_archive_path=worker_output_archive_path,
-                            task_id=worker_task_id,
-                            seed=worker_seed or 101,
-                        ),
-                    )
-                elif worker_backend == "mol1":
-                    run_mol1_backend(
+                if worker_seed is not None:
+                    worker_predict_args["seed"] = worker_seed
+                worker_options = {
+                    **worker_predict_args,
+                    "low_vram": worker_low_vram,
+                    "custom_ccd_molecules": (
+                        worker_custom_ccd_molecules
+                        if isinstance(worker_custom_ccd_molecules, list) else []),
+                    "ipsae_ligand_chain_id": worker_ipsae_ligand_chain,
+                    "model_name": worker_model_name,
+                    "pocket_sequence_contacts": predict_args.pop(
+                        "mol1_pocket_sequence_contacts", None),
+                }
+                structure_backend(worker_backend).execute(
+                    PredictionRequest.from_yaml(worker_yaml_content),
+                    BackendRunContext(
                         temp_dir=worker_temp_dir,
                         yaml_content=worker_yaml_content,
                         output_archive_path=worker_output_archive_path,
-                        use_msa_server=bool(worker_predict_args.get("use_msa_server", False)),
-                        pocket_sequence_contacts=predict_args.pop(
-                            "mol1_pocket_sequence_contacts", None),
-                        seed=worker_seed,
+                        seed=worker_seed or 101,
                         task_id=worker_task_id,
-                    )
-                elif worker_backend == "protenix":
-                    run_protenix_backend(
-                        temp_dir=worker_temp_dir,
-                        yaml_content=worker_yaml_content,
-                        output_archive_path=worker_output_archive_path,
-                        seed=worker_seed,
-                        msa_mode=str(worker_predict_args.get("msa_mode") or "auto"),
-                        task_id=worker_task_id,
-                        custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
-                        low_vram=worker_low_vram,
-                        ipsae_ligand_chain_id=worker_ipsae_ligand_chain,
-                    )
-                elif worker_backend == "boltz":
-                    if worker_seed is not None:
-                        worker_predict_args["seed"] = worker_seed
-                    run_boltz_backend(
-                        worker_temp_dir,
-                        worker_yaml_content,
-                        worker_output_archive_path,
-                        worker_predict_args,
-                        worker_model_name,
-                        task_id=worker_task_id,
-                        custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
-                        low_vram=worker_low_vram,
-                        ipsae_ligand_chain_id=worker_ipsae_ligand_chain,
-                    )
-                else:
-                    raise ValueError(f"Unsupported peptide candidate backend: '{worker_backend}'.")
+                        options=worker_options,
+                    ),
+                )
             finally:
                 if worker_gpu_id != -1 and callable(worker_release_gpu):
                     worker_release_gpu(gpu_id=worker_gpu_id, task_id=worker_task_id)
@@ -14176,21 +14140,29 @@ def main():
                     finally:
                         if peptide_parent_task_id:
                             _clear_peptide_subtask_registry(peptide_parent_task_id)
-            elif backend == "alphafold3":
+            elif backend in ("alphafold3", "protenix"):
                 if not af3_template_payloads:
                     af3_template_payloads = prepare_yaml_template_payloads(
                         processed_yaml,
-                        str(_resolve_backend_work_root(_resolve_backend_results_root("alphafold3", runtime_task_id, temp_dir))),
+                        str(_resolve_backend_work_root(_resolve_backend_results_root(backend, runtime_task_id, temp_dir))),
                     )
-                run_alphafold3_backend(
-                    temp_dir,
-                    processed_yaml,
-                    output_archive_path,
-                    seed=seed,
-                    template_payloads=af3_template_payloads,
-                    task_id=runtime_task_id,
-                    custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
-                    low_vram=low_vram,
+                structure_backend(backend).execute(
+                    PredictionRequest.from_yaml(processed_yaml),
+                    BackendRunContext(
+                        temp_dir=temp_dir,
+                        yaml_content=processed_yaml,
+                        output_archive_path=output_archive_path,
+                        seed=seed or 101,
+                        task_id=runtime_task_id,
+                        options={
+                            "low_vram": low_vram,
+                            "custom_ccd_molecules": (
+                                custom_ccd_molecules
+                                if isinstance(custom_ccd_molecules, list) else []),
+                            "template_payloads": af3_template_payloads,
+                            "msa_mode": str(predict_args.get("msa_mode") or "auto"),
+                        },
+                    ),
                 )
             elif backend == "nesso":
                 if template_inputs:
@@ -14205,38 +14177,29 @@ def main():
                     task_id=runtime_task_id,
                     low_vram=low_vram,
                 )
-            elif backend == "protenix":
-                run_protenix_backend(
-                    temp_dir=temp_dir,
-                    yaml_content=processed_yaml,
-                    output_archive_path=output_archive_path,
-                    seed=seed,
-                    msa_mode=str(predict_args.get("msa_mode") or "auto"),
-                    task_id=runtime_task_id,
-                    custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
-                    low_vram=low_vram,
-                    template_payloads=af3_template_payloads if isinstance(af3_template_payloads, list) else None,
-                )
             elif backend == "mol1":
-                run_mol1_backend(
-                    temp_dir=temp_dir,
-                    yaml_content=processed_yaml,
-                    output_archive_path=output_archive_path,
-                    use_msa_server=use_msa_server,
-                    seed=seed,
-                    task_id=runtime_task_id,
+                structure_backend("mol1").execute(
+                    PredictionRequest.from_yaml(processed_yaml),
+                    BackendRunContext(
+                        temp_dir=temp_dir,
+                        yaml_content=processed_yaml,
+                        output_archive_path=output_archive_path,
+                        seed=seed or 101,
+                        task_id=runtime_task_id,
+                        options={"use_msa_server": use_msa_server},
+                    ),
                 )
             elif backend == "esmfold2":
                 if template_inputs:
                     raise ValueError("ESMFold2 does not support template files.")
-                esmfold2 = structure_backend("esmfold2")
-                esmfold2.execute(
+                structure_backend("esmfold2").execute(
                     PredictionRequest.from_yaml(processed_yaml),
                     BackendRunContext(
                         temp_dir=temp_dir,
+                        yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
-                        task_id=runtime_task_id,
                         seed=seed or 101,
+                        task_id=runtime_task_id,
                     ),
                 )
             elif backend == "rfd4":
@@ -14253,16 +14216,24 @@ def main():
                 if seed is not None:
                     predict_args["seed"] = seed
                 validate_template_paths(processed_yaml)
-                run_boltz_backend(
-                    temp_dir,
-                    processed_yaml,
-                    output_archive_path,
-                    predict_args,
-                    model_name,
-                    task_id=runtime_task_id,
-                    strict_ligand_confidence_contract=strict_ligand_confidence_contract,
-                    custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
-                    low_vram=low_vram,
+                structure_backend("boltz").execute(
+                    PredictionRequest.from_yaml(processed_yaml),
+                    BackendRunContext(
+                        temp_dir=temp_dir,
+                        yaml_content=processed_yaml,
+                        output_archive_path=output_archive_path,
+                        seed=seed or 101,
+                        task_id=runtime_task_id,
+                        options={
+                            "predict_args": predict_args,
+                            "model_name": model_name,
+                            "strict_ligand_confidence_contract": strict_ligand_confidence_contract,
+                            "low_vram": low_vram,
+                            "custom_ccd_molecules": (
+                                custom_ccd_molecules
+                                if isinstance(custom_ccd_molecules, list) else []),
+                        },
+                    ),
                 )
 
             if not os.path.exists(output_archive_path):

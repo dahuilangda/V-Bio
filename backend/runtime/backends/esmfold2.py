@@ -24,7 +24,7 @@ class EsmFold2Backend(StructureBackend):
         results_root, input_dir, output_dir = self._prepare_dirs(ctx)
         yaml_path = os.path.join(input_dir, "input.yaml")
         with open(yaml_path, "w", encoding="utf-8") as handle:
-            handle.write(request.to_yaml())
+            handle.write(ctx.yaml_content)
 
         seed = int(ctx.seed)
         command = self._docker_command(image, yaml_path, output_dir, seed)

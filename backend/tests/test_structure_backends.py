@@ -72,7 +72,7 @@ class EsmFold2BackendTests(unittest.TestCase):
         backend = structure_backend("esmfold2")
         self.assertEqual(backend.name, "esmfold2")
         with self.assertRaises(ValueError):
-            structure_backend("mol1")
+            structure_backend("nesso")
 
 
 if __name__ == "__main__":
