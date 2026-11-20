@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-class DomainError(Exception):
+class DomainError(ValueError):
     """平台可预期的领域错误基类。"""
 
 
