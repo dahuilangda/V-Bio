@@ -34,3 +34,45 @@ def get_engine(backend: str) -> dict | None:
 def active_engine_ids() -> list[str]:
     return sorted(k for k, v in ENGINES.items() if v.get("status") == "active")
 
+
+
+def engine_constraints(backend: str) -> frozenset[str]:
+    """引擎声明的约束类型；未知引擎返回空集。"""
+    engine = get_engine(backend)
+    return frozenset(engine.get("constraints") or []) if engine else frozenset()
+
+
+def engine_design_modes(backend: str) -> frozenset[str]:
+    engine = get_engine(backend)
+    return frozenset(engine.get("design_modes") or []) if engine else frozenset()
+
+
+def engine_supports_constraint(backend: str, constraint: str) -> bool:
+    return constraint in engine_constraints(backend)
+
+
+def engine_constraints(backend: str) -> frozenset[str]:
+    """引擎声明的约束类型键集合；未知引擎返回空集。"""
+    engine = get_engine(backend)
+    return frozenset(engine.get("constraints") or []) if engine else frozenset()
+
+
+def engine_constraint_quality(backend: str, constraint: str) -> str | None:
+    """约束实现质量：hard（可保证环闭合/键长）、soft（先验性引导）、
+    native（引擎原生条件）。未声明返回 None。"""
+    engine = get_engine(backend)
+    if not engine:
+        return None
+    constraints = engine.get("constraints") or {}
+    if isinstance(constraints, dict):
+        return constraints.get(constraint)
+    return constraint in constraints or None
+
+
+def engine_supports_constraint(backend: str, constraint: str) -> bool:
+    return constraint in engine_constraints(backend)
+
+
+def engine_design_modes(backend: str) -> frozenset[str]:
+    engine = get_engine(backend)
+    return frozenset(engine.get("design_modes") or []) if engine else frozenset()

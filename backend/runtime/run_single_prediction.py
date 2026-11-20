@@ -5000,18 +5000,18 @@ def run_rfd4_design_strategy(
 
 
 def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
-    """Cyclic/bicyclic ring constraints require a backend with covalent-bond
-    priors; Boltz2 cannot guarantee the ring bond lengths (same rule as the
-    ESM3 path)."""
+    """Cyclic/bicyclic ring closure requires a bond prior graded hard in the
+    capability matrix; soft priors (boltz) cannot guarantee ring bond lengths."""
     if design_mode not in ("cyclic", "bicyclic"):
         return
+    from backend.core.engine_capabilities import engine_constraint_quality
     backend = str(score_backend or "").strip().lower()
-    if backend in ("mol1", "mol-1", "protenix", "protenix2dock",
-                   "protenix-2-dock", "alphafold3", "esmfold2", "esm-fold-2"):
+    aliases = {"mol-1": "mol1", "protenix-2-dock": "protenix", "esm-fold-2": "esmfold2"}
+    if engine_constraint_quality(aliases.get(backend, backend), "bond") == "hard":
         return
     raise ValueError(
-        f"模式 {design_mode} 的成环约束需要共价键先验：打分后端 {score_backend} "
-        "不支持；可用 mol1 / protenix / protenix2dock / alphafold3 / esmfold2。")
+        f"模式 {design_mode} 的成环约束需要 hard 级共价键先验：打分后端 {score_backend} "
+        "为 soft 先验或不支持；可用 mol1 / protenix / protenix2dock / alphafold3 / esmfold2。")
 
 
 def _pair_arms_by_distance(anchors: Dict[int, Dict[str, np.ndarray]],

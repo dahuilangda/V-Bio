@@ -15,7 +15,6 @@ from backend.runtime.backends.request import PredictionRequest
 
 class EsmFold2Backend(StructureBackend):
     name = "esmfold2"
-    supported_constraints = frozenset({"bond"})
     supported_chirality = frozenset({"l"})
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:

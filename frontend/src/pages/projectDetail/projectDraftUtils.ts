@@ -76,21 +76,21 @@ export function listConstraintResidues(constraint: PredictionConstraint): Array<
 }
 
 const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'pocket'];
-const AF3_CONSTRAINT_TYPES: PredictionConstraintType[] = ['bond'];
 
+import { ENGINES } from '../../config/engineCapabilities';
 import { normalizePredictionBackend } from '../apiAccessHelpers';
 
 export type { PredictionBackend } from '../apiAccessHelpers';
 export { normalizePredictionBackend };
 
+// 约束能力读共享能力矩阵（configs/engine_capabilities.json），与后端同源
 export function allowedConstraintTypesForBackend(backend: string): PredictionConstraintType[] {
   const normalized = normalizePredictionBackend(backend);
-  if (normalized === 'alphafold3' || normalized === 'protenix') {
-    return AF3_CONSTRAINT_TYPES;
-  }
-  if (normalized === 'nesso') return [];
-  if (normalized === 'esmfold2') return [];
-  return ALL_CONSTRAINT_TYPES;
+  const constraints = ENGINES[normalized]?.constraints as
+    | Record<string, string>
+    | undefined;
+  if (!constraints) return [];
+  return ALL_CONSTRAINT_TYPES.filter((kind) => kind in constraints);
 }
 
 export function filterConstraintsByBackend(constraints: PredictionConstraint[], backend: string): PredictionConstraint[] {

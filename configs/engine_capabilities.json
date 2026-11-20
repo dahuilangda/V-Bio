@@ -20,6 +20,11 @@
         "custom_ccd": true,
         "msa": true,
         "ncaa": false
+      },
+      "constraints": {
+        "bond": "soft",
+        "contact": "native",
+        "pocket": "native"
       }
     },
     "alphafold3": {
@@ -43,6 +48,9 @@
         "custom_ccd": false,
         "msa": true,
         "ncaa": false
+      },
+      "constraints": {
+        "bond": "hard"
       }
     },
     "protenix": {
@@ -68,6 +76,10 @@
         "custom_ccd": true,
         "msa": true,
         "ncaa": true
+      },
+      "constraints": {
+        "bond": "hard",
+        "pocket": "native"
       }
     },
     "protenix2dock": {
@@ -94,6 +106,10 @@
         "custom_ccd": true,
         "msa": true,
         "ncaa": true
+      },
+      "constraints": {
+        "bond": "hard",
+        "pocket": "native"
       }
     },
     "mol1": {
@@ -117,6 +133,11 @@
         "custom_ccd": false,
         "msa": true,
         "ncaa": true
+      },
+      "constraints": {
+        "bond": "hard",
+        "contact": "native",
+        "pocket": "native"
       }
     },
     "esmfold2": {
@@ -143,9 +164,9 @@
         "msa": false,
         "ncaa": false
       },
-      "constraints": [
-        "bond"
-      ]
+      "constraints": {
+        "bond": "hard"
+      }
     },
     "esm3": {
       "label": "ESM3",
@@ -193,7 +214,8 @@
         "custom_ccd": false,
         "msa": false,
         "ncaa": true
-      }
+      },
+      "constraints": {}
     },
     "nesso": {
       "label": "Nesso",
@@ -208,7 +230,8 @@
         "custom_ccd": false,
         "msa": false,
         "ncaa": false
-      }
+      },
+      "constraints": {}
     },
     "boltz2dock": {
       "label": "Boltz2Dock",

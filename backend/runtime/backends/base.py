@@ -24,17 +24,23 @@ class BackendRunContext:
 
 class StructureBackend(ABC):
     name: ClassVar[str] = ""
-    supported_constraints: ClassVar[frozenset[str]] = frozenset()
-    supported_chirality: ClassVar[frozenset[str]] = frozenset({"l"})
+
+    # 能力全部来自 configs/engine_capabilities.json（单一事实源）；
+    # 子类不再手写，避免与矩阵漂移。
+    @classmethod
+    def supported_constraints(cls) -> frozenset[str]:
+        from backend.core.engine_capabilities import engine_constraints
+        return engine_constraints(cls.name)
 
     def validate(self, request: PredictionRequest) -> None:
+        supported = self.supported_constraints()
         present = set()
         if request.bonds:
             present.add("bond")
         for constraint in request.other_constraints:
             if isinstance(constraint, dict):
                 present.update(constraint)
-        unsupported = sorted(present - set(self.supported_constraints))
+        unsupported = sorted(present - supported)
         if unsupported:
             raise ValueError(
                 f"constraints {unsupported} are not supported by the {self.name} backend")

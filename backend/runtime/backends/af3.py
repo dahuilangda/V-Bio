@@ -7,7 +7,6 @@ from backend.runtime.backends.request import PredictionRequest
 
 class Af3Backend(StructureBackend):
     name = "alphafold3"
-    supported_constraints = frozenset({"bond"})
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request)

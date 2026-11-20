@@ -7,7 +7,6 @@ from backend.runtime.backends.request import PredictionRequest
 
 class BoltzBackend(StructureBackend):
     name = "boltz"
-    supported_constraints = frozenset({"bond", "contact", "pocket"})
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request)

@@ -7,7 +7,6 @@ from backend.runtime.backends.request import PredictionRequest
 
 class ProtenixBackend(StructureBackend):
     name = "protenix"
-    supported_constraints = frozenset({"bond", "pocket"})
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request)

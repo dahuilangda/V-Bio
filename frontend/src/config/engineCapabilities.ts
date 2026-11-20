@@ -31,6 +31,8 @@ export interface EngineCapability {
   chirality: Chirality[];
   design_modes: DesignMode[];
   peptide_roles?: PeptideRole[];
+  /** 约束类型 -> 实现质量（hard/soft/native），与后端同源 */
+  constraints?: Record<string, string>;
   features: EngineFeatures;
 }
 
