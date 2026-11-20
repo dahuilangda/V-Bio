@@ -505,13 +505,17 @@ export function AffinityResultsWorkspace({
     [interactionsReport, selectedInteraction]
   );
 
-  const handleLigand2DAtomClick = (atomIndex: number) => {
+  const handleLigand2DBackgroundClick = useCallback(() => {
+    setSelectedLigandAtomIndex(null);
+  }, []);
+
+    const handleLigand2DAtomClick = useCallback((atomIndex: number) => {
     if (!exactLigandAtomLinks) return;
     if (!Number.isFinite(atomIndex) || atomIndex < 0 || atomIndex >= exactLigandAtomLinks.atoms.length) return;
     setSelectedLigandAtomIndex((current) => (current === atomIndex ? null : atomIndex));
-  };
+  }, [exactLigandAtomLinks]);
 
-  const handleLigand3DPick = (pick: MolstarResiduePick) => {
+  const handleLigand3DPick = useCallback((pick: MolstarResiduePick) => {
     if (!exactLigandAtomLinks) return;
     const atomName = String(pick.atomName || '').trim();
     if (!atomName) return;
@@ -520,7 +524,7 @@ export function AffinityResultsWorkspace({
     const atomIndex = exactLigandAtomLinks.displayAtomIndexByAtomName.get(atomName);
     if (typeof atomIndex !== 'number') return;
     setSelectedLigandAtomIndex((current) => (current === atomIndex ? null : atomIndex));
-  };
+  }, [exactLigandAtomLinks]);
 
   return (
     <>
@@ -602,7 +606,7 @@ export function AffinityResultsWorkspace({
                 confidenceHint={ligandConfidenceHint}
                 highlightAtomIndices={selectedLigandAtomIndex === null ? null : [selectedLigandAtomIndex]}
                 onAtomClick={exactLigandAtomLinks ? handleLigand2DAtomClick : undefined}
-                onBackgroundClick={exactLigandAtomLinks ? () => setSelectedLigandAtomIndex(null) : undefined}
+                onBackgroundClick={handleLigand2DBackgroundClick}
               />
             </div>
           </section>
