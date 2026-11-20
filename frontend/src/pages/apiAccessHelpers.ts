@@ -120,7 +120,7 @@ export function normalizeProjectStatsSort(value: string | null | undefined): Pro
   return 'last_desc';
 }
 
-export function normalizePredictionBackend(value: string | null | undefined): PredictionBackend {
+export function normalizePredictionBackend(value: unknown): PredictionBackend {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'alphafold3') return 'alphafold3';
   if (normalized === 'protenix') return 'protenix';
@@ -129,6 +129,7 @@ export function normalizePredictionBackend(value: string | null | undefined): Pr
   if (normalized === 'rfd4') return 'rfd4';
   if (normalized === 'protenix2dock' || normalized === 'protenix-2-dock') return 'protenix2dock';
   if (normalized === 'nesso' || normalized === 'nesso1' || normalized === 'nesso-1') return 'nesso';
+  if (normalized === 'boltz' || normalized === 'boltz2' || normalized === 'boltz-2') return 'boltz';
   return 'boltz';
 }
 

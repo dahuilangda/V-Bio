@@ -78,32 +78,10 @@ export function listConstraintResidues(constraint: PredictionConstraint): Array<
 const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'pocket'];
 const AF3_CONSTRAINT_TYPES: PredictionConstraintType[] = ['bond'];
 
-export type PredictionBackend =
-  | 'boltz'
-  | 'alphafold3'
-  | 'protenix'
-  | 'nesso'
-  | 'mol1'
-  | 'esmfold2'
-  | 'protenix2dock'
-  | 'rfd4';
-;
+import { normalizePredictionBackend } from '../apiAccessHelpers';
 
-export function normalizePredictionBackend(
-  value: unknown
-): PredictionBackend {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'alphafold3' || normalized === 'protenix' || normalized === 'nesso') {
-    return normalized;
-  }
-  if (normalized === 'nesso1' || normalized === 'nesso-1') return 'nesso';
-  if (normalized === 'mol1' || normalized === 'mol-1') return 'mol1';
-  if (normalized === 'esmfold2' || normalized === 'esm-fold2' || normalized === 'esmfold-2') return 'esmfold2';
-  if (normalized === 'protenix2dock' || normalized === 'protenix-2-dock') return 'protenix2dock';
-  if (normalized === 'rfd4') return 'rfd4';
-  if (normalized === 'boltz' || normalized === 'boltz2' || normalized === 'boltz-2') return 'boltz';
-  return 'boltz';
-}
+export type { PredictionBackend } from '../apiAccessHelpers';
+export { normalizePredictionBackend };
 
 export function allowedConstraintTypesForBackend(backend: string): PredictionConstraintType[] {
   const normalized = normalizePredictionBackend(backend);

@@ -1,4 +1,5 @@
 import { readObjectPath } from '../../pages/projectDetail/projectMetrics';
+import { WATER_COMP_IDS } from '../../api/resultParser/resultBundleHelpers';
 import { stripCifTokenQuotes } from '../../utils/structureParser';
 
 export interface ExactLigandAtomLink {
@@ -15,7 +16,7 @@ export interface ExactLigandAtomLinkMap {
   displayAtomIndexByAtomName: Map<string, number>;
 }
 
-const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'SOL']);
+
 const POLYMER_COMP_IDS = new Set([
   'ACE',
   'NME',

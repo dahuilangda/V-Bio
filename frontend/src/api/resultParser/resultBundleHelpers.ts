@@ -90,7 +90,7 @@ function isJsonLiteralBoundary(value: string | undefined): boolean {
   return !value || /\s|[,:{}\[\]]/.test(value);
 }
 
-export function normalizeNonFiniteJsonLiterals(text: string): string {
+function normalizeNonFiniteJsonLiterals(text: string): string {
   let out = '';
   let inString = false;
   let escaping = false;
@@ -197,7 +197,7 @@ export function normalizeChainToken(value: string): string {
   return value.trim().toUpperCase();
 }
 
-export function chainIdMatches(candidate: string, preferred: string): boolean {
+function chainIdMatches(candidate: string, preferred: string): boolean {
   const normalizedCandidate = normalizeChainToken(candidate);
   const normalizedPreferred = normalizeChainToken(preferred);
   if (!normalizedCandidate || !normalizedPreferred) return false;
@@ -212,7 +212,7 @@ export function chainIdMatches(candidate: string, preferred: string): boolean {
   return false;
 }
 
-export function collectLigandCoverageChainIds(confidence: Record<string, unknown>): Set<string> {
+function collectLigandCoverageChainIds(confidence: Record<string, unknown>): Set<string> {
   const ids = new Set<string>();
   const add = (value: unknown) => {
     if (typeof value !== 'string') return;
