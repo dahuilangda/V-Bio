@@ -2067,6 +2067,15 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
     }
   }
 
+  // Server-extracted metrics from the prebuilt view archive are
+  // authoritative for every backend — client-side legacy formulas
+  // (distance-filtered ipSAE) must not override them in hydration.
+  const compactName = names.find((n) => getBaseName(n).toLowerCase() === 'compact_metrics.json');
+  const compactMetrics = compactName ? await readZipJson(zip, compactName) : null;
+  if (compactMetrics && typeof compactMetrics === 'object' && !Array.isArray(compactMetrics)) {
+    confidence = { ...confidence, ...(compactMetrics as Record<string, unknown>) };
+  }
+
   const confidenceRecord = confidence as Record<string, unknown>;
   const existingLigandAtomPlddtsFlat = normalizeLigandAtomPlddts(toFiniteNumberArray(confidenceRecord.ligand_atom_plddts));
   const existingLigandAtomPlddtsByChainRaw = normalizeLigandAtomPlddtsByChain(confidenceRecord.ligand_atom_plddts_by_chain);
