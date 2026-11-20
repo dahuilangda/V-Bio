@@ -3112,6 +3112,13 @@ def _read_bool_option(options: Dict[str, Any], key: str, default: bool = False) 
     return coerce_bool(options.get(key), default)
 
 
+def _embed_custom_ccd_into_yaml(yaml_content: str, molecules: list) -> str:
+    import yaml as _yaml_mod
+    data = _yaml_mod.safe_load(yaml_content) or {}
+    data["custom_ccd_molecules"] = molecules
+    return _yaml_mod.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
 def main():
     """
     Main function to run a single prediction based on arguments provided in a JSON file.
