@@ -22,11 +22,12 @@ written so failures name the offending CCD and never reach the GPU.
 from __future__ import annotations
 
 from typing import Dict, List
+from backend.core.errors import DomainError
 
 __all__ = ["validate_ccd_additions", "CCDContractError"]
 
 
-class CCDContractError(RuntimeError):
+class CCDContractError(DomainError):
     """Raised when appended custom-CCD cif text violates the chem_comp contract."""
 
 

@@ -4,9 +4,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from backend.core.errors import UserInputError
 
 
-class AffinityPreviewError(ValueError):
+class AffinityPreviewError(UserInputError):
     """Raised when affinity preview inputs cannot be parsed."""
 
 

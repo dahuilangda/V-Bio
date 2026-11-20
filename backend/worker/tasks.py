@@ -27,6 +27,7 @@ from backend.core.celery_app import celery_app
 from backend.monitoring.event_transport import publish_task_heartbeat, publish_task_status
 from backend.services.common_utils import coerce_bool
 from backend.scheduling.capability_router import parse_capability_queue
+from backend.core.errors import DomainError, TransientError
 from backend.worker.docker_cmd import (
     collect_gpu_device_group_ids,
     docker_args_has_flag,
@@ -440,7 +441,7 @@ def _build_failure_meta(error: Exception) -> dict:
     }
 
 
-def _coerce_positive_int(value: Any, default: int, min_value: int = 1) -> int:
+def _positive_int_or_default(value: Any, default: int, min_value: int = 1) -> int:
     """Parse int-like value with lower bound, otherwise return default."""
     try:
         parsed = int(value)
@@ -837,7 +838,7 @@ def _communicate_with_optional_timeout(process: subprocess.Popen, timeout_second
     return process.communicate(timeout=timeout_seconds)
 
 
-class SubprocessHardTimeout(RuntimeError):
+class SubprocessHardTimeout(TransientError):
     """子进程超时：终态，不可重试（勿用 builtin TimeoutError，会被 autoretry 重跑 GPU 任务）。"""
 
 
@@ -982,7 +983,7 @@ RESULT_UPLOAD_ATTEMPTS = 3
 RESULT_UPLOAD_BACKOFF_SECONDS = 5.0
 
 
-class ResultUploadError(RuntimeError):
+class ResultUploadError(DomainError):
     """All upload attempts failed. The local archive is then the ONLY copy of a
     finished GPU run's output — fail loudly, never silently."""
 
@@ -1732,12 +1733,12 @@ def boltz2score_task(self, score_args: dict):
         def _resolve_diffusion_arg(key: str, default: Any) -> Any:
             if defer_diffusion_defaults and score_args.get(key) is None:
                 return None
-            return _coerce_positive_int(score_args.get(key), default)
+            return _positive_int_or_default(score_args.get(key), default)
 
         recycling_steps = _resolve_diffusion_arg('recycling_steps', default_recycling_steps)
         sampling_steps = _resolve_diffusion_arg('sampling_steps', default_sampling_steps)
         diffusion_samples = _resolve_diffusion_arg('diffusion_samples', default_diffusion_samples)
-        max_parallel_samples = _coerce_positive_int(
+        max_parallel_samples = _positive_int_or_default(
             score_args.get('max_parallel_samples'),
             BOLTZ2SCORE_DEFAULT_MAX_PARALLEL_SAMPLES,
         )

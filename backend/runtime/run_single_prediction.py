@@ -26,6 +26,7 @@ from pathlib import Path
 from collections import Counter
 from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
 import subprocess
+from backend.core.errors import TransientError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = PROJECT_ROOT / "capabilities"
@@ -9069,7 +9070,7 @@ def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
     return ";".join(pairs)
 
 
-class DpeptideStaleWorkerError(RuntimeError):
+class DpeptideStaleWorkerError(TransientError):
     """A refine dispatch flag was silently dropped by the executing worker.
 
     The worker task contract echoes the flags it honored into the dpeptide

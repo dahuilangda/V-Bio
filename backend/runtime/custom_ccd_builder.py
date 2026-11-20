@@ -18,6 +18,7 @@ from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
+from backend.core.errors import UserInputError
 
 
 # SMARTS for a peptide-linkable backbone: N - C(alpha, tetrahedral) - C(=O)[O|N].
@@ -26,7 +27,7 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 CUSTOM_RESIDUE_BACKBONE_SMARTS = "[NX3;!$(NC=O)]-[C;X4]-C(=O)[O,N]"
 
 
-class CustomCCDError(ValueError):
+class CustomCCDError(UserInputError):
     """A user-supplied component failed construction/contract checks; the message
     always names the offending CCD code so HTTP-level rejections are actionable."""
 
