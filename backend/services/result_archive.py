@@ -13,7 +13,6 @@ import os
 import shutil
 import sys
 import re
-import tempfile
 import threading
 import time
 import zipfile
@@ -24,9 +23,10 @@ from typing import Any, Callable, Dict, Optional
 import gemmi
 from celery.result import AsyncResult
 from werkzeug.utils import secure_filename
+from backend.services.common_utils import coerce_bool
 
 
-_BOLTZ_WATER_RESNAMES = {'HOH', 'WAT', 'H2O'}
+_BOLTZ_WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
 _BOLTZ_ION_RESNAMES = {
     'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE', 'MN', 'CU', 'CO', 'NI',
     'CD', 'HG', 'SR', 'BA', 'CS', 'LI', 'BR', 'I',
@@ -611,23 +611,29 @@ class ResultArchiveService:
                     if affinity_candidates:
                         include.append(sorted(affinity_candidates, key=lambda item: (len(item), item))[0])
             elif is_af3:
-                structure = preferred_structure if preferred_structure_token else self._choose_best_af3_structure_file(names)
+                # the viewer must show the sample the metrics were computed
+                # from — derive the trio from the extractor's best sample,
+                # with the legacy name heuristics as fallback.
+                af3_samples = self._prediction_samples(src_zip, names)
+                af3_best = self._best_sample(
+                    [c for c in af3_samples if c.get('cif')]) if af3_samples else None
+                structure = preferred_structure if preferred_structure_token else (
+                    (af3_best or {}).get('cif')
+                    or self._choose_best_af3_structure_file(names))
                 if structure:
                     include.append(structure)
-                summary_candidates = [
+                summary = (af3_best or {}).get('summary_name') or self._choose_preferred_path([
                     name for name in names
                     if name.lower().endswith('.json')
                     and 'af3/output/' in name.lower()
                     and 'summary_confidences' in name.lower()
-                ]
-                confidences_candidates = [
+                ])
+                confidences = (af3_best or {}).get('full_name') or self._choose_preferred_path([
                     name for name in names
                     if name.lower().endswith('.json')
                     and 'af3/output/' in name.lower()
                     and os.path.basename(name).lower() == 'confidences.json'
-                ]
-                summary = self._choose_preferred_path(summary_candidates)
-                confidences = self._choose_preferred_path(confidences_candidates)
+                ])
                 if summary:
                     include.append(summary)
                 if confidences:
@@ -757,7 +763,7 @@ class ResultArchiveService:
 
     def build_or_get_view_archive(self, source_zip_path: str, preferred_structure_name: str | None = None) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v16-sample-ranks'
+        cache_schema_version = 'view-v17-extractor-best'
         preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}|{preferred_structure_token}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
@@ -1392,7 +1398,7 @@ class ResultArchiveService:
         if model is None:
             return None
 
-        water = {'HOH', 'WAT', 'DOD'}
+        water = _BOLTZ_WATER_RESNAMES
 
         def amino_count(chain):
             return sum(1 for res in chain
@@ -1498,7 +1504,7 @@ class ResultArchiveService:
             if structure is not None:
                 for ch in structure[0]:
                     for res in ch:
-                        if res.name.strip() in ('HOH', 'WAT', 'DOD'):
+                        if res.name.strip() in _BOLTZ_WATER_RESNAMES:
                             continue
                         info = gemmi.find_tabulated_residue(res.name)
                         polymer = (info is not None
@@ -1553,8 +1559,11 @@ class ResultArchiveService:
             # for one binder chain the pair rows already carry both directions.
             # Chains whose token mapping failed would only feed ipsae2 an
             # unknown id — drop them instead of failing the whole run.
-            binder_letters = sorted({id_to_letter[c] for c in binder_chains
-                                     if c in id_to_letter})
+            # Layout 3 (boltz npz) carries no token labels: ipsae2 reads the
+            # boltz cif natively, so raw cif ids are its chain language —
+            # keep them instead of silently dropping the group aggregate.
+            binder_letters = sorted({id_to_letter.get(c, c) for c in binder_chains
+                                     if c in id_to_letter or not asym_counts})
             if len(binder_letters) >= 2:
                 command += ['--group', '+'.join(binder_letters)]
             result = subprocess.run(
@@ -1631,7 +1640,12 @@ class ResultArchiveService:
         (protenix msa/<chain>.a3m, af3 <chain>_msa.a3m) each describe one
         chain's alignment: the deepest row count is the total depth and
         every chain carries depth + per-position coverage, matching the
-        mol1 summary block so every backend fills the coverage chart."""
+        mol1 summary block so every backend fills the coverage chart.
+
+        a3m lowercase characters are insertions against the query columns;
+        they are stripped before column mapping, and rows that do not match
+        the query width afterwards are skipped. Gap counts accumulate one
+        row at a time, so memory scales with alignment width only."""
         import numpy as _np
         per_chain: list = []
         for name in src_zip.namelist():
@@ -1647,26 +1661,42 @@ class ResultArchiveService:
             stem = os.path.basename(name)[:-len('.a3m')]
             if stem.lower().endswith('_msa'):
                 stem = stem[:-len('_msa')]
-            chain = stem.strip() or os.path.basename(os.path.dirname(name))
-            depth = len(seqs)
-            cols = max(1, len(seqs[0]))
-            gap = _np.zeros((depth, cols), dtype=_np.int32)
-            for i, seq in enumerate(seqs):
-                b = _np.frombuffer(
-                    seq[:cols].encode('ascii', errors='ignore').upper(),
-                    dtype=_np.uint8)
-                gap[i, :len(b)] = (b == ord('-')) | (b == 0)
-            coverage = (100 - gap.sum(axis=0) * 100 // depth).tolist()
-            length = cols - int(gap[0].sum())
+            chain = stem.strip() or 'unnamed'
+            stripped = [''.join(ch for ch in seq if not ch.islower())
+                        for seq in seqs]
+            cols = len(stripped[0])
+            if cols <= 0:
+                continue
+            gap_counts = _np.zeros(cols, dtype=_np.int64)
+            kept = 0
+            query_gaps = 0
+            for seq in stripped:
+                b = _np.frombuffer(seq.encode('ascii', errors='ignore'),
+                                   dtype=_np.uint8)
+                if len(b) != cols:
+                    continue  # non-conforming row (non-ascii or ragged)
+                kept += 1
+                gaps = b == ord('-')
+                gap_counts += gaps
+                if kept == 1:
+                    query_gaps = int(gaps.sum())
+            if kept <= 0:
+                continue
+            coverage = (100 - gap_counts * 100 // kept).tolist()
             per_chain.append({
-                'chain': chain, 'length': length,
-                'depth': depth, 'coverage': coverage,
+                'chain': chain, 'length': cols - query_gaps,
+                'depth': kept, 'coverage': coverage,
             })
         if not per_chain:
             return None
-        per_chain.sort(key=lambda entry: entry['chain'])
-        deepest = max(entry['depth'] for entry in per_chain)
-        return {'depth': deepest, 'chains': per_chain}
+        deepest = {}
+        for entry in per_chain:
+            prev = deepest.get(entry['chain'])
+            if prev is None or entry['depth'] > prev['depth']:
+                deepest[entry['chain']] = entry
+        per_chain = sorted(deepest.values(), key=lambda entry: entry['chain'])
+        return {'depth': max(entry['depth'] for entry in per_chain),
+                'chains': per_chain}
 
     def _extract_compact_prediction_metrics_from_zip(self, source_zip_path: str) -> Optional[Dict[str, Any]]:
         try:
@@ -1772,10 +1802,7 @@ class ResultArchiveService:
                         'ligand_display_atom_plddts': ligand_display_atom_plddts,
                     }
                     if has_clash is not None:
-                        if isinstance(has_clash, str):
-                            metrics_block['has_clash'] = has_clash.strip().lower() == 'true'
-                        elif isinstance(has_clash, (bool, int, float)):
-                            metrics_block['has_clash'] = bool(has_clash)
+                        metrics_block['has_clash'] = coerce_bool(has_clash)
                     if score <= best_score:
                         parsed_entries.append((score, metrics_block))
                         continue
@@ -1892,7 +1919,15 @@ class ResultArchiveService:
                     root_summary = json.loads(src_zip.read(summary_name))
                     msa_stats = root_summary.get('msa')
                     if isinstance(msa_stats, dict) and msa_stats.get('depth'):
-                        merged['msa'] = msa_stats
+                        # a depth-only summary must not discard the richer
+                        # per-chain block derived from a3m files
+                        existing = merged.get('msa')
+                        if (not msa_stats.get('chains')
+                                and isinstance(existing, dict)
+                                and existing.get('chains')):
+                            merged['msa'] = {**existing, 'depth': msa_stats['depth']}
+                        else:
+                            merged['msa'] = msa_stats
                 except Exception:  # noqa: BLE001 — zip 无 summary.json 时跳过
                     pass
                 # The zipped summary predates per-chain MSA stats on older

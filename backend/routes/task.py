@@ -24,7 +24,19 @@ SCREENING_JSON_MAX_BYTES = 32 * 1024 * 1024
 
 
 def _pick_structure_name_from_archive(zip_path: str) -> str:
-    """Best structure member basename: ranked picks first, then any cif/pdb."""
+    """Best structure member basename: the extractor's best sample first,
+    then ranked picks, then any cif/pdb."""
+    try:
+        from backend.services.result_archive import ResultArchiveService
+        with zipfile.ZipFile(zip_path) as zf:
+            names = [n for n in zf.namelist() if not n.endswith('/')]
+            samples = ResultArchiveService._prediction_samples(zf, names)
+            best = ResultArchiveService._best_sample(
+                [c for c in samples if c.get('cif')])
+            if best and best.get('cif'):
+                return os.path.basename(best['cif'].rstrip('/'))
+    except Exception:
+        pass
     best_ranked = None
     first_sample = None
     first_any = None

@@ -17,6 +17,9 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y'}
 
 
+WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
+
+
 def coerce_bool(value: Any, default: bool = False) -> bool:
     """Type-rich bool parser for task/payload values (bool, int, float, str).
 
