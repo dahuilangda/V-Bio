@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Optional
 import gemmi
 from celery.result import AsyncResult
 from werkzeug.utils import secure_filename
-from backend.services.common_utils import coerce_bool
+from backend.services.common_utils import coerce_bool, to_finite_float
 
 
 _BOLTZ_WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
@@ -315,11 +315,7 @@ class ResultArchiveService:
 
     @staticmethod
     def _to_finite_float(value: object) -> Optional[float]:
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if math.isfinite(parsed) else None
+        return to_finite_float(value)
 
     @staticmethod
     def _boltz_confidence_heuristic_score(path: str) -> int:

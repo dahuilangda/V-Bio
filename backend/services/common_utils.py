@@ -17,6 +17,20 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y'}
 
 
+import math
+
+WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
+
+
+def to_finite_float(value):
+    """Parse a number-or-string into a finite float; None when unusable."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
 
 

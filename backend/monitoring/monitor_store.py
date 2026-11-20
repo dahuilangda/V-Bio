@@ -63,11 +63,8 @@ def _integer(value: Any, default: int = 0) -> int:
 
 
 def _finite_float(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return parsed if math.isfinite(parsed) else None
+    from backend.services.common_utils import to_finite_float
+    return to_finite_float(value)
 
 
 def _iso(value: Any) -> str | None:

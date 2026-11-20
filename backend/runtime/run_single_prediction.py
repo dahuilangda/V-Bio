@@ -1864,11 +1864,8 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
 
 
 def _to_finite_float(value: Any) -> Optional[float]:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
+    from backend.services.common_utils import to_finite_float
+    return to_finite_float(value)
 
 
 def _choose_preferred_existing_path(paths: Iterable[Path]) -> Optional[Path]:
