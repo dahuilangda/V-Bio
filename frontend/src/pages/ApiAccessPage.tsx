@@ -1283,7 +1283,7 @@ export function ApiAccessPage() {
     ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
   const allCustomCcdMolecules = collectCustomCcdMoleculesFromComponents(normalizedYamlBuilderComponents, { includeLigandSmiles: false });
-  const customCcdMolecules = (isNessoPredictionBackend || isEsmfold2PredictionBackend)
+  const customCcdMolecules = isNessoPredictionBackend
     ? []
     : allCustomCcdMolecules.filter((item) => looksLikeAminoAcidBackboneSmiles(item.smiles));
   const customCcdFlags = customCcdMolecules.length > 0
