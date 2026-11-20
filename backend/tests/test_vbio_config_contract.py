@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "configs" / "vbio.example.toml"
 
 KEY_RE = re.compile(r"""os\.environ\.get\(\s*["']([A-Z_][A-Z_0-9]*)["']""")
+SUBSCRIPT_RE = re.compile(r"""os\.environ\[\s*["']([A-Z_][A-Z_0-9]*)["']\s*\]""")
+GETENV_RE = re.compile(r"""os\.getenv\(\s*["']([A-Z_][A-Z_0-9]*)["']""")
 
 # 运行期注入键：worker/子进程启动时写入，非部署配置。
 # CELERY_WORKER_*/HOSTNAME 由入口脚本按实例生成；VBIO_API_URL 由任务代码
@@ -30,7 +32,52 @@ RUNTIME_INJECTED = {
     "VITE_API_TOKEN",  # 见下：构建期由 [frontend] 的同名键注入
 }
 
-SCAN_ROOTS = [REPO_ROOT / "backend", REPO_ROOT / "frontend" / "server"]
+VENDORED_PATH_PARTS = ("Mol-1-source", ".venv", "esm3_local")
+
+# 引擎容器内部键：在引擎镜像里读取，不经宿主 toml 配置。
+# 豁免名单即文档——新增容器内部键时登记到这里。
+ENGINE_INTERNAL_ENV_KEYS = {
+    # protenix2dock：runner -> 容器参数注入通道
+    "PROTENIX_INIT_COORDS_PATH",
+    "PROTENIX_TFG_CONSTRAINTS_PATH",
+    "PROTENIX_TFG_CONTACTS_PATH",
+    "PROTENIX_PIN_MASK_PATH",
+    "PROTENIX_COVALENT_BONDS_PATH",
+    "PROTENIX_SCORE_ONLY",
+    "PROTENIX_CCD_BOND_BANDS_PATH",
+    "PROTENIX_CLASH_SHELL_PATH",
+    "PROTENIX_TFG_STEREO",
+    "PROTENIX_ROOT_DIR",
+    "PROTENIX_AROMATIC_REBUILD",
+    "PROTENIX_AFFINITY_CKPT",
+    "HF_HUB_OFFLINE",
+    "P2D_INTERFACE_WEIGHTS",
+    "P2D_PEPTIDE_MSA_TIMEOUT_SECONDS",
+    # mol1 容器内路径与服务地址
+    "MOL_CHECKPOINT_DIR",
+    "MOL_MSA_CACHE_DIR",
+    "MOL_MSA_SERVER_URL",
+    # esm3 / peplm 容器内调优
+    "ESM3_ADAPTER_ROOT",
+    "ESM3_IDLE_RELEASE_SECONDS",
+    "ESM3_GPU_ACQUIRE_TIMEOUT",
+    "ESM3_MAX_LIVE_OPTIMIZERS",
+    "PEPLM_BETA_KL",
+    "PEPLM_ENTROPY_COEF",
+    # d 肽 boltz 评分
+    "DPEPTIDE_BOLTZ_CACHE",
+    "DPEPTIDE_BOLTZ_ROOT",
+    "DPEPTIDE_USE_MSA",
+    # halo / 基准脚本
+    "HALO_RUNS_DIR",
+    "COMPARE_FEP_GPU_IDS",
+}
+
+SCAN_ROOTS = [
+    REPO_ROOT / "backend",
+    REPO_ROOT / "frontend" / "server",
+    REPO_ROOT / "capabilities",
+]
 
 
 def _example_keys() -> set[str]:
@@ -47,10 +94,15 @@ def _code_keys() -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     for root in SCAN_ROOTS:
         for path in sorted(root.rglob("*.py")):
+            relative = str(path.relative_to(REPO_ROOT))
+            if any(part in relative for part in VENDORED_PATH_PARTS):
+                continue
             text = path.read_text(encoding="utf-8", errors="ignore")
-            for match in KEY_RE.finditer(text):
-                found.setdefault(match.group(1), []).append(
-                    str(path.relative_to(REPO_ROOT)))
+            keys = {match.group(1) for match in
+                    list(KEY_RE.finditer(text)) + list(SUBSCRIPT_RE.finditer(text))
+                    + list(GETENV_RE.finditer(text))}
+            for key in keys:
+                found.setdefault(key, []).append(relative)
     return found
 
 
@@ -60,6 +112,7 @@ def test_every_code_referenced_key_is_documented():
     missing = sorted(
         key for key in keys
         if key not in documented and key not in RUNTIME_INJECTED
+        and key not in ENGINE_INTERNAL_ENV_KEYS
     )
     assert not missing, (
         "代码读取了模板未登记的配置键（加进 vbio.example.toml 对应小节，"
