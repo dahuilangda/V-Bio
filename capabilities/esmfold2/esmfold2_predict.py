@@ -16,7 +16,7 @@ MSA depth) consumes it unchanged:
 
 Boundary notes (see configs/engine_capabilities.json):
   - L-peptides only; D positions would need D-form CCD modifications.
-  - constraints.bond is rejected: cross-chain bond constraints are a
+  - constraints are rejected: contact/bond constraints are a
     protenix2dock capability in this integration.
   - No MSA input (single-sequence mode; the full model still benefits from
     its language-model priors).

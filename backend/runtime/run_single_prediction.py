@@ -1450,10 +1450,6 @@ def _docker_warn(message: str) -> None:
     print(f"[WARN] {message}", file=sys.stderr)
 
 
-def make_task_scoped_container_name(task_id: Optional[str]) -> Optional[str]:
-    return make_scoped_container_name(task_id, prefix="boltz-af3")
-
-
 def sanitize_a3m_content(content: str, context: str = "") -> str:
     """
     移除 A3M 内容中的非法控制字符（例如 \\x00）。
@@ -1724,7 +1720,7 @@ def _infer_affinity_chain_plan(
     structure_path: Path,
     requested_ligand_chain: str,
 ) -> Optional[Dict[str, Any]]:
-    solvent_names = {"HOH", "WAT"}
+    solvent_names = {"HOH", "WAT", "H2O", "DOD"}
     ligand_chain_requested = str(requested_ligand_chain or "").strip()
     if not ligand_chain_requested:
         return None
@@ -1929,7 +1925,7 @@ def _cif_chain_has_nonpolymer_atom_site(structure_path: Path, chain_id: str) -> 
     except Exception:
         return None
 
-    solvent_names = {"HOH", "WAT"}
+    solvent_names = {"HOH", "WAT", "H2O", "DOD"}
     atom_fields: List[str] = []
     atom_field_index: Dict[str, int] = {}
     inside_atom_loop = False
@@ -1989,7 +1985,7 @@ def _structure_chain_has_nonpolymer_ligand(structure_path: Path, chain_id: str) 
     if cif_result is not None:
         return cif_result
 
-    solvent_names = {"HOH", "WAT"}
+    solvent_names = {"HOH", "WAT", "H2O", "DOD"}
     polymer_like_names = set(AMINO_ACID_MAPPING.keys()) | {
         "A", "C", "G", "U", "I",
         "DA", "DC", "DG", "DT", "DI", "DU",
@@ -3249,7 +3245,7 @@ def _find_ligand_chain_and_resname_in_structure(path: Path) -> Optional[Tuple[st
         "A", "C", "G", "U", "I",
         "DA", "DC", "DG", "DT", "DI", "DU",
     }
-    solvent_names = {"HOH", "WAT"}
+    solvent_names = {"HOH", "WAT", "H2O", "DOD"}
 
     try:
         structure = gemmi.read_structure(str(path))
@@ -4468,53 +4464,6 @@ def _sanitize_constraints_for_chain_lengths(yaml_content: str) -> str:
     return yaml_content
 
 
-def _load_template_residue_number_mapping(
-    template_path: Path,
-    preferred_chain: Optional[str] = None,
-) -> Tuple[str, List[int]]:
-    structure = gemmi.read_structure(str(template_path))
-    structure.setup_entities()
-    if len(structure) == 0:
-        return "", []
-    model = structure[0]
-    selected_chain = None
-    preferred = str(preferred_chain or "").strip()
-    if preferred:
-        for chain in model:
-            if str(chain.name or "").strip() == preferred:
-                selected_chain = chain
-                break
-    if selected_chain is None:
-        for chain in model:
-            if any(residue.het_flag == "A" for residue in chain):
-                selected_chain = chain
-                break
-    if selected_chain is None:
-        selected_chain = next(iter(model), None)
-    if selected_chain is None:
-        return "", []
-
-    aa3_to1 = {
-        "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q", "GLU": "E", "GLY": "G",
-        "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P", "SER": "S",
-        "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V", "SEC": "U", "PYL": "O",
-    }
-    seen: set[Tuple[int, str]] = set()
-    sequence_chars: List[str] = []
-    residue_numbers: List[int] = []
-    for residue in selected_chain:
-        if residue.het_flag != "A":
-            continue
-        residue_key = (int(residue.seqid.num), str(residue.seqid.icode or "").strip())
-        if residue_key in seen:
-            continue
-        seen.add(residue_key)
-        residue_numbers.append(int(residue.seqid.num))
-        residue_name = str(residue.name or "").strip().upper()
-        sequence_chars.append(aa3_to1.get(residue_name, "X"))
-    return "".join(sequence_chars), residue_numbers
-
-
 def _load_template_chain_mappings(
     template_path: Path,
     preferred_chain: Optional[str] = None,
@@ -5464,7 +5413,16 @@ def run_esmfold2_backend(
         command += ["--samples", samples_env]
 
     started = time.time()
-    completed = subprocess.run(command, check=False)
+    # Cold-cache weight downloads (multi-GB) can exceed any interactive
+    # patience; bound the run so a hung container cannot pin the worker.
+    timeout_seconds = int(os.environ.get("ESMFOLD2_RUN_TIMEOUT_SECONDS") or 14400)
+    try:
+        completed = subprocess.run(command, check=False, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["docker", "stop", container_name], capture_output=True)
+        raise RuntimeError(
+            f"ESMFold2 inference timed out after {timeout_seconds}s; "
+            "weights download or inference hung (container stopped)")
     print(f"ESMFold2 inference finished ({time.time() - started:.0f}s, "
           f"exit={completed.returncode})", file=sys.stderr)
     if completed.returncode != 0:
@@ -10172,6 +10130,7 @@ def _pocket_collect_refine(
     require_bonds: bool,
     chirality_label: str,
     expect_blind: bool = False,
+    linker_ccd: str = "SEZ",
 ) -> Dict[str, Any]:
     """GPU-result half of the pocket route (pairs with
     :func:`_pocket_place_for_refine` + dispatch): collect the dispatched
@@ -11981,6 +11940,7 @@ def run_peptide_design_backend(
                             require_bonds=(design_mode == "bicyclic"),
                             chirality_label="d",
                             expect_blind=blind_linear_route,
+                            linker_ccd=linker_ccd,
                         )
                         d_space_refined = gate_result["refined"]
                         d_space_metrics = gate_result["metrics"]
@@ -12078,6 +12038,7 @@ def run_peptide_design_backend(
                         pocket_sequence_contacts=pocket_sequence_contacts,
                         require_bonds=(design_mode == "bicyclic"),
                         chirality_label="l",
+                        linker_ccd=linker_ccd,
                     )
                     structure_file = Path(gate_result["refined"])
                     staged_path = gate_result["staged"]
@@ -14124,6 +14085,14 @@ def main():
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
                         low_vram=worker_low_vram,
+                    )
+                elif worker_backend == "esmfold2":
+                    run_esmfold2_backend(
+                        worker_temp_dir,
+                        worker_yaml_content,
+                        worker_output_archive_path,
+                        seed=worker_seed,
+                        task_id=worker_task_id,
                     )
                 elif worker_backend == "mol1":
                     run_mol1_backend(

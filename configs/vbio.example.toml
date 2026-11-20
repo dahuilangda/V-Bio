@@ -84,6 +84,7 @@ PEPTIDE_CANDIDATE_DISPATCH_WINDOW = ""
 PEPTIDE_REFINE_QUEUE_GRACE_SECONDS = ""
 # D 肽相关
 DPEPTIDE_PLDDT_GATE = ""
+DPEPTIDE_PLDDT_GATE_D = ""
 DPEPTIDE_TARGET_PREDICT_TIMEOUT_SECONDS = ""
 
 # ---------------------------------------------------------------- MSA 服务
@@ -174,9 +175,15 @@ MOL1_ATOM_CONFIDENCE = ""
 
 [esmfold2]
 ESMFOLD2_DOCKER_IMAGE = "vbio-esmfold2-runtime:latest"
-# 容器内 diffusion 样本数；其余调优键（ESMFOLD2_WEIGHTS /
-# ESMFOLD2_NUM_LOOPS / ESMFOLD2_NUM_SAMPLING_STEPS）按需在环境中设置
+# 容器内 diffusion 样本数
 ESMFOLD2_SAMPLES = "5"
+# 权重仓（HF 标识或本地路径）
+ESMFOLD2_WEIGHTS = ""
+# 循环次数与采样步数（空 = 引擎默认）
+ESMFOLD2_NUM_LOOPS = ""
+ESMFOLD2_NUM_SAMPLING_STEPS = ""
+# 单次推理容器超时秒（防冷缓存下载挂死占住 worker）
+ESMFOLD2_RUN_TIMEOUT_SECONDS = "14400"
 
 [rfd4]
 RFD4_DOCKER_IMAGE = "rfd4-proteina-engine:cu13"

@@ -1,7 +1,8 @@
 """Slow pass: add pair_ipsae to rows that have PAE but not ipSAE."""
 import sys, threading, logging
 sys.path.insert(0, '/data/V-Bio')
-import psycopg2, json
+import json, os
+import psycopg2
 from backend.services.result_archive import ResultArchiveService
 
 svc = ResultArchiveService.__new__(ResultArchiveService)
@@ -9,7 +10,7 @@ svc._compact_metrics_cache = {}
 svc._compact_metrics_lock = threading.Lock()
 svc.logger = __import__('logging').getLogger('backfill')
 
-conn = psycopg2.connect('postgresql://postgres:postgres@host.docker.internal:54322/postgres', application_name='vbio-ipsae-backfill')
+conn = psycopg2.connect(os.environ.setdefault('VBIO_MONITOR_DATABASE_URL', 'postgresql://postgres:postgres@127.0.0.1:54322/postgres'), application_name='vbio-ipsae-backfill')
 conn.autocommit = True
 cur = conn.cursor()
 cur.execute("SET ROLE anon")

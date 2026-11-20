@@ -6,7 +6,6 @@
       "status": "active",
       "workflows": [
         "prediction",
-        "virtual_screening",
         "lead_optimization"
       ],
       "chirality": [

@@ -83,14 +83,6 @@ def arms_for_backend(ccd: str, backend: str) -> List[str]:
     return list(linker.arm_atoms)
 
 
-def codes_needing_af3_userccd(codes: List[str]) -> List[str]:
-    return [c for c in codes if get_linker(c).af3_userccd]
-
-
-def codes_needing_protenix_overlay(codes: List[str]) -> List[str]:
-    return [c for c in codes if get_linker(c).protenix_overlay]
-
-
 def atom_map() -> Dict[str, List[str]]:
     """{ccd: [arm atoms]} for consumers that only need the legacy shape
     (candidate-yaml bond construction, linker-code detection)."""

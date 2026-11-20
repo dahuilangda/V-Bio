@@ -454,8 +454,8 @@ def register_prediction_routes(
             # Nesso consumes protein sequences directly and has no MSA input contract.
             if use_msa_server:
                 logger.info(
-                    'Force use_msa_server=False for backend=nesso (client=%s).',
-                    request.remote_addr,
+                    'Force use_msa_server=False for backend=%s: no MSA input '
+                    'contract (client=%s).', backend, request.remote_addr,
                 )
             use_msa_server = False
 
