@@ -24,6 +24,7 @@ import {
 import { useLeadOptHaloRun, type LeadOptHaloCandidate } from './leadopt/hooks/useLeadOptHaloRun';
 import type { LeadOptHaloMode } from '../../api/backendLeadOptimizationApi';
 import { PocketBoxControls } from './PocketBoxControls';
+import '../../styles/lead-optimization.css';
 
 export interface LeadOptHaloSnapshot {
   taskId: string | null;

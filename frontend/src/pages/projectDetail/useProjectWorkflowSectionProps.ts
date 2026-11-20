@@ -25,6 +25,8 @@ import { engineSupportsFeature } from '../../config/engineCapabilities';
 import type { PredictionOptions } from '../../types/models';
 import type { ProjectWorkspaceDraft, WorkspaceTab } from './workspaceTypes';
 
+const EMPTY_SNAPSHOT_RECORD: Record<string, unknown> = {};
+
 interface UseProjectWorkflowSectionPropsInput {
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
@@ -486,8 +488,8 @@ export function useProjectWorkflowSectionProps({
         onResizerPointerDown: onResultsResizerPointerDown,
         onResizerKeyDown: onResultsResizerKeyDown,
         snapshotCards,
-        snapshotConfidence: snapshotConfidence || {},
-        snapshotAffinity: snapshotAffinity || {},
+        snapshotConfidence: snapshotConfidence || EMPTY_SNAPSHOT_RECORD,
+        snapshotAffinity: snapshotAffinity || EMPTY_SNAPSHOT_RECORD,
         resultChainIds,
         selectedResultTargetChainId,
         selectedResultLigandChainId,

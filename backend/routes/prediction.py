@@ -10,6 +10,7 @@ from rdkit import Chem
 from backend.core.engine_capabilities import active_engine_ids, get_engine
 from backend.runtime.nesso_backend import normalize_nesso_screening_input_yaml
 from backend.runtime.screening_library import merge_screening_compounds_file_into_yaml
+from backend.services.common_utils import error_payload
 
 
 def _parse_prediction_properties(raw_value: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -742,7 +743,7 @@ def register_prediction_routes(
             )
         except Exception as exc:
             logger.exception('Failed to dispatch Celery task for prediction request from %s: %s', request.remote_addr, exc)
-            return jsonify({'error': 'Failed to dispatch prediction task.', 'details': str(exc)}), 500
+            return jsonify(error_payload('Failed to dispatch prediction task.', details=exc)), 500
         response_payload = {
             'task_id': task.id,
             'queue': target_queue,

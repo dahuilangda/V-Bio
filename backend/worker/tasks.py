@@ -60,7 +60,6 @@ _ensure_repo_root_on_path()
 
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Subprocess timeout defaults; peptide workflows can disable hard timeouts to

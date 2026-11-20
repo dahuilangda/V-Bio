@@ -25,6 +25,7 @@ import {
 } from '../api/adminMonitorApi';
 import { useAuth } from '../hooks/useAuth';
 import { formatDateTime, formatDuration } from '../utils/date';
+import '../styles/admin-monitor.css';
 
 const WINDOW_OPTIONS = [
   { value: 24, label: '24h' },

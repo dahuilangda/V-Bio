@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -12,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 # /status/batch 专用常驻线程池：每请求新建池会反复抖动线程
 _STATUS_BATCH_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="status-batch")
 from typing import Any, Callable, Dict, Optional, Tuple
+
+from backend.services.common_utils import error_payload
 
 from celery.result import AsyncResult
 from flask import jsonify, request, send_file, send_from_directory
@@ -35,8 +38,9 @@ def _pick_structure_name_from_archive(zip_path: str) -> str:
                 [c for c in samples if c.get('cif')])
             if best and best.get('cif'):
                 return os.path.basename(best['cif'].rstrip('/'))
-    except Exception:
-        pass
+    except Exception as pick_exc:
+        logging.getLogger(__name__).debug(
+            'structure-name best-sample pick skipped: %s', pick_exc)
     best_ranked = None
     first_sample = None
     first_any = None
@@ -731,7 +735,7 @@ def register_task_routes(
             return jsonify({'error': 'Invalid file path detected.'}), 400
         except Exception as exc:
             logger.exception('Unexpected error while resolving full results for task %s: %s', task_id, exc)
-            return jsonify({'error': f'Failed to resolve full result archive: {exc}'}), 500
+            return jsonify(error_payload('Failed to resolve full result archive.', details=exc)), 500
 
         directory = app.config['UPLOAD_FOLDER']
         logger.info('Serving full result file %s for task %s from %s.', filename, task_id, filepath)
@@ -759,14 +763,14 @@ def register_task_routes(
             return jsonify({'error': 'Invalid file path detected.'}), 400
         except Exception as exc:
             logger.exception('Unexpected error while resolving view source archive for task %s: %s', task_id, exc)
-            return jsonify({'error': f'Failed to resolve source result archive for view: {exc}'}), 500
+            return jsonify(error_payload('Failed to resolve source result archive for view.', details=exc)), 500
 
         preferred_structure_name = str(request.args.get('structure_name') or '').strip()
         try:
             view_path = build_or_get_view_archive(filepath, preferred_structure_name=preferred_structure_name or None)
         except Exception as exc:
             logger.warning('Failed to build view archive for task %s from %s: %s', task_id, filepath, exc)
-            return jsonify({'error': f'Failed to build view archive: {exc}'}), 500
+            return jsonify(error_payload('Failed to build view archive.', details=exc)), 500
 
         download_name = f'{task_id}_view_results.zip'
         logger.info('Serving view result archive for task %s: %s', task_id, view_path)
@@ -800,7 +804,7 @@ def register_task_routes(
             return jsonify({'error': 'Invalid file path detected.'}), 400
         except Exception as exc:
             logger.exception('Unexpected error while resolving results for task %s: %s', task_id, exc)
-            return jsonify({'error': f'Failed to resolve result archive: {exc}'}), 500
+            return jsonify(error_payload('Failed to resolve result archive.', details=exc)), 500
 
         try:
             with zipfile.ZipFile(filepath) as archive:
@@ -827,10 +831,10 @@ def register_task_routes(
             return jsonify({'error': 'Result archive is not a valid ZIP file.'}), 500
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             logger.error('Invalid screening JSON in results for task %s: %s', task_id, exc)
-            return jsonify({'error': f'Failed to parse nesso/screening.json: {exc}'}), 500
+            return jsonify(error_payload('Failed to parse nesso screening results.', details=exc)), 500
         except Exception as exc:
             logger.exception('Unexpected error while reading screening results for task %s: %s', task_id, exc)
-            return jsonify({'error': f'Failed to read screening results: {exc}'}), 500
+            return jsonify(error_payload('Failed to read screening results.', details=exc)), 500
 
         if not isinstance(screening, dict) or not isinstance(screening.get('compounds'), list):
             return jsonify({'error': 'nesso/screening.json must be an object with a compounds array.'}), 500
@@ -890,7 +894,7 @@ def register_task_routes(
             except Exception:
                 pass
             logger.exception("Failed to save uploaded file '%s' for task %s: %s", filename, task_id, exc)
-            return jsonify({'error': f'Failed to save file: {exc}'}), 500
+            return jsonify(error_payload('Failed to save file.', details=exc)), 500
         except Exception as exc:
             try:
                 if 'temp_save_path' in locals() and os.path.exists(temp_save_path):
@@ -898,7 +902,7 @@ def register_task_routes(
             except Exception:
                 pass
             logger.exception('An unexpected error occurred during file upload for task %s: %s', task_id, exc)
-            return jsonify({'error': f'An unexpected error occurred: {exc}'}), 500
+            return jsonify(error_payload('An unexpected error occurred.', details=exc)), 500
 
     @app.route('/tasks/runtime_index', methods=['GET'])
     @require_api_token
@@ -963,10 +967,7 @@ def register_task_routes(
             return jsonify(payload)
         except Exception as exc:
             logger.exception('Error collecting runtime task index: %s', exc)
-            return jsonify({
-                'error': 'Could not collect runtime task index.',
-                'details': str(exc),
-            }), 500
+            return jsonify(error_payload('Could not collect runtime task index.', details=exc)), 500
 
     @app.route('/workers/capabilities', methods=['GET'])
     @app.route('/workers/cluster_status', methods=['GET'])
@@ -978,7 +979,7 @@ def register_task_routes(
             return jsonify(payload)
         except Exception as exc:
             logger.exception('Failed to collect worker capability snapshot: %s', exc)
-            return jsonify({'error': 'Failed to collect worker capability snapshot.', 'details': str(exc)}), 500
+            return jsonify(error_payload('Failed to collect worker capability snapshot.', details=exc)), 500
 
     @app.route('/tasks/<task_id>', methods=['DELETE'])
     @require_api_token
@@ -1004,6 +1005,6 @@ def register_task_routes(
             }), 200
         except Exception as exc:
             logger.exception('Failed to terminate task %s: %s', task_id, exc)
-            return jsonify({'error': 'Failed to terminate task runtime.', 'details': str(exc)}), 500
+            return jsonify(error_payload('Failed to terminate task runtime.', details=exc)), 500
 
     

@@ -536,11 +536,26 @@ export async function pullResultForViewerTask(params: {
       const paeMatrix = asRecord(parsedConfidence).pae_matrix;
       const chainBounds = asRecord(parsedConfidence).pae_chain_bounds;
       if (Array.isArray(paeMatrix) && paeMatrix.length > 0) {
-        localStorage.setItem('vbio:pae:latest', JSON.stringify({
+        const payload = JSON.stringify({
           task_id: taskId,
           pae_matrix: paeMatrix,
           pae_chain_bounds: Array.isArray(chainBounds) ? chainBounds : []
-        }));
+        });
+        // 序列化即为主线程成本；上限 ~2MB，超出直接放弃缓存。
+        if (payload.length <= 2 * 1024 * 1024) {
+          const write = () => {
+            try {
+              localStorage.setItem('vbio:pae:latest', payload);
+            } catch {
+              // quota errors are non-fatal
+            }
+          };
+          if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(write, { timeout: 2000 });
+          } else {
+            setTimeout(write, 0);
+          }
+        }
       }
     } catch {
       // quota/serialization errors are non-fatal
@@ -734,6 +749,15 @@ export async function refreshTaskStatus(params: {
         ...incoming,
         __task_id: activeTaskId
       };
+      // 内容不变则保留原对象：statusInfo 是结果区 props 成员，
+      // 每 tick 新身份会击穿 Results 区的 memo 边界。
+      if (
+        previous !== null &&
+        previous.__task_id === activeTaskId &&
+        JSON.stringify(previous) === JSON.stringify(scopedIncoming)
+      ) {
+        return previous;
+      }
       const incomingRows = readPeptideCandidateRowsFromPayload(incoming);
       if (incomingRows.length > 0) {
         return scopedIncoming;

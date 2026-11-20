@@ -33,6 +33,7 @@ import { MemoLigand2DPreview } from './Ligand2DPreview';
 import { MolstarViewer } from './MolstarViewer';
 import { useVirtualScreeningPredictions } from './useVirtualScreeningPredictions';
 import { asRecord } from '../../pages/projectTasks/recordReaders';
+import '../../styles/virtual-screening.css';
 
 interface VirtualScreeningResultsSectionProps {
   screening: Record<string, unknown>;

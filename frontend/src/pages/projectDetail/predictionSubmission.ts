@@ -401,12 +401,6 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
         setError('Virtual Screening accepts at most 200 compounds per batch.');
         return;
       }
-      const screeningValidation = await validateVirtualScreeningSmiles(parsedScreening.compounds);
-      if (screeningValidation.invalid.length > 0) {
-        setWorkspaceTab('components');
-        setError(screeningValidation.invalid.slice(0, 3).map((item) => item.message).join(' '));
-        return;
-      }
       const contextLigands = submissionConfig.components
         .map((component, index) => ({ component, index }))
         .filter(({ component }) => component.type === 'ligand' && component.inputMethod !== 'ccd')
@@ -416,13 +410,23 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
           smiles: component.sequence,
           sourceIndex: index + 1
         }));
-      if (contextLigands.length > 0) {
-        const contextValidation = await validateVirtualScreeningSmiles(contextLigands);
-        if (contextValidation.invalid.length > 0) {
-          setWorkspaceTab('components');
-          setError(`Invalid context ligand: ${contextValidation.invalid[0].message}`);
-          return;
-        }
+      // 合并一次 RDKit 校验：化合物 + 上下文配体按序拼接，避免两轮全量遍历
+      const offset = parsedScreening.compounds.length;
+      const combinedValidation = await validateVirtualScreeningSmiles([
+        ...parsedScreening.compounds,
+        ...contextLigands
+      ]);
+      const screeningInvalid = combinedValidation.invalid.filter((item) => item.index < offset);
+      if (screeningInvalid.length > 0) {
+        setWorkspaceTab('components');
+        setError(screeningInvalid.slice(0, 3).map((item) => item.message).join(' '));
+        return;
+      }
+      const contextInvalid = combinedValidation.invalid.filter((item) => item.index >= offset);
+      if (contextInvalid.length > 0) {
+        setWorkspaceTab('components');
+        setError(`Invalid context ligand: ${contextInvalid[0].message}`);
+        return;
       }
     }
 

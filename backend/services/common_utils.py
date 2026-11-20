@@ -9,17 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import yaml
+import math
 
 
 def parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y'}
-
-
-import math
-
-WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
 
 
 def to_finite_float(value):
@@ -32,6 +28,15 @@ def to_finite_float(value):
 
 
 WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
+
+
+def error_payload(message: str, details=None) -> dict:
+    """用户安全的错误载荷：message 始终返回；内部细节仅在
+    EXPOSE_ERROR_DETAILS 开启时附带（服务端日志另由调用点负责）。"""
+    from backend.core import config
+    if details is not None and config.EXPOSE_ERROR_DETAILS:
+        return {'error': message, 'details': str(details)}
+    return {'error': message}
 
 
 def coerce_bool(value: Any, default: bool = False) -> bool:

@@ -883,7 +883,10 @@ export function useProjectDetailRuntimeContext() {
 
     let cancelled = false;
     const applyTaskSnapshot = (taskRow: ProjectTask) => {
-      const marker = `${focusedRowId}|${String(taskRow.updated_at || '').trim()}`;
+      // 轮询会让 updated_at 每 tick 变化；以行内输入选项的内容做标记，
+      // 只有任务真正切换或选项内容变化时才重放快照，避免覆盖用户编辑。
+      const optionsMarker = JSON.stringify(readTaskInputOptions(taskRow));
+      const marker = `${focusedRowId}|${optionsMarker}`;
       if (componentTaskSwitchRef.current === marker) return;
       componentTaskSwitchRef.current = marker;
       setDraft((prev) => {
@@ -892,6 +895,9 @@ export function useProjectDetailRuntimeContext() {
           mergeTaskSnapshotIntoConfig(prev.inputConfig, taskRow),
           prev.backend
         );
+        if (JSON.stringify(mergedConfig) === JSON.stringify(prev.inputConfig)) {
+          return prev;
+        }
         return {
           ...prev,
           taskName: String(taskRow.name || prev.taskName || '').trim(),
@@ -1728,6 +1734,7 @@ export function useProjectDetailRuntimeContext() {
   useProjectRuntimeEffects({
     projectTaskId: statusContextTaskRow?.task_id || project?.task_id || null,
     projectTaskState: displayTaskState || project?.task_state || null,
+    suppressStatusPolling: runtimePollingSummary.hasRuntimeTasks === true,
     refreshStatus,
     statusContextTaskRow,
     runtimeResultTask,

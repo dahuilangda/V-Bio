@@ -58,6 +58,7 @@ import { loadRDKitModule } from '../utils/rdkit';
 import { rdkitMolHasAminoAcidBackbone, looksLikeAminoAcidBackboneSmiles } from '../utils/inputValidation';
 import { ApiYamlBuilderModal } from './ApiYamlBuilderModal';
 import { ApiProjectTokenModal } from './ApiProjectTokenModal';
+import '../styles/api-access.css';
 import { ApiTokenRegistryModal } from './ApiTokenRegistryModal';
 import { ApiDocsPanel } from './ApiDocsPanel';
 import { ApiCommandRightColumn } from './ApiCommandRightColumn';

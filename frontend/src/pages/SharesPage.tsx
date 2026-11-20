@@ -14,6 +14,8 @@ import {
 } from '../api/supabaseLite';
 import type { ProjectShareRecord, ProjectTaskShareRecord, ShareAccessLevel } from '../types/models';
 import { formatDateTime } from '../utils/date';
+import '../styles/shares-page.css';
+import '../styles/shares.css';
 
 type ShareDirection = 'incoming' | 'outgoing';
 type ShareKind = 'project' | 'task';

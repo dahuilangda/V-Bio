@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from backend.services.common_utils import error_payload
+
 import gemmi
 from flask import jsonify, request
 
@@ -31,7 +33,7 @@ def register_lead_opt_routes(
             from rdkit import Chem
             from rdkit.Chem import BRICS
         except Exception as exc:
-            return jsonify({'error': f'RDKit is required for fragment preview: {exc}'}), 500
+            return jsonify(error_payload('RDKit is required for fragment preview.', details=exc)), 500
 
         input_mol = Chem.MolFromSmiles(smiles)
         if not input_mol:

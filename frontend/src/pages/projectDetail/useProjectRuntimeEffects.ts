@@ -35,6 +35,7 @@ interface UseProjectRuntimeEffectsInput {
   ) => Promise<void>;
   isPeptideDesignWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
+  suppressStatusPolling?: boolean;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   activeConstraintId: string | null;
   selectedContactConstraintIdsLength: number;
@@ -53,6 +54,7 @@ export function useProjectRuntimeEffects({
   pullResultForViewer,
   isPeptideDesignWorkflow,
   isLeadOptimizationWorkflow,
+  suppressStatusPolling = false,
   workspaceTab,
   activeConstraintId,
   selectedContactConstraintIdsLength,
@@ -64,7 +66,9 @@ export function useProjectRuntimeEffects({
   const refreshStatusRef = useRef(refreshStatus);
   refreshStatusRef.current = refreshStatus;
   useEffect(() => {
-    if (isLeadOptimizationWorkflow) return;
+    // 行轮询器（runtime context）活跃时它已覆盖同一数据；本循环只在
+    // 行轮询暂停（如 lead-opt）时补位，避免同一任务双轮询。
+    if (isLeadOptimizationWorkflow || suppressStatusPolling) return;
     const pollingTaskId = String(statusContextTaskRow?.task_id || runtimeResultTask?.task_id || projectTaskId || '').trim();
     if (!pollingTaskId) return;
     const normalizedState = String(
@@ -98,6 +102,7 @@ export function useProjectRuntimeEffects({
     };
   }, [
     isLeadOptimizationWorkflow,
+    suppressStatusPolling,
     projectTaskId,
     projectTaskState,
     statusContextTaskRow?.task_id,

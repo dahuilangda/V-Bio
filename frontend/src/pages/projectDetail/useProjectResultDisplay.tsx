@@ -317,7 +317,7 @@ export function useProjectResultDisplay({
     : affinityPreviewStructureFormat;
   const hasAffinityDisplayStructure = Boolean(affinityDisplayStructureText.trim());
 
-  const predictionLigandPreview = shouldPreparePredictionLigandPreview
+  const predictionLigandPreview = useMemo(() => (shouldPreparePredictionLigandPreview
     ? selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
         // Sequence ligands (designed peptides) render as the residue-circle
         // preview; a RDKit 2D depiction is meaningless for them.
@@ -343,7 +343,17 @@ export function useProjectResultDisplay({
               : 'No ligand input.'}
         </div>
       )
-    : null;
+    : null), [
+      shouldPreparePredictionLigandPreview,
+      selectedResultLigandSequence,
+      selectedResultLigandComponentType,
+      snapshotLigandResiduePlddts,
+      selectedResultLigandModifications,
+      predictionLigandPreviewSmiles,
+      exactLigandConfidencePreview.atomPlddts,
+      snapshotPlddt,
+      overviewPrimaryLigand
+    ]);
 
   return {
     displayStructureText,

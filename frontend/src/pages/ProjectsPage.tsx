@@ -40,6 +40,7 @@ import type { CopilotPlanAction, Project, TaskState } from '../types/models';
 import { backendLabel } from './projectTasks/taskPresentation';
 import { readCopilotText, readCopilotNumber, isOneOf } from '../utils/copilotPayload';
 import { Field } from '../components/common/Field';
+import '../styles/projects-page.css';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,

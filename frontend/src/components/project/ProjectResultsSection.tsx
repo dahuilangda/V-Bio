@@ -166,7 +166,7 @@ function PaeMatrixSection({ snapshotConfidence, taskId }: { snapshotConfidence: 
       // ignore
     }
     return null;
-  }, [taskId]);
+  }, [taskId, conf.pae_matrix]);
   let matrix = conf.pae_matrix;
   let bounds = conf.pae_chain_bounds;
   if (!Array.isArray(matrix) || matrix.length === 0) {

@@ -418,13 +418,29 @@ export function mergePayloadFields<T extends object, U extends object>(next: T, 
     }
     merged[key] = prevAny[key];
   };
+  // 摘要轮询载荷比 hydration 后的完整 confidence/affinity 更浅；保留键更多
+  // 的一方，避免每 tick 丢失 msa/pae_matrix 并触发下游 memo 风暴。
+  const richerOf = (nextValue: unknown, prevValue: unknown): unknown => {
+    const nextKeys = nextValue && typeof nextValue === 'object' ? Object.keys(nextValue as object).length : 0;
+    const prevKeys = prevValue && typeof prevValue === 'object' ? Object.keys(prevValue as object).length : 0;
+    return nextKeys >= prevKeys ? nextValue : prevValue;
+  };
   if (Object.prototype.hasOwnProperty.call(nextAny, 'confidence') || Object.prototype.hasOwnProperty.call(prevAny, 'confidence')) {
-    merged.confidence = hasObjectContent(nextAny.confidence)
-      ? mergeConfidencePreservingPeptideCandidates(nextAny.confidence, prevAny.confidence)
-      : prevAny.confidence;
+    if (hasObjectContent(nextAny.confidence) && hasObjectContent(prevAny.confidence)) {
+      const richer = richerOf(nextAny.confidence, prevAny.confidence);
+      merged.confidence = richer === nextAny.confidence
+        ? mergeConfidencePreservingPeptideCandidates(nextAny.confidence, prevAny.confidence)
+        : prevAny.confidence;
+    } else {
+      merged.confidence = hasObjectContent(nextAny.confidence)
+        ? mergeConfidencePreservingPeptideCandidates(nextAny.confidence, prevAny.confidence)
+        : prevAny.confidence;
+    }
   }
   if (Object.prototype.hasOwnProperty.call(nextAny, 'affinity') || Object.prototype.hasOwnProperty.call(prevAny, 'affinity')) {
-    merged.affinity = hasObjectContent(nextAny.affinity) ? nextAny.affinity : prevAny.affinity;
+    merged.affinity = hasObjectContent(nextAny.affinity) || hasObjectContent(prevAny.affinity)
+      ? richerOf(nextAny.affinity, prevAny.affinity)
+      : prevAny.affinity;
   }
   if (Object.prototype.hasOwnProperty.call(nextAny, 'properties') || Object.prototype.hasOwnProperty.call(prevAny, 'properties')) {
     merged.properties =

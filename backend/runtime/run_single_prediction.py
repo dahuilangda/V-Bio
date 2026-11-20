@@ -4112,8 +4112,8 @@ def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> No
                 " 检测到 templates 输入，模板可能包含不受支持的 CCD 组分。"
                 "请移除该模板，或替换为标准氨基酸残基模板后重试。"
             )
-    except Exception:
-        pass
+    except Exception as manifest_exc:
+        print(f"[WARN] boltz preprocessing manifest unreadable; gate skipped: {manifest_exc}", file=sys.stderr)
 
     raise RuntimeError(
         "Boltz 输入预处理失败：没有生成任何有效记录，任务无法继续。"
