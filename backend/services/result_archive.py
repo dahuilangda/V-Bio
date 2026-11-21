@@ -137,7 +137,7 @@ class ResultArchiveService:
 
             abs_filepath = os.path.abspath(filepath)
             abs_upload_folder = os.path.abspath(directory)
-            if not abs_filepath.startswith(abs_upload_folder):
+            if os.path.commonpath([abs_filepath, abs_upload_folder]) != abs_upload_folder:
                 raise PermissionError(f'Invalid file path outside upload folder: {filepath}')
             if not os.path.exists(filepath):
                 raise FileNotFoundError(f'Result file not found on disk: {filepath}')
@@ -169,7 +169,7 @@ class ResultArchiveService:
 
         abs_filepath = os.path.abspath(filepath)
         abs_upload_folder = os.path.abspath(directory)
-        if not abs_filepath.startswith(abs_upload_folder):
+        if os.path.commonpath([abs_filepath, abs_upload_folder]) != abs_upload_folder:
             raise PermissionError(f'Invalid file path outside upload folder: {filepath}')
         if not os.path.exists(filepath):
             raise FileNotFoundError(f'Result file not found on disk: {filepath}')
@@ -532,13 +532,13 @@ class ResultArchiveService:
                 continue
             scored.append((score, -len(item), item))
         if not scored:
-            raise RuntimeError('Protenix summary confidence files are present but ranking_score is invalid.')
+            return None, None
 
         scored.sort(reverse=True)
         selected_summary = scored[0][2]
         sample_match = _PROTENIX_SUMMARY_SAMPLE_RE.search(os.path.basename(selected_summary))
         if not sample_match:
-            raise RuntimeError(f'Unable to parse Protenix summary sample index from: {selected_summary}')
+            return None, None
 
         sample_index = sample_match.group(1)
         summary_dir = os.path.dirname(selected_summary)
@@ -550,7 +550,7 @@ class ResultArchiveService:
             flags=re.IGNORECASE,
         )
         if structure_base == summary_base:
-            raise RuntimeError(f'Unable to derive Protenix sample structure name from: {selected_summary}')
+            return None, None
 
         structure_candidates = [
             os.path.join(summary_dir, f'{structure_base}.cif'),
@@ -559,10 +559,7 @@ class ResultArchiveService:
         ]
         structure = next((item for item in structure_candidates if item in names), None)
         if not structure:
-            raise RuntimeError(
-                f"Unable to locate Protenix structure for summary '{selected_summary}' "
-                f'(expected sample index {sample_index}).'
-            )
+            return None, None
         return structure, selected_summary
 
     def _build_view_archive_bytes(self, source_zip_path: str, preferred_structure_name: str | None = None) -> bytes:
@@ -1846,18 +1843,19 @@ class ResultArchiveService:
                         merged.update(sc_block)
                 except Exception as exc:  # noqa: BLE001 — sc is additive
                     self.logger.warning('interface sc extraction skipped: %s', exc)
-                try:
-                    pair_block = self._extract_pair_ipsae(src_zip)
-                    if pair_block:
-                        merged.update(pair_block)
-                        # The legacy ligand-ipsae keys were distance-filtered
-                        # with the linker pooled into the protein side; the
-                        # official pure-PAE values above supersede them.
-                        merged['protein_to_ligand_ipsae'] = pair_block['ipsae_protein_to_ligand']
-                        merged['ligand_to_protein_ipsae'] = pair_block['ipsae_ligand_to_protein']
-                        merged['ligand_ipsae_max'] = pair_block['ipsae_official_max']
-                except Exception:  # noqa: BLE001 — pair ipsae is additive
-                    pass
+                pair_block = self._extract_pair_ipsae(src_zip)
+                if pair_block:
+                    merged.update(pair_block)
+                    # The legacy ligand-ipsae keys were distance-filtered
+                    # with the linker pooled into the protein side; the
+                    # official pure-PAE values above supersede them.
+                    for legacy_key, pair_key in (
+                        ('protein_to_ligand_ipsae', 'ipsae_protein_to_ligand'),
+                        ('ligand_to_protein_ipsae', 'ipsae_ligand_to_protein'),
+                        ('ligand_ipsae_max', 'ipsae_official_max'),
+                    ):
+                        if pair_block.get(pair_key) is not None:
+                            merged[legacy_key] = pair_block[pair_key]
                 # 各后端置信标点统一从最优样本规范化
                 try:
                     names = [n for n in src_zip.namelist() if not n.endswith('/')]

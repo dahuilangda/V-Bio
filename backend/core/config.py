@@ -164,7 +164,7 @@ GPU_MSA_WAITING_ZSET_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:msa_waiting"
 # MSA 软保留：存在存活 MSA 等待方时，长任务持卡达到上限后新的 acquire 让位等待，
 # 保证等待中的 MSA search（CPU 回退已禁用）总能拿到下一张空卡。
 GPU_MSA_RESERVE_ENABLED = _env_bool("GPU_MSA_RESERVE_ENABLED", True)
-GPU_MSA_RESERVE_HOLDER_LIMIT = int(os.environ.get("GPU_MSA_RESERVE_HOLDER_LIMIT", "3") or "3")
+GPU_MSA_RESERVE_HOLDER_LIMIT = _parse_int_env("GPU_MSA_RESERVE_HOLDER_LIMIT", 3)
 # 等待条目超过该秒数未刷新即视为死条目（wrapper 刷新周期 ≤30s）。
 _WAITER_STALE_ENV = os.environ.get("GPU_WAITER_STALE_SECONDS") or os.environ.get("GPU_MSA_WAITER_STALE_SECONDS")
 GPU_WAITER_STALE_SECONDS = int(_WAITER_STALE_ENV or "180")
@@ -174,14 +174,14 @@ GPU_WAITER_STALE_SECONDS = int(_WAITER_STALE_ENV or "180")
 GPU_PRIORITY_WAITING_ZSET_KEY = _namespaced_gpu_pool_key("boltz_gpu_pool:priority_waiting")
 GPU_PRIORITY_RESERVE_ENABLED = _env_bool("GPU_PRIORITY_RESERVE_ENABLED", True)
 # GPU 池常驻自愈（gpu_manager maintain）：周期 reconcile 与孤儿任务容器巡检。
-GPU_MAINTENANCE_INTERVAL_SECONDS = int(os.environ.get("GPU_MAINTENANCE_INTERVAL_SECONDS", "300") or "300")
+GPU_MAINTENANCE_INTERVAL_SECONDS = _parse_int_env("GPU_MAINTENANCE_INTERVAL_SECONDS", 300)
 # 孤儿容器处置策略：report 仅告警；kill 追加 docker rm -f。
 GPU_ORPHAN_POLICY = str(os.environ.get("GPU_ORPHAN_POLICY", "report") or "report").strip().lower()
 # 容器运行超过该秒数才参与孤儿判定，避免误伤刚启动的任务。
-GPU_ORPHAN_MIN_AGE_SECONDS = int(os.environ.get("GPU_ORPHAN_MIN_AGE_SECONDS", "1800") or "1800")
+GPU_ORPHAN_MIN_AGE_SECONDS = _parse_int_env("GPU_ORPHAN_MIN_AGE_SECONDS", 1800)
 # 磁盘水位守卫（维护循环巡检结果盘）：仅告警，不阻断任务。
-DISK_WARN_PERCENT = int(os.environ.get("DISK_WARN_PERCENT", "85") or "85")
-DISK_CRITICAL_PERCENT = int(os.environ.get("DISK_CRITICAL_PERCENT", "92") or "92")
+DISK_WARN_PERCENT = _parse_int_env("DISK_WARN_PERCENT", 85)
+DISK_CRITICAL_PERCENT = _parse_int_env("DISK_CRITICAL_PERCENT", 92)
 # 多肽父任务 -> 子任务 Celery ID 注册表前缀
 PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX = "boltz_peptide_subtasks:"
 
@@ -277,17 +277,17 @@ PROTENIX_MODEL_DIR = os.environ.get("PROTENIX_MODEL_DIR")
 # Affinity-head checkpoint (read-only mount; empty = head disabled).
 PROTENIX2DOCK_AFFINITY_CKPT = os.environ.get("PROTENIX2DOCK_AFFINITY_CKPT", "")
 # Per-tenant daily /predict admission quota; <= 0 disables the gate.
-TENANT_MAX_DAILY = int(os.environ.get("TENANT_MAX_DAILY", "50"))
+TENANT_MAX_DAILY = _parse_int_env("TENANT_MAX_DAILY", 50)
 
 # Task-completion email notifications (optional notify_email at submit).
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465") or 465)
+SMTP_PORT = _parse_int_env("SMTP_PORT", 465)
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_SENDER_NAME = os.environ.get("SMTP_SENDER_NAME", "V-Bio")
 # Task-email batching window in seconds; 0 = one immediate email per task.
-NOTIFY_DIGEST_WINDOW_SECONDS = int(os.environ.get("NOTIFY_DIGEST_WINDOW_SECONDS", "900") or 0)
+NOTIFY_DIGEST_WINDOW_SECONDS = _parse_int_env("NOTIFY_DIGEST_WINDOW_SECONDS", 900)
 ESMFOLD2_DOCKER_IMAGE = os.environ.get(
     "ESMFOLD2_DOCKER_IMAGE", "vbio-esmfold2-runtime:latest")
 MOL1_DOCKER_IMAGE = os.environ.get(
@@ -298,7 +298,7 @@ RFD4_DOCKER_IMAGE = os.environ.get(
     "RFD4_DOCKER_IMAGE", "rfd4-proteina-engine:cu13"
 )
 RFD4_DATA_DIR = os.environ.get("RFD4_DATA_DIR", "/data/rfd4-proteina")
-RFD4_NUM_DESIGNS = int(os.environ.get("RFD4_NUM_DESIGNS", "2") or "2")
+RFD4_NUM_DESIGNS = _parse_int_env("RFD4_NUM_DESIGNS", 2)
 # 覆盖默认 binder contig（默认 "12-22, /0, A1-<靶标长度>"）
 RFD4_CONTIG = os.environ.get("RFD4_CONTIG", "")
 PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
