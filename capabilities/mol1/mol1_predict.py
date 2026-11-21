@@ -108,6 +108,34 @@ def _to_mol_modifications(mods: list | None) -> list[dict]:
     return out
 
 
+# Mol-1 引擎的 1->3 字母表只有 20 标准 aa + X；O/U 是合法氨基酸字母
+# （O=PYL 吡咯赖氨酸，U=SEC 硒代半胱氨酸），components.cif 有对应 CCD。
+# 翻译成引擎原生的 CCD 修饰表达，字母占位为 X 后由修饰位覆盖残基。
+NONSTANDARD_AA_LETTER_CCD = {"O": "PYL", "U": "SEC"}
+PROTEIN_KNOWN_LETTERS = frozenset("ARNDCQEGHILKMFPSTWYVX")
+
+
+def _expand_protein_sequence(sequence: str, modifications: list[dict]) -> tuple[str, list[dict]]:
+    letters = list(str(sequence or "").strip().upper())
+    unknown: dict[str, list[int]] = {}
+    generated: list[dict] = []
+    for i, ch in enumerate(letters):
+        if ch in PROTEIN_KNOWN_LETTERS:
+            continue
+        ccd = NONSTANDARD_AA_LETTER_CCD.get(ch)
+        if ccd is None:
+            unknown.setdefault(ch, []).append(i + 1)
+            continue
+        letters[i] = "X"
+        generated.append({"ptmType": f"CCD_{ccd}", "ptmPosition": i + 1})
+    if unknown:
+        detail = ", ".join(
+            f"'{ch}' @ {positions}" for ch, positions in sorted(unknown.items()))
+        raise ValueError(
+            f"protein sequence contains non-amino-acid letters: {detail}")
+    return "".join(letters), modifications + generated
+
+
 def _to_mol_id_list(raw_id) -> list[str]:
     if raw_id is None:
         return []
@@ -123,12 +151,13 @@ def _to_mol_sequences(sequences: list[dict]) -> list[dict]:
             ids = _to_mol_id_list(entity.get("id"))
             count = int(entity["count"]) if entity.get("count") else max(len(ids), 1)
             if kind == "proteinChain":
+                mods = _to_mol_modifications(entity.get("modifications"))
+                sequence, mods = _expand_protein_sequence(entity["sequence"], mods)
                 seq_entry = {
-                    "sequence": entity["sequence"],
+                    "sequence": sequence,
                     "count": count,
                     **({"id": ids} if ids else {}),
-                    **({"modifications": _to_mol_modifications(entity.get("modifications"))}
-                       if entity.get("modifications") else {}),
+                    **({"modifications": mods} if mods else {}),
                 }
                 out.append({"proteinChain": seq_entry})
             elif kind in ("dnaSequence", "rnaSequence"):
