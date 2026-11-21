@@ -32,7 +32,7 @@ export async function loadRDKitModule(): Promise<RDKitModule> {
     return window.__rdkitModulePromise;
   }
 
-  window.__rdkitModulePromise = (async () => {
+  const promise = (async () => {
     await loadScript(ENV.rdkitScriptUrl);
 
     if (typeof window.initRDKitModule !== 'function') {
@@ -46,6 +46,12 @@ export async function loadRDKitModule(): Promise<RDKitModule> {
       }
     });
   })();
+
+  // 失败不缓存：首次网络抖动不应永久杀死后续 2D 预览。
+  window.__rdkitModulePromise = promise.catch((error) => {
+    window.__rdkitModulePromise = undefined;
+    throw error;
+  });
 
   return window.__rdkitModulePromise;
 }

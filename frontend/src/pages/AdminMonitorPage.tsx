@@ -677,7 +677,7 @@ export function AdminMonitorPage() {
                         <td>
                           <div className="admin-monitor-task-name">
                             <strong title={task.name}>{task.name || 'Untitled task'}</strong>
-                            <code title={task.task_id}>{task.task_id.slice(0, 12)}</code>
+                            <code title={task.task_id || task.id}>{String(task.task_id || task.id || '').slice(0, 12)}</code>
                             {task.error_text ? <small className="admin-monitor-failure-text" title={task.error_text}>{task.error_text}</small> : null}
                           </div>
                         </td>

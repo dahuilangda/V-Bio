@@ -85,10 +85,14 @@ type WorkspaceRuntimeReady = WorkspaceRuntime & {
 };
 
 export function useProjectDetailWorkspaceView() {
+  const runtime = useProjectDetailRuntimeContext();
+  const { locationSearch, entryRoutingResolved, loading, error, project, draft } = runtime;
+
   // Designer draft guard: warn before an accidental full-page exit (refresh /
-  // close) while a draft design exists. SPA navigation is intentionally not
-  // intercepted — in-app draft persistence handles that path.
+  // close) only while a real draft exists on the new-task entry. SPA navigation
+  // is intentionally not intercepted — in-app draft persistence handles that.
   useEffect(() => {
+    if (!draft) return;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!window.location.search.includes('new_task=1')) return;
       event.preventDefault();
@@ -96,10 +100,7 @@ export function useProjectDetailWorkspaceView() {
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, []);
-
-  const runtime = useProjectDetailRuntimeContext();
-  const { locationSearch, entryRoutingResolved, loading, error, project, draft } = runtime;
+  }, [draft, locationSearch]);
 
   // Stale-while-revalidate: keep the workspace mounted on a refetch of the
   // same project; the placeholder is only for a genuinely new project.
@@ -377,7 +378,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           `Parameters loaded from "${row.name?.trim() || 'task'}" — review and press Run.`
         );
       } finally {
-        navigate(`/projects/${runtimeProjectId}`, { replace: true });
+        if (!cancelled) navigate(`/projects/${runtimeProjectId}`, { replace: true });
       }
     })();
     return () => { cancelled = true; };

@@ -166,10 +166,21 @@ export function isLikelyLigandAtomRow(groupPdb: string, compId: string): boolean
   return false;
 }
 
+// 以 H/D/T 开头的真实双字母元素符号——不得按氢处理（否则 Hg/Hf/Dy/Tb 等
+// 重原子被误跳过，pLDDT 均值偏移）。
+const HDT_TWO_LETTER_ELEMENTS = new Set([
+  'HE', 'HF', 'HG', 'HO', 'HS', 'DY',
+  'TA', 'TB', 'TC', 'TE', 'TI', 'TL', 'TM',
+]);
+
 export function isHydrogenLikeElement(raw: string): boolean {
-  const value = raw.trim().toUpperCase();
+  const value = (raw || '').trim().toUpperCase();
   if (!value) return false;
-  const head = value.replace(/[^A-Z]/g, '').slice(0, 1);
+  const alpha = value.replace(/[^A-Z]/g, '');
+  if (!alpha) return false;
+  if (alpha.length === 1) return alpha === 'H' || alpha === 'D' || alpha === 'T';
+  if (HDT_TWO_LETTER_ELEMENTS.has(alpha.slice(0, 2))) return false;
+  const head = alpha.slice(0, 1);
   return head === 'H' || head === 'D' || head === 'T';
 }
 

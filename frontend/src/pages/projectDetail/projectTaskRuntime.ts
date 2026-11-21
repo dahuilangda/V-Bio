@@ -514,8 +514,10 @@ export async function pullResultForViewerTask(params: {
 
   const shouldPersistProject = options?.persistProject !== false;
   const resultMode = options?.resultMode || 'view';
-  if (viewerPullInFlight.has(taskId)) return;
-  viewerPullInFlight.add(taskId);
+  // 与 viewBlobCacheKey 同粒度：同任务不同候选结构可并发拉取，互不吞并。
+  const inflightKey = viewBlobCacheKey(taskId, resultMode, options);
+  if (viewerPullInFlight.has(inflightKey)) return;
+  viewerPullInFlight.add(inflightKey);
   setResultError(null);
   try {
     const blob = await fetchResultBlobCached(taskId, resultMode, options);
@@ -663,7 +665,7 @@ export async function pullResultForViewerTask(params: {
     setStructureTaskId(null);
     setResultError(err instanceof Error ? err.message : 'Failed to parse downloaded result.');
   } finally {
-    viewerPullInFlight.delete(taskId);
+    viewerPullInFlight.delete(inflightKey);
   }
 }
 
@@ -772,13 +774,16 @@ export async function refreshTaskStatus(params: {
     const runtimeInfo = asRecord(status.info);
     const isProjectActiveTask = String(project?.task_id || '').trim() === activeTaskId;
     const nextErrorText = taskState === 'FAILURE' ? statusText : '';
-    const completedAt = taskState === 'SUCCESS' ? new Date().toISOString() : null;
+    // SUCCESS 复用已落库的 completed_at，避免每次轮询都重算 duration 造成增长。
+    const completedAt = taskState === 'SUCCESS'
+      ? (runtimeTask?.completed_at || project.completed_at || new Date().toISOString())
+      : null;
     const submittedAt = runtimeTask?.submitted_at || project.submitted_at;
     const durationSeconds =
-      taskState === 'SUCCESS' && submittedAt
+      taskState === 'SUCCESS' && submittedAt && completedAt
         ? (() => {
-            const duration = (Date.now() - new Date(submittedAt).getTime()) / 1000;
-            return Number.isFinite(duration) ? duration : null;
+            const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
+            return Number.isFinite(duration) && duration >= 0 ? duration : null;
           })()
         : null;
 

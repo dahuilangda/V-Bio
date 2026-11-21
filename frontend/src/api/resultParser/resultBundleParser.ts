@@ -2207,7 +2207,15 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       best_sequences: peptideDesignCandidates
     };
     // Promote best candidate metrics to top-level confidence when absent.
-    const bestCandidate = peptideDesignCandidates[0];
+    // legacy design_results 行按完成顺序排列，index 0 未必是最优，取最小 rank。
+    const bestCandidate = peptideDesignCandidates.reduce(
+      (best, item) => {
+        const rank = typeof item.rank === 'number' ? item.rank : Number.POSITIVE_INFINITY;
+        const bestRank = typeof best?.rank === 'number' ? best.rank : Number.POSITIVE_INFINITY;
+        return rank < bestRank ? item : best;
+      },
+      peptideDesignCandidates[0]
+    );
     const cl = confidence as Record<string, unknown>;
     if (bestCandidate) {
       const promoteIfAbsent = (key: string, value: unknown) => {

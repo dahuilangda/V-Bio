@@ -130,7 +130,7 @@ export function ProjectsPage() {
   const hasActiveRuntime = useMemo(
     () =>
       projects.some((item) => {
-        const counts = item.task_counts!;
+        const counts = item.task_counts ?? { queued: 0, running: 0, success: 0, failure: 0, other: 0 };
         return counts.queued > 0 || counts.running > 0 || item.task_state === 'QUEUED' || item.task_state === 'RUNNING';
       }),
     [projects]
@@ -251,7 +251,7 @@ export function ProjectsPage() {
     const updatedCutoff = updatedWindowMs === null ? null : Date.now() - updatedWindowMs;
     const filtered = projects.filter((project) => {
       const workflowDef = getWorkflowDefinition(project.task_type);
-      const counts = project.task_counts!;
+      const counts = project.task_counts ?? { queued: 0, running: 0, success: 0, failure: 0, other: 0 };
       const backendValue = String(project.backend || '').trim().toLowerCase();
       const hasActiveRuntime = counts.queued > 0 || counts.running > 0;
       if (typeFilter !== 'all' && workflowDef.key !== typeFilter) return false;
@@ -903,7 +903,7 @@ export function ProjectsPage() {
               <tbody>
                 {pagedProjects.map((project) => {
                   const workflowDef = getWorkflowDefinition(project.task_type);
-                  const counts = project.task_counts!;
+                  const counts = project.task_counts ?? { queued: 0, running: 0, success: 0, failure: 0, other: 0 };
                   const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
                   const isEditingProjectName = editingProjectNameId === project.id;
                   const isSavingProjectName = savingProjectNameId === project.id;
@@ -1077,7 +1077,7 @@ export function ProjectsPage() {
           <div className="project-card-list" aria-label="Projects">
             {pagedProjects.map((project) => {
               const workflowDef = getWorkflowDefinition(project.task_type);
-              const counts = project.task_counts!;
+              const counts = project.task_counts ?? { queued: 0, running: 0, success: 0, failure: 0, other: 0 };
               const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
               const canRemoveProject = canDeleteProject(project, session?.userId || null);
               const hasProjectRuntime = counts.running > 0 || counts.queued > 0;
