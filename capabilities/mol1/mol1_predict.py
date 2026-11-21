@@ -446,7 +446,7 @@ def _compact_pae_block(full_data: dict, max_dim: int = 134) -> dict | None:
         for j in range(0, n0, down):
             row.append(round(float(pae[i][j]), 2))
         matrix.append(row)
-    # 边界保持全 token 空间坐标（与 result_archive 及前端缩放逻辑同一契约）
+    # 边界为全 token 空间坐标，前端自行缩放
     for idx, chain in enumerate(asym):
         last = bounds[-1] if bounds else None
         if last and last["chain"] == chain:

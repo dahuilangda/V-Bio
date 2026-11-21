@@ -437,8 +437,7 @@ function applyAtomPlddtToCifStructure(structureText: string, atomPlddts: number[
       // 后续所有原子的列，跳过且不消耗 atomIndex 会使对齐整体前移——两者都
       // 属数据异常，整行保原文并照常推进索引让末段 pLDDT 落空而非错位。
       if (tokens.length === headers.length) {
-        // AF3 的 atom_plddts 不含水与氢：转换器追加/重排的水行、氢行不消耗
-        // plddt，与解析侧（ligand 逐名路径）的过滤规则一致。
+        // AF3 atom_plddts 不含水/氢，这些行不消耗数组
         const isWater = compCol >= 0 && WATER_COMP_IDS.has((tokens[compCol] || '').trim().toUpperCase());
         const element = elementCol >= 0 ? (tokens[elementCol] || '').trim() : '';
         const isHydrogen = isHydrogenLikeElement(element || (tokens[atomNameCol] || ''));
@@ -466,8 +465,7 @@ function applyAtomPlddtToPdbStructure(structureText: string, atomPlddts: number[
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (!(line.startsWith('ATOM') || line.startsWith('HETATM'))) continue;
-    // AF3 的 atom_plddts 不含水与氢；转换器追加的水行/氢行不消耗 plddt，
-    // 与解析侧（ligand 逐名路径）的过滤规则一致。
+    // AF3 atom_plddts 不含水/氢，这些行不消耗数组
     const compId = line.slice(17, 20).trim().toUpperCase();
     const element = line.length >= 78 ? line.slice(76, 78).trim() : '';
     const atomName = line.slice(12, 16).trim();
