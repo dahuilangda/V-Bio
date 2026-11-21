@@ -209,7 +209,6 @@ export function normalizeBaseUrl(value: string): string {
 }
 
 export function escapeForDoubleQuotedShell(value: string): string {
-  // 双引号内 \ ` $ 仍会展开/转义，粘贴即执行的 curl 不允许出现活性字符。
   return String(value || '')
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')

@@ -88,9 +88,6 @@ export function useProjectDetailWorkspaceView() {
   const runtime = useProjectDetailRuntimeContext();
   const { locationSearch, entryRoutingResolved, loading, error, project, draft } = runtime;
 
-  // Designer draft guard: warn before an accidental full-page exit (refresh /
-  // close) only while a real draft exists on the new-task entry. SPA navigation
-  // is intentionally not intercepted — in-app draft persistence handles that.
   useEffect(() => {
     if (!draft) return;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {

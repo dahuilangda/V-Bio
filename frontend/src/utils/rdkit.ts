@@ -47,7 +47,6 @@ export async function loadRDKitModule(): Promise<RDKitModule> {
     });
   })();
 
-  // 失败不缓存：首次网络抖动不应永久杀死后续 2D 预览。
   window.__rdkitModulePromise = promise.catch((error) => {
     window.__rdkitModulePromise = undefined;
     throw error;

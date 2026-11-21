@@ -328,7 +328,7 @@ export interface Project {
   completed_at: string | null;
   duration_seconds: number | null;
   structure_name: string;
-  task_counts?: ProjectTaskCounts;
+  task_counts: ProjectTaskCounts;
   access_scope?: ProjectAccessScope;
   access_level?: EffectiveAccessLevel;
   accessible_task_ids?: string[];

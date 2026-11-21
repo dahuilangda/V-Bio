@@ -514,7 +514,6 @@ export async function pullResultForViewerTask(params: {
 
   const shouldPersistProject = options?.persistProject !== false;
   const resultMode = options?.resultMode || 'view';
-  // 与 viewBlobCacheKey 同粒度：同任务不同候选结构可并发拉取，互不吞并。
   const inflightKey = viewBlobCacheKey(taskId, resultMode, options);
   if (viewerPullInFlight.has(inflightKey)) return;
   viewerPullInFlight.add(inflightKey);
@@ -774,7 +773,6 @@ export async function refreshTaskStatus(params: {
     const runtimeInfo = asRecord(status.info);
     const isProjectActiveTask = String(project?.task_id || '').trim() === activeTaskId;
     const nextErrorText = taskState === 'FAILURE' ? statusText : '';
-    // SUCCESS 复用已落库的 completed_at，避免每次轮询都重算 duration 造成增长。
     const completedAt = taskState === 'SUCCESS'
       ? (runtimeTask?.completed_at || project.completed_at || new Date().toISOString())
       : null;

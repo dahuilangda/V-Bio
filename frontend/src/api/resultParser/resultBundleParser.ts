@@ -2207,7 +2207,6 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       best_sequences: peptideDesignCandidates
     };
     // Promote best candidate metrics to top-level confidence when absent.
-    // legacy design_results 行按完成顺序排列，index 0 未必是最优，取最小 rank。
     const bestCandidate = peptideDesignCandidates.reduce(
       (best, item) => {
         const rank = typeof item.rank === 'number' ? item.rank : Number.POSITIVE_INFINITY;
