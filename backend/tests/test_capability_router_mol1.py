@@ -20,8 +20,14 @@ from backend.scheduling.capability_router import capability_from_prediction_back
         ("mol-1-dock", "mol1"),
         ("protenix", "protenix"),
         ("protenix2dock", "protenix2dock"),
-        ("未知引擎", "boltz2"),
     ],
 )
 def test_capability_from_prediction_backend(backend, expected):
     assert capability_from_prediction_backend(backend) == expected
+
+
+def test_unknown_prediction_backend_raises():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported prediction backend"):
+        capability_from_prediction_backend("esm3")

@@ -559,7 +559,10 @@ def register_prediction_routes(
         if priority not in ['high', 'default']:
             logger.warning("Invalid priority '%s' provided by client %s. Defaulting to 'default'.", priority, request.remote_addr)
             priority = 'default'
-        requested_capability = capability_from_prediction_backend(backend)
+        try:
+            requested_capability = capability_from_prediction_backend(backend)
+        except ValueError as exc:
+            return jsonify({'error': str(exc), 'backend': backend}), 400
         if proposer_uses_rfd4:
             requested_capability = 'rfd4'
         queue_selection = select_queue_for_capability(requested_capability, priority)

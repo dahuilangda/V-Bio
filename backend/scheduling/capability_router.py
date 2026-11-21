@@ -220,8 +220,9 @@ def capability_from_prediction_backend(backend: str | None) -> str:
     raw = str(backend or "").strip().lower()
     if raw in {"mol1dock", "mol-1-dock"}:
         return "mol1"
-    # Anything else cannot be classified; fall back to the boltz2 queue.
-    return "boltz2"
+    # 未知 backend 不再兜底进 boltz2 队列：没有运行时的 backend 必须在提交时
+    # 响亮失败，而不是被派到 GPU worker 上以 Unsupported backend 烧卡失败。
+    raise ValueError(f"Unsupported prediction backend '{str(backend or '').strip()}'.")
 
 
 def build_capability_queue(capability: str, priority: str | None = None) -> str:

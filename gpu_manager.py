@@ -829,7 +829,15 @@ def acquire_gpu(
                     last_reserve_log = now_mono
                 time.sleep(min(1.0, max(0.2, remaining)))
                 continue
-            result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
+            try:
+                result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
+            except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as exc:
+                # redis 瞬时抖动不等价于无卡可取：重试直至整体 deadline，
+                # 让真正的超时出口给出诚实的"等待超时"语义。
+                logger.warning(
+                    "任务 %s: GPU 池 redis 读取失败（%s），在 deadline 内重试。", task_id, exc)
+                time.sleep(1.0)
+                continue
             if result is not None:
                 gpu_id = int(result[1])
                 # 原子认领先行：弹卡与认领之间该卡对 pool 和 in_use 均不可见，
