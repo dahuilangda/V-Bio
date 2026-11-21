@@ -293,17 +293,12 @@ def register_task_routes(
         _archive_snapshot_cache[key] = snapshot
         return snapshot
 
-    def _read_archive_result_payloads(archive_name: str) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
-        """Read results_summary.json from a result archive (cached per stat).
-
-        Returns (design_summary, None); (None, None) when the archive carries
-        no completion summary. design_results.json is no longer materialized
-        here — no caller consumes it and it is by far the largest member.
-        """
+    def _read_archive_design_summary(archive_name: str) -> Dict[str, Any] | None:
+        """Read results_summary.json from a result archive (cached per stat)."""
         snapshot = _archive_snapshot(archive_name)
         if snapshot is None:
-            return None, None
-        return snapshot['design_summary'], None
+            return None
+        return snapshot['design_summary']
 
     def _archive_chain_mean_plddt_cached(
         snapshot: Dict[str, Any], filepath: str, structure_name: str
@@ -408,7 +403,7 @@ def register_task_routes(
         # Celery is consulted only for tasks without one.
         archive_name = find_result_archive(task_id)
         if archive_name:
-            design_summary, _ = _read_archive_result_payloads(archive_name)
+            design_summary = _read_archive_design_summary(archive_name)
             if isinstance(design_summary, dict):
                 response: Dict[str, Any] = {
                     'task_id': task_id,
@@ -844,6 +839,7 @@ def register_task_routes(
             logger.error('No selected file for upload for task %s.', task_id)
             return jsonify({'error': 'No selected file'}), 400
 
+        temp_save_path = ""
         try:
             filename = secure_filename(file.filename)
             # 归档名必须归属该任务：secure_filename 会把非 ASCII 名剥成扩展名，
@@ -880,7 +876,7 @@ def register_task_routes(
             return jsonify({'message': f"File '{filename}' uploaded successfully for task {task_id}"}), 200
         except IOError as exc:
             try:
-                if 'temp_save_path' in locals() and os.path.exists(temp_save_path):
+                if temp_save_path and os.path.exists(temp_save_path):
                     os.remove(temp_save_path)
             except Exception:
                 pass
@@ -888,7 +884,7 @@ def register_task_routes(
             return jsonify(error_payload('Failed to save file.', details=exc)), 500
         except Exception as exc:
             try:
-                if 'temp_save_path' in locals() and os.path.exists(temp_save_path):
+                if temp_save_path and os.path.exists(temp_save_path):
                     os.remove(temp_save_path)
             except Exception:
                 pass

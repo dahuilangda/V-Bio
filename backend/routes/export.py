@@ -254,7 +254,7 @@ def register_export_routes(
             if unicode_name != download_name:
                 response.headers["Content-Disposition"] = (
                     f'attachment; filename="{download_name}"; '
-                    f"filename*=UTF-8''{_url_quote(unicode_name)}"
+                    f"filename*=UTF-8''{_url_quote(unicode_name, safe='')}"
                 )
         except Exception:
             logger.debug("Could not attach RFC 5987 filename header for export %s.", export_id)

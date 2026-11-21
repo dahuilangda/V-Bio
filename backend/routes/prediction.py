@@ -257,14 +257,31 @@ def register_prediction_routes(
                         "Quota resets at midnight."
                     )
                 }), 429
-
-            client.incr(daily_key)
-            client.expire(daily_key, 86400)
         except redis_module.RedisError:
             logger.warning(
                 "Tenant quota check failed (Redis unreachable); "
                 "failing open", exc_info=True)
         return None
+
+    def _consume_tenant_quota(tenant_id: str) -> None:
+        import redis as redis_module
+        from datetime import date
+
+        from gpu_manager import get_redis_client
+
+        today = date.today().strftime("%Y%m%d")
+        max_daily = int(getattr(config_module, "TENANT_MAX_DAILY", 50))
+        if max_daily <= 0:
+            return
+        try:
+            client = get_redis_client()
+            daily_key = f"vbio:quota:daily:{tenant_id}:{today}"
+            client.incr(daily_key)
+            client.expire(daily_key, 86400)
+        except redis_module.RedisError:
+            logger.warning(
+                "Tenant quota consume failed (Redis unreachable); "
+                "failing open", exc_info=True)
 
     @app.route('/predict', methods=['POST'])
     @require_api_token
@@ -592,10 +609,16 @@ def register_prediction_routes(
         if custom_ccd_molecules is None:
             return jsonify({'error': 'Invalid custom_ccd_molecules payload.'}), 400
 
+        if backend == 'nesso' and custom_ccd_molecules:
+            return jsonify({
+                'error': 'Nesso does not support custom CCD residue uploads; use protein sequences and ligand SMILES or standard CCD.',
+                'backend': backend,
+            }), 400
+
         # Dry-run the production CCD builders so bad chemistry fails as 400
         # here instead of inside a GPU task. Engines with relaxed CCD parsing
         # (esmfold2/mol1) skip the strict contract check.
-        strict_ccd_backends = {'boltz', 'alphafold3', 'protenix', 'protenix2dock', 'nesso'}
+        strict_ccd_backends = {'boltz', 'alphafold3', 'protenix', 'protenix2dock'}
         if custom_ccd_molecules and backend in strict_ccd_backends:
             from backend.runtime.custom_ccd_builder import _build_custom_ccd_bundle
             from backend.runtime.ccd_contract import validate_ccd_additions
@@ -607,12 +630,6 @@ def register_prediction_routes(
                     'error': f'Custom CCD rejected: {ccd_error}',
                     'backend': backend,
                 }), 400
-
-        if backend == 'nesso' and custom_ccd_molecules:
-            return jsonify({
-                'error': 'Nesso does not support custom CCD residue uploads; use protein sequences and ligand SMILES or standard CCD.',
-                'backend': backend,
-            }), 400
 
         template_inputs = []
         template_meta_raw = request.form.get('template_meta')
@@ -740,7 +757,7 @@ def register_prediction_routes(
                     return jsonify({'error': 'rfd4_spec must be a YAML mapping.'}), 400
                 predict_args['rfd4_spec'] = rfd4_spec
 
-        # Consume quota only after validation; 400-rejected submits must not burn units.
+        # 配额校验前置拦截超额提交；计数在派发成功后落地，dispatch 失败不烧额度。
         quota_response = _check_tenant_quota(tenant_id)
         if quota_response:
             return quota_response
@@ -757,6 +774,7 @@ def register_prediction_routes(
         except Exception as exc:
             logger.exception('Failed to dispatch Celery task for prediction request from %s: %s', request.remote_addr, exc)
             return jsonify(error_payload('Failed to dispatch prediction task.', details=exc)), 500
+        _consume_tenant_quota(tenant_id)
         response_payload = {
             'task_id': task.id,
             'queue': target_queue,
