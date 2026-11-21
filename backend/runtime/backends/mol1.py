@@ -48,6 +48,9 @@ class Mol1Backend(StructureBackend):
         os.makedirs(input_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
+        custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
+                                if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
+
         # 嵌入自定义残基到 yaml 供 mol1_predict.py 读取注入
         if custom_ccd_molecules:
             import yaml as _yaml_mod
