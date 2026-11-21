@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import logging
 import os
 import re
@@ -193,7 +194,7 @@ def _to_float(value: Any) -> Optional[float]:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if number != number or number in (float("inf"), float("-inf")):
+    if not math.isfinite(number):
         return None
     return number
 

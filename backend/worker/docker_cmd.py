@@ -168,18 +168,11 @@ def build_task_docker_skeleton(
     """Return (partial command, container_name) with common flags applied;
     the caller appends image, engine volumes/env, and argv."""
     container_name = make_task_container_name(task_id, runtime_label)
-    raw_extra = shlex.split(str(getattr(config, "PROTENIX_DOCKER_EXTRA_ARGS", "") or ""))
-    extra_args = sanitize_docker_extra_args(raw_extra)
-    runtime_overridden = any(tok == "--runtime" for tok in extra_args)
-
     command = ["docker", "run", "--rm", "--name", container_name]
     command.extend(["--label", f"boltz.task_id={task_id}"])
     command.extend(["--label", f"boltz.runtime={runtime_label}"])
-    if not runtime_overridden:
-        command.extend(["--runtime", "nvidia"])
-    if (shm_size
-            and not docker_args_has_flag(extra_args, "--shm-size")
-            and not docker_args_has_flag(extra_args, "--ipc")):
+    command.extend(["--runtime", "nvidia"])
+    if shm_size:
         command.extend(["--shm-size", shm_size])
     command.extend(["--gpus", f"device={int(gpu_id)}"])
 

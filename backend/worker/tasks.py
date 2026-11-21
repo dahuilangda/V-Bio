@@ -5,16 +5,15 @@ import sys
 import traceback
 import tempfile
 import json
+import math
 import subprocess
 import shutil
 import logging
 import threading
 import time
-import re
 import zipfile
 import shlex
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,7 +78,6 @@ PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS = int(
     getattr(config, "PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS", 30 * 60) or (30 * 60)
 )
 HEARTBEAT_INTERVAL = 60  # 心跳间隔（秒）
-PROGRESS_TTL_SECONDS = 3600
 TASK_STATUS_TTL_SECONDS = 24 * 3600
 PROGRESS_UPDATE_INTERVAL = 20
 MAX_STATUS_DETAILS_CHARS = 4_000
@@ -87,7 +85,6 @@ MAX_EXCEPTION_MESSAGE_CHARS = 20_000
 MAX_TRACEBACK_CHARS = 40_000
 MAX_STDIO_TAIL_CHARS = 12_000
 TASK_CANCELLED_KEY_PREFIX = "task_cancelled:"
-TASK_CANCELLED_TTL_SECONDS = 14 * 24 * 3600
 
 
 def _task_cancelled_key(task_id: str) -> str:
@@ -456,13 +453,12 @@ def _build_failure_meta(error: Exception) -> dict:
     }
 
 
-def _positive_int_or_default(value: Any, default: int, min_value: int = 1) -> int:
-    """Parse int-like value with lower bound, otherwise return default."""
+def _positive_int_or_default(value: Any, default: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         return default
-    return parsed if parsed >= min_value else default
+    return parsed if parsed >= 1 else default
 
 
 class TaskProgressTracker:
@@ -592,7 +588,7 @@ def _read_float_metric(value: Any) -> Optional[float]:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    if not (parsed == parsed and parsed not in (float('inf'), float('-inf'))):
+    if not math.isfinite(parsed):
         return None
     return parsed
 
@@ -1985,7 +1981,7 @@ def boltz2score_task(self, score_args: dict):
             gpu_acquired_at = 0.0
 
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
-        with zipfile.ZipFile(output_archive_path, 'w') as zipf:
+        with zipfile.ZipFile(output_archive_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(output_dir):
                 rel_root = os.path.relpath(root, output_dir)
                 if rel_root == os.path.join("affinity", "work") or rel_root.startswith(

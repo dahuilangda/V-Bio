@@ -54,7 +54,7 @@ def lead_optimization_halo_task(self, optimization_args: dict):
                 import base64
 
                 dest = run_dir / default_name
-                raw = base64.b64decode(upload["content_base64"])
+                raw = base64.b64decode(upload["content_base64"], validate=True)
                 if key == "reference_sdf":
                     # 引擎只读 SDF；其余上传格式（mol2/mol/pdb/cif）在此转成 SDF
                     dest.write_text(
