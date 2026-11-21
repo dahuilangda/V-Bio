@@ -19,6 +19,9 @@ import yaml
 
 from backend.runtime.backends.base import BackendRunContext, StructureBackend
 from backend.runtime.backends.request import PredictionRequest
+from backend.runtime.custom_ccd_builder import load_standard_ccd_codes
+
+MOL1_COMMON_DIR = "/data/mol1/common/common"
 
 
 class Mol1Backend(StructureBackend):
@@ -35,6 +38,11 @@ class Mol1Backend(StructureBackend):
             resolve_backend_results_root,
             resolve_backend_work_root,
         )
+        from backend.runtime.custom_ccd_builder import (
+            _normalize_custom_ccd_molecules,
+            apply_custom_ccd_code_remap,
+            resolve_custom_ccd_code_collisions,
+        )
         from backend.worker.docker_cmd import ensure_image, image_and_python
 
         mol1_image = str(MOL1_DOCKER_IMAGE or "").strip()
@@ -48,11 +56,15 @@ class Mol1Backend(StructureBackend):
         os.makedirs(input_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
-                                if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
-
-        # 嵌入自定义残基到 yaml 供 mol1_predict.py 读取注入
+        custom_ccd_molecules = _normalize_custom_ccd_molecules(
+            ctx.options.get("custom_ccd_molecules"))
         if custom_ccd_molecules:
+            custom_ccd_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
+                custom_ccd_molecules, load_standard_ccd_codes())
+            if ccd_remap:
+                yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
+                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
+                      file=sys.stderr)
             import yaml as _yaml_mod
             yaml_data = _yaml_mod.safe_load(yaml_content) or {}
             yaml_data["custom_ccd_molecules"] = custom_ccd_molecules
@@ -60,9 +72,6 @@ class Mol1Backend(StructureBackend):
         yaml_path = os.path.join(input_dir, "input.yaml")
         with open(yaml_path, "w", encoding="utf-8") as handle:
             handle.write(yaml_content)
-
-        custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
-                                if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
 
         use_msa_server = bool(ctx.options.get("use_msa_server", False))
         pocket_sequence_contacts = ctx.options.get("pocket_sequence_contacts")
@@ -78,7 +87,7 @@ class Mol1Backend(StructureBackend):
             "--runtime", "nvidia", "--shm-size", "16g",
             "--gpus", gpu_arg,
             "--add-host", "host.docker.internal:host-gateway",
-            "--volume", "/data/mol1/common/common:/cache/common:ro",
+            "--volume", f"{MOL1_COMMON_DIR}:/cache/common:ro",
             "--volume", "/data/mol1/checkpoint:/cache/checkpoint:ro",
             "--volume", "/data/msa_cache:/data/msa_cache:ro",
             "--volume", "/data/V-Bio:/workspace/vbio:ro",
