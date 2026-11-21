@@ -133,6 +133,23 @@ def _mk_task_temp_dir(prefix: str) -> str:
     return tempfile.mkdtemp(prefix=prefix, dir=temp_root)
 
 
+def _quarantine_result_archive(task_id: str, archive_path: str) -> str:
+    """上传失败时把结果归档移入隔离目录；finally 的临时目录清理不得销毁
+    GPU 产物的唯一副本。返回隔离路径，失败返回空串。"""
+    try:
+        quarantine_root = os.path.join(os.path.dirname(_resolve_worker_temp_root()),
+                                       "_quarantined_uploads")
+        os.makedirs(quarantine_root, exist_ok=True)
+        target = os.path.join(quarantine_root, f"{task_id}_{os.path.basename(archive_path)}")
+        shutil.move(archive_path, target)
+        logger.warning(
+            f"Task {task_id}: result archive quarantined at {target} after upload failure.")
+        return target
+    except Exception as exc:
+        logger.error(f"Task {task_id}: failed to quarantine result archive: {exc}")
+        return ""
+
+
 def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool = True) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {
         "found": [],
@@ -1096,6 +1113,7 @@ def predict_task(self, predict_args: dict):
     reported_gpu_ids: list[int] = []
     task_id = self.request.id
     task_temp_dir = None 
+    output_archive_path = ""
     tracker = None
     subprocess_timeout = SUBPROCESS_TIMEOUT
 
@@ -1349,6 +1367,9 @@ def predict_task(self, predict_args: dict):
         raise
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        # 推理产物已生成但后续上传/后处理失败：隔离归档，防 finally 清理销毁唯一副本。
+        if output_archive_path and os.path.exists(output_archive_path):
+            _quarantine_result_archive(task_id, output_archive_path)
         # 父任务失败时撤销已排队候选，避免空跑 GPU 推理。
         if is_peptide_design:
             try:
@@ -1584,6 +1605,7 @@ def boltz2score_task(self, score_args: dict):
     task_capability = ""
     task_id = self.request.id
     task_temp_dir = None
+    output_archive_path = ""
     tracker = None
 
     try:
@@ -1889,8 +1911,7 @@ def boltz2score_task(self, score_args: dict):
         try:
             stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
         except subprocess.TimeoutExpired as e:
-            process.kill()
-            stdout, stderr = process.communicate()
+            stdout, stderr = _kill_process_group(process)
             _terminate_task_container(task_container_name)
             error_message = (
                 f"Subprocess for Boltz2Score task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
@@ -1970,6 +1991,9 @@ def boltz2score_task(self, score_args: dict):
 
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        # 推理产物已生成但上传失败：隔离归档，防 finally 清理销毁唯一副本。
+        if output_archive_path and os.path.exists(output_archive_path):
+            _quarantine_result_archive(task_id, output_archive_path)
         if tracker:
             tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
         self.update_state(state='FAILURE', meta=_build_failure_meta(e))

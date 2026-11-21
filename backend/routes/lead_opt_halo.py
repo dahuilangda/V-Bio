@@ -105,8 +105,8 @@ def register_lead_opt_halo_routes(
                 return jsonify({'error': "pocket must be 'x,y,z'."}), 400
 
         try:
-            rounds = int(payload.get('rounds') or 6)
-            budget = int(payload.get('budget_per_round') or 48)
+            rounds = int(payload.get('rounds', 6))
+            budget = int(payload.get('budget_per_round', 48))
         except (TypeError, ValueError):
             return jsonify({'error': 'rounds and budget_per_round must be integers.'}), 400
         if not 1 <= rounds <= 100:
@@ -156,7 +156,7 @@ def register_lead_opt_halo_routes(
             }
 
         try:
-            hop_ratio = float(payload.get('scaffold_hop_ratio') or 0.4)
+            hop_ratio = float(payload.get('scaffold_hop_ratio', 0.4))
         except (TypeError, ValueError):
             return jsonify({'error': 'scaffold_hop_ratio must be a number.'}), 400
         if not 0.0 <= hop_ratio <= 1.0:

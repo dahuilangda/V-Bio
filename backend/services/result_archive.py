@@ -15,6 +15,7 @@ import sys
 import re
 import threading
 import time
+import uuid
 import zipfile
 from pathlib import Path
 import tempfile
@@ -770,7 +771,8 @@ class ResultArchiveService:
             return str(cache_path)
 
         data = self._build_view_archive_bytes(source_zip_path, preferred_structure_name=preferred_structure_name)
-        temp_path = cache_dir / f'{cache_key}.tmp'
+        # 并发构建共用 cache_key 时各写各的临时文件；os.replace 仍是原子发布。
+        temp_path = cache_dir / f'{cache_key}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp'
         temp_path.write_bytes(data)
         os.replace(str(temp_path), str(cache_path))
         return str(cache_path)
