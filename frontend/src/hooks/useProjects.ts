@@ -223,9 +223,12 @@ async function persistTerminalRuntimeTaskStatuses(
         submittedAt
           ? (() => {
               const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
-              return Number.isFinite(duration) && duration >= 0 ? duration : null;
+              // 时钟倒挂/非法值时保留已落库时长，而不是清成 null 覆盖合法值。
+              return Number.isFinite(duration) && duration >= 0
+                ? duration
+                : (row.duration_seconds ?? null);
             })()
-          : row.duration_seconds;
+          : (row.duration_seconds ?? null);
 
       if (
         String(row.task_state || '').trim().toUpperCase() === taskState &&
@@ -600,11 +603,18 @@ export function useProjects(session: Session | null) {
     projectCountsRef.current = new Map(nextProjects.map((row) => [row.id, cloneProjectTaskCounts(row.task_counts)] as const));
     persistProjectCountsCache(nextProjects);
     setProjects((prev) => {
+      // 快照可能取于网络 await 之前：prev 中快照没有的行（发布间隙新建/共享
+      // 进来的项目）原位保留，避免被整表替换抹掉。
       const prevById = new Map(prev.map((item) => [item.id, item] as const));
-      return nextProjects.map((row) => ({
+      const nextIds = new Set(nextProjects.map((row) => row.id));
+      const merged = nextProjects.map((row) => ({
         ...mergeProjectRuntimeFields(row, prevById.get(row.id) || null),
         task_counts: row.task_counts
       }));
+      for (const item of prev) {
+        if (!nextIds.has(item.id)) merged.push(item);
+      }
+      return merged;
     });
   }, [persistProjectCountsCache]);
 
@@ -770,8 +780,13 @@ export function useProjects(session: Session | null) {
         task_counts: readProjectCounts(row.id, previousProjectsById.get(row.id)?.task_counts)
       }));
       if (shouldPublishProjectsEarly) {
-        setProjects(optimisticOwnedProjects);
-        projectsRef.current = optimisticOwnedProjects;
+        // owned 行乐观更新，prev 里本会话可见的 shared 行原位保留，
+        // 避免 shared 项目在 share-links 拉取窗口内从列表闪没。
+        const optimisticIds = new Set(optimisticOwnedProjects.map((row) => row.id));
+        const retainedShared = previousProjects.filter((row) => !optimisticIds.has(row.id));
+        const published = [...optimisticOwnedProjects, ...retainedShared];
+        setProjects(published);
+        projectsRef.current = published;
       }
 
       const [projectShareLinks, taskShareLinks] = await shareLinksPromise;

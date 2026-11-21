@@ -498,22 +498,24 @@ export function ProjectsPage() {
   }, [load]);
 
   useEffect(() => {
-    if (!hasActiveRuntime) return;
+    if (!hasActiveRuntime) {
+      const idleTimer = window.setInterval(() => {
+        if (document.visibilityState === 'hidden') return;
+        void load({ silent: true, preferBackendStatus: true });
+      }, 60000);
+      return () => window.clearInterval(idleTimer);
+    }
+    let ticks = 0;
     const timer = window.setInterval(() => {
       // hidden tabs skip the tick; the visibilitychange handler refreshes on return
       if (document.visibilityState === 'hidden') return;
-      void load({ silent: true, statusOnly: true, preferBackendStatus: true });
+      ticks += 1;
+      if (ticks % 6 === 0) {
+        void load({ silent: true, preferBackendStatus: true });
+      } else {
+        void load({ silent: true, statusOnly: true, preferBackendStatus: true });
+      }
     }, 2500);
-    return () => window.clearInterval(timer);
-  }, [hasActiveRuntime, load]);
-
-  useEffect(() => {
-    // 无活跃运行时放宽心跳：空闲项目列表无需 15s 全量刷新。
-    const interval = hasActiveRuntime ? 15000 : 60000;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'hidden') return;
-      void load({ silent: true, preferBackendStatus: true });
-    }, interval);
     return () => window.clearInterval(timer);
   }, [hasActiveRuntime, load]);
 

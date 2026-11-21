@@ -256,6 +256,8 @@ export function WorkflowRuntimeSettingsSection({
   // true once the user clicked any atom: SMILES edits then validate the picks
   // instead of auto-detecting over them; cleared by Auto and on open
   const manualOverrideBackboneRef = useRef(false);
+  const customDraftBackboneRef = useRef(customDraftBackbone);
+  customDraftBackboneRef.current = customDraftBackbone;
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const isRfd4Strategy = isPeptideDesignWorkflow && peptideProposerBackend === 'rfd4';
   // D 肽可用性 = 提案引擎与打分引擎的手性声明（能力矩阵同源）
@@ -419,15 +421,16 @@ export function WorkflowRuntimeSettingsSection({
           const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
           setCustomDraftValid(valid);
           // amidation flips the terminal element; re-detect keeping the user's picks
+          const latestBackbone = customDraftBackboneRef.current;
           if (amidatedChanged) {
             skipBackboneAutoDetectRef.current = false;
-            const anchors = manualOverrideBackboneRef.current ? customDraftBackbone : {};
+            const anchors = manualOverrideBackboneRef.current ? latestBackbone : {};
             setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, anchors, customDraftAmidated) ?? {});
             setCustomDraftAutoStatus('idle');
           } else if (manualOverrideBackboneRef.current) {
             // user picked atoms: validate them, never auto-detect over them
-            const kept = validateBackboneSlots(rdkit, smiles, customDraftBackbone, customDraftAmidated);
-            if (CUSTOM_BACKBONE_SLOTS.some((slot) => kept[slot] !== customDraftBackbone[slot])) {
+            const kept = validateBackboneSlots(rdkit, smiles, latestBackbone, customDraftAmidated);
+            if (CUSTOM_BACKBONE_SLOTS.some((slot) => kept[slot] !== latestBackbone[slot])) {
               setCustomDraftBackbone(kept);
             }
           } else if (skipBackboneAutoDetectRef.current) {

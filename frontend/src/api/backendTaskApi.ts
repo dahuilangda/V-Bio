@@ -34,15 +34,20 @@ const statusVerById = new Map<string, string>();
 const lastStatusById = new Map<string, TaskStatusResponse>();
 const STATUS_VER_MAP_MAX_ENTRIES = 20000;
 
-function trimStatusVerMap(): void {
-  const excess = statusVerById.size - STATUS_VER_MAP_MAX_ENTRIES;
+function trimMapToSize(map: Map<string, unknown>, maxEntries: number): void {
+  const excess = map.size - maxEntries;
   if (excess <= 0) return;
   let dropped = 0;
-  for (const key of statusVerById.keys()) {
-    statusVerById.delete(key);
+  for (const key of map.keys()) {
+    map.delete(key);
     dropped += 1;
     if (dropped >= excess) break;
   }
+}
+
+function trimStatusVerMap(): void {
+  trimMapToSize(statusVerById, STATUS_VER_MAP_MAX_ENTRIES);
+  trimMapToSize(lastStatusById, STATUS_VER_MAP_MAX_ENTRIES);
 }
 
 async function fetchStatusStubs(taskIds: string[]): Promise<Map<string, string>> {

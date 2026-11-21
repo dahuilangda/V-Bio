@@ -1948,12 +1948,17 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
     if (confidencesRaw) {
       const atomPlddtsRaw = confidencesRaw.atom_plddts;
       if (Array.isArray(atomPlddtsRaw)) {
-        const atomPlddts = atomPlddtsRaw.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-        const avgPlddt = mean(atomPlddts);
+        // 保持与原子的位置对齐：非有限值记 0 而不是压缩数组——压缩会让
+        // 之后所有原子的 B-factor 整体错位。
+        const atomPlddts = atomPlddtsRaw.map((value) =>
+          typeof value === 'number' && Number.isFinite(value) ? value : 0
+        );
+        const finitePlddts = atomPlddtsRaw.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+        const avgPlddt = mean(finitePlddts);
         if (avgPlddt !== null) {
           af3Metrics.complex_plddt = avgPlddt;
         }
-        if (atomPlddts.length > 0) {
+        if (atomPlddts.length > 0 && finitePlddts.length > 0) {
           structureText = applyAtomPlddtToStructure(structureText, structureFormat, atomPlddts);
         }
       }

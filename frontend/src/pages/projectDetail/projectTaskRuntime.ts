@@ -141,9 +141,7 @@ function readLeadOptTerminalStatusText(task: ProjectTask | null, taskState: Task
       return `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`;
     }
     if (taskState === 'FAILURE') {
-      return summary.success === 0
-        ? `Scoring complete (0/${Math.max(1, summary.total)})`
-        : `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`;
+      return `Scoring finished: ${summary.success}/${Math.max(1, summary.total)} succeeded`;
     }
   }
 
