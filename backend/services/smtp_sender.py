@@ -20,6 +20,11 @@ def frontend_base_url() -> str:
     return str(os.environ.get("FRONTEND_URL") or "").rstrip("/")
 
 
+def make_msg_id() -> str:
+    import uuid
+    return f"<{uuid.uuid4().hex}@vbio>"
+
+
 def send_plain_smtp(to_email: str, subject: str, body: str) -> bool:
     """Send one plain-text email. Returns True on success; never raises."""
     if not smtp_configured():
@@ -32,9 +37,15 @@ def send_plain_smtp(to_email: str, subject: str, body: str) -> bool:
             (str(os.environ.get("SMTP_SENDER_NAME") or "V-Bio"),
              str(os.environ["SMTP_USER"])))
         msg["To"] = to_email.strip()
+        try:
+            smtp_port = int(os.environ.get("SMTP_PORT") or 465)
+        except ValueError:
+            logger.warning("Invalid SMTP_PORT %r; falling back to 465.", os.environ.get("SMTP_PORT"))
+            smtp_port = 465
+        msg["Message-ID"] = make_msg_id()
         with smtplib.SMTP_SSL(
             str(os.environ["SMTP_HOST"]),
-            int(os.environ.get("SMTP_PORT") or 465),
+            smtp_port,
             timeout=30,
         ) as server:
             server.login(str(os.environ["SMTP_USER"]),

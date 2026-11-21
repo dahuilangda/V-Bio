@@ -13,9 +13,7 @@ import math
 
 
 def parse_bool(value: Optional[str], default: bool = False) -> bool:
-    if value is None:
-        return default
-    return str(value).strip().lower() in {'1', 'true', 'yes', 'y'}
+    return coerce_bool(value, default)
 
 
 def to_finite_float(value):
@@ -25,9 +23,6 @@ def to_finite_float(value):
     except (TypeError, ValueError, OverflowError):
         return None
     return parsed if math.isfinite(parsed) else None
-
-
-WATER_RESNAMES = frozenset({'HOH', 'WAT', 'H2O', 'DOD'})
 
 
 def normalize_peptide_design_mode(raw) -> str:
