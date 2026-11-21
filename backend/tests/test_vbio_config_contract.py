@@ -58,6 +58,9 @@ ENGINE_INTERNAL_ENV_KEYS = {
     "MOL_CHECKPOINT_DIR",
     "MOL_MSA_CACHE_DIR",
     "MOL_MSA_SERVER_URL",
+    "MOL_MSA_FILL_DEADLINE_SECONDS",
+    # protenix2dock 离线预处理 shard 标记
+    "P2D_FEATS_SHARD",
     # esm3 / peplm 容器内调优
     "ESM3_ADAPTER_ROOT",
     "ESM3_IDLE_RELEASE_SECONDS",
