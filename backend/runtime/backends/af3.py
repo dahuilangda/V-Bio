@@ -15,6 +15,160 @@ from backend.runtime.backends.base import BackendRunContext, StructureBackend
 from backend.runtime.backends.request import PredictionRequest
 
 
+_SITECUSTOMIZE_CODE = r"""import logging
+try:
+    from alphafold3.data import parsers as _af3_parsers
+except Exception:
+    _af3_parsers = None
+
+def _count_non_lowercase(seq: str) -> int:
+    return sum(1 for ch in seq if not ch.islower())
+
+def _normalize_a3m(a3m_text: str):
+    # Pad sequences so non-lowercase lengths match, avoiding featurizer shape errors.
+    header = None
+    seq_chunks = []
+    entries = []
+    changed = False
+    for line in (a3m_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if header is not None:
+                entries.append((header, "".join(seq_chunks)))
+            header = line
+            seq_chunks = []
+        else:
+            seq_chunks.append(line)
+    if header is not None:
+        entries.append((header, "".join(seq_chunks)))
+    if not entries:
+        return a3m_text, changed
+    target = max(_count_non_lowercase(seq) for _, seq in entries)
+    fixed = []
+    for hdr, seq in entries:
+        count = _count_non_lowercase(seq)
+        if count < target:
+            seq = seq + ("-" * (target - count))
+            changed = True
+        fixed.append(f"{hdr}\n{seq}")
+    return "\n".join(fixed) + "\n", changed
+
+# Align AlphaFold3 runtime CCD-to-one-letter mapping with userCCD parent codes.
+# AF3 uses this table to derive the effective protein query sequence for PTMs
+# before validating the first MSA row.
+try:
+    import os as _os
+    import json as _json
+    from alphafold3.constants import residue_names as _af3_residue_names
+    _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
+    if isinstance(_ccd_overrides, dict):
+        for _ccd, _one in _ccd_overrides.items():
+            _ccd = str(_ccd or "").strip().upper()
+            _one = str(_one or "").strip().upper()[:1]
+            if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
+                _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
+except Exception as _exc:
+    logging.warning("Failed to apply userCCD residue one-letter overrides: %s", _exc)
+
+if _af3_parsers is not None:
+    _orig_convert = getattr(_af3_parsers, "convert_stockholm_to_a3m", None)
+    _orig_lazy = getattr(_af3_parsers, "lazy_parse_fasta_string", None)
+    _orig_parse_a3m = getattr(_af3_parsers, "parse_a3m", None)
+
+    if callable(_orig_convert):
+        def _safe_convert_stockholm_to_a3m(stockholm_format, max_sequences=None, remove_first_row_gaps=True, linewidth=None):
+            try:
+                result = _orig_convert(stockholm_format, max_sequences=max_sequences, remove_first_row_gaps=remove_first_row_gaps, linewidth=linewidth)
+            except StopIteration:
+                logging.warning("alphafold3.parsers.convert_stockholm_to_a3m: no sequences found; returning empty A3M.")
+                return ""
+            fixed, changed = _normalize_a3m(result)
+            if changed:
+                logging.warning("alphafold3.parsers.convert_stockholm_to_a3m: normalized ragged A3M by right-padding gaps.")
+            return fixed
+
+        _af3_parsers.convert_stockholm_to_a3m = _safe_convert_stockholm_to_a3m
+
+    if callable(_orig_parse_a3m):
+        def _safe_parse_a3m(a3m_string: str):
+            fixed, changed = _normalize_a3m(a3m_string)
+            if changed:
+                logging.warning("alphafold3.parsers.parse_a3m: normalized ragged A3M by right-padding gaps.")
+            return _orig_parse_a3m(fixed)
+
+        _af3_parsers.parse_a3m = _safe_parse_a3m
+
+    if callable(_orig_lazy):
+        def _safe_lazy_parse_fasta_string(fasta_string: str):
+            if not fasta_string or not str(fasta_string).strip():
+                logging.warning("alphafold3.parsers.lazy_parse_fasta_string: empty FASTA input; returning no sequences.")
+                return iter()
+            try:
+                return _orig_lazy(fasta_string)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(f"alphafold3.parsers.lazy_parse_fasta_string: failed to parse FASTA ({exc}); returning no sequences.")
+                return iter()
+
+        _af3_parsers.lazy_parse_fasta_string = _safe_lazy_parse_fasta_string
+
+# Ensure AF3 mmCIF strings always include a valid release date field.
+try:
+    from alphafold3 import structure as _af3_structure
+    _orig_from_mmcif = getattr(_af3_structure, "from_mmcif", None)
+
+    if callable(_orig_from_mmcif):
+        def _ensure_release_date_in_mmcif_text(text: str) -> str:
+            if "_pdbx_audit_revision_history.revision_date" in text:
+                return text
+            lines = text.splitlines()
+            insert_at = 1 if lines and lines[0].lower().startswith("data_") else 0
+            injection = [
+                "_pdbx_database_status.recvd_initial_deposition_date 1970-01-01",
+                "_pdbx_database_status.date_of_initial_deposition 1970-01-01",
+                "_pdbx_database_status.date_of_release 1970-01-01",
+                "loop_",
+                "_pdbx_audit_revision_history.revision_ordinal",
+                "_pdbx_audit_revision_history.data_content_type",
+                "_pdbx_audit_revision_history.major_revision",
+                "_pdbx_audit_revision_history.minor_revision",
+                "_pdbx_audit_revision_history.revision_date",
+                "1 'Structure model' 1 0 1970-01-01",
+            ]
+            merged = lines[:insert_at] + injection + lines[insert_at:]
+            return "\n".join(merged) + ("\n" if merged else "")
+
+        def _looks_like_mmcif_text(value) -> bool:
+            if not isinstance(value, str):
+                return False
+            sample = value[:2048]
+            return (
+                sample.lstrip().startswith("data_")
+                or "_atom_site." in sample
+                or "_entry.id" in sample
+                or "_pdbx_database_status." in sample
+            )
+
+        def _safe_from_mmcif(*args, **kwargs):
+            safe_args = list(args)
+            safe_kwargs = dict(kwargs)
+            try:
+                for idx, arg in enumerate(safe_args):
+                    if _looks_like_mmcif_text(arg):
+                        safe_args[idx] = _ensure_release_date_in_mmcif_text(arg)
+                for key, value in list(safe_kwargs.items()):
+                    if _looks_like_mmcif_text(value):
+                        safe_kwargs[key] = _ensure_release_date_in_mmcif_text(value)
+            except Exception:
+                pass
+            return _orig_from_mmcif(*safe_args, **safe_kwargs)
+
+        _af3_structure.from_mmcif = _safe_from_mmcif
+except Exception:
+    pass
+"""
+
 class Af3Backend(StructureBackend):
     name = "alphafold3"
 
@@ -30,7 +184,7 @@ class Af3Backend(StructureBackend):
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request, ctx.options.get("custom_ccd_molecules"))
         request = self.post_validate(request)
-        yaml_content = ctx.yaml_content
+        yaml_content = request.source_yaml
         yaml_data = self._load_yaml_for_affinity(yaml_content)
 
         from backend.runtime.run_single_prediction import (
@@ -77,6 +231,11 @@ class Af3Backend(StructureBackend):
             resolve_backend_work_root,
         )
         from backend.services.common_utils import ProteinMsaMode
+        from backend.runtime.custom_ccd_builder import (
+            apply_custom_ccd_code_remap,
+            load_standard_ccd_codes,
+            resolve_custom_ccd_code_collisions,
+        )
         from backend.worker.docker_cmd import (
             collect_gpu_device_group_ids,
             ensure_image,
@@ -116,6 +275,12 @@ class Af3Backend(StructureBackend):
         # descriptor category and breaks AF3 parsing). Explicit custom molecules
         # (ligands, linkers) still pass through.
         custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+        base_ccd_codes = load_standard_ccd_codes()
+        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)
+        if ccd_remap:
+            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
+            yaml_data = self._load_yaml_for_affinity(yaml_content)
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)
         _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
         user_ccd_text = None
         if custom_molecules:

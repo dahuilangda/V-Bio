@@ -53,14 +53,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def inject_custom_ccd(request) -> None:
-    """自定义残基注入 esm CCD 表：kind=residue 的条目按 SMILES 构建分子。"""
+    """自定义残基注入 esm CCD 表（本进程内，按任务隔离）。
+
+    编码与 SDK CCD 表冲突时自动改名 Z###，并把实体级/修饰位引用同步改名；
+    平台 preset 编码有内建定义，直接沿用标准条目。
+    """
     from backend.runtime.custom_ccd_builder import (
         _build_custom_ccd_mol,
         _normalize_custom_ccd_molecules,
+        _preset_custom_ccd_codes,
+        _next_free_z_code,
     )
     from esm.models.esmfold2.conformers import load_ccd
 
     ccd = load_ccd()
+    protected = _preset_custom_ccd_codes()
+    remap: dict[str, str] = {}
     for item in _normalize_custom_ccd_molecules(request.custom_ccd_molecules):
         if item.get("kind") != "residue":
             continue
@@ -68,8 +76,12 @@ def inject_custom_ccd(request) -> None:
         if not code:
             continue
         if code in ccd:
-            raise ValueError(
-                f"自定义 CCD {code} 与标准 CCD 组分冲突，请更换编码")
+            if code in protected:
+                continue
+            new_code = _next_free_z_code(set(ccd.keys()) | set(remap.values()))
+            remap[code] = new_code
+            item["ccd"] = new_code
+            code = new_code
         mol = _build_custom_ccd_mol(item.get("smiles"), kind="residue",
                                     backbone=item.get("backbone"),
                                     amidated=bool(item.get("cTerminalAmidated")))
@@ -79,6 +91,14 @@ def inject_custom_ccd(request) -> None:
                 atom.ClearProp("leaving_atom")
                 atom.SetProp("leaving_atom", "1" if props["leaving_atom"] else "0")
         ccd[code] = mol
+    if remap:
+        print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {remap}", file=sys.stderr)
+        for entity in request.entities:
+            if str(entity.ccd or "").upper() in remap:
+                entity.ccd = remap[str(entity.ccd).upper()]
+            for mod in entity.modifications:
+                if str(mod.ccd or "").upper() in remap:
+                    mod.ccd = remap[str(mod.ccd).upper()]
 
 
 def esm_ccd_has(ccd: str) -> bool:

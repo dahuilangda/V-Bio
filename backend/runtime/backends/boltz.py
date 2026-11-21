@@ -45,13 +45,19 @@ class BoltzBackend(StructureBackend):
         normalized_yaml = request.source_yaml
 
         from backend.core.config import (
+            BASE_DIR,
             BOLTZ2_CONTAINER_CACHE_DIR,
             BOLTZ2_DOCKER_EXTRA_ARGS,
             BOLTZ2_DOCKER_IMAGE,
             BOLTZ2_DOCKER_SHM_SIZE,
             BOLTZ2_HOST_CACHE_DIR,
-            PROJECT_ROOT,
         )
+        from backend.runtime.constraints_pipeline import print_constraint_residue_summary
+        from backend.runtime.custom_ccd_builder import (
+            apply_custom_ccd_code_remap,
+            resolve_custom_ccd_code_collisions,
+        )
+        from backend.runtime.msa_pipeline import cache_msa_files_from_temp_dir
         from backend.runtime.run_single_prediction import (
             _append_custom_residues_ccd_from_molecules,
             _assert_msa_server_configured,
@@ -60,7 +66,6 @@ class BoltzBackend(StructureBackend):
             _merge_referenced_preset_modification_molecules,
             _normalize_custom_ccd_molecules,
             _prepare_task_boltz_custom_mols_dir,
-            _print_constraint_residue_summary,
             _require_complete_external_msa,
             _run_boltz_ipsae_postprocess,
             assert_boltz_preprocessing_succeeded,
@@ -74,14 +79,13 @@ class BoltzBackend(StructureBackend):
             resolve_backend_results_root,
             resolve_backend_work_root,
         )
+        from backend.runtime.docker_exec import remove_container, run_docker_streaming
         from backend.worker.docker_cmd import (
             collect_gpu_device_group_ids,
             docker_args_has_flag,
             ensure_image,
             make_scoped_container_name,
             readable_docker_failure_diagnosis,
-            remove_container,
-            run_docker_streaming,
             sanitize_docker_extra_args,
         )
 
@@ -207,7 +211,7 @@ class BoltzBackend(StructureBackend):
             "--gpus", gpu_arg,
             "--volume", f"{ctx.temp_dir}:{ctx.temp_dir}",
             "--volume", f"{results_root}:{results_root}",
-            "--volume", f"{PROJECT_ROOT}:/workspace/vbio:ro",
+            "--volume", f"{BASE_DIR}:/workspace/vbio:ro",
             "--workdir", "/workspace/vbio",
             "--env", "PYTHONPATH=/workspace/vbio",
         ])
@@ -240,6 +244,15 @@ class BoltzBackend(StructureBackend):
         host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
         container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
         container_base_mols_dir = "/root/.boltz_base_mols"
+        if custom_molecules and host_cache_dir:
+            base_mols_dir = Path(host_cache_dir) / "mols"
+            base_mol_codes = {path.stem.upper() for path in base_mols_dir.glob("*.pkl")}
+            custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
+                custom_molecules, base_mol_codes)
+            if ccd_remap:
+                normalized_yaml = apply_custom_ccd_code_remap(normalized_yaml, ccd_remap)
+                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
+                      file=sys.stderr)
         custom_mols_dir: Optional[Path] = None
         if custom_molecules and not host_cache_dir:
             raise RuntimeError("BOLTZ2_HOST_CACHE_DIR is required when using custom drawn residue CCD molecules.")

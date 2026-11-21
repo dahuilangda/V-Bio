@@ -17,13 +17,40 @@ class EsmFold2Backend(StructureBackend):
     name = "esmfold2"
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
+        import sys
+
+        from backend.runtime.custom_ccd_builder import (
+            _normalize_custom_ccd_molecules,
+            apply_custom_ccd_code_remap,
+            load_standard_ccd_codes,
+            resolve_custom_ccd_code_collisions,
+        )
+
         self.validate(request, ctx.options.get("custom_ccd_molecules"))
         request = self.post_validate(request)
+        yaml_content = request.source_yaml
+
+        # 自定义残基嵌入任务 yaml；编码与标准 CCD 冲突时改名 Z###（容器内
+        # 注入按改名后的编码进行，任务归档与输出保持一致）。
+        custom_ccd_molecules = _normalize_custom_ccd_molecules(
+            ctx.options.get("custom_ccd_molecules"))
+        if custom_ccd_molecules:
+            custom_ccd_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
+                custom_ccd_molecules, load_standard_ccd_codes())
+            if ccd_remap:
+                yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
+                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
+                      file=sys.stderr)
+            import yaml as _yaml
+            yaml_data = _yaml.safe_load(yaml_content) or {}
+            yaml_data["custom_ccd_molecules"] = custom_ccd_molecules
+            yaml_content = _yaml.safe_dump(yaml_data, sort_keys=False, allow_unicode=True)
+
         image = self._resolve_image()
         results_root, input_dir, output_dir = self._prepare_dirs(ctx)
         yaml_path = os.path.join(input_dir, "input.yaml")
         with open(yaml_path, "w", encoding="utf-8") as handle:
-            handle.write(ctx.yaml_content)
+            handle.write(yaml_content)
 
         seed = int(ctx.seed)
         command = self._docker_command(image, yaml_path, output_dir, seed)
@@ -37,7 +64,7 @@ class EsmFold2Backend(StructureBackend):
                            capture_output=True)
             raise RuntimeError(f"ESMFold2 inference timed out after {timeout_seconds}s")
         print(f"ESMFold2 inference finished ({time.time() - started:.0f}s, "
-              f"exit={completed.returncode})", file=__import__("sys").stderr)
+              f"exit={completed.returncode})", file=sys.stderr)
         if completed.returncode != 0:
             raise RuntimeError(f"ESMFold2 inference failed (exit {completed.returncode})")
 

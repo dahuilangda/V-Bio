@@ -44,7 +44,7 @@ class ProtenixBackend(StructureBackend):
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request, ctx.options.get("custom_ccd_molecules"))
         request = self.post_validate(request)
-        yaml_content = ctx.yaml_content
+        yaml_content = request.source_yaml
 
         from backend.core.config import (
             PROTENIX_COMMON_CACHE_DIR,
@@ -71,7 +71,6 @@ class ProtenixBackend(StructureBackend):
             _merge_referenced_preset_modification_molecules,
             _normalize_custom_ccd_molecules,
             _normalize_protenix_output_permissions,
-            _prepare_task_boltz_custom_mols_dir,
             _PROTENIX_INPUT_CONTAINER_DIR,
             _PROTENIX_TEMPLATE_CONTAINER_DIR,
             _raise_if_protenix_reported_error_without_structure,
@@ -96,13 +95,20 @@ class ProtenixBackend(StructureBackend):
             resolve_backend_results_root,
             resolve_backend_work_root,
         )
+        from backend.runtime.custom_ccd_builder import (
+            _append_custom_residues_ccd_from_molecules,
+            apply_custom_ccd_code_remap,
+            load_standard_ccd_codes,
+            resolve_custom_ccd_code_collisions,
+        )
+        from backend.runtime.docker_exec import remove_container, run_docker_streaming
+        from backend.runtime.msa_pipeline import cache_msa_files_from_temp_dir
         from backend.services.common_utils import ProteinMsaMode
         from backend.worker.docker_cmd import (
+            collect_gpu_device_group_ids,
             ensure_image,
             make_scoped_container_name,
             readable_docker_failure_diagnosis,
-            remove_container,
-            run_docker_streaming,
             sanitize_docker_extra_args,
         )
 
@@ -148,6 +154,12 @@ class ProtenixBackend(StructureBackend):
             _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
             yaml_content,
         )
+        protenix_common_dir = Path(str(PROTENIX_COMMON_CACHE_DIR).strip())
+        base_ccd_codes = load_standard_ccd_codes(protenix_common_dir / "components.cif")
+        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)
+        if ccd_remap:
+            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)
         # preset 合并后的分子表可能比 raw 请求多出酰胺化条目，按合并表再校验
         _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
         linker_codes = [c for c in _detect_bicyclic_linker_codes(yaml_content)
@@ -157,7 +169,7 @@ class ProtenixBackend(StructureBackend):
         protenix_common_overlay_root: Optional[Path] = None
         if custom_molecules or linker_extra_cif:
             protenix_common_overlay_root = _merge_custom_ccd_with_existing_cache(
-                Path(str(PROTENIX_COMMON_CACHE_DIR).strip()),
+                protenix_common_dir,
                 protenix_work_root / "protenix_common_overlay",
                 custom_molecules,
                 extra_cif_text=linker_extra_cif,
