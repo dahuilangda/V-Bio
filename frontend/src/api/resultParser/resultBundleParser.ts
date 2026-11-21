@@ -430,11 +430,14 @@ function applyAtomPlddtToCifStructure(structureText: string, atomPlddts: number[
       if (row === 'loop_' || row.startsWith('_')) break;
 
       const tokens = tokenizeCifRow(rawRow);
-      if (tokens.length >= headers.length && atomIndex < atomPlddts.length) {
+      // token 数与表头数必须严格相等：少列行（或异常引号切分）写入会错位
+      // 后续所有原子的列，跳过且不消耗 atomIndex 会使对齐整体前移——两者都
+      // 属数据异常，整行保原文并照常推进索引让末段 pLDDT 落空而非错位。
+      if (tokens.length === headers.length && atomIndex < atomPlddts.length) {
         tokens[bFactorCol] = formatPlddtNumber(atomPlddts[atomIndex]);
         lines[rowIndex] = tokens.join(' ');
-        atomIndex += 1;
       }
+      atomIndex += 1;
       rowIndex += 1;
     }
 
