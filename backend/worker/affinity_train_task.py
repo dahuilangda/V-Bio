@@ -123,13 +123,11 @@ def affinity_train_task(self, train_args: dict):
         # Stream stdout for progress heartbeats (training logs [progress] lines).
         last_progress = ""
         tail_lines: list[str] = []
-        import time
 
         hard_timeout = int(train_args.get("timeout_seconds", 0)) or None
-        t0 = time.time()
-        assert process.stdout is not None
-        for line in process.stdout:
-            line = line.rstrip()
+
+        def _handle_output(line: str) -> None:
+            nonlocal last_progress
             tail_lines.append(line)
             if len(tail_lines) > 200:
                 tail_lines.pop(0)
@@ -141,9 +139,15 @@ def affinity_train_task(self, train_args: dict):
                 )
                 tracker.update_status("running", f"Training: {last_progress}")
             _tasks._raise_if_task_cancelled(self, redis_client, task_id)
-            if hard_timeout and time.time() - t0 > hard_timeout:
-                process.kill()
-                raise TimeoutError(f"affinity training exceeded {hard_timeout}s")
+
+        def _poll() -> None:
+            _tasks._raise_if_task_cancelled(self, redis_client, task_id)
+
+        try:
+            _tasks._stream_process_output(process, _handle_output, timeout_seconds=hard_timeout, on_poll=_poll)
+        except _tasks.SubprocessHardTimeout:
+            _tasks._kill_process_group(process)
+            raise TimeoutError(f"affinity training exceeded {hard_timeout}s")
         process.wait()
         rc = process.returncode
 

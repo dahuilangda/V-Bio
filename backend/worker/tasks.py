@@ -873,6 +873,52 @@ def _kill_process_group(process: subprocess.Popen, grace_seconds: int = 30) -> t
         return "", ""
 
 
+def _stream_process_output(
+    process: subprocess.Popen,
+    on_line,
+    *,
+    timeout_seconds: Optional[int] = None,
+    poll_interval: float = 5.0,
+    on_poll=None,
+) -> None:
+    """逐行消费 stdout；容器静默挂起时仍按 poll_interval 驱动超时与取消。
+
+    超时抛 SubprocessHardTimeout 时进程仍在运行，调用方负责杀进程组与容器。
+    """
+    import queue as _queue
+    import threading as _threading
+    import time as _time
+
+    assert process.stdout is not None
+    deadline = (_time.time() + timeout_seconds) if timeout_seconds else None
+    lines: "_queue.Queue" = _queue.Queue()
+
+    def _pump() -> None:
+        try:
+            for raw in process.stdout:
+                lines.put(raw)
+        finally:
+            lines.put(None)
+
+    reader = _threading.Thread(target=_pump, daemon=True)
+    reader.start()
+    while True:
+        try:
+            line = lines.get(timeout=poll_interval)
+        except _queue.Empty:
+            line = None
+            if on_poll is not None:
+                on_poll()
+        if line is None:
+            if not reader.is_alive():
+                break
+            continue
+        on_line(line.rstrip())
+        if deadline is not None and _time.time() > deadline:
+            raise SubprocessHardTimeout(
+                f"subprocess exceeded {timeout_seconds}s without completing.")
+
+
 
 
 def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
@@ -1037,8 +1083,9 @@ def upload_result_to_central_api(task_id: str, local_file_path: str, filename: s
             return payload
         except requests.exceptions.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0
-            if 400 <= status_code < 500:
+            if 400 <= status_code < 500 and status_code != 429:
                 # Client-side rejection (bad request/auth) — retrying cannot fix it.
+                # 429 是限流瞬态，与 5xx 同路退避重试。
                 raise ResultUploadError(
                     f"Upload rejected with HTTP {status_code} for task {task_id}: {exc}"
                 ) from exc
@@ -1440,8 +1487,10 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     redelivery_key = f"vbio:redelivery:{self.request.id}"
     try:
         guard_redis = get_redis_client()
-        attempts = guard_redis.incr(redelivery_key)
-        guard_redis.expire(redelivery_key, 3600)
+        if not guard_redis.set(redelivery_key, 1, nx=True, ex=3600):
+            attempts = guard_redis.incr(redelivery_key)
+        else:
+            attempts = 1
         if attempts > 4:
             raise RuntimeError(
                 f"Candidate task {self.request.id[:8]} exceeded 4 worker "

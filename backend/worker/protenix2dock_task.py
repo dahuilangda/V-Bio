@@ -270,33 +270,32 @@ def protenix2dock_task(self, score_args: dict):
         # ("INFO protenix2dock: <message>") plus periodic progress markers.
         tail_lines: list[str] = []
         import re as _re
-        import time as _time
 
         _STAGE_RE = _re.compile(r"INFO protenix2dock: (.+)")
-        hard_deadline = _time.time() + _tasks.SUBPROCESS_TIMEOUT
-        stdout = ""
-        assert process.stdout is not None
-        for line in process.stdout:
-            line = line.rstrip()
+
+        def _handle_output(line: str) -> None:
             tail_lines.append(line)
             if len(tail_lines) > 200:
                 tail_lines.pop(0)
             m = _STAGE_RE.search(line)
             if m:
-                # stage relays must carry the progress payload too — each
-                # update_status REPLACES the stored status, so a payload-less
-                # relay here would wipe the percent the header chip reads
                 tracker.update_status(
                     "running", m.group(1)[:200],
                     payload={"progress": {"progress_percent": 50.0}})
             _tasks._raise_if_task_cancelled(self, redis_client, task_id)
-            if _time.time() > hard_deadline:
-                process.kill()
-                _tasks._terminate_task_container(container_name)
-                # 终态超时，避免被 autoretry_for 的 TimeoutError 整任务重跑。
-                raise _tasks.SubprocessHardTimeout(
-                    f"protenix2dock task {task_id} exceeded {_tasks.SUBPROCESS_TIMEOUT}s."
-                )
+
+        def _poll() -> None:
+            _tasks._raise_if_task_cancelled(self, redis_client, task_id)
+
+        try:
+            _tasks._stream_process_output(
+                process, _handle_output,
+                timeout_seconds=_tasks.SUBPROCESS_TIMEOUT, on_poll=_poll,
+            )
+        except _tasks.SubprocessHardTimeout:
+            _tasks._kill_process_group(process)
+            _tasks._terminate_task_container(container_name)
+            raise
         process.wait()
         stdout = "\n".join(tail_lines)
         stderr = stdout
