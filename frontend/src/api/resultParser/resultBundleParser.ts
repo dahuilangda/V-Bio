@@ -418,6 +418,10 @@ function applyAtomPlddtToCifStructure(structureText: string, atomPlddts: number[
       i = headerIndex - 1;
       continue;
     }
+    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
+    const elementCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
+    const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
+    const atomNameCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
 
     let rowIndex = headerIndex;
     while (rowIndex < lines.length) {
@@ -433,11 +437,18 @@ function applyAtomPlddtToCifStructure(structureText: string, atomPlddts: number[
       // token 数与表头数必须严格相等：少列行（或异常引号切分）写入会错位
       // 后续所有原子的列，跳过且不消耗 atomIndex 会使对齐整体前移——两者都
       // 属数据异常，整行保原文并照常推进索引让末段 pLDDT 落空而非错位。
-      if (tokens.length === headers.length && atomIndex < atomPlddts.length) {
-        tokens[bFactorCol] = formatPlddtNumber(atomPlddts[atomIndex]);
-        lines[rowIndex] = tokens.join(' ');
+      if (tokens.length === headers.length) {
+        // AF3 的 atom_plddts 不含水与氢：转换器追加/重排的水行、氢行不消耗
+        // plddt，与解析侧（ligand 逐名路径）的过滤规则一致。
+        const isWater = compCol >= 0 && WATER_COMP_IDS.has((tokens[compCol] || '').trim().toUpperCase());
+        const element = elementCol >= 0 ? (tokens[elementCol] || '').trim() : '';
+        const isHydrogen = isHydrogenLikeElement(element || (tokens[atomNameCol] || ''));
+        if (!isWater && !isHydrogen && atomIndex < atomPlddts.length) {
+          tokens[bFactorCol] = formatPlddtNumber(atomPlddts[atomIndex]);
+          lines[rowIndex] = tokens.join(' ');
+          atomIndex += 1;
+        }
       }
-      atomIndex += 1;
       rowIndex += 1;
     }
 
@@ -456,6 +467,12 @@ function applyAtomPlddtToPdbStructure(structureText: string, atomPlddts: number[
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (!(line.startsWith('ATOM') || line.startsWith('HETATM'))) continue;
+    // AF3 的 atom_plddts 不含水与氢；转换器追加的水行/氢行不消耗 plddt，
+    // 与解析侧（ligand 逐名路径）的过滤规则一致。
+    const compId = line.slice(17, 20).trim().toUpperCase();
+    const element = line.length >= 78 ? line.slice(76, 78).trim() : '';
+    const atomName = line.slice(12, 16).trim();
+    if (WATER_COMP_IDS.has(compId) || isHydrogenLikeElement(element || atomName)) continue;
     if (atomIndex >= atomPlddts.length) break;
 
     const bFactor = normalizePlddt(atomPlddts[atomIndex]).toFixed(2).padStart(6);

@@ -148,6 +148,11 @@ function readLeadOptTerminalStatusText(task: ProjectTask | null, taskState: Task
   return taskState === 'SUCCESS' ? 'Task completed.' : fallback;
 }
 
+function isTerminalTaskState(value: unknown): boolean {
+  const token = String(value || '').trim().toUpperCase();
+  return token === 'SUCCESS' || token === 'FAILURE' || token === 'REVOKED';
+}
+
 function readPeptideCandidateRowsFromPayload(value: unknown): Array<Record<string, unknown>> {
   const payload = asRecord(value);
   const direct = asRecordArray(payload.best_sequences);
@@ -771,12 +776,12 @@ export async function refreshTaskStatus(params: {
     const runtimeInfo = asRecord(status.info);
     const isProjectActiveTask = String(project?.task_id || '').trim() === activeTaskId;
     const nextErrorText = taskState === 'FAILURE' ? statusText : '';
-    const completedAt = taskState === 'SUCCESS'
+    const completedAt = isTerminalTaskState(taskState)
       ? (runtimeTask?.completed_at || project.completed_at || new Date().toISOString())
       : null;
     const submittedAt = runtimeTask?.submitted_at || project.submitted_at;
     const durationSeconds =
-      taskState === 'SUCCESS' && submittedAt && completedAt
+      isTerminalTaskState(taskState) && submittedAt && completedAt
         ? (() => {
             const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
             return Number.isFinite(duration) && duration >= 0 ? duration : null;
@@ -873,9 +878,9 @@ export async function refreshTaskStatus(params: {
     const persistedProjectState = String(project.task_state || '').trim().toUpperCase();
     const persistedTaskState = String(runtimeTask?.task_state || '').trim().toUpperCase();
     const projectNeedsTerminalBackfill =
-      taskState === 'SUCCESS' && (!project.completed_at || project.duration_seconds === null);
+      isTerminalTaskState(taskState) && (!project.completed_at || project.duration_seconds === null);
     const taskNeedsTerminalBackfill =
-      taskState === 'SUCCESS' && (!runtimeTask?.completed_at || runtimeTask.duration_seconds === null);
+      isTerminalTaskState(taskState) && (!runtimeTask?.completed_at || runtimeTask.duration_seconds === null);
     const shouldPersistProject =
       isProjectActiveTask && (persistedProjectState !== taskState || projectNeedsTerminalBackfill);
     const shouldPersistTask = Boolean(runtimeTask) && (persistedTaskState !== taskState || taskNeedsTerminalBackfill);
@@ -886,7 +891,7 @@ export async function refreshTaskStatus(params: {
         status_text: statusText,
         error_text: nextErrorText,
       };
-      if (taskState === 'SUCCESS') {
+      if (isTerminalTaskState(taskState)) {
         patchData.completed_at = completedAt;
         patchData.duration_seconds = durationSeconds;
       }
@@ -899,7 +904,7 @@ export async function refreshTaskStatus(params: {
         status_text: statusText,
         error_text: nextErrorText,
       };
-      if (taskState === 'SUCCESS') {
+      if (isTerminalTaskState(taskState)) {
         taskPatch.completed_at = completedAt;
         taskPatch.duration_seconds = durationSeconds;
       }
