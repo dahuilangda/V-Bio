@@ -279,7 +279,6 @@ def register_affinity_routes(
         requested_seed = parse_int(request.form.get('seed'), None)
         requested_structure_refine = parse_bool(request.form.get('structure_refine'), False)
         requested_compute_ipsae = parse_bool(request.form.get('compute_ipsae'), False)
-        requested_use_msa_server = parse_bool(request.form.get('use_msa_server'), True)
         requested_mode = str(request.form.get('mode') or 'dock').strip().lower()
         if requested_mode not in VALID_BOLTZ2SCORE_MODES:
             return jsonify({'error': f"Unsupported mode '{requested_mode}'."}), 400
@@ -309,8 +308,7 @@ def register_affinity_routes(
                 'error': 'MSA_SERVER_URL is required for boltz2score execution.',
                 'capability': 'boltz2score',
             }), 503
-        if not requested_use_msa_server:
-            logger.info('Force use_msa_server=True for boltz2score request from %s.', request.remote_addr)
+        # boltz2score 依赖 MSA 特征，恒经服务器取 MSA
         requested_use_msa_server = True
 
         try:

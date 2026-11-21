@@ -923,7 +923,7 @@ export function WorkflowRuntimeSettingsSection({
                     designMode: (peptideDesignMode as 'linear' | 'cyclic' | 'bicyclic') || 'linear',
                   })
                 : engineOptionsFor({
-                    workflow: isAffinityWorkflow ? 'virtual_screening' : 'prediction',
+                    workflow: 'prediction',
                   })
               ).map((option: { value: string; label: string }) => (
                 <option key={option.value} value={option.value}>

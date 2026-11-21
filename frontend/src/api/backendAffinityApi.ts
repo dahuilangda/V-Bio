@@ -182,8 +182,6 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   if (normalizedSeed !== null) {
     form.append('seed', String(normalizedSeed));
   }
-  const useMsaServer = input.useMsa === true;
-  form.append('use_msa_server', String(useMsaServer).toLowerCase());
   form.append('priority', 'high');
   const res = await requestBackend('/api/boltz2score', {
     method: 'POST',
