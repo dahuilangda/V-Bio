@@ -1917,11 +1917,6 @@ def _normalize_protenix_output_permissions(
         print(f"[WARN] 无法自动修复 Protenix 输出目录权限: {perm_err}", file=sys.stderr)
 
 
-def _safe_runtime_token(raw: Any) -> str:
-    from backend.runtime.backends.support import safe_runtime_token
-    return safe_runtime_token(raw)
-
-
 # Legacy shape derived from the unified linker registry (bicyclic_linkers.py)
 BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = bicyclic_linkers.atom_map()
 

@@ -16,10 +16,6 @@ def smtp_configured() -> bool:
     return bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_USER"))
 
 
-def frontend_base_url() -> str:
-    return str(os.environ.get("FRONTEND_URL") or "").rstrip("/")
-
-
 def make_msg_id() -> str:
     import uuid
     return f"<{uuid.uuid4().hex}@vbio>"

@@ -63,15 +63,6 @@ DPEPTIDE_PLDDT_GATE_DEFAULT = 55.0
 DPEPTIDE_PLDDT_GATE_D_DEFAULT = 50.0
 
 
-def plddt_gate_from_env() -> float:
-    """Operator override hook; default from DPEPTIDE_PLDDT_GATE_DEFAULT."""
-    raw = os.environ.get("DPEPTIDE_PLDDT_GATE", "").strip()
-    try:
-        return float(raw) if raw else DPEPTIDE_PLDDT_GATE_DEFAULT
-    except ValueError:
-        return DPEPTIDE_PLDDT_GATE_DEFAULT
-
-
 def plddt_gate_for_chirality(chirality: str) -> float:
     """Gate for a chirality ('l'/'d'), with operator overrides per side."""
     key = "DPEPTIDE_PLDDT_GATE_D" if str(chirality or "").strip().lower() == "d" else "DPEPTIDE_PLDDT_GATE"

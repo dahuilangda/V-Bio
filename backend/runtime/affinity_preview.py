@@ -205,10 +205,6 @@ def _choose_ligand_chain_id(structure: Any) -> str:
         index += 1
 
 
-def _pick_atom_name(atom: Any, serial: int) -> str:
-    return _pick_atom_name_with_index(atom, serial, None)
-
-
 def _encode_heavy_atom_tag(index: int) -> str:
     chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     value = max(0, int(index))
