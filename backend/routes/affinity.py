@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from typing import Any, Callable, Dict, Optional
 
@@ -202,23 +203,44 @@ def register_affinity_routes(
         from backend.worker.affinity_train_task import affinity_train_task
 
         payload = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
+
+        def _num(key, default, cast):
+            raw = payload.get(key)
+            if raw is None or str(raw).strip() == '':
+                return default
+            return cast(raw)
+
         try:
             train_args = {
                 'index_csv': str(payload.get('index_csv') or '').strip() or None,
                 'val_csv': str(payload.get('val_csv') or '').strip() or None,
                 'work_dir': str(payload.get('work_dir') or '').strip() or None,
-                'epochs': int(payload.get('epochs') or 1),
-                'rel_weight': float(payload.get('rel_weight') or 2.0),
-                'msa_prob': float(payload.get('msa_prob') or 0.0),
-                'lr': float(payload.get('lr') or 1e-4),
+                'epochs': _num('epochs', 1, int),
+                'rel_weight': _num('rel_weight', 2.0, float),
+                'msa_prob': _num('msa_prob', 0.0, float),
+                'lr': _num('lr', 1e-4, float),
                 'resume_ckpt': str(payload.get('resume_ckpt') or '').strip() or None,
-                'ckpt_every': int(payload.get('ckpt_every') or 0),
-                'num_blocks': int(payload.get('num_blocks') or 2),
-                'dropout': float(payload.get('dropout') or 0.1),
-                'timeout_seconds': int(payload.get('timeout_seconds') or 0),
+                'ckpt_every': _num('ckpt_every', 0, int),
+                'num_blocks': _num('num_blocks', 2, int),
+                'dropout': _num('dropout', 0.1, float),
+                'timeout_seconds': _num('timeout_seconds', 0, int),
             }
         except (TypeError, ValueError) as exc:
             return jsonify({'error': f'Invalid numeric parameter: {exc}'}), 400
+        if not 1 <= train_args['epochs'] <= 10000:
+            return jsonify({'error': 'epochs must be within 1-10000.'}), 400
+        if train_args['lr'] <= 0 or train_args['rel_weight'] < 0:
+            return jsonify({'error': 'lr and rel_weight must be positive.'}), 400
+        if not 0 <= train_args['msa_prob'] <= 1 or not 0 <= train_args['dropout'] <= 1:
+            return jsonify({'error': 'msa_prob and dropout must be within 0-1.'}), 400
+        if train_args['timeout_seconds'] < 0:
+            return jsonify({'error': 'timeout_seconds must be non-negative.'}), 400
+
+        # 训练产物与输入限定在训练数据根下，防止在宿主任意路径建目录。
+        for path_key in ('work_dir', 'index_csv', 'val_csv', 'resume_ckpt'):
+            value = train_args.get(path_key)
+            if value and not os.path.abspath(value).startswith('/data/affinity_training/'):
+                return jsonify({'error': f'{path_key} must live under /data/affinity_training/.'}), 400
         priority = (payload.get('priority') or 'default').lower()
         if priority not in ('high', 'default'):
             priority = 'default'

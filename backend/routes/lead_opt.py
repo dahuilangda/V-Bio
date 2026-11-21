@@ -499,11 +499,6 @@ def register_lead_opt_routes(
                                 'residues': contacts[:8],
                             })
         except Exception as exc:
-            # Pocket extraction is supplementary — except the activity-contract
-            # RuntimeError above, which must propagate as a loud failure.
-            if isinstance(exc, RuntimeError) and 'atom mapping failed' in str(exc):
-                raise
-            # Drop partial rows so incomplete pocket data is never presented as complete.
             logger.warning('Failed to extract reference interactions: %s', exc)
             pocket_residues = []
             ligand_atom_contacts = []

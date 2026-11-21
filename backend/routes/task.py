@@ -630,6 +630,9 @@ def register_task_routes(
                 ver = 'unknown'
             stub = {'task_id': task_id, 'ver': ver}
             _stub_snapshot_cache[task_id] = (stub, now + ttl_seconds)
+            # 会话级缓存随轮询任务集有界增长，超限整表过期（TTL 只有 2s，重建廉价）。
+            if len(_stub_snapshot_cache) > 20000:
+                _stub_snapshot_cache.clear()
             stubs.append(stub)
         return jsonify({'stubs': stubs})
 
@@ -843,6 +846,12 @@ def register_task_routes(
 
         try:
             filename = secure_filename(file.filename)
+            # 归档名必须归属该任务：secure_filename 会把非 ASCII 名剥成扩展名，
+            # 空名或指向其他任务的归档一律拒绝，防止覆盖他任务产物。
+            if not filename or not filename.startswith(f"{task_id}_"):
+                return jsonify({
+                    'error': f'Archive filename must be "{task_id}_<suffix>" after sanitization; got "{filename}"'
+                }), 400
             save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             temp_save_path = f"{save_path}.upload-{uuid.uuid4().hex}.tmp"
             file.save(temp_save_path)

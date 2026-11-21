@@ -514,8 +514,11 @@ def register_prediction_routes(
                     _bcl.get_linker(str(peptide_design_options.get('peptideBicyclicLinkerCcd') or 'ZBR'))
                 except ValueError as exc:
                     return jsonify({'error': str(exc)}), 400
-                len_min = int(peptide_design_options.get('peptideLengthMin') or 0)
-                len_max = int(peptide_design_options.get('peptideLengthMax') or 0)
+                try:
+                    len_min = int(peptide_design_options.get('peptideLengthMin') or 0)
+                    len_max = int(peptide_design_options.get('peptideLengthMax') or 0)
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'peptideLengthMin/Max must be integers.'}), 400
                 if len_min <= 0 or len_max < len_min:
                     return jsonify({'error': 'bicyclic mode requires peptideLengthMin/Max (Min>0, Max>=Min).'}), 400
                 if len_min < len(seed_mask) + 7:
