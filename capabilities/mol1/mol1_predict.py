@@ -36,35 +36,44 @@ import yaml
 
 # ---------------------------------------------------------------- CCD 覆盖层
 
-def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | None:
-    """将自定义残基合并进 components.cif + rdkit pkl，返回覆盖目录。
+def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> tuple[Path | None, dict]:
+    """将自定义残基合并进 components.cif + rdkit pkl，返回 (覆盖目录, 编码重映射)。
 
     在 mol1 runtime 容器内执行——/cache/common/components.cif 已挂载。
-    覆盖目录按任务隔离（work_dir 下）；标准 CCD 目录只读不写。
-    自定义编码与标准 CCD 冲突时抛出 ValueError。
+    覆盖目录按任务隔离；编码冲突时自动生成无冲突替代编码并返回重映射表。
     """
     import pickle
     from rdkit import Chem
 
     if not custom_molecules:
-        return None
+        return None, {}
 
     source_cif = Path("/cache/common/components.cif")
     source_pkl = Path("/cache/common/components.cif.rdkit_mol.pkl")
     if not source_cif.is_file():
         print(f"[WARN] CCD source not found: {source_cif}", file=sys.stderr)
-        return None
+        return None, {}
 
-    # 编码冲突检查：自定义编码不得与标准 CCD 重叠
+    # 扫描标准 CCD 编码集合
     base_codes = set()
     for line in source_cif.read_text(errors="replace").splitlines():
         if line.startswith("data_"):
             base_codes.add(line[5:].strip().upper())
+
+    # 冲突时自动重命名：Z + 序号后缀
+    remap: dict[str, str] = {}
+    used = set(base_codes)
     for item in custom_molecules:
         code = str(item.get("ccd") or "").strip().upper()
-        if code in base_codes:
-            raise ValueError(
-                f"自定义残基编码 {code} 与标准 CCD 组分冲突，请更换编码")
+        if not code or code not in used:
+            continue
+        seq = 1
+        while f"Z{seq:03d}" in used:
+            seq += 1
+        new_code = f"Z{seq:03d}"
+        used.add(new_code)
+        remap[code] = new_code
+        item["ccd"] = new_code
 
     overlay_dir = work_dir / "ccd_overlay"
     overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -72,17 +81,15 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
     merged_pkl = overlay_dir / "components.cif.rdkit_mol.pkl"
 
     if merged_cif.is_file() and merged_pkl.is_file():
-        return overlay_dir
+        return overlay_dir, remap
 
     custom_codes = set()
     custom_blocks = []
     for item in custom_molecules:
         code = str(item.get("ccd") or "").strip().upper()
         smiles = str(item.get("smiles") or "").strip()
-        if not code or not smiles:
+        if not code or not smiles or code in custom_codes:
             continue
-        if code in custom_codes:
-            raise ValueError(f"自定义残基编码 {code} 重复")
         custom_codes.add(code)
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
@@ -95,7 +102,7 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
         block = _mol_to_ccd_block(mol, code, conf)
         custom_blocks.append(block)
     if not custom_blocks:
-        return None
+        return overlay_dir if merged_cif.is_file() else None, remap
     merged_cif.write_text(source_cif.read_text(errors="replace").rstrip()
                           + "\n\n" + "\n\n".join(custom_blocks) + "\n")
 
@@ -119,8 +126,8 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
         import pickle
         pickle.dump(mols, handle)
 
-    print(f"CCD overlay built: {overlay_dir} ({len(custom_blocks)} custom residues)", file=sys.stderr)
-    return overlay_dir
+    print(f"CCD overlay built: {overlay_dir} ({len(custom_codes)} custom residues)", file=sys.stderr)
+    return overlay_dir, remap
 
 
 def _mol_to_ccd_block(mol, code: str, conf) -> str:
@@ -580,9 +587,20 @@ def main() -> None:
         yaml_data = yaml.safe_load(Path(args.yaml).read_text()) or {}
         custom_mols = yaml_data.get("custom_ccd_molecules") or []
         if custom_mols:
-            overlay = _build_ccd_overlay(custom_mols, work_dir)
+            overlay, remap = _build_ccd_overlay(custom_mols, work_dir)
+            if remap:
+                # 重映射 yaml 中的 modification ccd 引用
+                yaml_path = Path(args.yaml)
+                for job in yaml_to_mol_jobs(yaml_path):
+                    pass  # validate first
+                text = yaml_path.read_text()
+                for old_code, new_code in remap.items():
+                    text = text.replace(f"ccd: {old_code}", f"ccd: {new_code}")
+                    text = text.replace(f'"ccd": "{old_code}"', f'"ccd": "{new_code}"')
+                yaml_path.write_text(text)
+                print(f"CCD codes remapped: {remap}", file=sys.stderr)
             if overlay:
-                args.checkpoint_dir = str(overlay / "checkpoint") if False else args.checkpoint_dir
+                pass  # overlay dir ready for file mounts (handled by caller)
 
     if args.yaml:
         jobs = yaml_to_mol_jobs(Path(args.yaml))
