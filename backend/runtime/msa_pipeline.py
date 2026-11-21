@@ -595,7 +595,9 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
     if not isinstance(sequences, list):
         return yaml_content, 0
 
-    injected = 0
+    # 按唯一序列分组：boltz 强制同序列蛋白共享同一条 MSA 路径，
+    # 逐实体注入会让同序列链指向不同文件而触发全局校验失败。
+    groups: Dict[str, List[Tuple[dict, List[str]]]] = {}
     for entity in sequences:
         if not isinstance(entity, dict):
             continue
@@ -614,26 +616,33 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
             chain_ids = [str(ids or "").strip()] if str(ids or "").strip() else []
         if not chain_ids:
             continue
+        seq_key = str(protein.get("sequence") or "").strip().upper()
+        groups.setdefault(seq_key, []).append((protein, chain_ids))
 
+    injected = 0
+    for members in groups.values():
         selected_path: Optional[Path] = None
-        for chain_id in chain_ids:
-            candidate_path = Path(temp_dir) / f"{safe_filename(chain_id)}_msa.a3m"
-            if not candidate_path.is_file():
-                continue
-            if not _ensure_nonempty_a3m_file(
-                str(candidate_path),
-                protein.get("sequence", ""),
-                context=f"{chain_id} 注入校验",
-                header=chain_id,
-            ):
-                continue
-            selected_path = candidate_path
+        for protein, chain_ids in members:
+            for chain_id in chain_ids:
+                candidate_path = Path(temp_dir) / f"{safe_filename(chain_id)}_msa.a3m"
+                if not candidate_path.is_file():
+                    continue
+                if not _ensure_nonempty_a3m_file(
+                    str(candidate_path),
+                    protein.get("sequence", ""),
+                    context=f"{chain_id} 注入校验",
+                    header=chain_id,
+                ):
+                    continue
+                selected_path = candidate_path
+                break
             if selected_path:
                 break
         if not selected_path:
             continue
-        protein["msa"] = str(selected_path)
-        injected += 1
+        for protein, _chain_ids in members:
+            protein["msa"] = str(selected_path)
+            injected += 1
 
     if injected <= 0:
         return yaml_content, 0
