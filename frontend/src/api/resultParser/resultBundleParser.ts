@@ -1838,9 +1838,13 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
   const zip = await JSZipLib.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
-  // mol1 与 protenix2dock 的置信度载荷同形，按 protenix 契约解析
+  // mol1/esmfold2 与 protenix2dock 的置信度载荷同形，按 protenix 契约解析
+  const isEsMfold2 = names.some((name) => name.toLowerCase().includes('esmfold2/output/'));
   const isProtenix = names.some(
-    (name) => name.toLowerCase().includes('protenix/output/') || name.toLowerCase().includes('mol1/output/')
+    (name) =>
+      name.toLowerCase().includes('protenix/output/') ||
+      name.toLowerCase().includes('mol1/output/') ||
+      isEsMfold2
   );
   const isNesso = names.some((name) => name.toLowerCase() === 'nesso/manifest.json');
   // HALO lead-optimization bundles are structureless run artifacts keyed on a
@@ -2041,15 +2045,16 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
     const confFile = isProtenix
       ? preferredProtenixConfidence || protenixSelection?.confidenceFile || null
       : preferredBoltzConfidence || boltzSelection?.confidenceFile || null;
+    const confidenceBackend = isEsMfold2 ? 'esmfold2' : isProtenix ? 'protenix' : 'boltz';
     const parsedConfidence = await readZipJson(zip, confFile);
     if (parsedConfidence) {
       confidence = compactConfidenceForStorage({
         ...parsedConfidence,
-        backend: isProtenix ? 'protenix' : 'boltz'
+        backend: confidenceBackend
       }, { preservePeptideCandidateStructureText });
     } else {
       confidence = {
-        backend: isProtenix ? 'protenix' : 'boltz'
+        backend: confidenceBackend
       };
     }
     if (isProtenix) {

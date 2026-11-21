@@ -215,6 +215,9 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
+    if (message.startsWith('Backend request timeout')) {
+      throw new Error(`Prediction submit timed out. ${message}`);
+    }
     throw new Error(
       `Failed to reach backend /predict endpoint. Check VITE_API_BASE_URL or Vite proxy setup. Original error: ${message}`
     );

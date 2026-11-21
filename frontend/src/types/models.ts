@@ -181,7 +181,7 @@ export interface PredictionOptions {
   peptideResiduePool?: PeptideResiduePoolSelection[];
   peptideNonNaturalMin?: number;
   peptideNonNaturalMax?: number;
-  peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
+  peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'ZBR';
   peptideStructureUpload?: {
     fileName: string;
     format: 'pdb' | 'cif';

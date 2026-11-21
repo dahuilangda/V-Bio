@@ -451,6 +451,9 @@ def register_affinity_routes(
         score_args['structure_refine'] = requested_structure_refine
         score_args['use_msa_server'] = requested_use_msa_server
         score_args['compute_interactions'] = requested_compute_interactions
+        project_id = str(request.form.get('project_id') or '').strip()
+        if project_id:
+            score_args['project_id'] = project_id
         # The protenix2dock worker consumes this (fp32 vs low-VRAM engine mode).
         requested_low_vram = parse_bool(request.form.get('low_vram'), False)
         if requested_low_vram:

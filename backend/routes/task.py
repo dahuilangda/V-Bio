@@ -723,9 +723,9 @@ def register_task_routes(
             directory,
             filename,
             as_attachment=True,
-            conditional=False,
-            etag=False,
-            max_age=0,
+            conditional=True,
+            etag=True,
+            max_age=60,
         )
 
     @app.route('/results/<task_id>/view', methods=['GET'])

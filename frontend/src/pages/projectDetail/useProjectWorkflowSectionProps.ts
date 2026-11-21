@@ -197,7 +197,7 @@ interface UseProjectWorkflowSectionPropsInput {
   peptideResiduePoolAvailable?: boolean;
   peptideNonNaturalMin: number;
   peptideNonNaturalMax: number;
-  peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'BS3';
+  peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'ZBR';
   peptideBicyclicFixTerminalCys: boolean;
   peptideBicyclicIncludeExtraCys: boolean;
   peptideBicyclicCys1Pos: number;
@@ -231,7 +231,7 @@ interface UseProjectWorkflowSectionPropsInput {
   onPeptideEliteSizeChange: (value: number) => void;
   onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
-  onPeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
+  onPeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'ZBR') => void;
   onPeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
   onPeptideBicyclicIncludeExtraCysChange: (value: boolean) => void;
   onPeptideBicyclicCys1PosChange: (value: number) => void;

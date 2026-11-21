@@ -796,7 +796,7 @@ export function handleRuntimePeptideNonNaturalRangeChangeAction<TDraft extends D
 }
 
 export function handleRuntimePeptideBicyclicLinkerCcdChangeAction<TDraft extends DraftLike>(params: {
-  peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'BS3';
+  peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'ZBR';
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
 }): void {
   const { peptideBicyclicLinkerCcd, setDraft } = params;

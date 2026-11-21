@@ -103,7 +103,7 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimeLeadOptDockPocketChange: (pocket: AffinityDockPocket | null) => void;
   handleRuntimePeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
   handleRuntimePeptideNonNaturalRangeChange: (min: number, max: number) => void;
-  handleRuntimePeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
+  handleRuntimePeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'ZBR') => void;
   handleRuntimePeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
   handleRuntimePeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
   handleRuntimePeptideBicyclicIncludeExtraCysChange: (value: boolean) => void;
@@ -326,7 +326,7 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   }, [setDraft]);
 
-  const handleRuntimePeptideBicyclicLinkerCcdChange = useCallback((value: 'SEZ' | '29N' | 'BS3') => {
+  const handleRuntimePeptideBicyclicLinkerCcdChange = useCallback((value: 'SEZ' | '29N' | 'ZBR') => {
     handleRuntimePeptideBicyclicLinkerCcdChangeAction({
       peptideBicyclicLinkerCcd: value,
       setDraft

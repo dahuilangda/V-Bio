@@ -10,6 +10,7 @@ export function mapBackendTaskState(raw: string): TaskState {
   if (normalized === 'REVOKED') return 'REVOKED';
   if (normalized === 'PENDING' || normalized === 'RECEIVED' || normalized === 'RETRY') return 'QUEUED';
   if (normalized === 'STARTED' || normalized === 'RUNNING' || normalized === 'PROGRESS') return 'RUNNING';
+  if (normalized === 'UNKNOWN') return 'FAILURE';
   return 'QUEUED';
 }
 

@@ -151,10 +151,11 @@ class EsmFold2Backend(StructureBackend):
             for root, _dirs, files in os.walk(output_dir):
                 for name in files:
                     full = os.path.join(root, name)
-                    zf.write(full, os.path.relpath(full, results_root))
+                    rel = os.path.relpath(full, output_dir)
+                    zf.write(full, os.path.join("esmfold2/output", rel))
             yaml_src = os.path.join(input_dir, "input.yaml")
             if os.path.exists(yaml_src):
-                zf.write(yaml_src, os.path.relpath(yaml_src, results_root))
+                zf.write(yaml_src, "esmfold2/input.yaml")
 
 
 def _container_name(command: list) -> str:

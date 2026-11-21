@@ -502,6 +502,7 @@ class ResultArchiveService:
             'protenix/output/protenix_model_0.mmcif',
             'protenix/output/protenix_model_0.pdb',
             'mol1/output/mol1_model_0.cif',
+            'esmfold2/output/input_sample_0.cif',
         ]
         canonical_confidence = 'protenix/output/confidence_protenix_model_0.json'
         structure = next((item for item in canonical_structures if item in names), None)
@@ -514,6 +515,7 @@ class ResultArchiveService:
             if (
                 item.lower().startswith('protenix/output/')
                 or item.lower().startswith('mol1/output/')
+                or item.lower().startswith('esmfold2/output/')
             )
             and item.lower().endswith('.json')
             and _PROTENIX_SUMMARY_SAMPLE_RE.search(os.path.basename(item))
@@ -568,7 +570,9 @@ class ResultArchiveService:
             lower_names = [name.lower() for name in names]
             is_af3 = any('af3/output/' in name for name in lower_names)
             is_protenix = any(
-                'protenix/output/' in name or 'mol1/output/' in name
+                'protenix/output/' in name
+                or 'mol1/output/' in name
+                or 'esmfold2/output/' in name
                 for name in lower_names
             )
             is_nesso = 'nesso/manifest.json' in lower_names

@@ -23,13 +23,13 @@ import {
 } from '../../utils/peptideCysLayout';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
-type BicyclicLinkerType = 'SEZ' | '29N' | 'BS3';
+type BicyclicLinkerType = 'SEZ' | '29N' | 'ZBR';
 
-// Canonical CCD SMILES used for RDKit previews.
+// Canonical CCD SMILES used for RDKit previews (matches backend bicyclic_linkers.LINKERS).
 const BICYCLIC_LINKERS: Array<{ type: BicyclicLinkerType; name: string; smiles: string }> = [
-  { type: 'SEZ', name: '1,3,5-Trimethylbenzene', smiles: 'Cc1cc(C)cc(C)c1' },
-  { type: '29N', name: 'Triazinane linker', smiles: 'CC(=O)CCN1CN(CC(=O)CC)CN(CC(=O)CC)C1' },
-  { type: 'BS3', name: 'Bi(III) center', smiles: '[Bi+3]' }
+  { type: 'ZBR', name: 'TBMB (tris-bromomethylbenzene)', smiles: 'Brc1c(CBr)cc(CBr)cc1CBr' },
+  { type: 'SEZ', name: '1,3,5-Trimethylbenzene core', smiles: 'Cc1cc(C)cc(C)c1' },
+  { type: '29N', name: 'Triazinane linker', smiles: 'CC(=O)CCN1CN(CC(=O)CC)CN(CC(=O)CC)C1' }
 ];
 
 

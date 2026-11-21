@@ -73,7 +73,7 @@ const DEFAULT_PEPTIDE_ITERATIONS = 12;
 const DEFAULT_PEPTIDE_POPULATION_SIZE = 16;
 const DEFAULT_PEPTIDE_ELITE_SIZE = 5;
 const DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD = 'SEZ';
-const VALID_PEPTIDE_BICYCLIC_LINKER_CCD = new Set(['SEZ', '29N', 'BS3']);
+const VALID_PEPTIDE_BICYCLIC_LINKER_CCD = new Set(['SEZ', '29N', 'ZBR']);
 const DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE = 'auto';
 const VALID_PEPTIDE_BICYCLIC_CYS_POSITION_MODES = new Set(['auto', 'manual']);
 const DEFAULT_PEPTIDE_BICYCLIC_FIX_TERMINAL_CYS = true;
@@ -299,14 +299,14 @@ function normalizePeptideDesignMode(value: unknown): 'linear' | 'cyclic' | 'bicy
   return DEFAULT_PEPTIDE_DESIGN_MODE;
 }
 
-function normalizePeptideBicyclicLinkerCcd(value: unknown): 'SEZ' | '29N' | 'BS3' {
+function normalizePeptideBicyclicLinkerCcd(value: unknown): 'SEZ' | '29N' | 'ZBR' {
   if (typeof value === 'string') {
     const normalized = value.trim().toUpperCase();
     if (VALID_PEPTIDE_BICYCLIC_LINKER_CCD.has(normalized)) {
-      return normalized as 'SEZ' | '29N' | 'BS3';
+      return normalized as 'SEZ' | '29N' | 'ZBR';
     }
   }
-  return DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'BS3';
+  return DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'ZBR';
 }
 
 function normalizePeptideBicyclicCysPositionMode(value: unknown): 'auto' | 'manual' {
@@ -496,7 +496,7 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
       peptideResiduePool: DEFAULT_PEPTIDE_RESIDUE_POOL,
       peptideNonNaturalMin: 0,
       peptideNonNaturalMax: 0,
-      peptideBicyclicLinkerCcd: DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'BS3',
+      peptideBicyclicLinkerCcd: DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'ZBR',
       peptideBicyclicCysPositionMode: DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE as 'auto' | 'manual',
       peptideBicyclicFixTerminalCys: DEFAULT_PEPTIDE_BICYCLIC_FIX_TERMINAL_CYS,
       peptideBicyclicIncludeExtraCys: DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS,

@@ -1920,7 +1920,7 @@ ${submitTaskIdCapture}`;
                         <option value="ZBR">ZBR (TBMB)</option>
                         <option value="SEZ">SEZ</option>
                         <option value="29N">29N</option>
-                        <option value="BS3">BS3</option>
+                        <option value="ZBR">ZBR (TBMB)</option>
                       </select>
                     </Field>
                     <Field label="Pocket Residues" hint="required: author-numbered pocket on the uploaded structure, e.g. A:41,D:92,D:93">
