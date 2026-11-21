@@ -1741,7 +1741,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         handleRuntimePeptideChiralityChange(peptideChirality as 'l' | 'd');
       }
       const peptideBicyclicLinkerCcd = readText(patch.peptideBicyclicLinkerCcd).trim();
-      if (peptideBicyclicLinkerCcd === 'SEZ' || peptideBicyclicLinkerCcd === '29N' || peptideBicyclicLinkerCcd === 'BS3') {
+      if (peptideBicyclicLinkerCcd === 'SEZ' || peptideBicyclicLinkerCcd === '29N' || peptideBicyclicLinkerCcd === 'ZBR') {
         handleRuntimePeptideBicyclicLinkerCcdChange(peptideBicyclicLinkerCcd);
       }
       const peptideBicyclicCysPositionMode = readText(patch.peptideBicyclicCysPositionMode).trim();
