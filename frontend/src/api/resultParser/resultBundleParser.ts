@@ -418,7 +418,6 @@ function applyAtomPlddtToCifStructure(structureText: string, atomPlddts: number[
       i = headerIndex - 1;
       continue;
     }
-    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
     const elementCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
     const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
     const atomNameCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
