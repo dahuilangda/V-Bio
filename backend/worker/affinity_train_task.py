@@ -7,7 +7,6 @@ checkpoint the next resumes from. Route: POST /api/affinity_train.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shlex

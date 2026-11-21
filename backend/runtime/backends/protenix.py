@@ -59,7 +59,6 @@ class ProtenixBackend(StructureBackend):
             PROTENIX_PYTHON_BIN,
             PROTENIX_SOURCE_DIR,
             PROTENIX_USE_HOST_USER,
-            RESULTS_BASE_DIR,
         )
         from backend.runtime.run_single_prediction import (
             _assert_msa_server_configured,

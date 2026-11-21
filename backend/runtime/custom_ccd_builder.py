@@ -11,7 +11,6 @@ run_single_prediction.py and import the builders from here.
 """
 import re
 import sys
-import pickle
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 

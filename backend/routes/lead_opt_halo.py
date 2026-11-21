@@ -3,7 +3,6 @@ scaffold hopping, scored by the platform's own prediction engines."""
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import sys
 from pathlib import Path

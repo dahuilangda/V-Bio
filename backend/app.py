@@ -4,7 +4,9 @@ import logging
 import threading
 from functools import wraps
 from typing import Any, Dict, Optional
-from flask import Flask, request, jsonify, send_from_directory
+
+from flask import Flask, request, jsonify
+from gpu_manager import get_redis_client
 
 from backend.core import config
 from backend.core.celery_app import celery_app
@@ -14,7 +16,6 @@ from backend.worker.tasks import (
     export_tasks_excel_task,
 )
 from backend.worker.lead_opt_halo_task import lead_optimization_halo_task
-from gpu_manager import get_redis_client, get_gpu_status
 from backend.runtime.affinity_preview import AffinityPreviewError, build_affinity_preview
 from backend.routes.task import register_task_routes
 from backend.routes.affinity import register_affinity_routes

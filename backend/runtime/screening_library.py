@@ -14,9 +14,10 @@ compound textarea is also valid as a ``compounds_file`` upload.
 
 from __future__ import annotations
 
+from typing import Dict, List, Optional, Tuple
+
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 

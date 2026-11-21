@@ -364,8 +364,6 @@ class Af3Backend(StructureBackend):
             user_ccd=user_ccd_text,
         )
 
-        af3_ccd_one_letter_overrides = _extract_user_ccd_one_letter_overrides(user_ccd_text)
-
         if template_payloads:
             for tpl in template_payloads:
                 mmcif_text = tpl.get("mmcif")
