@@ -25,11 +25,9 @@ class ResolveCustomCcdCodeCollisionsTests(unittest.TestCase):
             [{"ccd": "ALA"}], taken)
         self.assertEqual(remap, {"ALA": "Z003"})
 
-    def test_empty_base_codes_fail_open(self):
-        molecules = [{"ccd": "DLY", "smiles": "C"}]
-        remapped, remap = resolve_custom_ccd_code_collisions(molecules, set())
-        self.assertEqual(remap, {})
-        self.assertEqual(molecules[0]["ccd"], "DLY")
+    def test_empty_base_codes_raise(self):
+        with self.assertRaises(ValueError):
+            resolve_custom_ccd_code_collisions([{"ccd": "DLY", "smiles": "C"}], set())
 
     def test_yaml_remap_updates_entity_and_modifications(self):
         yaml_doc = (

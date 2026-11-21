@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any, Callable, Dict, Optional
 
 import yaml
@@ -168,35 +169,46 @@ def _parse_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
     return parsed
 
 
-def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> list[Dict[str, Any]]:
+def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> Optional[list[Dict[str, Any]]]:
+    """合法返回分子列表；输入非法返回 None（提交方据此 400）。"""
     if raw_value is None or not str(raw_value).strip():
         return []
     try:
         parsed = json.loads(raw_value)
     except json.JSONDecodeError:
-        return []
+        return None
     if not isinstance(parsed, list):
-        return []
+        return None
     molecules: list[Dict[str, Any]] = []
     seen: set[str] = set()
     for item in parsed:
         if not isinstance(item, dict):
-            continue
+            return None
         ccd = str(item.get('ccd') or item.get('ccdCode') or '').strip().upper()
+        if not re.fullmatch(r'[A-Z0-9_-]{1,12}', ccd):
+            return None
         smiles = str(item.get('smiles') or '').strip()
-        if not ccd or not smiles or ccd in seen:
-            continue
-        seen.add(ccd)
+        if not smiles:
+            return None
         kind = str(item.get('kind') or 'residue').strip().lower()
         if kind not in {'residue', 'ligand'}:
-            kind = 'residue'
+            return None
+        if ccd in seen:
+            return None
+        seen.add(ccd)
+        base_residue = str(item.get('baseResidue') or item.get('base_residue') or '').strip().upper()
+        if base_residue and not re.fullmatch(r'[A-Z]', base_residue):
+            return None
+        backbone = item.get('backbone')
+        if backbone is not None and _parse_backbone_override(backbone) is None:
+            return None
         molecules.append({
-            'ccd': ccd[:12],
+            'ccd': ccd,
             'smiles': smiles,
-            'base_residue': str(item.get('baseResidue') or item.get('base_residue') or '').strip().upper()[:1],
+            'base_residue': base_residue[:1],
             'label': str(item.get('label') or '').strip()[:80],
             'kind': kind,
-            'backbone': _parse_backbone_override(item.get('backbone')),
+            'backbone': _parse_backbone_override(backbone) if backbone is not None else None,
             'cTerminalAmidated': bool(item.get('cTerminalAmidated')),
         })
     return molecules
@@ -282,6 +294,11 @@ def register_prediction_routes(
         except IOError as exc:
             logger.exception('Failed to read yaml_file from request: %s. Client IP: %s', exc, request.remote_addr)
             return jsonify({'error': f'Failed to read yaml_file: {exc}'}), 400
+
+        try:
+            yaml.safe_load(yaml_content)
+        except yaml.YAMLError as exc:
+            return jsonify({'error': f'Invalid YAML: {exc}'}), 400
 
         # 同一请求多处校验共用一次解析；内容被改写（properties 合并、
         # 化合物合并）后刷新，避免同一 yaml 反复 safe_load
@@ -569,6 +586,8 @@ def register_prediction_routes(
             logger.info('seed parameter missing for backend=%s; defaulting to %s for client %s.', backend, seed_value, request.remote_addr)
 
         custom_ccd_molecules = _parse_custom_ccd_molecules(request.form.get('custom_ccd_molecules'))
+        if custom_ccd_molecules is None:
+            return jsonify({'error': 'Invalid custom_ccd_molecules payload.'}), 400
 
         # Dry-run the production CCD builders so bad chemistry fails as 400
         # here instead of inside a GPU task. Engines with relaxed CCD parsing

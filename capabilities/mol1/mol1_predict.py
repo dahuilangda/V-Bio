@@ -37,11 +37,6 @@ import yaml
 # ---------------------------------------------------------------- CCD 覆盖层
 
 def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> tuple[Path | None, dict]:
-    """将自定义残基合并进 components.cif + rdkit pkl，返回 (覆盖目录, 编码重映射)。
-
-    在 mol1 runtime 容器内执行——/cache/common/components.cif 已挂载。
-    覆盖目录按任务隔离；编码冲突时自动生成无冲突替代编码并返回重映射表。
-    """
     import pickle
     from rdkit import Chem
 
@@ -51,16 +46,15 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> tuple[Pa
     source_cif = Path("/cache/common/components.cif")
     source_pkl = Path("/cache/common/components.cif.rdkit_mol.pkl")
     if not source_cif.is_file():
-        print(f"[WARN] CCD source not found: {source_cif}", file=sys.stderr)
-        return None, {}
+        raise RuntimeError(f"标准 CCD components.cif 不存在: {source_cif}")
+    if not source_pkl.is_file():
+        raise RuntimeError(f"标准 CCD rdkit 缓存不存在: {source_pkl}")
 
-    # 扫描标准 CCD 编码集合
     base_codes = set()
     for line in source_cif.read_text(errors="replace").splitlines():
         if line.startswith("data_"):
             base_codes.add(line[5:].strip().upper())
 
-    # 冲突时自动重命名：Z + 序号后缀
     remap: dict[str, str] = {}
     used = set(base_codes)
     for item in custom_molecules:
@@ -106,13 +100,9 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> tuple[Pa
     merged_cif.write_text(source_cif.read_text(errors="replace").rstrip()
                           + "\n\n" + "\n\n".join(custom_blocks) + "\n")
 
-    # 合并 pkl：标准条目 + 自定义条目
-    mols = {}
-    if source_pkl.is_file():
-        Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
-        import pickle
-        with source_pkl.open("rb") as handle:
-            mols = pickle.load(handle)
+    Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+    with source_pkl.open("rb") as handle:
+        mols = pickle.load(handle)
     for item in custom_molecules:
         code = str(item.get("ccd") or "").strip().upper()
         smiles = str(item.get("smiles") or "").strip()
@@ -120,10 +110,8 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> tuple[Pa
             continue
         mol = Chem.MolFromSmiles(smiles)
         if mol is not None:
-            Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
             mols[code] = mol
     with merged_pkl.open("wb") as handle:
-        import pickle
         pickle.dump(mols, handle)
 
     print(f"CCD overlay built: {overlay_dir} ({len(custom_codes)} custom residues)", file=sys.stderr)

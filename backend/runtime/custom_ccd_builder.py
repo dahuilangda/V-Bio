@@ -18,6 +18,7 @@ from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
+from backend.core.config import PROTENIX_COMMON_CACHE_DIR
 from backend.core.errors import UserInputError
 
 
@@ -51,22 +52,27 @@ def _normalize_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
 
 def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_value, list):
-        return []
+        raise UserInputError("custom_ccd_molecules 必须为列表。")
     molecules: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for item in raw_value:
         if not isinstance(item, dict):
-            continue
-        ccd = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("ccd") or "")).upper()[:12]
+            raise UserInputError("custom_ccd_molecules 条目必须为对象。")
+        code = str(item.get("ccd") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9_-]{1,12}", code):
+            raise UserInputError(
+                f"自定义 CCD 编码非法: {item.get('ccd')!r}（限 1-12 位字母/数字/-/_）。")
         smiles = str(item.get("smiles") or "").strip()
-        if not ccd or not smiles or ccd in seen:
-            continue
+        if not smiles:
+            raise UserInputError(f"自定义 CCD {code} 缺少 SMILES。")
         kind = str(item.get("kind") or "residue").strip().lower()
         if kind not in {"residue", "ligand"}:
-            kind = "residue"
-        seen.add(ccd)
+            raise UserInputError(f"自定义 CCD {code} 的 kind 非法: {item.get('kind')!r}。")
+        if code in seen:
+            raise UserInputError(f"自定义 CCD 编码重复: {code}。")
+        seen.add(code)
         molecules.append({
-            "ccd": ccd,
+            "ccd": code,
             "smiles": smiles,
             "base_residue": str(item.get("base_residue") or item.get("baseResidue") or "").strip().upper()[:1],
             "label": str(item.get("label") or "").strip()[:80],
@@ -86,41 +92,23 @@ def _boltz_custom_ccd_aliases(ccd: str) -> List[str]:
     return aliases
 
 
-def load_standard_ccd_codes(cif_path: Optional[Path] = None) -> set:
-    """扫描 components.cif（`data_<code>` 头）得到标准 CCD 编码集合。
+STANDARD_CCD_COMPONENTS_CIF = Path(PROTENIX_COMMON_CACHE_DIR) / "components.cif"
 
-    未显式给定时依次尝试已知的标准 CCD 挂载路径；全部缺失则返回空集
-    （调用方据此跳过冲突重命名并告警，不阻断任务）。
-    """
-    if cif_path is not None:
-        candidates = [Path(cif_path)]
-    else:
-        candidates = [
-            Path("/data/protenix/common_cache/components.cif"),
-            Path("/data/mol1/common/common/components.cif"),
-        ]
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        try:
-            codes = {
-                line[5:].strip().upper()
-                for line in candidate.read_text(errors="replace").splitlines()
-                if line.startswith("data_")
-            }
-            if codes:
-                return codes
-        except OSError as exc:
-            print(f"[WARN] 标准 CCD 读取失败 {candidate}: {exc}", file=sys.stderr)
-    return set()
+
+def load_standard_ccd_codes(cif_path: Optional[Path] = None) -> set:
+    path = Path(cif_path) if cif_path is not None else STANDARD_CCD_COMPONENTS_CIF
+    if not path.is_file():
+        raise FileNotFoundError(f"标准 CCD components.cif 不存在: {path}")
+    return {
+        line[5:].strip().upper()
+        for line in path.read_text(errors="replace").splitlines()
+        if line.startswith("data_")
+    }
 
 
 def _preset_custom_ccd_codes() -> set:
-    try:
-        from backend.runtime.peptide_design_backend import PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES
-        return {str(code or "").strip().upper() for code in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES}
-    except Exception:
-        return set()
+    from backend.runtime.peptide_design_backend import PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES
+    return {str(code or "").strip().upper() for code in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES}
 
 
 def _next_free_z_code(used: set) -> str:
@@ -134,20 +122,14 @@ def _next_free_z_code(used: set) -> str:
 
 def resolve_custom_ccd_code_collisions(
     molecules: List[Dict[str, Any]],
-    taken_codes: Any,
-    protected_codes: Any = None,
+    taken_codes: set,
+    protected_codes: set = frozenset(),
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
-    """自定义残基编码与基础 CCD 冲突时自动改名（Z001 起），返回 (分子表, 重映射)。
-
-    taken_codes 为该引擎将合并进入的基础 CCD 编码集合；protected_codes
-    （平台 preset 编码）有内建标准定义，跳过改名。molecules 原地更新。
-    """
-    taken = {str(code or "").strip().upper() for code in (taken_codes or ()) if code}
-    if not taken:
-        return molecules, {}
-    protected = {str(code or "").strip().upper() for code in (protected_codes or ())}
+    if not taken_codes:
+        raise ValueError("基础 CCD 编码集合为空，无法执行编码冲突检查。")
+    protected = {str(code or "").strip().upper() for code in protected_codes}
     remap: Dict[str, str] = {}
-    used = set(taken)
+    used = set(taken_codes)
     for item in molecules:
         code = str(item.get("ccd") or "").strip().upper()
         if not code or code not in used or code in protected:
@@ -159,7 +141,6 @@ def resolve_custom_ccd_code_collisions(
 
 
 def apply_custom_ccd_code_remap(yaml_content: str, remap: Dict[str, str]) -> str:
-    """将编码重映射同步到任务 yaml：实体级 ccd 与 modifications[].ccd。"""
     if not remap:
         return yaml_content
     import yaml as _yaml

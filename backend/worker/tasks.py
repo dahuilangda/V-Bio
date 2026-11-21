@@ -134,8 +134,6 @@ def _mk_task_temp_dir(prefix: str) -> str:
 
 
 def _quarantine_result_archive(task_id: str, archive_path: str) -> str:
-    """上传失败时把结果归档移入隔离目录；finally 的临时目录清理不得销毁
-    GPU 产物的唯一副本。返回隔离路径，失败返回空串。"""
     try:
         quarantine_root = os.path.join(os.path.dirname(_resolve_worker_temp_root()),
                                        "_quarantined_uploads")
@@ -1367,7 +1365,6 @@ def predict_task(self, predict_args: dict):
         raise
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        # 推理产物已生成但后续上传/后处理失败：隔离归档，防 finally 清理销毁唯一副本。
         if output_archive_path and os.path.exists(output_archive_path):
             _quarantine_result_archive(task_id, output_archive_path)
         # 父任务失败时撤销已排队候选，避免空跑 GPU 推理。
@@ -1991,7 +1988,6 @@ def boltz2score_task(self, score_args: dict):
 
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        # 推理产物已生成但上传失败：隔离归档，防 finally 清理销毁唯一副本。
         if output_archive_path and os.path.exists(output_archive_path):
             _quarantine_result_archive(task_id, output_archive_path)
         if tracker:

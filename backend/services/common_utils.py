@@ -131,11 +131,7 @@ def classify_protein_msa(value: Any) -> ProteinMsaMode:
 def extract_protein_msa_policies(yaml_content: str) -> list[ProteinMsaPolicy]:
     if not yaml_content.strip():
         return []
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except yaml.YAMLError:
-        # 非法 yaml 按无 MSA 策略处理；提交路径的统一 yaml 校验负责给出 400。
-        return []
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
         return []
     sequences = yaml_data.get('sequences')
@@ -169,10 +165,7 @@ def infer_use_msa_server_from_yaml_text(yaml_content: str) -> bool:
 
 
 def extract_template_meta_from_yaml(yaml_content: str) -> Dict[str, Dict]:
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except yaml.YAMLError:
-        return {}
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
         return {}
 
