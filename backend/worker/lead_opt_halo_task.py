@@ -24,7 +24,12 @@ from gpu_manager import get_redis_client
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, name="backend.worker.tasks.lead_optimization_halo_task")
+@celery_app.task(
+    bind=True,
+    name="backend.worker.tasks.lead_optimization_halo_task",
+    soft_time_limit=172800,
+    time_limit=176400,
+)
 def lead_optimization_halo_task(self, optimization_args: dict):
     from backend.worker import tasks as _tasks
 
@@ -36,9 +41,6 @@ def lead_optimization_halo_task(self, optimization_args: dict):
     try:
         tracker.start_heartbeat()
         tracker.update_status("running", "Preparing HALO optimization inputs.")
-
-        os.environ["VBIO_API_URL"] = str(getattr(config, "CENTRAL_API_URL", "http://127.0.0.1:5000"))
-        os.environ["VBIO_API_TOKEN"] = str(getattr(config, "VBIO_API_TOKEN", "") or "")
 
         output_root = Path(getattr(config, "LEAD_OPTIMIZATION_OUTPUT_DIR", "/data/boltz_lead_optimization_results"))
         task_temp_dir = str(output_root / f"halo_task_{task_id}")
@@ -80,6 +82,8 @@ def lead_optimization_halo_task(self, optimization_args: dict):
             "target_name": optimization_args.get("target_name", ""),
             "target_chain": optimization_args.get("target_chain", "A"),
             "priority": optimization_args.get("priority", "default"),
+            "api_url": str(getattr(config, "CENTRAL_API_URL", "http://127.0.0.1:5000")),
+            "api_token": str(getattr(config, "VBIO_API_TOKEN", "") or ""),
         }
         if not payload["protein_path"]:
             raise ValueError("protein structure (upload or path) is required.")

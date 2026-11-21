@@ -360,6 +360,8 @@ def run_halo_optimization(
             timeout_s=int(payload.get("oracle_timeout_s") or 7200),
             priority=str(payload.get("priority") or "default"),
             seed=cfg.seed or None,
+            api_url=payload.get("api_url"),
+            api_token=payload.get("api_token"),
             log=log,
         )
 
