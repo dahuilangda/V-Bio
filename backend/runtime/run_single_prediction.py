@@ -31,10 +31,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = PROJECT_ROOT / "capabilities"
 
 
-
-
-
-
 if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
     sys.path.insert(0, str(CAPABILITIES_DIR))
 if str(PROJECT_ROOT) not in sys.path:
@@ -123,9 +119,7 @@ _PROTENIX_CCD_PKL = "components.cif.rdkit_mol.pkl"
 _PROTENIX_MERGED_CCD_FILES = (_PROTENIX_CCD_CIF, _PROTENIX_CCD_PKL)
 
 
-
 _PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
-
 
 
 _BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
@@ -237,8 +231,6 @@ def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SE
     return [base_seed + offset for offset in range(count)]
 
 
-
-
 def _ensure_af3_required_fields(cif_text: str) -> str:
     """
     Ensure mmCIF contains all fields required by AlphaFold3 for template parsing.
@@ -326,8 +318,6 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
         return cif_text
     except Exception:
         return cif_text
-
-
 
 
 def prepare_template_payloads(
@@ -504,10 +494,6 @@ def prepare_template_payloads(
     return yaml_content, af3_templates
 
 
-
-
-
-
 def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dict]:
     yaml_data = yaml.safe_load(yaml_content) or {}
     template_entries = yaml_data.get("templates") or []
@@ -607,8 +593,6 @@ def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dic
     return af3_templates
 
 
-_PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
-_PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mmcif"
 # 用户模板缺少 PDB 注册元数据（release_dates、chem_comp.type），由后端按
 # 任务补齐：合成 ID 形如 t001（4 字符字母数字，满足 hit 名约束），日期取
 # 泄漏截止期（2021-09-30）之前的固定值。
@@ -622,8 +606,6 @@ _PROTENIX_STD_AA_CHEM_COMP_TYPES = {
     "GLY": "peptide linking",
     "MSE": "L-peptide derivative",
 }
-
-
 
 
 def validate_af3_database_files(database_dir: str) -> None:
@@ -689,8 +671,6 @@ def validate_af3_database_files(database_dir: str) -> None:
             raise RuntimeError(f"无法读取 AF3 数据库文件 {path}: {e}") from e
 
 
-
-
 from backend.runtime.ipsae_postprocess import (
     _find_ligand_chain_and_resname_in_structure,
     _run_af3_ipsae_postprocess,
@@ -742,8 +722,6 @@ from backend.runtime.msa_pipeline import MSA_CACHE_CONFIG
 
 IPSAE_PAE_CUTOFF = 12.0
 IPSAE_DIST_CUTOFF = 5.0
-_BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
-_PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
 
 
 def _normalized_msa_server_url() -> str:
@@ -1295,10 +1273,6 @@ def convert_structure_to_single_chain_mmcif(
     return output_path, cif_text, selected_chain, template_seq
 
 
-
-
-
-
 def _complete_template_chem_comp_types(cif_text: str) -> str:
     """补全模板 cif 中缺失的标准氨基酸 _chem_comp.type 元数据。
 
@@ -1468,12 +1442,6 @@ from backend.worker.docker_cmd import (
 
 
 from backend.runtime.docker_exec import remove_container, run_docker_streaming
-
-
-
-
-
-
 
 
 def _structure_candidate_priority(name: str, base_priority: int, jobname: str) -> int:
@@ -1860,10 +1828,6 @@ def run_protenix_affinity_pipeline(
         return []
 
 
-
-
-
-
 def _resolve_backend_results_root(backend: str, task_id: Optional[str], temp_dir: str) -> Path:
     from backend.runtime.backends.support import resolve_backend_results_root
     return resolve_backend_results_root(backend, task_id, temp_dir)
@@ -1958,542 +1922,8 @@ def _safe_runtime_token(raw: Any) -> str:
     return safe_runtime_token(raw)
 
 
-
-
-
-
-
-
-
-
-
-
 # Legacy shape derived from the unified linker registry (bicyclic_linkers.py)
 BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = bicyclic_linkers.atom_map()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int], List[int]]:
-    if not query_seq or not template_seq:
-        return [], []
-
-    aligner = Align.PairwiseAligner()
-    aligner.mode = "global"
-    alignment = aligner.align(query_seq, template_seq)[0]
-    query_indices: List[int] = []
-    template_indices: List[int] = []
-
-    for query_block, template_block in zip(alignment.aligned[0], alignment.aligned[1]):
-        q_start, q_end = query_block
-        t_start, t_end = template_block
-        length = min(q_end - q_start, t_end - t_start)
-        for offset in range(length):
-            query_indices.append(int(q_start + offset))
-            template_indices.append(int(t_start + offset))
-
-    return query_indices, template_indices
-
-
-
-
-def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
-    mapping: Dict[str, str] = {}
-    for item in yaml_data.get("sequences", []):
-        if not isinstance(item, dict):
-            continue
-        # Support both "protein" (Boltz format) and "proteinChain" (V-Bio format)
-        protein = item.get("protein") or item.get("proteinChain")
-        if protein is None or not isinstance(protein, dict):
-            continue
-        seq = protein.get("sequence", "")
-        ids = protein.get("id") or protein.get("chain_id")
-        if isinstance(ids, list):
-            chain_ids = ids
-        else:
-            chain_ids = [ids] if ids is not None else []
-        if not chain_ids:
-            continue
-        for chain_id in chain_ids:
-            mapping[chain_id] = seq
-    return mapping
-
-
-
-
-def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SEED_COUNT) -> Optional[List[int]]:
-    if seed is None:
-        return None
-    try:
-        base_seed = int(seed)
-    except (TypeError, ValueError):
-        return None
-    if count <= 1:
-        return [base_seed]
-    return [base_seed + offset for offset in range(count)]
-
-
-
-
-def _ensure_af3_required_fields(cif_text: str) -> str:
-    """
-    Ensure mmCIF contains all fields required by AlphaFold3 for template parsing.
-
-    AF3 requires _atom_site.pdbx_PDB_model_num field which may be missing
-    when converting from PDB or generating mmCIF with gemmi.
-    """
-    try:
-        doc = gemmi.cif.read_string(cif_text)
-        if len(doc) == 0:
-            return cif_text
-        block = doc.sole_block()
-
-        # Check if _atom_site table exists
-        atom_site_loop = block.find_loop("_atom_site")
-        if not atom_site_loop:
-            return cif_text
-
-        tags = atom_site_loop.tags
-        has_model_num = "_atom_site.pdbx_PDB_model_num" in tags
-
-        if not has_model_num:
-            lines = cif_text.splitlines()
-            result_lines = []
-            in_atom_site_loop = False
-            atom_site_tags_found = False
-            model_num_idx = -1
-
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-
-                if stripped.startswith("loop_"):
-                    j = i + 1
-                    atom_site_tags = []
-                    while j < len(lines) and lines[j].strip().startswith("_"):
-                        atom_site_tags.append(lines[j].strip())
-                        j += 1
-
-                    if atom_site_tags and any(t.startswith("_atom_site.") for t in atom_site_tags):
-                        in_atom_site_loop = True
-                        atom_site_tags_found = True
-
-                        # pdbx_PDB_model_num belongs after group_PDB and before id.
-                        insert_idx = -1
-                        for idx, tag in enumerate(atom_site_tags):
-                            if tag == "_atom_site.group_PDB":
-                                insert_idx = idx + 1
-                                break
-                            elif tag == "_atom_site.id" and insert_idx == -1:
-                                insert_idx = idx
-                                break
-
-                        result_lines.append(line)
-                        for k, tag in enumerate(atom_site_tags):
-                            if k == insert_idx:
-                                result_lines.append("_atom_site.pdbx_PDB_model_num")
-                                model_num_idx = insert_idx
-                            result_lines.append(lines[i + 1 + k])
-
-                        # If we didn't find a place to insert, add at the end
-                        if insert_idx == -1:
-                            result_lines.append("_atom_site.pdbx_PDB_model_num")
-                            model_num_idx = len(atom_site_tags)
-
-                        continue
-
-                if in_atom_site_loop and atom_site_tags_found:
-                    if not stripped.startswith("_") and stripped and not stripped.startswith("loop_") and not stripped.startswith("data_"):
-                        parts = stripped.split()
-                        if model_num_idx >= 0 and model_num_idx < len(parts) + 1:
-                            parts.insert(model_num_idx, "1")
-                            result_lines.append(" ".join(parts))
-                        else:
-                            result_lines.append(line)
-                        continue
-                    elif stripped.startswith("_") or stripped.startswith("loop_") or stripped.startswith("data_"):
-                        in_atom_site_loop = False
-                        atom_site_tags_found = False
-                        model_num_idx = -1
-
-                result_lines.append(line)
-
-            return "\n".join(result_lines) + ("\n" if result_lines else "")
-
-        return cif_text
-    except Exception:
-        return cif_text
-
-
-
-
-def prepare_template_payloads(
-    yaml_content: str,
-    template_inputs: Optional[List[dict]],
-    temp_dir: str,
-) -> Tuple[str, List[dict]]:
-    if not template_inputs:
-        return yaml_content, []
-
-    yaml_data = yaml.safe_load(yaml_content) or {}
-    had_templates = bool(yaml_data.get("templates"))
-    chain_seq_map = build_chain_sequence_map(yaml_data)
-    boltz_templates = list(yaml_data.get("templates", []) or [])
-    if boltz_templates:
-        normalized = []
-        for entry in boltz_templates:
-            if not isinstance(entry, dict):
-                continue
-            path_ref = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
-            if not path_ref:
-                continue
-            path = Path(str(path_ref))
-            resolved: Optional[Path] = None
-            if path.is_absolute():
-                if path.exists():
-                    resolved = path
-            else:
-                if path.exists():
-                    resolved = path.resolve()
-                else:
-                    candidate = Path(temp_dir) / path
-                    if candidate.exists():
-                        resolved = candidate
-            if not resolved:
-                continue
-            updated = dict(entry)
-            if "pdb" in updated:
-                updated["pdb"] = str(resolved)
-            else:
-                updated.pop("pdb", None)
-                if "cif" in updated:
-                    updated["cif"] = str(resolved)
-                    updated.pop("mmcif", None)
-                elif "mmcif" in updated:
-                    updated["mmcif"] = str(resolved)
-            normalized.append(updated)
-        boltz_templates = normalized
-    af3_templates: List[dict] = []
-
-    templates_dir = Path(temp_dir) / "templates"
-    for idx, template in enumerate(template_inputs):
-        content_b64 = template.get("content_base64")
-        if not content_b64:
-            print("[WARN] 模板内容为空，跳过。", file=sys.stderr)
-            continue
-        try:
-            raw_bytes = base64.b64decode(content_b64)
-        except Exception:
-            print("[WARN] 模板内容解码失败，跳过。", file=sys.stderr)
-            continue
-        text = raw_bytes.decode("utf-8", errors="replace")
-        fmt = (template.get("format") or "pdb").lower()
-        file_name = template.get("file_name") or template.get("filename") or f"template_{idx}.{fmt}"
-        template_chain_id = template.get("template_chain_id")
-
-        if fmt == "pdb":
-            chain_sequences, first_chain = _extract_chain_sequences_from_pdb_text(text)
-        else:
-            chain_sequences = extract_chain_sequences_from_structure(text, fmt)
-            first_chain = next(iter(chain_sequences.keys()), None)
-        if not chain_sequences:
-            print("[WARN] 模板未解析出蛋白质链，跳过。", file=sys.stderr)
-            continue
-        if template_chain_id not in chain_sequences:
-            template_chain_id = first_chain or next(iter(chain_sequences.keys()))
-        template_seq = chain_sequences.get(template_chain_id, "")
-
-        templates_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = templates_dir / file_name
-        try:
-            raw_path.write_bytes(raw_bytes)
-        except Exception as exc:
-            print(f"[WARN] 保存模板文件失败 {raw_path}: {exc}", file=sys.stderr)
-            continue
-        # The single-chain conversion writes into cif_path, which for cif
-        # uploads equals raw_path and would clobber it; keep a copy with the
-        # original author numbering for pocket-residue translation.
-        author_path = templates_dir / f"{Path(file_name).stem}_author{Path(file_name).suffix or '.cif'}"
-        try:
-            author_path.write_bytes(raw_bytes)
-        except Exception as exc:
-            print(f"[WARN] 保存原始模板失败 {author_path}: {exc}", file=sys.stderr)
-
-        if fmt == "pdb":
-            filtered_path = templates_dir / f"{Path(file_name).stem}_chain{template_chain_id}.pdb"
-            try:
-                _write_filtered_pdb_by_chain(text, str(template_chain_id or ""), filtered_path)
-                raw_path = filtered_path
-            except Exception as exc:
-                print(f"[WARN] 过滤 PDB 模板失败 {raw_path}: {exc}", file=sys.stderr)
-
-        cif_stem = Path(file_name).stem or f"template_{idx}"
-        cif_path = templates_dir / f"{cif_stem}.cif"
-        try:
-            cif_path, cif_text, resolved_chain_id, cif_template_seq = convert_structure_to_single_chain_mmcif(
-                raw_path, str(template_chain_id or ""), cif_path
-            )
-        except Exception as exc:
-            print(f"[WARN] 模板转换失败，已跳过 {file_name}: {exc}", file=sys.stderr)
-            continue
-        if cif_template_seq:
-            template_seq = cif_template_seq
-            template_chain_id = resolved_chain_id
-
-        target_chain_ids = template.get("target_chain_ids") or []
-        if target_chain_ids and template_seq:
-            for item in yaml_data.get("sequences", []):
-                if "protein" not in item:
-                    continue
-                protein = item.get("protein", {})
-                ids = protein.get("id")
-                if isinstance(ids, list):
-                    ids_list = ids
-                else:
-                    ids_list = [ids] if ids is not None else []
-                if not set(ids_list).intersection(target_chain_ids):
-                    continue
-                if not protein.get("sequence"):
-                    protein["sequence"] = template_seq
-            chain_seq_map = build_chain_sequence_map(yaml_data)
-        if target_chain_ids:
-            query_seq = chain_seq_map.get(target_chain_ids[0], "")
-        else:
-            query_seq = ""
-
-        query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
-
-        # Boltz template entry
-        boltz_entry: Dict[str, Any] = {"cif": str(cif_path)}
-        # pocket-residue translation needs the author numbering of the
-        # original upload; the converted mmcif renumbers residues 1..N
-        boltz_entry["author_pdb"] = str(author_path)
-        if target_chain_ids:
-            boltz_entry["chain_id"] = target_chain_ids if len(target_chain_ids) > 1 else target_chain_ids[0]
-        boltz_templates.append(boltz_entry)
-
-        # AF3 template payload
-        if query_indices and template_indices:
-            af3_source_text = cif_text
-            af3_mmcif = _sanitize_release_date_text_with_gemmi(
-                af3_source_text,
-                release_date=None,
-                include_loops=True,
-            )
-            af3_mmcif = _force_af3_release_date_text(af3_mmcif, None)
-            af3_templates.append({
-                "target_chain_ids": target_chain_ids,
-                "mmcif": af3_mmcif,
-                "queryIndices": query_indices,
-                "templateIndices": template_indices,
-            })
-
-    if boltz_templates or had_templates:
-        yaml_data["templates"] = boltz_templates
-    elif "templates" in yaml_data:
-        yaml_data.pop("templates", None)
-    yaml_content = yaml.safe_dump(
-        yaml_data,
-        sort_keys=False,
-        default_flow_style=False,
-    )
-
-    return yaml_content, af3_templates
-
-
-
-
-def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dict]:
-    yaml_data = yaml.safe_load(yaml_content) or {}
-    template_entries = yaml_data.get("templates") or []
-    if not isinstance(template_entries, list) or not template_entries:
-        return []
-
-    chain_seq_map = build_chain_sequence_map(yaml_data)
-    if not chain_seq_map:
-        return []
-
-    af3_templates: List[dict] = []
-    templates_dir = Path(temp_dir) / "templates_from_yaml"
-
-    for idx, entry in enumerate(template_entries):
-        if not isinstance(entry, dict):
-            continue
-        cif_ref = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
-        if not cif_ref:
-            continue
-        cif_path = Path(str(cif_ref))
-        if not cif_path.is_absolute():
-            candidate = Path(temp_dir) / cif_path
-            if candidate.exists():
-                cif_path = candidate
-        if not cif_path.exists():
-            print(f"[WARN] 模板 CIF 文件不存在，跳过: {cif_path}", file=sys.stderr)
-            continue
-        suffix = cif_path.suffix.lower()
-        fmt = "cif" if suffix in (".cif", ".mmcif") else "pdb"
-        try:
-            text = cif_path.read_text()
-        except Exception as exc:
-            print(f"[WARN] 读取模板文件失败 {cif_path}: {exc}", file=sys.stderr)
-            continue
-
-        template_chain_id = entry.get("template_id") or entry.get("template_chain_id")
-        if isinstance(template_chain_id, (list, tuple)):
-            template_chain_id = template_chain_id[0] if template_chain_id else None
-        target_chain_ids = _normalize_chain_id_list(
-            entry.get("chain_id") or entry.get("target_chain_ids") or entry.get("chain_ids")
-        )
-        if not target_chain_ids and chain_seq_map:
-            target_chain_ids = [next(iter(chain_seq_map.keys()))]
-
-        if fmt == "pdb":
-            chain_sequences, first_chain = _extract_chain_sequences_from_pdb_text(text)
-        else:
-            chain_sequences = extract_chain_sequences_from_structure(text, fmt)
-            first_chain = next(iter(chain_sequences.keys()), None)
-        if not chain_sequences:
-            continue
-        if template_chain_id not in chain_sequences:
-            template_chain_id = first_chain or next(iter(chain_sequences.keys()))
-        template_seq = chain_sequences.get(template_chain_id, "")
-
-        cif_text: Optional[str] = None
-        cif_out = templates_dir / f"template_yaml_{idx}.cif"
-        try:
-            if fmt == "pdb":
-                filtered_path = templates_dir / f"template_yaml_{idx}_chain{template_chain_id}.pdb"
-                _write_filtered_pdb_by_chain(text, str(template_chain_id or ""), filtered_path)
-                source_path = filtered_path
-            else:
-                source_path = cif_path
-            _, cif_text, resolved_chain_id, cif_template_seq = convert_structure_to_single_chain_mmcif(
-                source_path, str(template_chain_id or ""), cif_out
-            )
-            if cif_template_seq:
-                template_seq = cif_template_seq
-                template_chain_id = resolved_chain_id
-        except Exception as exc:
-            if fmt in ("cif", "mmcif") and text:
-                print(f"[WARN] 转换模板失败，改用原始 mmCIF: {cif_path} ({exc})", file=sys.stderr)
-                cif_text = text
-            else:
-                print(f"[WARN] 转换模板为单链 mmCIF 失败 {cif_path}: {exc}", file=sys.stderr)
-                continue
-
-        query_seq = chain_seq_map.get(target_chain_ids[0], "") if target_chain_ids else ""
-        query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
-        if not query_indices or not template_indices:
-            continue
-
-        af3_mmcif = _sanitize_release_date_text_with_gemmi(
-            cif_text or "",
-            release_date=None,
-            include_loops=True,
-        )
-        af3_mmcif = _force_af3_release_date_text(af3_mmcif, None)
-        af3_templates.append({
-            "target_chain_ids": target_chain_ids,
-            "mmcif": af3_mmcif,
-            "queryIndices": query_indices,
-            "templateIndices": template_indices,
-        })
-
-    return af3_templates
-
-
-_PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
-_PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mmcif"
-# 用户模板缺少 PDB 注册元数据（release_dates、chem_comp.type），由后端按
-# 任务补齐：合成 ID 形如 t001（4 字符字母数字，满足 hit 名约束），日期取
-# 泄漏截止期（2021-09-30）之前的固定值。
-_PROTENIX_TEMPLATE_RELEASE_DATE = "2019-01-01"
-# 标准氨基酸的 PDB 注册 _chem_comp.type：Protenix 解析模板时以该字段判定
-# 蛋白链（须含 "peptide"）。
-_PROTENIX_STD_AA_CHEM_COMP_TYPES = {
-    **{aa: "L-peptide linking" for aa in
-       ("ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "HIS", "ILE",
-        "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL")},
-    "GLY": "peptide linking",
-    "MSE": "L-peptide derivative",
-}
-
-
-
-
-def validate_af3_database_files(database_dir: str) -> None:
-    """
-    Perform lightweight sanity checks on key AF3 database FASTA files to fail fast
-    when files are missing or corrupted (common cause of jackhmmer 'Parse failed').
-    """
-    required_files = [
-        "uniref90_2022_05.fa",
-        "uniprot_all_2021_04.fa",
-        "mgy_clusters_2022_05.fa",
-        "bfd-first_non_consensus_sequences.fasta",
-    ]
-
-    # Allow common amino-acid symbols plus gap/stop placeholders; digits are not valid.
-    allowed_seq_pattern = re.compile(r"^[A-Za-z\-\.*?]+$")
-    max_lines_scan = AF3_VALIDATE_MAX_LINES  # scan early part; set to 0 to scan full file
-
-    for filename in required_files:
-        path = Path(database_dir) / filename
-        if not path.exists() or not path.is_file():
-            raise RuntimeError(
-                f"AlphaFold3 数据库缺少必需文件: {path}. 请重新下载/解压 AF3 数据库。"
-            )
-        try:
-            with open(path, "rb") as f:
-                head = f.read(4096)
-                if b"\x00" in head:
-                    raise RuntimeError(
-                        f"检测到文件包含非法空字节，可能已损坏: {path}. 请重新下载/解压该文件。"
-                    )
-                # 第一条非空行应为 FASTA 标题
-                first_line = head.splitlines()[0] if head else b""
-                if not first_line.startswith(b">"):
-                    raise RuntimeError(
-                        f"文件不是有效的 FASTA 格式（首行未以 '>' 开头）: {path}. "
-                        "请重新下载/解压 AF3 数据库。"
-                    )
-
-            # Streaming scan of the early portion of the file to catch corruption quickly.
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                header_seen = False
-                for lineno, line in enumerate(f, start=1):
-                    if max_lines_scan > 0 and lineno > max_lines_scan:
-                        break
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    if stripped.startswith(">"):  # header line
-                        header_seen = True
-                        continue
-                    if not header_seen:
-                        raise RuntimeError(
-                            f"文件开头缺少 FASTA 标题: {path} (行 {lineno})。"
-                        )
-                    if not allowed_seq_pattern.match(stripped):
-                        preview = stripped[:80]
-                        raise RuntimeError(
-                            f"检测到无效的 FASTA 序列字符 (行 {lineno}): '{preview}'. "
-                            f"请重新下载/解压 {path.name}，当前文件可能已损坏。"
-                        )
-        except OSError as e:
-            raise RuntimeError(f"无法读取 AF3 数据库文件 {path}: {e}") from e
-
 
 
 def _detect_bicyclic_linker_codes(yaml_content: str) -> List[str]:
@@ -2517,28 +1947,6 @@ def _linker_ccd_mmcif_bundle(codes: Iterable[str]) -> str:
             raise FileNotFoundError(f"Bicyclic linker CCD mmcif is missing: {path}")
         parts.append(path.read_text())
     return "\n".join(parts)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 PEPTIDE_NATURAL_THREE_TO_ONE = {
@@ -2591,9 +1999,6 @@ PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES = {
 PEPTIDE_PRESET_PLACEMENT_RULES = {
     "PCA": "n_term",
 }
-
-
-
 
 
 def _collect_preset_modification_ccds_from_yaml(yaml_content: str) -> List[str]:
@@ -2676,8 +2081,6 @@ def _extract_user_ccd_one_letter_overrides(user_ccd_text: Optional[str]) -> Dict
     return overrides
 
 
-
-
 def _validate_amidated_terminal_constraints(yaml_text: str, custom_molecules: List[Dict[str, Any]]) -> None:
     """C-terminal amidated custom residues carry no leaving atom on the backbone carbon, so they
     can only occupy the last position of a LINEAR protein chain. Reject them on cyclic chains or at
@@ -2717,48 +2120,6 @@ def _validate_amidated_terminal_constraints(yaml_text: str, custom_molecules: Li
                 )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
     parent_token = str(parent_task_id or "").strip()
     if not parent_token:
@@ -2770,18 +2131,6 @@ def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
         client.delete(_peptide_subtask_registry_key(parent_token))
     except Exception:
         pass
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _binder_msa_assignment(binder_sequence: str) -> str:
@@ -2832,112 +2181,13 @@ def _binder_msa_assignment(binder_sequence: str) -> str:
     return cached_msa_path
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Interface engagement floor for sample selection: receptor-peptide heavy-atom
 # pairs within 4.5 A. A docked 12-20-mer buries dozens of pairs; below this
 # the sample never docked and must not ship regardless of clash-freedom.
 ENGAGE_MIN_CONTACTS = 8
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 POCKET_CONTACT_MAX_A = 5.0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# The two CCD artifacts are rewritten (merged) per overlay; every other entry in
-# the shared cache is static and must be linked, never duplicated. Keep the names
-# in one place: the skip set in the materialization loop is load-bearing — an
-# unlisted CCD artifact would be hardlinked over the freshly merged overlay copy.
-_PROTENIX_CCD_CIF = "components.cif"
-_PROTENIX_CCD_PKL = "components.cif.rdkit_mol.pkl"
-_PROTENIX_MERGED_CCD_FILES = (_PROTENIX_CCD_CIF, _PROTENIX_CCD_PKL)
 
 
 def _merge_custom_ccd_with_existing_cache(
@@ -3099,8 +2349,6 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
         seen.add(parsed)
         normalized.append(parsed)
     return normalized
-
-
 
 
 def _read_bool_option(options: Dict[str, Any], key: str, default: bool = False) -> bool:
