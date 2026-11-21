@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
-import re
+import shutil
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from backend.runtime.af3_adapter import safe_filename
 from backend.services.common_utils import (
     ProteinMsaMode,
     extract_protein_msa_policies,
+    is_msa_disabled,
 )
 
 # MSA 缓存配置（目录可通过 VBIO_MSA_CACHE_DIR 覆盖；默认指向 /data 挂载，
@@ -55,6 +58,46 @@ def sanitize_a3m_content(content: str, context: str = "") -> str:
         msg_context = f" ({context})" if context else ""
         print(f"[WARN] 检测到并移除非法字符\\x00{msg_context}", file=sys.stderr)
     return sanitized
+
+
+def _a3m_has_sequence_content(content: str) -> bool:
+    saw_header = False
+    for raw_line in sanitize_a3m_content(content).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            saw_header = True
+            continue
+        if saw_header and any(ch not in {"-", "."} for ch in line):
+            return True
+    return False
+
+
+def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", header: str = "query") -> bool:
+    existing_content = ""
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                existing_content = f.read()
+        except OSError as exc:
+            print(f"[WARN] 无法读取 A3M 文件 {path}: {exc}", file=sys.stderr)
+            return False
+
+    sanitized = sanitize_a3m_content(existing_content, context=context or path)
+    if sanitized and _a3m_has_sequence_content(sanitized):
+        if sanitized != existing_content:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(sanitized)
+            except OSError as exc:
+                print(f"[WARN] 无法写回清理后的 A3M 文件 {path}: {exc}", file=sys.stderr)
+                return False
+        return True
+
+    msg_context = f" ({context})" if context else ""
+    print(f"[ERROR] A3M 文件无有效序列内容: {path}{msg_context}", file=sys.stderr)
+    return False
 
 
 

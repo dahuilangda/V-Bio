@@ -8,11 +8,41 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
+import gemmi
+
+from backend.core.config import (
+    BASE_DIR,
+    BOLTZ2SCORE_SCRIPT,
+    BOLTZ2_CONTAINER_CACHE_DIR,
+    BOLTZ2_DOCKER_EXTRA_ARGS,
+    BOLTZ2_DOCKER_IMAGE,
+    BOLTZ2_DOCKER_SHM_SIZE,
+    BOLTZ2_HOST_CACHE_DIR,
+)
+from backend.runtime.backends.support import determine_docker_gpu_arg
+from backend.runtime.design_constants import AMINO_ACID_MAPPING
+from backend.runtime.docker_exec import remove_container
+from backend.runtime.ipsae_postprocess import (
+    _find_first_existing,
+    _iter_affinity_entries,
+    _load_json_object,
+    _tail_lines,
+)
+from backend.worker.docker_cmd import (
+    _docker_warn,
+    collect_gpu_device_group_ids,
+    docker_args_has_flag,
+    ensure_image,
+    make_scoped_container_name,
+    sanitize_docker_extra_args,
+)
 
 
 def extract_affinity_config_from_yaml(yaml_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -425,7 +455,7 @@ def _run_boltz2score_affinity_postprocess(
             "--volume",
             f"{affinity_base}:{affinity_base}",
             "--volume",
-            f"{PROJECT_ROOT}:/workspace/vbio:ro",
+            f"{BASE_DIR}:/workspace/vbio:ro",
             "--workdir",
             "/workspace/vbio",
             "--env",
@@ -480,7 +510,7 @@ def _run_boltz2score_affinity_postprocess(
     with score_log.open("w", encoding="utf-8") as logf:
         score_proc = subprocess.Popen(
             docker_command,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(BASE_DIR),
             stdout=logf,
             stderr=subprocess.STDOUT,
             text=True,

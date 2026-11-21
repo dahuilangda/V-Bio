@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import zipfile
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-from backend.runtime.msa_pipeline import is_sequence_match
+from backend.runtime.af3_adapter import AF3Preparation, safe_filename, serialize_af3_json
+from backend.runtime.msa_pipeline import MSA_CACHE_CONFIG, get_sequence_hash
+from backend.runtime.protenix_adapter import serialize_protenix_json
+from backend.services.common_utils import ProteinMsaMode, extract_protein_msa_policies
+
 
 def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> None:
     manifest_path = Path(base_dir) / "processed" / "manifest.json"
@@ -32,8 +38,8 @@ def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> No
                 " 检测到 templates 输入，模板可能包含不受支持的 CCD 组分。"
                 "请移除该模板，或替换为标准氨基酸残基模板后重试。"
             )
-    except Exception as manifest_exc:
-        print(f"[WARN] boltz preprocessing manifest unreadable; gate skipped: {manifest_exc}", file=sys.stderr)
+    except Exception as yaml_exc:
+        print(f"[WARN] boltz 输入 yaml 无法解析，无法给出模板提示: {yaml_exc}", file=sys.stderr)
 
     raise RuntimeError(
         "Boltz 输入预处理失败：没有生成任何有效记录，任务无法继续。"

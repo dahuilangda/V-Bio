@@ -22,6 +22,11 @@ REPO_MOUNT_CONTAINER = "/workspace/vbio"
 IMAGE_PRECHECK_TIMEOUT_SECONDS = 30
 
 
+def _docker_warn(message: str) -> None:
+    import sys
+    print(f"[WARN] {message}", file=sys.stderr)
+
+
 def sanitize_docker_extra_args(raw_args: list, log=None) -> list:
     """Drop malformed -e/--env tokens to avoid breaking docker image resolution."""
     sanitized: list = []

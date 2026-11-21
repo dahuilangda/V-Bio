@@ -5,16 +5,16 @@
 """
 from __future__ import annotations
 
-import glob
-import json
-import math
-import os
-import random
-import re
 import base64
 import copy
 import glob
 import hashlib
+import json
+import math
+import os
+import pickle
+import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,6 +23,7 @@ import time
 import traceback
 import uuid
 import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +31,8 @@ import yaml
 from rdkit import Chem
 
 import numpy as np
+
+from backend.core.errors import DpeptideStaleWorkerError
 
 from backend.core.config import (
     PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
@@ -65,8 +68,9 @@ from backend.runtime.linker_measurement import (
     _structure_linker_anchor_map,
 )
 from backend.runtime.msa_pipeline import (
-    cache_msa_files_from_temp_dir,
-    generate_msa_for_sequences,
+    _ensure_nonempty_a3m_file,
+    _msa_search_concurrency,
+    sanitize_a3m_content,
 )
 
 
@@ -96,8 +100,6 @@ if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
-
 sys.path.append(str(PROJECT_ROOT))
 from backend.worker.docker_cmd import ensure_image, readable_docker_failure_diagnosis  # noqa: E402
 from backend.runtime.design_constants import (  # noqa: E402
@@ -109,6 +111,7 @@ from backend.runtime.design_constants import (  # noqa: E402
     plddt_gate_for_chirality,
 )
 from backend.core.config import (
+    BOLTZ2SCORE_SCRIPT,
     MSA_SERVER_URL,
     MSA_SERVER_TIMEOUT_SECONDS,
     COLABFOLD_JOBS_DIR,
@@ -213,69 +216,16 @@ from backend.runtime.custom_ccd_builder import (
 from backend.runtime.ccd_contract import validate_ccd_additions
 
 from backend.runtime.msa_pipeline import MSA_CACHE_CONFIG
+from backend.runtime.constraints_pipeline import (
+    build_alignment_indices,
+    build_chain_sequence_map,
+    _normalize_chain_id_list,
+)
 
 IPSAE_PAE_CUTOFF = 12.0
 IPSAE_DIST_CUTOFF = 5.0
 _BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
 _PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
-
-
-
-
-def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int], List[int]]:
-    if not query_seq or not template_seq:
-        return [], []
-
-    aligner = Align.PairwiseAligner()
-    aligner.mode = "global"
-    alignment = aligner.align(query_seq, template_seq)[0]
-    query_indices: List[int] = []
-    template_indices: List[int] = []
-
-    for query_block, template_block in zip(alignment.aligned[0], alignment.aligned[1]):
-        q_start, q_end = query_block
-        t_start, t_end = template_block
-        length = min(q_end - q_start, t_end - t_start)
-        for offset in range(length):
-            query_indices.append(int(q_start + offset))
-            template_indices.append(int(t_start + offset))
-
-    return query_indices, template_indices
-
-
-
-
-def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
-    mapping: Dict[str, str] = {}
-    for item in yaml_data.get("sequences", []):
-        if not isinstance(item, dict):
-            continue
-        # Support both "protein" (Boltz format) and "proteinChain" (V-Bio format)
-        protein = item.get("protein") or item.get("proteinChain")
-        if protein is None or not isinstance(protein, dict):
-            continue
-        seq = protein.get("sequence", "")
-        ids = protein.get("id") or protein.get("chain_id")
-        if isinstance(ids, list):
-            chain_ids = ids
-        else:
-            chain_ids = [ids] if ids is not None else []
-        if not chain_ids:
-            continue
-        for chain_id in chain_ids:
-            mapping[chain_id] = seq
-    return mapping
-
-
-
-
-def _normalize_chain_id_list(value: Any) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        return [str(item) for item in value if item is not None and str(item).strip()]
-    text = str(value).strip()
-    return [text] if text else []
 
 
 
@@ -291,34 +241,6 @@ def _a3m_has_sequence_content(content: str) -> bool:
             continue
         if saw_header and any(ch not in {"-", "."} for ch in line):
             return True
-    return False
-
-
-
-
-def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", header: str = "query") -> bool:
-    existing_content = ""
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                existing_content = f.read()
-        except OSError as exc:
-            print(f"[WARN] 无法读取 A3M 文件 {path}: {exc}", file=sys.stderr)
-            return False
-
-    sanitized = sanitize_a3m_content(existing_content, context=context or path)
-    if sanitized and _a3m_has_sequence_content(sanitized):
-        if sanitized != existing_content:
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(sanitized)
-            except OSError as exc:
-                print(f"[WARN] 无法写回清理后的 A3M 文件 {path}: {exc}", file=sys.stderr)
-                return False
-        return True
-
-    msg_context = f" ({context})" if context else ""
-    print(f"[ERROR] A3M 文件无有效序列内容: {path}{msg_context}", file=sys.stderr)
     return False
 
 
@@ -2025,6 +1947,8 @@ def _prefetch_generation_binder_msas(
     if not unique:
         return {}
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from backend.runtime.run_single_prediction import _binder_msa_assignment
 
     max_workers = max(1, min(_msa_search_concurrency(), len(unique)))
     t0 = time.time()

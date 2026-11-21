@@ -2,12 +2,65 @@
 模板对齐重映射与残基摘要。供各后端 post_validate 使用。"""
 from __future__ import annotations
 
-import re
+import sys
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
+from Bio import Align
 import gemmi
 import yaml
 
+
+def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int], List[int]]:
+    if not query_seq or not template_seq:
+        return [], []
+
+    aligner = Align.PairwiseAligner()
+    aligner.mode = "global"
+    alignment = aligner.align(query_seq, template_seq)[0]
+    query_indices: List[int] = []
+    template_indices: List[int] = []
+
+    for query_block, template_block in zip(alignment.aligned[0], alignment.aligned[1]):
+        q_start, q_end = query_block
+        t_start, t_end = template_block
+        length = min(q_end - q_start, t_end - t_start)
+        for offset in range(length):
+            query_indices.append(int(q_start + offset))
+            template_indices.append(int(t_start + offset))
+
+    return query_indices, template_indices
+
+
+def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for item in yaml_data.get("sequences", []):
+        if not isinstance(item, dict):
+            continue
+        # Support both "protein" (Boltz format) and "proteinChain" (V-Bio format)
+        protein = item.get("protein") or item.get("proteinChain")
+        if protein is None or not isinstance(protein, dict):
+            continue
+        seq = protein.get("sequence", "")
+        ids = protein.get("id") or protein.get("chain_id")
+        if isinstance(ids, list):
+            chain_ids = ids
+        else:
+            chain_ids = [ids] if ids is not None else []
+        if not chain_ids:
+            continue
+        for chain_id in chain_ids:
+            mapping[chain_id] = seq
+    return mapping
+
+
+def _normalize_chain_id_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item is not None and str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
 
 
 
@@ -142,8 +195,11 @@ def sanitize_constraints_for_chain_lengths(yaml_content: str) -> str:
     if not isinstance(constraints, list) or not constraints:
         return yaml_content
 
+    from backend.runtime.run_single_prediction import (
+        _extract_protein_chain_lengths_from_yaml,
+        _extract_sequence_chain_types_from_yaml,
+    )
     _extract_sequence_chain_types_from_yaml(yaml_data)
-    from backend.runtime.run_single_prediction import _extract_protein_chain_lengths_from_yaml
     chain_lengths = _extract_protein_chain_lengths_from_yaml(yaml_data)
     if not chain_lengths:
         return yaml_content
@@ -365,6 +421,7 @@ def print_constraint_residue_summary(yaml_content: str) -> None:
         return
     if not isinstance(yaml_data, dict):
         return
+    from backend.runtime.run_single_prediction import _extract_protein_chain_lengths_from_yaml
     chain_lengths = _extract_protein_chain_lengths_from_yaml(yaml_data)
     constraints = yaml_data.get("constraints")
     if not isinstance(constraints, list) or not constraints:

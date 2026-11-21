@@ -6,17 +6,37 @@
 """
 from __future__ import annotations
 
-import glob
 import json
 import math
 import os
-import re
+import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import gemmi
 import numpy as np
-import yaml
+
+from backend.core.config import BOLTZ2_DOCKER_EXTRA_ARGS, BOLTZ2_DOCKER_IMAGE
+from backend.runtime.design_constants import AMINO_ACID_MAPPING
+from backend.runtime.docker_exec import remove_container
+from backend.runtime.peptide_design_backend import (
+    _BOLTZ_RESULT_CONF_RE,
+    _PROTENIX_SUMMARY_CONF_RE,
+    IPSAE_DIST_CUTOFF,
+    IPSAE_PAE_CUTOFF,
+    PROJECT_ROOT,
+)
+from backend.worker.docker_cmd import (
+    _docker_warn,
+    collect_gpu_device_group_ids,
+    ensure_image,
+    make_scoped_container_name,
+    sanitize_docker_extra_args,
+)
+
 
 def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
     """标准化 properties 字段，支持 list / dict 等多种写法。"""
@@ -24,14 +44,11 @@ def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
         return []
 
     if isinstance(properties, dict):
-        # 单个字典，直接作为候选
         return [properties]
 
     if isinstance(properties, list):
-        # 已经是列表，过滤出字典条目
         return [entry for entry in properties if isinstance(entry, dict)]
 
-    # 其他类型不支持
     return []
 
 
@@ -759,6 +776,8 @@ def _run_af3_ipsae_postprocess(
     prep: AF3Preparation,
     af3_output_dir: Path,
 ) -> List[Tuple[Path, str]]:
+    from backend.runtime.run_single_prediction import locate_af3_structure_file
+
     structure_path = locate_af3_structure_file(af3_output_dir, prep.jobname)
     if not structure_path or not structure_path.exists():
         return []

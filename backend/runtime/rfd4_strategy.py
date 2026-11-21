@@ -7,14 +7,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+import requests
 import yaml
 
 from backend.core.config import (
@@ -25,18 +30,22 @@ from backend.core.config import (
     VBIO_API_TOKEN,
     VBIO_GATEWAY_URL,
 )
+from backend.runtime import bicyclic_linkers, rfd4_adapter
 from backend.runtime.peptide_design_backend import (
     _dpeptide_target_sequence,
+    _normalize_peptide_design_mode,
     _pocket_contacts_for_staged_space,
 )
 from backend.runtime.rfd4_adapter import MIN_CLOSURE_RESIDUES
 from backend.runtime.bicyclic_linkers import get_linker
 from backend.runtime.backends.support import (
+    determine_docker_gpu_arg,
     resolve_backend_results_root,
     resolve_backend_work_root,
     safe_runtime_token,
 )
 from backend.services.common_utils import normalize_peptide_design_mode
+from backend.worker.docker_cmd import ensure_image
 
 
 
@@ -61,8 +70,8 @@ def run_rfd4_backend(
     ensure_image(rfd4_image)
     print("Using RFD4-Proteina backend", file=sys.stderr)
 
-    results_root = _resolve_backend_results_root("rfd4", task_id, temp_dir)
-    work_root = _resolve_backend_work_root(results_root)
+    results_root = resolve_backend_results_root("rfd4", task_id, temp_dir)
+    work_root = resolve_backend_work_root(results_root)
     input_dir = work_root / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
     (results_root / "output").mkdir(parents=True, exist_ok=True)
@@ -93,7 +102,7 @@ def run_rfd4_backend(
     image, _ = image_and_python(rfd4_image)
     gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
     container_name = f"rfd4-generate-{uuid.uuid4().hex[:12]}"
-    run_token = _safe_runtime_token(task_id or Path(temp_dir).name)
+    run_token = safe_runtime_token(task_id or Path(temp_dir).name)
     command = [
         "docker", "run", "--rm", "--name", container_name,
         "--runtime", "nvidia", "--gpus", gpu_arg,

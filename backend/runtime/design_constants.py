@@ -12,6 +12,17 @@ from __future__ import annotations
 
 import os
 
+# --- Residue code tables --------------------------------------------------
+# Three-letter-to-one-letter mapping shared by template prep, ipSAE chain
+# typing and affinity chain inference.
+AMINO_ACID_MAPPING = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLU": "E", "GLN": "Q", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
+ONE_TO_THREE_AMINO_ACID = {one: three for three, one in AMINO_ACID_MAPPING.items()}
+
 # --- Export gates ---------------------------------------------------------
 # A shipped product must be a BOUND complex. Real docks pass at 1.5-8 A min
 # heavy-atom distance; the staged pre-docking frame sits 50-100 A off-target.

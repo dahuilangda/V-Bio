@@ -26,7 +26,6 @@ from pathlib import Path
 from collections import Counter
 from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
 import subprocess
-from backend.core.errors import TransientError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = PROJECT_ROOT / "capabilities"
@@ -41,12 +40,16 @@ if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
-
 sys.path.append(str(PROJECT_ROOT))
-from backend.worker.docker_cmd import ensure_image, readable_docker_failure_diagnosis  # noqa: E402
+from backend.worker.docker_cmd import (  # noqa: E402
+    _docker_warn,
+    ensure_image,
+    readable_docker_failure_diagnosis,
+)
 from backend.runtime.design_constants import (  # noqa: E402
+    AMINO_ACID_MAPPING,
     BACKBONE_CA_CA_MIN_A,
+    ONE_TO_THREE_AMINO_ACID,
     PRODUCT_BOUND_MAX_DISTANCE_A,
     REFINE_ABSOLUTE_PAIR_MIN_A,
     REFINE_INTERPENETRATION_MIN_A,
@@ -54,6 +57,7 @@ from backend.runtime.design_constants import (  # noqa: E402
     plddt_gate_for_chirality,
 )
 from backend.core.config import (
+    BOLTZ2SCORE_SCRIPT,
     MSA_SERVER_URL,
     MSA_SERVER_TIMEOUT_SECONDS,
     COLABFOLD_JOBS_DIR,
@@ -169,8 +173,16 @@ def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int
     return query_indices, template_indices
 
 
-from backend.runtime.peptide_design_backend import run_peptide_design_backend
+from backend.runtime.constraints_pipeline import _normalize_chain_id_list
+from backend.runtime.peptide_design_backend import (
+    _merge_peptide_preset_molecules_by_code,
+    _normalize_peptide_backend,
+    _normalize_peptide_design_mode,
+    _peptide_subtask_registry_key,
+    run_peptide_design_backend,
+)
 from backend.runtime.rfd4_strategy import (
+    _assert_bond_capable_scorer,
     run_bicyclic_strategy,
     run_rfd4_backend,
     run_rfd4_design_strategy,
@@ -192,6 +204,8 @@ from backend.runtime.affinity_support import (  # noqa: F401
     prepare_structure_for_affinity,
 )
 from backend.runtime.msa_pipeline import (
+    _ensure_nonempty_a3m_file,
+    _get_redis_client_optional,
     _inject_local_msa_paths_into_yaml,
     _require_complete_external_msa,
     cache_msa_files_from_temp_dir,
@@ -199,6 +213,7 @@ from backend.runtime.msa_pipeline import (
     get_sequence_hash,
     parse_a3m_content,
     request_msa_from_server,
+    sanitize_a3m_file,
     save_msa_result_to_file,
 )
 
@@ -677,6 +692,7 @@ def validate_af3_database_files(database_dir: str) -> None:
 
 
 from backend.runtime.ipsae_postprocess import (
+    _find_ligand_chain_and_resname_in_structure,
     _run_af3_ipsae_postprocess,
     _run_boltz2score_ipsae_postprocess_in_docker,
     _run_boltz_ipsae_postprocess,
@@ -746,13 +762,6 @@ def _assert_msa_server_configured(backend: str) -> str:
 # to scan the whole file (may take time but catches deep corruption).
 AF3_VALIDATE_MAX_LINES = os.environ.get("ALPHAFOLD3_VALIDATE_MAX_LINES")
 AF3_VALIDATE_MAX_LINES = int(AF3_VALIDATE_MAX_LINES) if AF3_VALIDATE_MAX_LINES else 200000
-AMINO_ACID_MAPPING = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLU": "E", "GLN": "Q", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
-}
-ONE_TO_THREE_AMINO_ACID = {one: three for three, one in AMINO_ACID_MAPPING.items()}
 DEFAULT_TEMPLATE_RELEASE_DATE = "1987-11-16"
 _RELEASE_DATE_PAIR_TAGS = (
     "_pdbx_database_status.recvd_initial_deposition_date",
@@ -1461,8 +1470,6 @@ from backend.worker.docker_cmd import (
 from backend.runtime.docker_exec import remove_container, run_docker_streaming
 
 
-def _docker_warn(message: str) -> None:
-    print(f"[WARN] {message}", file=sys.stderr)
 
 
 
@@ -2855,17 +2862,6 @@ def _binder_msa_assignment(binder_sequence: str) -> str:
 
 
 
-class DpeptideStaleWorkerError(TransientError):
-    """A refine dispatch flag was silently dropped by the executing worker.
-
-    The worker task contract echoes the flags it honored into the dpeptide
-    contract; a missing/mismatched echo means the celery process predates the
-    flag (long-running worker, code updated on disk after its start) — the
-    dropped ``blind_peptide`` flag causes a silent
-    downgraded to a clashing staged-local refine and every candidate was
-    chirality-rejected. Raised task-level (not per-candidate) so the run fails
-    fast with the actionable fix: restart the GPU worker container.
-    """
 
 
 

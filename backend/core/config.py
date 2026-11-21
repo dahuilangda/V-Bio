@@ -236,6 +236,9 @@ VBIO_GATEWAY_URL = os.environ.get(
 MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://localhost:8080")
 MSA_SERVER_TIMEOUT_SECONDS = _parse_int_env("MSA_SERVER_TIMEOUT_SECONDS", 1800, minimum=60)
 
+# 亲和力打分脚本在引擎容器内的挂载路径（boltz2score）。
+BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
+
 # ColabFold 服务器缓存目录（用于清理历史任务）
 COLABFOLD_JOBS_DIR = os.environ.get(
     "COLABFOLD_JOBS_DIR",
