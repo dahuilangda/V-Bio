@@ -249,8 +249,6 @@ class Af3Backend(StructureBackend):
                                 if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
         low_vram = bool(ctx.options.get("low_vram", False))
 
-        # 自定义 CCD 先行处理：与 AF3 内建 RCSB CCD 冲突的编码自动改名并同步
-        # yaml，保证 AF3 输入解析（modifications）、MSA 与 userCCD 编码一致。
         custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
         base_ccd_codes = load_standard_ccd_codes()
         custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)

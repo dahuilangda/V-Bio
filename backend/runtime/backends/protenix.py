@@ -125,15 +125,13 @@ class ProtenixBackend(StructureBackend):
         ensure_image(str(PROTENIX_DOCKER_IMAGE or "vbio-protenix-v2-runtime:2.0.0").strip())
         print("Using Protenix backend", file=sys.stderr)
 
-        # 自定义 CCD 先行处理：preset 合并、与基础 CCD 冲突的编码自动改名并
-        # 同步 yaml，保证后续输入解析、MSA、overlay 与归档编码一致。
         custom_molecules = _merge_referenced_preset_modification_molecules(
             _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
             yaml_content,
         )
         protenix_common_dir = Path(str(PROTENIX_COMMON_CACHE_DIR).strip())
-        base_ccd_codes = load_standard_ccd_codes(protenix_common_dir / "components.cif")
-        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)
+        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
+            custom_molecules, load_standard_ccd_codes(protenix_common_dir / "components.cif"))
         if ccd_remap:
             yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
             print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)

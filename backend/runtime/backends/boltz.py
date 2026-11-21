@@ -98,8 +98,6 @@ class BoltzBackend(StructureBackend):
         low_vram = bool(ctx.options.get("low_vram", False))
         ipsae_ligand_chain_id = ctx.options.get("ipsae_ligand_chain_id")
 
-        # 自定义 CCD 先行处理：preset 合并、与基础分子库冲突的编码自动改名，
-        # 重映射同步进 normalized_yaml，后续 MSA/输入/归档全部使用改名后编码。
         custom_molecules = _merge_referenced_preset_modification_molecules(
             _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
             normalized_yaml,

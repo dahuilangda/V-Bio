@@ -30,8 +30,6 @@ class EsmFold2Backend(StructureBackend):
         request = self.post_validate(request)
         yaml_content = request.source_yaml
 
-        # 自定义残基嵌入任务 yaml；编码与标准 CCD 冲突时改名 Z###（容器内
-        # 注入按改名后的编码进行，任务归档与输出保持一致）。
         custom_ccd_molecules = _normalize_custom_ccd_molecules(
             ctx.options.get("custom_ccd_molecules"))
         if custom_ccd_molecules:
