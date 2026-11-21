@@ -73,9 +73,9 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"无法解析自定义残基 SMILES: {smiles}")
-        from rdkit.Chem import rdMolDescriptors
+        from rdkit.Chem import AllChem
         mol = Chem.AddHs(mol)
-        Chem.AllChem.EmbedMolecule(mol, randomSeed=42)
+        AllChem.EmbedMolecule(mol, randomSeed=42)
         mol = Chem.RemoveHs(mol)
         conf = mol.GetConformer()
         block = _mol_to_ccd_block(mol, code, conf)
