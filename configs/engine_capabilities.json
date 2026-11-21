@@ -49,7 +49,7 @@
       ],
       "features": {
         "pocket": false,
-        "custom_ccd": false,
+        "custom_ccd": true,
         "msa": true,
         "ncaa": true
       },
@@ -58,7 +58,7 @@
       },
       "modification_support": {
         "standard_ccd": true,
-        "custom_residue_upload": false
+        "custom_residue_upload": true
       }
     },
     "protenix": {

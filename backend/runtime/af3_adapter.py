@@ -687,10 +687,30 @@ def _replace_a3m_first_query_sequence(a3m_text: str, query_sequence: str) -> str
     return "\n".join(next_lines).rstrip("\n") + "\n"
 
 
+def _base_substituted_sequence(
+    sequence: str,
+    modifications: List[Dict[str, object]],
+    ccd_one_letter: Dict[str, str],
+) -> str:
+    """按 AF3 派生规则改写修饰位：CCD one_letter_code 为有效字母（含 X）时
+    替换原字母，'?' 或未知则保留。Msa.from_a3m 强校验 a3m 首行与该序列相等。"""
+    seq = list(str(sequence or "").strip().upper())
+    for mod in modifications or []:
+        code = str(mod.get("ptmType") or mod.get("ccd") or "").strip().upper()
+        position = int(mod.get("ptmPosition") or 0)
+        letter = str(ccd_one_letter.get(code) or mod.get("baseResidue") or "").strip().upper()
+        if 1 <= position <= len(seq) and letter and letter != "?":
+            seq[position - 1] = letter
+    return "".join(seq)
+
+
 def load_unpaired_msa(
-    prep: AF3Preparation, chain_msa_paths: Dict[str, Path]
+    prep: AF3Preparation,
+    chain_msa_paths: Dict[str, Path],
+    ccd_one_letter: Optional[Dict[str, str]] = None,
 ) -> List[str]:
     unpaired: List[str] = []
+    letter_map = dict(ccd_one_letter or {})
     for index, sequence in enumerate(prep.query_sequences_unique):
         mode = prep.query_msa_modes[index]
         if mode is ProteinMsaMode.DISABLED:
@@ -700,19 +720,13 @@ def load_unpaired_msa(
         msa_content: Optional[str] = None
         group_key = prep.query_sequence_keys[index] if index < len(prep.query_sequence_keys) else sequence
         chain_ids = prep.query_group_to_chain_ids.get(group_key) or prep.sequence_to_chain_ids.get(sequence, [])
+        mods = prep.query_modifications[index] if index < len(prep.query_modifications) else []
         for chain_id in chain_ids:
             path = chain_msa_paths.get(chain_id)
             if path and path.exists():
-                # AF3's MSA.from_a3m requires the first (query) sequence to equal the protein
-                # `sequence` field exactly. That field uses the PARENT residue letter (the
-                # modification is supplied separately via `modifications[]`), so normalise the
-                # MSA query to the base sequence — never the PTM-letter-substituted one.
-                # Substituting X (custom CCD has no one-letter code) made AF3 raise
-                # "First MSA sequence LRLRGX is not the query_sequence='LRLRGG'"; Protenix and
-                # Boltz are lenient about this, which is why only AF3 failed.
                 msa_content = _replace_a3m_first_query_sequence(
                     _normalize_a3m_content(path.read_text()),
-                    sequence,
+                    _base_substituted_sequence(sequence, mods, letter_map),
                 )
                 break
         if msa_content is None:

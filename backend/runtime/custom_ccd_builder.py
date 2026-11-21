@@ -106,6 +106,32 @@ def load_standard_ccd_codes(cif_path: Optional[Path] = None) -> set:
     }
 
 
+def load_standard_ccd_one_letter_codes(
+    codes: Any, cif_path: Optional[Path] = None
+) -> Dict[str, str]:
+    """提取指定 CCD 编码的 one_letter_code（'?' 表示无标准单字母）。"""
+    wanted = {str(code or "").strip().upper() for code in codes or () if code}
+    if not wanted:
+        return {}
+    path = Path(cif_path) if cif_path is not None else STANDARD_CCD_COMPONENTS_CIF
+    if not path.is_file():
+        raise FileNotFoundError(f"标准 CCD components.cif 不存在: {path}")
+    result: Dict[str, str] = {}
+    current: Optional[str] = None
+    for line in path.read_text(errors="replace").splitlines():
+        if line.startswith("data_"):
+            code = line[5:].strip().upper()
+            if code in wanted and code not in result:
+                current = code
+            else:
+                current = None
+        elif current and line.lstrip().startswith("_chem_comp.one_letter_code"):
+            value = line.split(None, 1)[1].strip() if len(line.split(None, 1)) > 1 else "?"
+            result[current] = value
+            current = None
+    return result
+
+
 def _preset_custom_ccd_codes() -> set:
     from backend.runtime.peptide_design_backend import PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES
     return {str(code or "").strip().upper() for code in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES}
@@ -560,6 +586,22 @@ def _custom_ccd_mol_to_cif_block(
             "_chem_comp_bond.pdbx_aromatic_flag",
         ])
         lines.extend(bond_rows)
+    lines.append("#")
+    # AF3 的 constants/chemical_components.mmcif_to_info 直接读取
+    # _pdbx_chem_comp_descriptor.type/.descriptor，缺该类别会 KeyError。
+    descriptor_smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+    rdkit_version = Chem.rdBase.rdkitVersion
+    lines.extend([
+        "loop_",
+        "_pdbx_chem_comp_descriptor.comp_id",
+        "_pdbx_chem_comp_descriptor.type",
+        "_pdbx_chem_comp_descriptor.descriptor",
+        "_pdbx_chem_comp_descriptor.program",
+        "_pdbx_chem_comp_descriptor.program_version",
+        "_pdbx_chem_comp_descriptor.date",
+        f"{ccd} SMILES_CANONICAL '{descriptor_smiles}' RDKit {rdkit_version} 2026-06-26",
+        f"{ccd} SMILES '{descriptor_smiles}' RDKit {rdkit_version} 2026-06-26",
+    ])
     lines.append("#")
     return "\n".join(lines) + "\n"
 

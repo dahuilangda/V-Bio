@@ -234,6 +234,7 @@ class Af3Backend(StructureBackend):
         from backend.runtime.custom_ccd_builder import (
             apply_custom_ccd_code_remap,
             load_standard_ccd_codes,
+            load_standard_ccd_one_letter_codes,
             resolve_custom_ccd_code_collisions,
         )
         from backend.worker.docker_cmd import (
@@ -309,7 +310,29 @@ class Af3Backend(StructureBackend):
             raise RuntimeError(
                 f"AlphaFold3 MSA assignment incomplete; missing chains: "
                 f"{', '.join(sorted(set(missing_chain_ids)))}")
-        unpaired_msa = load_unpaired_msa(prep, chain_msa_paths)
+        # AF3 用 CCD one_letter_code 派生修饰后的 query 序列：自定义残基取
+        # base_residue，标准 CCD 取 components.cif 的 one_letter_code（'?' 保留原字母）。
+        referenced_codes = [
+            str(mod.get("ptmType") or "")
+            for mods in prep.query_modifications
+            for mod in (mods or [])
+        ]
+        ccd_one_letter = {item["ccd"]: item["base_residue"] for item in custom_molecules if item.get("base_residue")}
+        standard_codes = [c for c in referenced_codes if c and c not in ccd_one_letter]
+        ccd_one_letter.update(load_standard_ccd_one_letter_codes(standard_codes))
+        unpaired_msa = load_unpaired_msa(prep, chain_msa_paths, ccd_one_letter)
+
+        fasta_content = build_af3_fasta(prep)
+        model_seeds = build_af3_model_seeds(seed)
+        af3_json = build_af3_json(
+            prep,
+            unpaired_msa,
+            use_external_msa=True,
+            model_seeds=model_seeds,
+            user_ccd=user_ccd_text,
+        )
+
+        af3_ccd_one_letter_overrides = _extract_user_ccd_one_letter_overrides(user_ccd_text)
 
         fasta_content = build_af3_fasta(prep)
         model_seeds = build_af3_model_seeds(seed)
