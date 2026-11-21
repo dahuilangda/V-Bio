@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -80,14 +79,6 @@ class TaskMonitor:
         return processes
 
     @staticmethod
-    def _task_container_name(task_id: str) -> str:
-        token = ''.join(ch.lower() if ch.isalnum() else '-' for ch in task_id.strip())
-        token = token.strip('-')
-        if not token:
-            token = hashlib.sha1(task_id.encode('utf-8')).hexdigest()[:12]
-        return f"boltz-af3-{token[:48]}"
-
-    @staticmethod
     def _docker_available() -> bool:
         return shutil.which('docker') is not None
 
@@ -135,31 +126,28 @@ class TaskMonitor:
         if not result['docker_available']:
             return result
 
-        container_name = self._task_container_name(task_id)
+        # 单次 ps 带格式化输出（名称 + 任务标签），避免逐容器 inspect。
         try:
-            all_ids_raw = self._run_docker_command(['ps', '-a', '-q'], timeout=self.docker_cmd_timeout_seconds)
+            listing = self._run_docker_command(
+                ['ps', '-a', '--format',
+                 '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Label "boltz.task_id"}}'],
+                timeout=self.docker_cmd_timeout_seconds,
+            )
         except Exception as exc:
             result['errors'].append(str(exc))
             return result
 
-        all_ids = [line.strip() for line in all_ids_raw.splitlines() if line.strip()]
-        for container_id in all_ids:
-            details = self._inspect_container(container_id)
-            if not details:
+        for line in listing.splitlines():
+            parts = line.split('\t')
+            if len(parts) != 4:
                 continue
-            labels = details.get('labels') or {}
-            mount_sources = details.get('mount_sources') or []
-            name = str(details.get('name') or '')
-            label_task_id = str(labels.get('boltz.task_id') or '').strip()
-            label_match = label_task_id == task_id
-            mount_match = any(task_id in source for source in mount_sources)
-            name_match = task_id in name or container_name in name
-            if label_match or mount_match or name_match:
+            container_id, name, state, label_task_id = (part.strip() for part in parts)
+            if label_task_id == task_id or task_id in name:
                 result['containers'].append({
-                    'id': details['id'],
-                    'name': name,
-                    'running': bool(details.get('running')),
-                    'status': str(details.get('status') or ''),
+                    'id': container_id,
+                    'name': name.lstrip('/'),
+                    'running': state == 'running',
+                    'status': state,
                     'label_task_id': label_task_id,
                 })
         return result

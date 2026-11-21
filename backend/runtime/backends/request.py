@@ -52,8 +52,13 @@ class PredictionRequest:
         return next((e for e in self.entities if e.chain_id == chain), None)
 
     def polymer_chains(self) -> dict[str, SequenceEntity]:
-        return {e.chain_id: e for e in self.entities
-                if e.kind in ("protein", "rna", "dna") and e.sequence}
+        chains: dict[str, SequenceEntity] = {}
+        for e in self.entities:
+            if e.kind not in ("protein", "rna", "dna") or not e.sequence:
+                continue
+            for chain in e.ids or ([e.chain_id] if e.chain_id else []):
+                chains[chain] = e
+        return chains
 
     def sequence_lengths(self) -> dict[str, int]:
         return {chain: len(e.sequence) for chain, e in self.polymer_chains().items()}

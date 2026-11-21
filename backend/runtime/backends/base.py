@@ -59,7 +59,9 @@ class StructureBackend(ABC):
             raise ValueError(
                 f"{self.name} backend does not support custom residue uploads")
         lengths = request.sequence_lengths()
-        chains = set(lengths) | {e.chain_id for e in request.entities}
+        chains = set(lengths) | {
+            chain for e in request.entities for chain in (e.ids or [e.chain_id])
+        }
         for bond in request.bonds:
             for chain, residue in ((bond.chain1, bond.residue1),
                                    (bond.chain2, bond.residue2)):

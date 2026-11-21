@@ -404,10 +404,9 @@ def parse_yaml_for_protenix(
                     )
                 )
             else:
-                # pocket constraint: converted to protenix's native
-                # constraint.pocket block below (PocketFeaturizer encodes it
-                # and the diffusion was trained with pocket augmentation)
-                pocket_constraints_data.append(constraint.get("pocket"))
+                raise ValueError(
+                    f"Unsupported constraint type in protenix input: {sorted(constraint.keys())}"
+                )
 
     payload: List[Dict[str, Any]] = [{
         "name": input_name,

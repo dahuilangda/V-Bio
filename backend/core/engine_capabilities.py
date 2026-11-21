@@ -48,19 +48,7 @@ def engine_constraint_quality(backend: str, constraint: str) -> str | None:
     engine = get_engine(backend)
     if not engine:
         return None
-    constraints = engine.get("constraints") or {}
-    if isinstance(constraints, dict):
-        return constraints.get(constraint)
-    return constraint in constraints or None
-
-
-def engine_supports_constraint(backend: str, constraint: str) -> bool:
-    return constraint in engine_constraints(backend)
-
-
-def engine_design_modes(backend: str) -> frozenset[str]:
-    engine = get_engine(backend)
-    return frozenset(engine.get("design_modes") or []) if engine else frozenset()
+    return (engine.get("constraints") or {}).get(constraint)
 
 
 def engine_chirality(backend: str) -> frozenset[str]:
