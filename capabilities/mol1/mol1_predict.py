@@ -40,7 +40,8 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
     """将自定义残基合并进 components.cif + rdkit pkl，返回覆盖目录。
 
     在 mol1 runtime 容器内执行——/cache/common/components.cif 已挂载。
-    覆盖目录放在 work_dir（结果根）下，通过 --volume 文件绑定挂载。
+    覆盖目录按任务隔离（work_dir 下）；标准 CCD 目录只读不写。
+    自定义编码与标准 CCD 冲突时抛出 ValueError。
     """
     import pickle
     from rdkit import Chem
@@ -54,6 +55,17 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
         print(f"[WARN] CCD source not found: {source_cif}", file=sys.stderr)
         return None
 
+    # 编码冲突检查：自定义编码不得与标准 CCD 重叠
+    base_codes = set()
+    for line in source_cif.read_text(errors="replace").splitlines():
+        if line.startswith("data_"):
+            base_codes.add(line[5:].strip().upper())
+    for item in custom_molecules:
+        code = str(item.get("ccd") or "").strip().upper()
+        if code in base_codes:
+            raise ValueError(
+                f"自定义残基编码 {code} 与标准 CCD 组分冲突，请更换编码")
+
     overlay_dir = work_dir / "ccd_overlay"
     overlay_dir.mkdir(parents=True, exist_ok=True)
     merged_cif = overlay_dir / "components.cif"
@@ -62,14 +74,16 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
     if merged_cif.is_file() and merged_pkl.is_file():
         return overlay_dir
 
-    # 追加自定义残基块到 components.cif
-    base_text = source_cif.read_text(errors="replace").rstrip()
+    custom_codes = set()
     custom_blocks = []
     for item in custom_molecules:
         code = str(item.get("ccd") or "").strip().upper()
         smiles = str(item.get("smiles") or "").strip()
         if not code or not smiles:
             continue
+        if code in custom_codes:
+            raise ValueError(f"自定义残基编码 {code} 重复")
+        custom_codes.add(code)
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"无法解析自定义残基 SMILES: {smiles}")
@@ -82,9 +96,10 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
         custom_blocks.append(block)
     if not custom_blocks:
         return None
-    merged_cif.write_text(base_text + "\n\n" + "\n\n".join(custom_blocks) + "\n")
+    merged_cif.write_text(source_cif.read_text(errors="replace").rstrip()
+                          + "\n\n" + "\n\n".join(custom_blocks) + "\n")
 
-    # 合并 pkl
+    # 合并 pkl：标准条目 + 自定义条目
     mols = {}
     if source_pkl.is_file():
         Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
@@ -94,7 +109,7 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
     for item in custom_molecules:
         code = str(item.get("ccd") or "").strip().upper()
         smiles = str(item.get("smiles") or "").strip()
-        if not code or not smiles:
+        if not code or not smiles or code in mols:
             continue
         mol = Chem.MolFromSmiles(smiles)
         if mol is not None:
@@ -104,7 +119,7 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path | N
         import pickle
         pickle.dump(mols, handle)
 
-    print(f"CCD overlay built: {overlay_dir} ({len(custom_molecules)} custom residues)", file=sys.stderr)
+    print(f"CCD overlay built: {overlay_dir} ({len(custom_blocks)} custom residues)", file=sys.stderr)
     return overlay_dir
 
 
