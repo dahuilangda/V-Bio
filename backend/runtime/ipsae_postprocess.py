@@ -1041,9 +1041,3 @@ def _find_first_existing(paths: List[Path]) -> Optional[Path]:
 
 
 
-def __getattr__(name: str):
-    """迁移期符号解析：函数体保留原引用，运行时从调度模块取编排符号。"""
-    from backend.runtime import run_single_prediction as _rsp
-    value = getattr(_rsp, name)
-    globals()[name] = value
-    return value

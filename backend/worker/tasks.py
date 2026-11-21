@@ -27,6 +27,7 @@ from backend.monitoring.event_transport import publish_task_heartbeat, publish_t
 from backend.services.common_utils import coerce_bool
 from backend.scheduling.capability_router import parse_capability_queue
 from backend.core.errors import DomainError, TransientError
+from backend.runtime.docker_exec import remove_container
 from backend.worker.docker_cmd import (
     collect_gpu_device_group_ids,
     docker_args_has_flag,

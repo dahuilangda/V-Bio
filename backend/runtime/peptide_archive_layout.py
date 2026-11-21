@@ -10,7 +10,6 @@ routes and maintenance scripts can share one tested implementation.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple

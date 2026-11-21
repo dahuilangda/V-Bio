@@ -21,6 +21,10 @@ def make_msg_id() -> str:
     return f"<{uuid.uuid4().hex}@vbio>"
 
 
+def frontend_base_url() -> str:
+    return str(os.environ.get("FRONTEND_URL") or "").rstrip("/")
+
+
 def send_plain_smtp(to_email: str, subject: str, body: str) -> bool:
     """Send one plain-text email. Returns True on success; never raises."""
     if not smtp_configured():

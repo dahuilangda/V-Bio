@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import copy
-import glob
 import hashlib
 import json
 import math
@@ -15,13 +14,9 @@ import os
 import pickle
 import random
 import re
-import shlex
 import shutil
-import subprocess
 import sys
 import time
-import traceback
-import uuid
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -34,31 +29,12 @@ import numpy as np
 
 from backend.core.errors import DpeptideStaleWorkerError
 
-from backend.core.config import (
-    PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
-    RESULTS_BASE_DIR,
-)
 from backend.runtime.design_constants import (
     BACKBONE_CA_CA_MIN_A,
     PRODUCT_BOUND_MAX_DISTANCE_A,
     REFINE_ABSOLUTE_PAIR_MIN_A,
     REFINE_INTERPENETRATION_MIN_A,
     REFINE_PACKING_BAND_A,
-)
-from backend.runtime.bicyclic_linkers import get_linker
-from backend.runtime.backends import structure_backend
-from backend.runtime.backends.base import BackendRunContext
-from backend.runtime.backends.request import PredictionRequest
-from backend.runtime.backends.support import (
-    determine_docker_gpu_arg,
-    resolve_backend_results_root,
-    resolve_backend_work_root,
-)
-from backend.runtime.constraints_pipeline import (
-    normalize_ligand_chain_collisions,
-    remap_constraints_by_template_alignment,
-    sanitize_constraints_for_chain_lengths,
-    validate_unique_sequence_chain_ids,
 )
 from backend.runtime.linker_measurement import (
     _append_staged_bicyclic_links,
@@ -81,14 +57,6 @@ if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
     sys.path.insert(0, str(CAPABILITIES_DIR))
 
 
-def __getattr__(name: str):
-    """编排符号（MSA/断言/正则/常量等）从 run_single_prediction 惰性解析。"""
-    from backend.runtime import run_single_prediction as _rsp
-    if name not in _rsp.__dict__:
-        raise AttributeError(name)
-    value = getattr(_rsp, name)
-    globals()[name] = value
-    return value
 
 
 def _resolve_capability_dir(name: str) -> Path:
@@ -101,7 +69,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 sys.path.append(str(PROJECT_ROOT))
-from backend.worker.docker_cmd import ensure_image, readable_docker_failure_diagnosis  # noqa: E402
 from backend.runtime.design_constants import (  # noqa: E402
     BACKBONE_CA_CA_MIN_A,
     PRODUCT_BOUND_MAX_DISTANCE_A,
@@ -167,53 +134,14 @@ from backend.runtime.backends import structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
 from backend.runtime.msa_pipeline import (
-    _inject_local_msa_paths_into_yaml,
-    _require_complete_external_msa,
-    cache_msa_files_from_temp_dir,
-    generate_msa_for_sequences,
     get_sequence_hash,
-    parse_a3m_content,
     request_msa_from_server,
     save_msa_result_to_file,
 )
-from backend.runtime.constraints_pipeline import (
-    normalize_ligand_chain_collisions as _normalize_ligand_chain_collisions,
-    print_constraint_residue_summary as _print_constraint_residue_summary,
-    remap_constraints_by_template_alignment as _remap_constraints_by_template_alignment,
-    sanitize_constraints_for_chain_lengths as _sanitize_constraints_for_chain_lengths,
-    validate_unique_sequence_chain_ids as _validate_unique_sequence_chain_ids,
-)
-from backend.runtime import bicyclic_linkers, rfd4_adapter
-from backend.runtime.nesso_backend import run_nesso_backend
-from backend.runtime import rfd4_adapter
-from backend.runtime.af3_adapter import (
-    AF3Preparation,
-    build_af3_fasta,
-    build_af3_json,
-    collect_chain_msa_paths,
-    load_unpaired_msa,
-    parse_yaml_for_af3,
-    safe_filename,
-    serialize_af3_json,
-)
-from backend.runtime.protenix_adapter import (
-    ProtenixPreparation,
-    apply_protein_msa_paths,
-    parse_yaml_for_protenix,
-    serialize_protenix_json,
-)
-from Bio import Align
+from backend.runtime import bicyclic_linkers
 import gemmi
 from rdkit import Chem
-from backend.runtime.custom_ccd_builder import (
-    _append_custom_residues_ccd,
-    _append_custom_residues_ccd_from_molecules,
-    _boltz_custom_ccd_aliases,
-    _build_custom_ccd_bundle,
-    _build_custom_ccd_mol,
-    _normalize_custom_ccd_molecules,
-)
-from backend.runtime.ccd_contract import validate_ccd_additions
+from backend.runtime.custom_ccd_builder import _normalize_custom_ccd_molecules
 
 from backend.runtime.msa_pipeline import MSA_CACHE_CONFIG
 from backend.runtime.constraints_pipeline import (

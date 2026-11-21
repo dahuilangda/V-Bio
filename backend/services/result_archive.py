@@ -1809,11 +1809,7 @@ class ResultArchiveService:
                             if not isinstance(values, list) or len(values) == 0:
                                 continue
                             value = values
-                        elif metric_key == 'ligand_smiles':
-                            value = str(metrics.get(metric_key) or '').strip()
-                            if not value:
-                                continue
-                        elif metric_key == 'ligand_display_smiles':
+                        elif metric_key in ('ligand_smiles', 'ligand_display_smiles'):
                             value = str(metrics.get(metric_key) or '').strip()
                             if not value:
                                 continue

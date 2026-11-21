@@ -37,14 +37,12 @@ from backend.runtime.peptide_design_backend import (
     _pocket_contacts_for_staged_space,
 )
 from backend.runtime.rfd4_adapter import MIN_CLOSURE_RESIDUES
-from backend.runtime.bicyclic_linkers import get_linker
 from backend.runtime.backends.support import (
     determine_docker_gpu_arg,
     resolve_backend_results_root,
     resolve_backend_work_root,
     safe_runtime_token,
 )
-from backend.services.common_utils import normalize_peptide_design_mode
 from backend.worker.docker_cmd import ensure_image
 
 

@@ -94,10 +94,6 @@ export function engineSupportsPeptideRole(backend: string, role: PeptideRole): b
   return (ENGINES[backend]?.peptide_roles || []).includes(role) === true;
 }
 
-export function engineSupportsWorkflow(backend: string, workflow: WorkflowKey): boolean {
-  return ENGINES[backend]?.workflows.includes(workflow) === true;
-}
-
 export function engineSupportsDesignMode(backend: string, mode: DesignMode): boolean {
   return ENGINES[backend]?.design_modes.includes(mode) === true;
 }

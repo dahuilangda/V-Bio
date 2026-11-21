@@ -2,28 +2,20 @@
 import sys
 import os
 import json
-import uuid
 import tempfile
 import shutil
 import traceback
 import yaml
-import hashlib
 import glob
 import zipfile
 import shlex
-import requests
 import time
 import tarfile
-import io
-import math
 import re
 import base64
-import random
 import copy
 import pickle
-import numpy as np
 from pathlib import Path
-from collections import Counter
 from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
 import subprocess
 
@@ -37,73 +29,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 sys.path.append(str(PROJECT_ROOT))
-from backend.worker.docker_cmd import (  # noqa: E402
+from backend.worker.docker_cmd import (
     _docker_warn,
-    ensure_image,
     readable_docker_failure_diagnosis,
 )
-from backend.runtime.design_constants import (  # noqa: E402
+from backend.runtime.design_constants import (
     AMINO_ACID_MAPPING,
-    BACKBONE_CA_CA_MIN_A,
     ONE_TO_THREE_AMINO_ACID,
-    PRODUCT_BOUND_MAX_DISTANCE_A,
-    REFINE_ABSOLUTE_PAIR_MIN_A,
-    REFINE_INTERPENETRATION_MIN_A,
-    REFINE_PACKING_BAND_A,
-    plddt_gate_for_chirality,
 )
 from backend.core.config import (
-    BOLTZ2SCORE_SCRIPT,
     MSA_SERVER_URL,
     MSA_SERVER_TIMEOUT_SECONDS,
-    COLABFOLD_JOBS_DIR,
-    BOLTZ2_DOCKER_IMAGE,
-    BOLTZ2_DOCKER_EXTRA_ARGS,
-    BOLTZ2_DOCKER_SHM_SIZE,
-    BOLTZ2_HOST_CACHE_DIR,
-    BOLTZ2_CONTAINER_CACHE_DIR,
-    ALPHAFOLD3_DOCKER_IMAGE,
-    ALPHAFOLD3_MODEL_DIR,
-    ALPHAFOLD3_DATABASE_DIR,
-    ALPHAFOLD3_DOCKER_EXTRA_ARGS,
-    PROTENIX_DOCKER_IMAGE,
-    PROTENIX_MODEL_DIR,
-    PROTENIX_MODEL_NAME,
-    PROTENIX_SOURCE_DIR,
-    PROTENIX_DOCKER_EXTRA_ARGS,
-    PROTENIX_INFER_EXTRA_ARGS,
-    PROTENIX_PYTHON_BIN,
-    MOL1_DOCKER_IMAGE,
-    RFD4_DOCKER_IMAGE,
-    RFD4_DATA_DIR,
-    RFD4_NUM_DESIGNS,
-    RFD4_CONTIG,
-    PROTENIX_USE_HOST_USER,
-    PROTENIX_CONTAINER_APP_DIR,
-    PROTENIX_CONTAINER_MODEL_DIR,
-    PROTENIX_CONTAINER_CHECKPOINT_PATH,
-    PROTENIX_COMMON_CACHE_DIR,
     PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
-    PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
-    RESULTS_BASE_DIR,
-    VBIO_API_TOKEN,
-    VBIO_GATEWAY_URL,
 )
-from backend.scheduling.capability_router import build_capability_queue
 from backend.services.common_utils import (
-    ProteinMsaMode,
     coerce_bool,
-    extract_protein_msa_policies,
     infer_use_msa_server_from_yaml_text,
-    is_msa_disabled,
 )
 from backend.runtime.linker_measurement import (
     BICYCLIC_LINKER_ATOM_MAP,
-    _append_staged_bicyclic_links,
-    _cyclic_headtail_bond_report,
-    _dpeptide_linker_bond_report,
-    _pdb_link_line,
-    _rebuild_single_atom_linker_anchor,
 )
 _PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
 
@@ -177,7 +121,6 @@ from backend.runtime.peptide_design_backend import (
 )
 from backend.runtime.rfd4_strategy import (
     _assert_bond_capable_scorer,
-    run_bicyclic_strategy,
     run_rfd4_backend,
     run_rfd4_design_strategy,
 )
@@ -185,17 +128,11 @@ from backend.runtime.backends import structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
 
-from backend.runtime.affinity_support import (  # noqa: F401
-    _infer_affinity_chain_plan,
-    _legacy_parse_ligand_from_text,
+from backend.runtime.affinity_support import (
     _run_boltz2score_affinity_postprocess,
-    _sanitize_atom_name_for_affinity,
-    _stage_structure_for_affinity_container,
-    _is_protein_like_residue_name,
     _extract_ligand_smiles_list,
     extract_affinity_config_from_yaml,
     find_ligand_resname_in_cif,
-    prepare_structure_for_affinity,
 )
 from backend.runtime.msa_pipeline import (
     _ensure_nonempty_a3m_file,
@@ -203,9 +140,7 @@ from backend.runtime.msa_pipeline import (
     _inject_local_msa_paths_into_yaml,
     _require_complete_external_msa,
     cache_msa_files_from_temp_dir,
-    generate_msa_for_sequences,
     get_sequence_hash,
-    parse_a3m_content,
     request_msa_from_server,
     sanitize_a3m_file,
     save_msa_result_to_file,
@@ -216,7 +151,6 @@ from backend.runtime.archiving import (
     create_af3_archive,
     create_archive_with_a3m,
     create_protenix_archive,
-    get_cached_a3m_files,
 )
 AF3_DEFAULT_MODEL_SEED_COUNT = 5
 def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SEED_COUNT) -> Optional[List[int]]:
@@ -674,17 +608,8 @@ def validate_af3_database_files(database_dir: str) -> None:
 from backend.runtime.ipsae_postprocess import (
     _find_ligand_chain_and_resname_in_structure,
     _run_af3_ipsae_postprocess,
-    _run_boltz2score_ipsae_postprocess_in_docker,
     _run_boltz_ipsae_postprocess,
     _run_protenix_ipsae_postprocess,
-    _run_standalone_ipsae_postprocess,
-)
-from backend.runtime.constraints_pipeline import (
-    normalize_ligand_chain_collisions as _normalize_ligand_chain_collisions,
-    print_constraint_residue_summary as _print_constraint_residue_summary,
-    remap_constraints_by_template_alignment as _remap_constraints_by_template_alignment,
-    sanitize_constraints_for_chain_lengths as _sanitize_constraints_for_chain_lengths,
-    validate_unique_sequence_chain_ids as _validate_unique_sequence_chain_ids,
 )
 from backend.runtime import bicyclic_linkers, rfd4_adapter
 from backend.runtime.nesso_backend import run_nesso_backend
@@ -697,13 +622,11 @@ from backend.runtime.af3_adapter import (
     load_unpaired_msa,
     parse_yaml_for_af3,
     safe_filename,
-    serialize_af3_json,
 )
 from backend.runtime.protenix_adapter import (
     ProtenixPreparation,
     apply_protein_msa_paths,
     parse_yaml_for_protenix,
-    serialize_protenix_json,
 )
 from Bio import Align
 import gemmi
@@ -1434,10 +1357,7 @@ def resolve_low_vram(predict_args: Optional[Dict[str, Any]]) -> bool:
 
 
 from backend.worker.docker_cmd import (
-    collect_gpu_device_group_ids,
-    docker_args_has_flag,
     make_scoped_container_name,
-    sanitize_docker_extra_args,
 )
 
 
@@ -1524,9 +1444,7 @@ def extract_af3_structure_from_archives(
                     base_priority = 60
 
             suffix = archive_path.suffix.lower()
-            if archive_path.name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
-                archive_type = "tar"
-            elif suffix in {".tar"}:
+            if archive_path.name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")) or suffix == ".tar":
                 archive_type = "tar"
             else:
                 archive_type = "zip"
@@ -2728,11 +2646,19 @@ if __name__ == "__main__":
     main()
 
 
+# 历史测试路径与肽设计簇符号统一转发（实现在各自源模块）
 def __getattr__(name: str):
-    """迁移转发：肽设计簇符号实际定义于 peptide_design_backend。"""
+    if name == 'generate_msa_for_sequences':
+        from backend.runtime.msa_pipeline import generate_msa_for_sequences as _v
+        globals()[name] = _v
+        return _v
+    if name == '_dpeptide_linker_bond_report':
+        from backend.runtime.linker_measurement import _dpeptide_linker_bond_report as _v
+        globals()[name] = _v
+        return _v
     from backend.runtime import peptide_design_backend as _pdb
-    if name not in _pdb.__dict__:
-        raise AttributeError(name)
-    value = getattr(_pdb, name)
-    globals()[name] = value
-    return value
+    if name in _pdb.__dict__:
+        value = getattr(_pdb, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
