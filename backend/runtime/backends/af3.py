@@ -167,6 +167,37 @@ try:
         _af3_structure.from_mmcif = _safe_from_mmcif
 except Exception:
     pass
+
+# 平台注入的 a3m 按原序列搜索，首行是原查询；AF3 的 query_sequence 则由
+# CCD 表 + userCCD + 清洗规则派生，修饰位会与原字母不同。首行必须等于
+# query_sequence（Msa.__init__ 强校验），对齐到 AF3 自己派生的值——派生
+# 事实源在 AF3，提交侧不做任何预测。
+try:
+    from alphafold3.data import msa as _af3_msa
+
+    _orig_from_a3m = _af3_msa.Msa.from_a3m.__func__
+
+    def _aligned_from_a3m(cls, query_sequence, chain_poly_type, a3m, deduplicate=True):
+        lines = (a3m or "").splitlines()
+        header_idx = None
+        for i, line in enumerate(lines):
+            if line.startswith(">"):
+                header_idx = i
+                break
+        if header_idx is not None and len(lines) > header_idx + 1:
+            first_seq = lines[header_idx + 1]
+            aligned = "".join(
+                ch for ch in first_seq if not ch.islower())
+            target = "".join(
+                ch for ch in (query_sequence or "") if not ch.islower())
+            if aligned != target and len(aligned) == len(target):
+                lines[header_idx + 1] = query_sequence
+                a3m = "\n".join(lines) + "\n"
+        return _orig_from_a3m(cls, query_sequence, chain_poly_type, a3m, deduplicate)
+
+    _af3_msa.Msa.from_a3m = classmethod(_aligned_from_a3m)
+except Exception:
+    pass
 """
 
 class Af3Backend(StructureBackend):
@@ -234,7 +265,6 @@ class Af3Backend(StructureBackend):
         from backend.runtime.custom_ccd_builder import (
             apply_custom_ccd_code_remap,
             load_standard_ccd_codes,
-            load_standard_ccd_one_letter_codes,
             resolve_custom_ccd_code_collisions,
         )
         from backend.worker.docker_cmd import (
@@ -310,17 +340,7 @@ class Af3Backend(StructureBackend):
             raise RuntimeError(
                 f"AlphaFold3 MSA assignment incomplete; missing chains: "
                 f"{', '.join(sorted(set(missing_chain_ids)))}")
-        # AF3 用 CCD one_letter_code 派生修饰后的 query 序列：自定义残基取
-        # base_residue，标准 CCD 取 components.cif 的 one_letter_code（'?' 保留原字母）。
-        referenced_codes = [
-            str(mod.get("ptmType") or "")
-            for mods in prep.query_modifications
-            for mod in (mods or [])
-        ]
-        ccd_one_letter = {item["ccd"]: item["base_residue"] for item in custom_molecules if item.get("base_residue")}
-        standard_codes = [c for c in referenced_codes if c and c not in ccd_one_letter]
-        ccd_one_letter.update(load_standard_ccd_one_letter_codes(standard_codes))
-        unpaired_msa = load_unpaired_msa(prep, chain_msa_paths, ccd_one_letter)
+        unpaired_msa = load_unpaired_msa(prep, chain_msa_paths)
 
         fasta_content = build_af3_fasta(prep)
         model_seeds = build_af3_model_seeds(seed)
