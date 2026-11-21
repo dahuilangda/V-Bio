@@ -7,8 +7,8 @@ class DomainError(ValueError):
     """平台可预期的领域错误基类。"""
 
 
-class UserInputError(DomainError, ValueError):
-    """调用方输入问题——对应 400。"""
+class UserInputError(DomainError):
+    """调用方输入问题——对应 400（DomainError 已是 ValueError 子类）。"""
 
 
 class TransientError(DomainError, RuntimeError):

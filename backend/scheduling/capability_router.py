@@ -363,12 +363,26 @@ def list_known_queues() -> list[str]:
 
 
 def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
+    # 五次 broadcast 并发发出：串行时最坏 5×timeout 全打在请求路径上。
+    from concurrent.futures import ThreadPoolExecutor
+
     inspector = celery_app.control.inspect(timeout=1.5)
-    active_queues = inspector.active_queues() or {}
-    active_tasks_by_worker = inspector.active() or {}
-    reserved_tasks_by_worker = inspector.reserved() or {}
-    scheduled_tasks_by_worker = inspector.scheduled() or {}
-    worker_stats = inspector.stats() or {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            key: pool.submit(call)
+            for key, call in (
+                ('active_queues', lambda: inspector.active_queues() or {}),
+                ('active', lambda: inspector.active() or {}),
+                ('reserved', lambda: inspector.reserved() or {}),
+                ('scheduled', lambda: inspector.scheduled() or {}),
+                ('stats', lambda: inspector.stats() or {}),
+            )
+        }
+    active_queues = futures['active_queues'].result()
+    active_tasks_by_worker = futures['active'].result()
+    reserved_tasks_by_worker = futures['reserved'].result()
+    scheduled_tasks_by_worker = futures['scheduled'].result()
+    worker_stats = futures['stats'].result()
 
     worker_names = sorted(
         set(active_queues.keys())
