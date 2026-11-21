@@ -98,6 +98,24 @@ class BoltzBackend(StructureBackend):
         low_vram = bool(ctx.options.get("low_vram", False))
         ipsae_ligand_chain_id = ctx.options.get("ipsae_ligand_chain_id")
 
+        # 自定义 CCD 先行处理：preset 合并、与基础分子库冲突的编码自动改名，
+        # 重映射同步进 normalized_yaml，后续 MSA/输入/归档全部使用改名后编码。
+        custom_molecules = _merge_referenced_preset_modification_molecules(
+            _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
+            normalized_yaml,
+        )
+        host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
+        if custom_molecules and host_cache_dir:
+            base_mol_codes = {
+                path.stem.upper() for path in (Path(host_cache_dir) / "mols").glob("*.pkl")
+            }
+            custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
+                custom_molecules, base_mol_codes)
+            if ccd_remap:
+                normalized_yaml = apply_custom_ccd_code_remap(normalized_yaml, ccd_remap)
+                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
+                      file=sys.stderr)
+
         ensure_image(str(BOLTZ2_DOCKER_IMAGE or "").strip())
         print_constraint_residue_summary(normalized_yaml)
 
@@ -237,22 +255,8 @@ class BoltzBackend(StructureBackend):
         if runtime_task_id:
             docker_command.extend(["--env", f"VBIO_TASK_ID={runtime_task_id}"])
 
-        custom_molecules = _merge_referenced_preset_modification_molecules(
-            _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
-            normalized_yaml,
-        )
-        host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
         container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
         container_base_mols_dir = "/root/.boltz_base_mols"
-        if custom_molecules and host_cache_dir:
-            base_mols_dir = Path(host_cache_dir) / "mols"
-            base_mol_codes = {path.stem.upper() for path in base_mols_dir.glob("*.pkl")}
-            custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
-                custom_molecules, base_mol_codes)
-            if ccd_remap:
-                normalized_yaml = apply_custom_ccd_code_remap(normalized_yaml, ccd_remap)
-                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
-                      file=sys.stderr)
         custom_mols_dir: Optional[Path] = None
         if custom_molecules and not host_cache_dir:
             raise RuntimeError("BOLTZ2_HOST_CACHE_DIR is required when using custom drawn residue CCD molecules.")

@@ -249,6 +249,16 @@ class Af3Backend(StructureBackend):
                                 if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
         low_vram = bool(ctx.options.get("low_vram", False))
 
+        # 自定义 CCD 先行处理：与 AF3 内建 RCSB CCD 冲突的编码自动改名并同步
+        # yaml，保证 AF3 输入解析（modifications）、MSA 与 userCCD 编码一致。
+        custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+        base_ccd_codes = load_standard_ccd_codes()
+        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)
+        if ccd_remap:
+            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
+            yaml_data = self._load_yaml_for_affinity(yaml_content)
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)
+
         image = str(ALPHAFOLD3_DOCKER_IMAGE or "jurgjn/alphafold3:v3.0.2").strip()
         ensure_image(image)
         print("Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
@@ -274,13 +284,6 @@ class Af3Backend(StructureBackend):
         # molecules must not be injected as userCCD (their generated cif lacks the
         # descriptor category and breaks AF3 parsing). Explicit custom molecules
         # (ligands, linkers) still pass through.
-        custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
-        base_ccd_codes = load_standard_ccd_codes()
-        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)
-        if ccd_remap:
-            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
-            yaml_data = self._load_yaml_for_affinity(yaml_content)
-            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)
         _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
         user_ccd_text = None
         if custom_molecules:
