@@ -260,7 +260,8 @@ export function ProjectsPage() {
         if (stateFilter === 'SUCCESS' && counts.success <= 0) return false;
         if (stateFilter === 'FAILURE' && counts.failure <= 0) return false;
         if (stateFilter === 'QUEUED' && counts.queued <= 0) return false;
-        if ((stateFilter === 'DRAFT' || stateFilter === 'REVOKED') && counts.other <= 0) return false;
+        if (stateFilter === 'DRAFT' && String(project.task_state || '').trim().toUpperCase() !== 'DRAFT') return false;
+        if (stateFilter === 'REVOKED' && String(project.task_state || '').trim().toUpperCase() !== 'REVOKED') return false;
       }
       if (backendFilter !== 'all' && backendValue !== backendFilter) return false;
       if (activityFilter === 'active' && !hasActiveRuntime) return false;
