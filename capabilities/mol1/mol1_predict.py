@@ -23,6 +23,7 @@ unpaired 语义）；缓存缺失走内置 colabfold 搜索，服务地址可用
 """
 from __future__ import annotations
 import sys
+import time
 
 import argparse
 import hashlib
@@ -356,6 +357,9 @@ def fill_missing_msa(jobs: list[dict], work_dir: Path,
     a3m_dir.mkdir(parents=True, exist_ok=True)
     idx = 0
     patched = False
+    fill_deadline_seconds = int(
+        os.environ.get("MOL_MSA_FILL_DEADLINE_SECONDS", "1800"))
+    deadline = time.monotonic() + fill_deadline_seconds
     for job in jobs:
         for entry in job["sequences"]:
             entity = entry.get("proteinChain")
@@ -363,6 +367,9 @@ def fill_missing_msa(jobs: list[dict], work_dir: Path,
                 continue
             seq = str(entity["sequence"]).strip().upper()
             if len(seq) > 25:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"MSA 填充超出 {fill_deadline_seconds}s 总时限（MSA 服务器持续不可用）")
                 chain_dir = work_dir / "msa" / _seq_md5(seq)
                 cached = [p for p in sorted(chain_dir.glob("**/non_pairing.a3m"))
                           if p.stat().st_size > 0 and _cached_a3m_matches(p, seq)]
@@ -439,12 +446,17 @@ def _compact_pae_block(full_data: dict, max_dim: int = 134) -> dict | None:
         for j in range(0, n0, down):
             row.append(round(float(pae[i][j]), 2))
         matrix.append(row)
+    # 边界保持全 token 空间坐标（与 result_archive 及前端缩放逻辑同一契约）
     for idx, chain in enumerate(asym):
         last = bounds[-1] if bounds else None
         if last and last["chain"] == chain:
             last["end"] = idx
         else:
-            bounds.append({"chain": int(chain), "start": idx, "end": idx})
+            try:
+                numeric = int(chain)
+            except (TypeError, ValueError):
+                numeric = len(bounds)
+            bounds.append({"chain": numeric, "start": idx, "end": idx})
     return {"pae_matrix": matrix, "pae_chain_bounds": bounds}
 
 
@@ -550,7 +562,7 @@ def main() -> None:
                 continue
             try:
                 rows = [l.strip() for l in Path(entity["unpairedMsaPath"]).read_text().splitlines()
-                        if l and not l.startswith(">")]
+                        if l and not l.startswith((">", "#"))]
             except OSError:
                 continue
             # Lowercase = insertion vs the query; coverage is per alignment

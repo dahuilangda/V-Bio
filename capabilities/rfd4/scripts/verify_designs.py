@@ -32,8 +32,15 @@ def binder_from_cif(path: Path) -> str:
     if not polymers:
         raise ValueError(f"no polymer chain in {path}")
     chain = min(polymers, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
-    return "".join(AA3_TO_AA1.get(r.name.strip().upper(), "A")
-                   for r in chain if r.het_flag != "H")
+    unknown = sorted({
+        r.name.strip().upper() for r in chain
+        if r.het_flag != "H" and r.name.strip().upper() not in AA3_TO_AA1
+    })
+    if unknown:
+        raise ValueError(
+            f"binder contains residues with no one-letter mapping: {', '.join(unknown)}"
+        )
+    return "".join(AA3_TO_AA1[r.name.strip().upper()] for r in chain if r.het_flag != "H")
 
 
 def post_multipart(url: str, token: str, fields: dict, yaml_path: Path) -> dict:
@@ -43,8 +50,13 @@ def post_multipart(url: str, token: str, fields: dict, yaml_path: Path) -> dict:
     for key, value in fields.items():
         cmd += ["-F", f"{key}={value}"]
     cmd += ["-F", f"yaml_file=@{yaml_path};type=application/x-yaml"]
-    out = subprocess.run(cmd, capture_output=True, text=True).stdout
-    return json.loads(out)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"curl failed ({result.returncode}): {result.stderr.strip()[:300]}")
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"gateway returned non-JSON: {result.stdout[:300]}") from exc
 
 
 def main() -> None:

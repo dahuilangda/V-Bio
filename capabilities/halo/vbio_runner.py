@@ -359,7 +359,7 @@ def run_halo_optimization(
             backend=str(payload.get("backend") or PredictOracle.DEFAULT_BACKEND),
             timeout_s=int(payload.get("oracle_timeout_s") or 7200),
             priority=str(payload.get("priority") or "default"),
-            seed=cfg.seed or None,
+            seed=cfg.seed if cfg.seed is not None else None,
             api_url=payload.get("api_url"),
             api_token=payload.get("api_token"),
             log=log,

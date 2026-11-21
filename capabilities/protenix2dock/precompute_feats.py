@@ -18,6 +18,7 @@ import argparse
 import copy
 import csv
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -85,7 +86,9 @@ def main() -> None:
         seed = args.seed
     sa = _A()
 
-    nt_map_path = out_dir / "n_token_map.json"
+    # 各 shard 写自己的 map 文件再由调用方合并：整文件覆写会互相抹掉条目。
+    shard_suffix = os.environ.get("P2D_FEATS_SHARD") or str(os.getpid())
+    nt_map_path = out_dir / f"n_token_map_shard_{shard_suffix}.json"
     nt_map = json.loads(nt_map_path.read_text()) if nt_map_path.exists() else {}
 
     done = failed = skipped = 0

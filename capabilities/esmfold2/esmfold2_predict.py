@@ -94,8 +94,7 @@ def inject_custom_ccd(request) -> None:
     if remap:
         print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {remap}", file=sys.stderr)
         for entity in request.entities:
-            if str(entity.ccd or "").upper() in remap:
-                entity.ccd = remap[str(entity.ccd).upper()]
+            entity.ccd = [remap.get(code.upper(), code) for code in entity.ccd]
             for mod in entity.modifications:
                 if str(mod.ccd or "").upper() in remap:
                     mod.ccd = remap[str(mod.ccd).upper()]

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
 
 from core.alignment import align_complex_init_coords
 from core.constraints import (
+    compute_bond_contact_pairs,
     compute_ccd_bond_bands,
     compute_free_chain_tfg_constraints,
     compute_ligand_covalent_bands,
@@ -365,12 +367,8 @@ def run_peptide_engine(args, work_dir: Path) -> tuple[Path, dict[str, Any]]:
         len(receptor_names),
         *((len(receptor_names) + 1,) if linker_entity is not None else ()),
     }
-    try:
-        _ccd_bands = compute_ccd_bond_bands(
-            info, coords, mask, free_entities=_free_entities)
-    except Exception as _band_exc:
-        _ccd_bands = None
-        log.warning("CCD bond bands unavailable: %s", _band_exc)
+    _ccd_bands = compute_ccd_bond_bands(
+        info, coords, mask, free_entities=_free_entities)
     staged_to_auto = {
         name: chr(ord("A") + i)
         for i, name in enumerate(entity_chain_names)

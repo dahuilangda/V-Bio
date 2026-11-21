@@ -218,11 +218,90 @@ def split_complex_file(complex_path: Path, work_dir: Path):
     mol = Chem.MolFromPDBFile(str(ligand_pdb), removeHs=False)
     if mol is None:
         raise ValueError(f"no parseable ligand chain in {complex_path}")
+    _restore_ligand_bond_orders(mol, ligand)
     ligand_sdf = work_dir / "input_ligand.sdf"
     writer = Chem.SDWriter(str(ligand_sdf))
     writer.write(mol)
     writer.close()
     return protein_path, ligand_sdf, mol
+
+
+def _restore_ligand_bond_orders(mol, ligand) -> None:
+    """PDB 无键级信息：MolFromPDBFile 的近似成键把芳香/双键全部写成单键。
+
+    按残基名从 CCD rdkit 缓存取模板，AssignBondOrdersFromTemplate 回填真实
+    键级；无模板的残基响亮报错——静默输出错误分子比失败更有害。
+    """
+    import pickle
+
+    from rdkit.Chem import AllChem
+
+    ccd_path = (Path(os.environ.get("PROTENIX_ROOT_DIR", "/cache"))
+                / "common" / "components.cif.rdkit_mol.pkl")
+    if not ccd_path.is_file():
+        raise RuntimeError(f"CCD rdkit 缓存不存在，无法回填键级: {ccd_path}")
+    with ccd_path.open("rb") as handle:
+        ccd_mols = pickle.load(handle)
+    if not isinstance(ccd_mols, dict) or not ccd_mols:
+        raise RuntimeError(f"CCD rdkit 缓存为空: {ccd_path}")
+
+    conf = mol.GetConformer()
+    conf_pos = conf.GetPositions()
+
+    def _residue_submol(atom_indices: list[int]) -> Chem.Mol:
+        rw = Chem.RWMol()
+        for old_idx in atom_indices:
+            rw.AddAtom(Chem.Atom(mol.GetAtomWithIdx(old_idx)))
+        new_conf = Chem.Conformer(rw.GetNumAtoms())
+        for new_idx, old_idx in enumerate(atom_indices):
+            new_conf.SetAtomPosition(new_idx, conf.GetAtomPosition(old_idx))
+        rw.AddConformer(new_conf, assignId=True)
+        for i, old_i in enumerate(atom_indices):
+            for j, old_j in enumerate(atom_indices):
+                if j > i and mol.GetBondBetweenAtoms(old_i, old_j) is not None:
+                    rw.AddBond(i, j, Chem.BondType.SINGLE)
+        return rw.GetMol()
+
+    untemplated: set[str] = set()
+    for chain in ligand[0]:
+        for res in chain:
+            atom_indices = []
+            for atom in res:
+                pos = atom.pos
+                for idx in range(mol.GetNumAtoms()):
+                    if float(np.linalg.norm(
+                            conf_pos[idx] - [pos.x, pos.y, pos.z])) < 0.3:
+                        atom_indices.append(idx)
+                        break
+            if not atom_indices:
+                continue
+            res_name = res.name.strip().upper()
+            template = ccd_mols.get(res_name)
+            if template is None:
+                untemplated.add(res_name)
+                continue
+            submol = _residue_submol(atom_indices)
+            try:
+                bonded = AllChem.AssignBondOrdersFromTemplate(
+                    Chem.Mol(template), submol)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"CCD 模板键级回填失败（残基 {res_name}）: {exc}") from exc
+            old_by_new = {new_idx: old_idx
+                          for new_idx, old_idx in enumerate(atom_indices)}
+            for bond in bonded.GetBonds():
+                old_i = old_by_new[bond.GetBeginAtomIdx()]
+                old_j = old_by_new[bond.GetEndAtomIdx()]
+                existing = mol.GetBondBetweenAtoms(old_i, old_j)
+                if existing is None:
+                    continue
+                existing.SetBondType(bond.GetBondType())
+                existing.SetIsAromatic(bond.GetIsAromatic())
+    if untemplated:
+        raise RuntimeError(
+            f"配体残基 {', '.join(sorted(untemplated))} 无 CCD 模板，无法回填键级")
+
+    Chem.SanitizeMol(mol)
 
 
 def resolve_inputs(args, work_dir: Path):
@@ -467,11 +546,11 @@ def main(argv=None):
     # entity after the protein chains (auto letters A, B, ... follow
     # input.json entity order); hardcoding "B" silently scores the wrong
     # interface on multi-chain receptors (homodimers)
-    interface = (args.interface_chains or "").replace(" ", "") or None
+    interface = (args.interface_chains or "").replace(" ", "").upper() or None
     if interface:
         ligand_chain = interface.split(",")[-1][0]
     elif args.mode == "peptide":
-        ligand_chain = chr(ord("A") + peptide_info["peptide_entity"])
+        ligand_chain = chr(ord("A") + peptide_info["peptide_entity"] % 26)
     else:
         keep_chains = ([c for c in (args.target_chain or "").split(",") if c.strip()]
                        or None)

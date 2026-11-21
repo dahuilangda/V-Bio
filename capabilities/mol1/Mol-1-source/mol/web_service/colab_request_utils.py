@@ -78,8 +78,8 @@ def run_mmseqs2_service(
             query += f"{seq}\n"
             n += 1
 
+        error_count = 0
         while True:
-            error_count = 0
             try:
                 # https://requests.readthedocs.io/en/latest/user/advanced/#advanced
                 # "good practice to set connect timeouts to slightly larger than a multiple of 3"
@@ -90,18 +90,14 @@ def run_mmseqs2_service(
                     headers=headers,
                     auth=HTTPBasicAuth(username, password),
                 )
-            except requests.exceptions.Timeout:
-                logger.warning("Timeout while submitting to MSA server. Retrying...")
-                continue
-            except Exception as e:
+            except requests.exceptions.RequestException as e:
                 error_count += 1
                 logger.warning(
-                    f"Error while fetching result from MSA server. Retrying... ({error_count}/5)"
+                    f"MSA server submit failed ({error_count}/5): {e}"
                 )
-                logger.warning(f"Error: {e}")
-                time.sleep(5)
                 if error_count > 5:
                     raise
+                time.sleep(5)
                 continue
             break
 
@@ -113,8 +109,8 @@ def run_mmseqs2_service(
         return out
 
     def status(ID):
+        error_count = 0
         while True:
-            error_count = 0
             try:
                 res = requests.get(
                     f"{host_url}/ticket/{ID}",
@@ -122,20 +118,14 @@ def run_mmseqs2_service(
                     headers=headers,
                     auth=HTTPBasicAuth(username, password),
                 )
-            except requests.exceptions.Timeout:
-                logger.warning(
-                    "Timeout while fetching status from MSA server. Retrying..."
-                )
-                continue
-            except Exception as e:
+            except requests.exceptions.RequestException as e:
                 error_count += 1
                 logger.warning(
-                    f"Error while fetching result from MSA server. Retrying... ({error_count}/5)"
+                    f"MSA server status failed ({error_count}/5): {e}"
                 )
-                logger.warning(f"Error: {e}")
-                time.sleep(5)
                 if error_count > 5:
                     raise
+                time.sleep(5)
                 continue
             break
         try:
@@ -155,20 +145,14 @@ def run_mmseqs2_service(
                     headers=headers,
                     auth=HTTPBasicAuth(username, password),
                 )
-            except requests.exceptions.Timeout:
-                logger.warning(
-                    "Timeout while fetching result from MSA server. Retrying..."
-                )
-                continue
-            except Exception as e:
+            except requests.exceptions.RequestException as e:
                 error_count += 1
                 logger.warning(
-                    f"Error while fetching result from MSA server. Retrying... ({error_count}/5)"
+                    f"MSA server download failed ({error_count}/5): {e}"
                 )
-                logger.warning(f"Error: {e}")
-                time.sleep(5)
                 if error_count > 5:
                     raise
+                time.sleep(5)
                 continue
             break
         with open(path, "wb") as out:
