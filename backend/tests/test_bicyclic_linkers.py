@@ -44,9 +44,10 @@ class TestLinkerRegistry:
             bcl.get_linker("BS3")
 
     def test_engine_mismatch_rejected(self):
-        with pytest.raises(ValueError, match="不支持后端 mol1"):
-            bcl.arms_for_backend("SEZ", "mol1")
-        assert bcl.arms_for_backend("ZBR", "mol1") == ["C7", "C8", "C9"]
+        # SEZ 仅 protenix 系可用；mol1 路径必须拒绝（生产侧走 engines 集合判定）
+        assert "mol1" not in bcl.get_linker("SEZ").engines
+        assert "mol1" in bcl.get_linker("ZBR").engines
+        assert list(bcl.get_linker("ZBR").arm_atoms) == ["C7", "C8", "C9"]
 
 
 class TestVerifyPayloadGuards:

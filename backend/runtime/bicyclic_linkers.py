@@ -68,21 +68,6 @@ def get_linker(ccd: str) -> BicyclicLinker:
             "BS3 为对称臂，无法表达三条独立共价键，不在双环支持范围）")
     return linker
 
-
-def arms_for_backend(ccd: str, backend: str) -> List[str]:
-    """Arm atoms of a linker for a specific backend; (linker, backend)
-    mismatches raise instead of silently producing an unverifiable payload."""
-    linker = get_linker(ccd)
-    norm = str(backend or "").strip().lower()
-    aliases = {"mol-1": "mol1", "protenix-2-dock": "protenix2dock"}
-    norm = aliases.get(norm, norm)
-    if norm not in linker.engines:
-        raise ValueError(
-            f"linker {linker.ccd} 不支持后端 {backend}（可用后端："
-            f"{sorted(linker.engines)}）；请改用兼容 linker 或后端")
-    return list(linker.arm_atoms)
-
-
 def atom_map() -> Dict[str, List[str]]:
     """{ccd: [arm atoms]} for consumers that only need the legacy shape
     (candidate-yaml bond construction, linker-code detection)."""
