@@ -1685,3 +1685,70 @@ button.peptide-residue-config-head .peptide-residue-selection-summary {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* .table 基础组件规则：全局生效（原先误置于 settings-auth 页面样式表） */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px;
+  text-align: left;
+  font-size: var(--text-sm);
+}
+
+/* 跨页共享：项目/任务工具栏与筛选基座（ProjectsPage、ProjectTasksPage 共用） */
+.project-toolbar {
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.project-toolbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.project-filter-field {
+  border: 1px solid #d8e4dd;
+  border-radius: var(--radius-md);
+  background: #f8fcf9;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: #496356;
+}
+.project-filter-field-search {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  height: auto;
+}
+.project-toolbar .search-input {
+  max-width: 420px;
+}
+.project-filter-select {
+  width: 100%;
+  min-width: 132px;
+  max-width: 220px;
+  border: 0;
+  background-color: transparent;
+  padding: 7px 24px 7px 2px;
+  font-size: var(--text-sm);
+  color: #2a4739;
+}
+.project-filter-select:focus {
+  outline: 2px solid var(--primary, #1f4f3f);
+  outline-offset: 1px;
+  border: 0;
+  box-shadow: none;
+}
+.project-toolbar-meta {
+  margin-left: auto;
+  line-height: 40px;
+}
