@@ -225,6 +225,12 @@
 .project-table tbody tr:hover {
   background: #f8fcf9;
 }
+.project-table tbody td {
+  border-bottom: 1px solid #e4ede8;
+}
+.project-table tbody tr:last-child td {
+  border-bottom: 0;
+}
 .project-table td {
   vertical-align: middle;
   padding-top: 16px;
