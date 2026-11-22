@@ -92,53 +92,6 @@
   color: #8b2a2a;
 }
 
-.auth-page {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  background: var(--bg);
-  padding: 24px;
-}
-
-.auth-card {
-  width: min(480px, 100%);
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 24px;
-  display: grid;
-  gap: 14px;
-  box-shadow: 0 18px 48px rgba(20, 44, 33, 0.08);
-}
-
-.auth-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: #224131;
-  font-weight: 700;
-}
-
-.auth-subtitle {
-  color: var(--muted);
-  font-size: var(--text-md);
-}
-
-
-.auth-footer {
-  color: var(--muted);
-  font-size: var(--text-md);
-}
-
-.auth-footer a {
-  color: #173d31;
-  font-weight: 600;
-  text-decoration: none;
-}
-
-.auth-footer a:hover {
-  text-decoration: underline;
-}
 
 .mmp-life-batch-item.active {
   border-color: #96baa5;
