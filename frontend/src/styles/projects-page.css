@@ -192,8 +192,17 @@
   background: #fff;
 }
 .project-table {
-  min-width: 1080px;
+  min-width: 1240px;
+  table-layout: fixed;
+  width: 100%;
 }
+/* 固定列规划：Project 吃余量，其余列定宽，避免自动布局把空间全灌进名称列 */
+.project-table thead th:nth-child(2) { width: 9%; }
+.project-table thead th:nth-child(3) { width: 7%; }
+.project-table thead th:nth-child(4) { width: 21%; }
+.project-table thead th:nth-child(5) { width: 12%; }
+.project-table thead th:nth-child(6) { width: 12%; }
+.project-table thead th:nth-child(7) { width: 9%; text-align: right; }
 .project-table thead th {
   position: sticky;
   top: 0;
@@ -285,6 +294,14 @@
   color: var(--muted);
   font-size: var(--text-sm);
   line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.project-table td.project-col-time {
+  padding-left: 18px;
+}
+.project-table th:nth-child(5),
+.project-table th:nth-child(6) {
+  padding-left: 18px;
 }
 .project-col-total {
   width: 86px;
@@ -312,9 +329,13 @@
 }
 .project-col-actions {
   white-space: nowrap;
+  text-align: right;
+}
+.project-table td.project-col-actions {
+  padding-right: 18px;
 }
 .project-action-row {
-  justify-content: flex-start;
+  justify-content: flex-end;
   align-items: center;
   gap: 6px;
 }
@@ -330,13 +351,13 @@
   background: #ffe4c2;
 }
 .project-state-overview {
-  min-width: 240px;
+  min-width: 0;
 }
 .project-state-pills {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 4px 6px;
 }
 .project-state-pill {
   display: inline-flex;
