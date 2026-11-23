@@ -1165,8 +1165,7 @@ def predict_task(self, predict_args: dict):
         ).strip().lower()
         # RFD4 strategy generates inside the parent task: it needs a GPU like
         # any prediction, unlike the ESM3 loop whose heavy work runs per candidate.
-        is_peptide_design = (normalized_workflow == 'peptide_design'
-                             and proposer_backend != 'rfd4')
+        is_peptide_design = normalized_workflow == 'peptide_design'
         low_vram = coerce_bool(predict_args.get("low_vram"), False)
         if normalized_workflow == 'peptide_design':
             if proposer_backend == 'rfd4':

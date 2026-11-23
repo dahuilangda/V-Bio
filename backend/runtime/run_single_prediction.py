@@ -116,7 +116,6 @@ from backend.runtime.peptide_design_backend import (
 from backend.runtime.rfd4_strategy import (
     _assert_bond_capable_scorer,
     run_rfd4_backend,
-    run_rfd4_design_strategy,
 )
 from backend.runtime import candidate_pool
 from backend.runtime.backends import resolve_ccd_before_gpu, structure_backend
@@ -2100,7 +2099,9 @@ def main():
             worker_output_archive_path = str(predict_args.pop("output_archive_path"))
             worker_predict_args = predict_args.pop("predict_args", {})
             worker_model_name = predict_args.pop("model_name", None)
-            worker_backend = _normalize_peptide_backend(predict_args.pop("backend", "boltz"))
+            worker_backend = str(predict_args.pop("backend", "boltz") or "boltz").strip().lower()
+            if worker_backend != "rfd4":
+                worker_backend = _normalize_peptide_backend(worker_backend)
             worker_acquire_gpu = bool(predict_args.pop("__peptide_worker_acquire_gpu__", True))
             worker_low_vram = resolve_low_vram(worker_predict_args)
             worker_task_id = str(predict_args.pop("__peptide_worker_task_id__", "")).strip() or "peptide-candidate-worker"
@@ -2164,7 +2165,19 @@ def main():
                     "pocket_sequence_contacts": predict_args.pop(
                         "mol1_pocket_sequence_contacts", None),
                 }
-                structure_backend(worker_backend).execute(
+                if worker_backend == "rfd4":
+                    run_rfd4_backend(
+                        temp_dir=worker_temp_dir,
+                        yaml_content=worker_yaml_content,
+                        output_archive_path=worker_output_archive_path,
+                        template_inputs=worker_predict_args.get("template_inputs"),
+                        rfd4_spec=worker_predict_args.get("rfd4_spec"),
+                        seed=worker_seed,
+                        task_id=worker_task_id,
+                        num_designs=worker_predict_args.get("rfd4_num_designs"),
+                    )
+                else:
+                    structure_backend(worker_backend).execute(
                     PredictionRequest.from_yaml(worker_yaml_content),
                     BackendRunContext(
                         temp_dir=worker_temp_dir,
@@ -2291,45 +2304,32 @@ def main():
                         raise ValueError(
                             f"RFD4-Proteina 不支持 {chirality_raw.upper()} 肽设计；"
                             "D 肽请使用 ESM3 + RL 策略。")
-                    # 一次性生成后自动派发验证子任务，不进入世代循环
                     score_backend_sel = str(
                         peptide_design_options.get("peptideScorerBackend")
                         or peptide_design_options.get("peptide_scorer_backend") or "protenix").strip().lower()
+                else:
+                    score_backend_sel = backend
+                try:
                     _assert_bond_capable_scorer(peptide_design_mode, score_backend_sel)
-                    run_rfd4_design_strategy(
+                    run_peptide_design_backend(
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
-                        score_backend=score_backend_sel,
-                        project_id=str(predict_args.get("project_id") or ""),
+                        backend=score_backend_sel,
                         predict_args=predict_args,
+                        model_name=model_name,
                         seed=seed,
-                        target_chain_id=peptide_design_target_chain,
-                        template_inputs=template_inputs if isinstance(template_inputs, list) else None,
                         options=peptide_design_options,
+                        target_chain_id=peptide_design_target_chain,
+                        progress_path=peptide_progress_path,
+                        gpu_ids=peptide_gpu_ids,
+                        subtask_queue=peptide_subtask_queue,
+                        custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                        template_inputs=template_inputs if isinstance(template_inputs, list) else None,
                     )
-                else:
-                    try:
-                        _assert_bond_capable_scorer(peptide_design_mode, backend)
-                        run_peptide_design_backend(
-                            temp_dir=temp_dir,
-                            yaml_content=processed_yaml,
-                            output_archive_path=output_archive_path,
-                            backend=backend,
-                            predict_args=predict_args,
-                            model_name=model_name,
-                            seed=seed,
-                            options=peptide_design_options,
-                            target_chain_id=peptide_design_target_chain,
-                            progress_path=peptide_progress_path,
-                            gpu_ids=peptide_gpu_ids,
-                            subtask_queue=peptide_subtask_queue,
-                            custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
-                            template_inputs=template_inputs if isinstance(template_inputs, list) else None,
-                        )
-                    finally:
-                        if peptide_parent_task_id:
-                            _clear_peptide_subtask_registry(peptide_parent_task_id)
+                finally:
+                    if peptide_parent_task_id:
+                        _clear_peptide_subtask_registry(peptide_parent_task_id)
             elif backend in ("alphafold3", "protenix"):
                 if not af3_template_payloads:
                     af3_template_payloads = prepare_yaml_template_payloads(

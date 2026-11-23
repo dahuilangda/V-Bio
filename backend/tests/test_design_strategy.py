@@ -29,7 +29,7 @@ def test_esm3_strategy_passes_pools_elites_and_budget_to_the_proposer():
     ])
     strategy = Esm3Strategy(proposer, ["A", "C"], [{"ccd": "NLE"}])
     elites = [{"sequence": "AAAA"}]
-    assert list(strategy.propose(elites, 12)) == [
+    assert list(strategy.propose(1, elites, 12)) == [
         Candidate("ACDE", [{"ccd": "NLE", "position": 2}], [1, 4], "denovo"),
         Candidate("FGHI", [], [], "edit"),
     ]
@@ -62,3 +62,14 @@ def test_subclasses_must_implement_every_action():
         Incomplete()
     assert Esm3Strategy.name == "esm3"
     assert isinstance(Esm3Strategy(FakeProposer([]), [], []), DesignStrategy)
+
+
+def test_strategy_defaults_differ_where_the_engines_differ():
+    from backend.runtime.design_strategy import Rfd4Strategy, strategy_class
+
+    assert (Esm3Strategy.uses_sequence_mask, Esm3Strategy.oversample, Esm3Strategy.generations) == (True, 2, None)
+    assert (Rfd4Strategy.uses_sequence_mask, Rfd4Strategy.oversample, Rfd4Strategy.generations) == (False, 1, 1)
+    assert strategy_class("esm3") is Esm3Strategy
+    assert strategy_class("rfd4") is Rfd4Strategy
+    with pytest.raises(ValueError, match="不支持的设计策略"):
+        strategy_class("unknown")

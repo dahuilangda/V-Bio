@@ -122,7 +122,13 @@ from backend.runtime.linker_measurement import (
     _rebuild_single_atom_linker_anchor,
 )
 from backend.runtime import candidate_pool
-from backend.runtime.design_strategy import Esm3Strategy, keep_best_by_prior
+from backend.runtime.design_strategy import (
+    Esm3Strategy,
+    Rfd4Strategy,
+    keep_best_by_prior,
+    rfd4_generation_queue,
+    strategy_class,
+)
 from backend.runtime.backends import is_structure_backend, structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
@@ -3483,6 +3489,67 @@ def _assert_product_chirality(
     }
 
 
+def _build_esm3_strategy(
+    *,
+    temp_dir: str,
+    predict_args: Dict[str, Any],
+    base_yaml_data: Dict[str, Any],
+    resolved_target_chain_id: str,
+    design_mode: str,
+    structure_mode: str,
+    peptide_chirality: str,
+    excluded_aas: List[str],
+    binder_length: int,
+    length_lo: Optional[int],
+    length_hi: Optional[int],
+    natural_pool: List[str],
+    unnatural_pool: List[Dict[str, Any]],
+    proposer_prefix: str,
+    proposer_suffix: str,
+    random_seed: int,
+) -> Esm3Strategy:
+    log_path = Path(temp_dir) / "proposals.log"
+
+    def log(message: str) -> None:
+        print(f"[esm3] {message}", file=sys.stderr)
+        try:
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+        except OSError:
+            pass
+
+    sys_path = str(CAPABILITIES_DIR / "peptide_lm")
+    sys.path.insert(0, sys_path)
+    try:
+        from peplm.integrate.esm3_proposer import ESM3Proposer
+    finally:
+        sys.path.remove(sys_path)
+
+    gpu = os.environ.get("ESM3_GPU_ID", "0")
+    proposer = ESM3Proposer(
+        chirality=peptide_chirality,
+        project_id=str(predict_args.get("project_id") or ""),
+        receptor_sequence=(
+            _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
+            if peptide_chirality in ("d", "l") else ""),
+        peptide_length=None if length_lo else binder_length,
+        len_range=(length_lo or 8, length_hi or 25),
+        cyclic=(design_mode == "cyclic"),
+        structure_mode=structure_mode,
+        excluded_aas=excluded_aas,
+        fixed_prefix=proposer_prefix,
+        fixed_suffix=proposer_suffix,
+        device=f"cuda:{gpu}",
+        seed=random_seed,
+        work_dir=str(Path(temp_dir) / "esm3_proposer"),
+        log=log,
+    )
+    log(
+        f"ESM3 proposal engine ready (length={binder_length or 'adaptive'}, "
+        f"mode={design_mode}, structure={structure_mode}, GPU={gpu})")
+    return Esm3Strategy(proposer, natural_pool, unnatural_pool)
+
+
 def run_peptide_design_backend(
     temp_dir: str,
     yaml_content: str,
@@ -3516,6 +3583,7 @@ def run_peptide_design_backend(
         raise ValueError("YAML root must be a mapping for peptide design.")
 
     random_seed = seed if isinstance(seed, int) else int(time.time())
+    parent_task_id = str(os.environ.get("VBIO_TASK_ID") or "peptide-design").strip() or "peptide-design"
     random.seed(random_seed)
 
     docking_engine = _is_docking_peptide_backend(backend)
@@ -3563,19 +3631,26 @@ def run_peptide_design_backend(
             raise ValueError(
                 f"肽长度窗口无效：min {_length_lo} > max {_length_hi}。")
         binder_length = _length_hi
-    iterations = _read_int_option(options, "peptideIterations", 12, min_value=2, max_value=100)
+    proposer_backend_sel = str(
+        options.get("peptideProposerBackend")
+        or options.get("peptide_proposer_backend") or "esm3").strip().lower()
+    strategy_cls = strategy_class(proposer_backend_sel)
+    iterations = strategy_cls.generations or _read_int_option(
+        options, "peptideIterations", 12, min_value=2, max_value=100)
     population_size = _read_int_option(options, "peptidePopulationSize", 16, min_value=2, max_value=100)
     elite_size = _read_int_option(options, "peptideEliteSize", 5, min_value=1, max_value=max(1, population_size))
     use_initial_sequence = _read_bool_option(options, "peptideUseInitialSequence", False)
-    mask_raw = str(options.get("peptideSequenceMask") or "")
-    mask_stripped = mask_raw.replace("-", "").replace("_", "").replace(" ", "").upper()
-    if (mask_stripped and _length_lo
-            and len(mask_stripped) != binder_length
-            and _length_lo <= len(mask_stripped) <= _length_hi):
-        sequence_mask = mask_stripped
-        _normalize_sequence_mask(sequence_mask, len(sequence_mask))
-    else:
-        sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
+    sequence_mask = ""
+    if strategy_cls.uses_sequence_mask:
+        mask_raw = str(options.get("peptideSequenceMask") or "")
+        mask_stripped = mask_raw.replace("-", "").replace("_", "").replace(" ", "").upper()
+        if (mask_stripped and _length_lo
+                and len(mask_stripped) != binder_length
+                and _length_lo <= len(mask_stripped) <= _length_hi):
+            sequence_mask = mask_stripped
+            _normalize_sequence_mask(sequence_mask, len(sequence_mask))
+        else:
+            sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
     excluded_aas = _normalize_excluded_aas(options.get("peptideExcludedAAs"))
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
     fixed_mods_raw = options.get("peptideFixedModifications")
@@ -3619,7 +3694,7 @@ def run_peptide_design_backend(
     allow_extra_cys = False
     bicyclic_manual_anchors = False
     cys_layout_spec: Optional[Dict[str, Any]] = None
-    if design_mode == "bicyclic":
+    if design_mode == "bicyclic" and strategy_cls.uses_sequence_mask:
         cys_position_mode = str(options.get("peptideBicyclicCysPositionMode") or "auto").strip().lower()
         fix_terminal_cys = _read_bool_option(options, "peptideBicyclicFixTerminalCys", True)
         allow_extra_cys = _read_bool_option(options, "peptideBicyclicIncludeExtraCys", False)
@@ -3812,59 +3887,52 @@ def run_peptide_design_backend(
             file=sys.stderr,
         )
 
-    _proposer_log_path = Path(temp_dir) / "proposals.log"
-
-    def _proposer_log(message: str) -> None:
-        print(f"[esm3] {message}", file=sys.stderr)
-        try:
-            with open(_proposer_log_path, "a", encoding="utf-8") as _pf:
-                _pf.write(f"{time.strftime('%H:%M:%S')} {message}\n")
-        except OSError:
-            pass
-
     _esm3_sys_path = str(CAPABILITIES_DIR / "peptide_lm")
     sys.path.insert(0, _esm3_sys_path)
     try:
         from peplm import sequence_quality as _seq_quality
-        from peplm.integrate.esm3_proposer import ESM3Proposer
         from peplm.loop.constraints import resolve_bicyclic_anchors as _resolve_bicyclic_anchors
     finally:
         sys.path.remove(_esm3_sys_path)
 
-    _esm3_gpu = os.environ.get("ESM3_GPU_ID", "0")
     proposer_prefix, proposer_suffix = _mask_fixed_edges(sequence_mask)
     if not proposer_prefix and design_mode == "bicyclic":
         proposer_prefix = "CREEEC"
     if not proposer_suffix and design_mode == "bicyclic":
         proposer_suffix = "C"
-    proposer_backend_sel = str(
-        options.get("peptideProposerBackend")
-        or options.get("peptide_proposer_backend") or "esm3").strip().lower()
-    if proposer_backend_sel != "esm3":
-        raise ValueError(f"不支持的设计策略: {proposer_backend_sel}")
-    proposer = ESM3Proposer(
-        chirality=peptide_chirality,
-        project_id=str(predict_args.get("project_id") or ""),
-        receptor_sequence=(
-            _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
-            if peptide_chirality in ("d", "l") else ""),
-        peptide_length=None if _length_lo else binder_length,
-        len_range=(_length_lo or 8, _length_hi or 25),
-        cyclic=(design_mode == "cyclic"),
-        structure_mode=structure_mode,
-        excluded_aas=excluded_aas,
-        fixed_prefix=proposer_prefix,
-        fixed_suffix=proposer_suffix,
-        device=f"cuda:{_esm3_gpu}",
-        seed=random_seed,
-        work_dir=str(Path(temp_dir) / "esm3_proposer"),
-        log=_proposer_log,
-    )
-    _proposer_log(
-        f"ESM3 proposal engine ready (length={binder_length or 'adaptive'}, "
-        f"mode={design_mode}, structure={structure_mode}, GPU={_esm3_gpu})")
-    strategy = Esm3Strategy(proposer, natural_pool, unnatural_pool)
-
+    if strategy_cls is Rfd4Strategy:
+        strategy = Rfd4Strategy(
+            temp_dir=temp_dir,
+            yaml_content=yaml_content,
+            design_mode=design_mode,
+            options=options,
+            target_sequence=_dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id),
+            pocket_author_contacts=pocket_author_contacts,
+            template_inputs=template_inputs if isinstance(template_inputs, list) else None,
+            spec=predict_args.get("rfd4_spec"),
+            parent_task_id=parent_task_id,
+            queue=subtask_queue or rfd4_generation_queue(),
+        )
+    else:
+        strategy = _build_esm3_strategy(
+            temp_dir=temp_dir,
+            options=options,
+            predict_args=predict_args,
+            base_yaml_data=base_yaml_data,
+            resolved_target_chain_id=resolved_target_chain_id,
+            design_mode=design_mode,
+            structure_mode=structure_mode,
+            peptide_chirality=peptide_chirality,
+            excluded_aas=excluded_aas,
+            binder_length=binder_length,
+            length_lo=_length_lo,
+            length_hi=_length_hi,
+            natural_pool=natural_pool,
+            unnatural_pool=unnatural_pool,
+            proposer_prefix=proposer_prefix,
+            proposer_suffix=proposer_suffix,
+            random_seed=random_seed,
+        )
     pocket_constraint_blueprint: Optional[Dict[str, Any]] = (
         {"contacts": [[c, n] for c, n in pocket_author_contacts]}
         if pocket_author_contacts else None
@@ -3980,7 +4048,6 @@ def run_peptide_design_backend(
         "default",
     )
     peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
-    parent_task_id = str(os.environ.get("VBIO_TASK_ID") or "peptide-design").strip() or "peptide-design"
     if peptide_gpu_ids:
         print(
             f"Peptide design candidate subtasks dispatch unbounded (requested_gpu_ids={peptide_gpu_ids})",
@@ -4032,32 +4099,35 @@ def run_peptide_design_backend(
                         {"sequence": s, "modifications": [], "plddts": []}
                         for s in seed_sequences[:2]
                     ]
-            for candidate in strategy.propose(_proposer_elites, population_size * 2):
-                lm_sequence = _apply_sequence_mask(candidate.sequence.upper(), sequence_mask)
+            for candidate in strategy.propose(
+                    generation, _proposer_elites, population_size * strategy.oversample):
+                lm_sequence = candidate.sequence.upper()
                 lm_mods = candidate.modifications
                 lm_anchors = candidate.cys_positions
                 lm_group = candidate.group
-                if design_mode == "bicyclic":
-                    lm_sequence, lm_anchors = _stamp_bicyclic_cysteines(
-                        lm_sequence,
-                        explicit_positions=list(design_params.get("cys_positions") or []),
-                        cys_layout=design_params.get("cys_layout"),
-                        sequence_mask=sequence_mask,
-                        allow_extra_cys=allow_extra_cys,
-                        resolve_anchors=_resolve_bicyclic_anchors,
-                    )
-                if unnatural_pool and nonnatural_max > 0:
-                    lm_sequence, lm_mods = _substitute_ncaa_residues(
-                        lm_sequence,
-                        lm_mods,
-                        unnatural_pool,
-                        nonnatural_min,
-                        nonnatural_max,
-                        list(design_params.get("cys_positions") or []),
-                        random.Random(random_seed + generation * 1000
-                                      + len(lm_sequence)),
-                    )
-                lm_mods = [m for m in (lm_mods or []) if isinstance(m, dict)]
+                if strategy.uses_sequence_mask:
+                    lm_sequence = _apply_sequence_mask(lm_sequence, sequence_mask)
+                    if design_mode == "bicyclic":
+                        lm_sequence, lm_anchors = _stamp_bicyclic_cysteines(
+                            lm_sequence,
+                            explicit_positions=list(design_params.get("cys_positions") or []),
+                            cys_layout=design_params.get("cys_layout"),
+                            sequence_mask=sequence_mask,
+                            allow_extra_cys=allow_extra_cys,
+                            resolve_anchors=_resolve_bicyclic_anchors,
+                        )
+                    if unnatural_pool and nonnatural_max > 0:
+                        lm_sequence, lm_mods = _substitute_ncaa_residues(
+                            lm_sequence,
+                            lm_mods,
+                            unnatural_pool,
+                            nonnatural_min,
+                            nonnatural_max,
+                            list(design_params.get("cys_positions") or []),
+                            random.Random(random_seed + generation * 1000
+                                          + len(lm_sequence)),
+                        )
+                    lm_mods = [m for m in (lm_mods or []) if isinstance(m, dict)]
                 lm_key = _peptide_candidate_key(lm_sequence, lm_mods)
                 if lm_key in evaluated_sequences:
                     continue
@@ -5289,6 +5359,8 @@ def run_peptide_design_backend(
             "design_results.json",
             json.dumps({"candidates": all_results_payload}, ensure_ascii=False, indent=2),
         )
+        for artifact_name, artifact in strategy.artifacts().items():
+            zipf.writestr(artifact_name, artifact)
 
     _write_peptide_progress(
         progress_path,
