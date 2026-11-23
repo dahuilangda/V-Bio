@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import gemmi
 import numpy as np
 import yaml
 import pytest
@@ -217,3 +218,40 @@ def test_combined_template_input(tmp_path):
     assert entry["file_name"] == "c.cif"
     assert entry["format"] == "cif"
     assert json.dumps(entry)
+
+
+def _target_structure(path, chain_name, first, count):
+    structure = gemmi.Structure()
+    structure.add_model(gemmi.Model("1"))
+    chain = structure[0].add_chain(chain_name)
+    for offset in range(count):
+        residue = chain.add_residue(gemmi.Residue())
+        residue.name = "ALA"
+        residue.seqid = gemmi.SeqId(first + offset, "?")
+        residue.het_flag = "A"
+        residue.add_atom(gemmi.Atom())
+        residue[0].name = "CA"
+        residue[0].element = gemmi.Element("C")
+    structure.make_mmcif_document().write_file(str(path))
+    return path
+
+
+def test_default_spec_follows_the_staged_structure_numbering(tmp_path):
+    target = _target_structure(tmp_path / "target.cif", "B", 17, 15)
+    assert rb.target_chain_range(target, 15) == ("B", 17, 31)
+    spec = yaml.safe_load(rb.default_spec(15, "", target))
+    assert spec["binder"]["contig"] == "12-22, /0, B17-31"
+    assert spec["binder"]["conditions"]["C_SEQ"] == {"true": [{"select": "sel('B')"}]}
+    assert yaml.safe_load(rb.default_spec(15, "50-120, /0, B17-31", target))["binder"]["contig"] == "50-120, /0, B17-31"
+    assert yaml.safe_load(rb.default_spec(15))["binder"]["contig"] == "12-22, /0, A1-15"
+
+
+def test_default_spec_rejects_a_target_it_cannot_describe(tmp_path):
+    mismatched = _target_structure(tmp_path / "short.cif", "A", 1, 12)
+    with pytest.raises(ValueError, match="12 个残基"):
+        rb.default_spec(15, "", mismatched)
+    structure = gemmi.read_structure(str(mismatched))
+    structure[0]["A"][5].seqid.num = 40
+    structure.make_mmcif_document().write_file(str(tmp_path / "gap.cif"))
+    with pytest.raises(ValueError, match="不连续"):
+        rb.default_spec(12, "", tmp_path / "gap.cif")

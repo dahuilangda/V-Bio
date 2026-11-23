@@ -47,7 +47,7 @@ def run_rfd4_backend(
     input_dir.mkdir(parents=True, exist_ok=True)
     (results_root / "output").mkdir(parents=True, exist_ok=True)
 
-    rfd4_adapter.stage_target(input_dir, template_inputs)
+    staged_target = rfd4_adapter.stage_target(input_dir, template_inputs)
 
     spec_payload = yaml.safe_load(yaml_content) or {}
     target_entry = next(
@@ -58,7 +58,8 @@ def run_rfd4_backend(
     if target_entry is None:
         raise ValueError("RFD4 生成任务需要在 yaml 中提供靶点蛋白链。")
     target_length = len(str(target_entry.get("sequence", "")))
-    spec_text = str(rfd4_spec) if rfd4_spec else rfd4_adapter.default_spec(target_length, RFD4_CONTIG)
+    spec_text = (str(rfd4_spec) if rfd4_spec
+                 else rfd4_adapter.default_spec(target_length, RFD4_CONTIG, staged_target))
     spec_path = input_dir / "rfd4_spec.yaml"
     spec_path.write_text(spec_text, encoding="utf-8")
 

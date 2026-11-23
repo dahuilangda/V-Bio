@@ -98,19 +98,53 @@ def stage_target(input_dir: Path, template_inputs: Optional[List[dict]]) -> Path
 
 # ---------------------------------------------------------------- spec construction
 
-def default_spec(target_length: int, contig_override: str = "") -> str:
+def target_chain_range(target_cif: Path, expected_length: int) -> Tuple[str, int, int]:
+    """First polymer chain of the staged target as (chain name, first residue
+    number, last residue number) in author numbering; raises when the chain
+    cannot be expressed as one contiguous range."""
+    import gemmi
+
+    structure = gemmi.read_structure(str(target_cif))
+    structure.setup_entities()
+    structure.remove_ligands_and_waters()
+    chains = [chain for chain in structure[0] if len(chain) > 0]
+    if not chains:
+        raise ValueError(f"靶标结构没有聚合物链：{target_cif}")
+    chain = chains[0]
+    residues = [residue for residue in chain if residue.het_flag != "H"]
+    if not residues:
+        raise ValueError(f"靶标结构首链 {chain.name} 没有聚合物残基：{target_cif}")
+    numbers = [residue.seqid.num for residue in residues]
+    first, last = numbers[0], numbers[-1]
+    if len(residues) != expected_length:
+        raise ValueError(
+            f"靶标结构首链 {chain.name} 有 {len(residues)} 个残基，与 yaml 靶标序列长度 "
+            f"{expected_length} 不一致；请确认上传的靶标结构，或在 rfd4_spec 中显式指定 contig。")
+    if numbers != list(range(first, last + 1)):
+        raise ValueError(
+            f"靶标链 {chain.name} 的残基编号不连续（{first}-{last} 共 {len(residues)} 个残基），"
+            "无法生成默认 contig；请在 rfd4_spec 中显式指定。")
+    return chain.name, first, last
+
+
+def default_spec(target_length: int, contig_override: str = "",
+                 target_cif: Optional[Path] = None) -> str:
     """Linear binder spec: target backbone rigid, target identity pinned,
-    binder length from RFD4_CONTIG or the 12-22 default."""
+    binder length from RFD4_CONTIG or the 12-22 default. The target segment
+    follows the staged structure's own chain name and residue numbering."""
     import yaml
 
+    chain, first, last = "A", 1, target_length
+    if target_cif is not None:
+        chain, first, last = target_chain_range(target_cif, target_length)
     spec = {
         "binder": {
             "input": "/workspace/input/target.cif",
             "contig": str(contig_override or "").strip()
-                      or f"12-22, /0, A1-{target_length}",
+                      or f"12-22, /0, {chain}{first}-{last}",
             "conditions": {
-                "C_CRDGRP": {"1": [{"select": "sel('A/*/*/[N,CA,C,O]')"}]},
-                "C_SEQ": {"true": [{"select": "sel('A')"}]},
+                "C_CRDGRP": {"1": [{"select": f"sel('{chain}/*/*/[N,CA,C,O]')"}]},
+                "C_SEQ": {"true": [{"select": f"sel('{chain}')"}]},
             },
         }
     }
