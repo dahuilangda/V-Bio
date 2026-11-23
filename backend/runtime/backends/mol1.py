@@ -19,13 +19,23 @@ import yaml
 
 from backend.runtime.backends.base import BackendRunContext, StructureBackend
 from backend.runtime.backends.request import PredictionRequest
-from backend.runtime.custom_ccd_builder import load_standard_ccd_codes
+from backend.runtime.ccd import CcdCatalog, ImageCcdCatalog, apply_custom_ccd_code_remap
 
-MOL1_COMMON_DIR = "/data/mol1/common/common"
+MOL1_COMMON_MOUNT = "/cache/common"
+_MOL1_CCD_READER = (
+    "with open('{mount}/components.cif', errors='replace') as handle:\n"
+    "    codes = [line[5:].strip() for line in handle if line.startswith('data_')]")
 
 
 class Mol1Backend(StructureBackend):
     name = "mol1"
+
+    def ccd_catalog(self) -> CcdCatalog:
+        from backend.core.config import MOL1_COMMON_DIR, MOL1_DOCKER_IMAGE
+        return ImageCcdCatalog(
+            self.name, MOL1_DOCKER_IMAGE, "python3.12",
+            _MOL1_CCD_READER.format(mount=MOL1_COMMON_MOUNT),
+            volumes=[(MOL1_COMMON_DIR, MOL1_COMMON_MOUNT)])
 
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
         self.validate(request, ctx.options.get("custom_ccd_molecules"))
@@ -38,11 +48,7 @@ class Mol1Backend(StructureBackend):
             resolve_backend_results_root,
             resolve_backend_work_root,
         )
-        from backend.runtime.custom_ccd_builder import (
-            _normalize_custom_ccd_molecules,
-            apply_custom_ccd_code_remap,
-            resolve_custom_ccd_code_collisions,
-        )
+        from backend.core.config import MOL1_COMMON_DIR
         from backend.worker.docker_cmd import ensure_image, image_and_python
 
         mol1_image = str(MOL1_DOCKER_IMAGE or "").strip()
@@ -56,19 +62,15 @@ class Mol1Backend(StructureBackend):
         os.makedirs(input_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        custom_ccd_molecules = _normalize_custom_ccd_molecules(
-            ctx.options.get("custom_ccd_molecules"))
-        if custom_ccd_molecules:
-            custom_ccd_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
-                custom_ccd_molecules, load_standard_ccd_codes())
-            if ccd_remap:
-                yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
-                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
-                      file=sys.stderr)
-            import yaml as _yaml_mod
-            yaml_data = _yaml_mod.safe_load(yaml_content) or {}
-            yaml_data["custom_ccd_molecules"] = custom_ccd_molecules
-            yaml_content = _yaml_mod.safe_dump(yaml_data, sort_keys=False, allow_unicode=True)
+        ccd = self.ccd_resolution(request, ctx.options)
+        yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd.remap)
+        if ccd.remap:
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd.remap}",
+                  file=sys.stderr)
+        if ccd.molecules:
+            yaml_data = yaml.safe_load(yaml_content) or {}
+            yaml_data["custom_ccd_molecules"] = ccd.molecules
+            yaml_content = yaml.safe_dump(yaml_data, sort_keys=False, allow_unicode=True)
         yaml_path = os.path.join(input_dir, "input.yaml")
         with open(yaml_path, "w", encoding="utf-8") as handle:
             handle.write(yaml_content)
@@ -87,7 +89,7 @@ class Mol1Backend(StructureBackend):
             "--runtime", "nvidia", "--shm-size", "16g",
             "--gpus", gpu_arg,
             "--add-host", "host.docker.internal:host-gateway",
-            "--volume", f"{MOL1_COMMON_DIR}:/cache/common:ro",
+            "--volume", f"{MOL1_COMMON_DIR}:{MOL1_COMMON_MOUNT}:ro",
             "--volume", "/data/mol1/checkpoint:/cache/checkpoint:ro",
             "--volume", "/data/msa_cache:/data/msa_cache:ro",
             "--volume", "/data/V-Bio:/workspace/vbio:ro",

@@ -55,34 +55,16 @@ def parse_args() -> argparse.Namespace:
 def inject_custom_ccd(request) -> None:
     """自定义残基注入 esm CCD 表（本进程内，按任务隔离）。
 
-    编码与 SDK CCD 表冲突时自动改名 Z###，并把实体级/修饰位引用同步改名；
-    平台 preset 编码有内建定义，直接沿用标准条目。
+    编码已由平台在申请 GPU 前对照本引擎的 CCD 表改过名，这里只构建与注入。
     """
-    from backend.runtime.custom_ccd_builder import (
-        _build_custom_ccd_mol,
-        _normalize_custom_ccd_molecules,
-        _preset_custom_ccd_codes,
-        _next_free_z_code,
-    )
+    from backend.runtime.custom_ccd_builder import _build_custom_ccd_mol
     from esm.models.esmfold2.conformers import load_ccd
 
     ccd = load_ccd()
-    protected = _preset_custom_ccd_codes()
-    remap: dict[str, str] = {}
-    for item in _normalize_custom_ccd_molecules(request.custom_ccd_molecules):
+    for item in request.custom_ccd_molecules:
         if item.get("kind") != "residue":
             continue
-        code = str(item.get("ccd") or "").strip().upper()
-        if not code:
-            continue
-        if code in ccd:
-            if code in protected:
-                continue
-            new_code = _next_free_z_code(set(ccd.keys()) | set(remap.values()))
-            remap[code] = new_code
-            item["ccd"] = new_code
-            code = new_code
-        mol = _build_custom_ccd_mol(item.get("smiles"), kind="residue",
+        mol = _build_custom_ccd_mol(item["smiles"], kind="residue",
                                     backbone=item.get("backbone"),
                                     amidated=bool(item.get("cTerminalAmidated")))
         for atom in mol.GetAtoms():
@@ -90,22 +72,7 @@ def inject_custom_ccd(request) -> None:
             if "leaving_atom" in props:
                 atom.ClearProp("leaving_atom")
                 atom.SetProp("leaving_atom", "1" if props["leaving_atom"] else "0")
-        ccd[code] = mol
-    if remap:
-        print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {remap}", file=sys.stderr)
-        for entity in request.entities:
-            entity.ccd = [remap.get(code.upper(), code) for code in entity.ccd]
-            for mod in entity.modifications:
-                if str(mod.ccd or "").upper() in remap:
-                    mod.ccd = remap[str(mod.ccd).upper()]
-
-
-def esm_ccd_has(ccd: str) -> bool:
-    try:
-        from esm.models.esmfold2.conformers import load_ccd
-        return ccd in load_ccd()
-    except Exception:
-        return True  # CCD table unavailable: let esm decide at tokenization
+        ccd[item["ccd"]] = mol
 
 
 def build_sequences(request: PredictionRequest) -> list:
@@ -133,10 +100,6 @@ def build_sequences(request: PredictionRequest) -> list:
                     raise ValueError(
                         f"modification position {mod.position} out of range "
                         f"1..{seq_len} for chain {chain} (ccd {mod.ccd})")
-                if not esm_ccd_has(mod.ccd):
-                    raise ValueError(
-                        f"CCD component {mod.ccd!r} not in the esm CCD table "
-                        f"(chain {chain} position {mod.position})")
                 mods.append(Modification(position=mod.position - 1, ccd=mod.ccd))
             if entity.kind == "protein":
                 sequences.append(ProteinInput(

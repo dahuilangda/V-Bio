@@ -9,6 +9,8 @@ import yaml
 from flask import jsonify, request
 from rdkit import Chem
 from backend.core.engine_capabilities import active_engine_ids, get_engine
+from backend.runtime.backends import is_structure_backend, structure_backend
+from backend.runtime.backends.request import PredictionRequest
 from backend.runtime.nesso_backend import normalize_nesso_screening_input_yaml
 from backend.runtime.screening_library import merge_screening_compounds_file_into_yaml
 from backend.services.common_utils import error_payload
@@ -618,55 +620,12 @@ def register_prediction_routes(
                 'backend': backend,
             }), 400
 
-        # 修饰引用完整性：yaml 里每个 modification ccd 必须可解析——
-        # 标准 CCD 或已提交的自定义 manifest，二者皆非则在提交时报 400，
-        # 而不是 GPU 阶段引擎深处 KeyError。全部后端统一执行。
-        referenced_ccds = set()
-        yaml_sequences = (yaml_payload or {}).get('sequences')
-        if isinstance(yaml_sequences, list):
-            for seq_entry in yaml_sequences:
-                if not isinstance(seq_entry, dict):
-                    continue
-                for entity in seq_entry.values():
-                    if not isinstance(entity, dict):
-                        continue
-                    for mod in entity.get('modifications') or []:
-                        if isinstance(mod, dict):
-                            code = str(mod.get('ccd') or mod.get('ptmType') or '').strip().upper()
-                            if code:
-                                referenced_ccds.add(code.removeprefix('CCD_'))
-        if referenced_ccds:
-            from backend.runtime.custom_ccd_builder import load_standard_ccd_codes
-            from backend.runtime.custom_ccd_builder import STANDARD_CCD_COMPONENTS_CIF
-            known = load_standard_ccd_codes(STANDARD_CCD_COMPONENTS_CIF)
-            known |= {str(m.get('ccd') or '').strip().upper() for m in custom_ccd_molecules}
-            unresolved = sorted(code for code in referenced_ccds if code not in known)
-            if unresolved:
-                return jsonify({
-                    'error': (
-                        'YAML modifications reference CCD codes with no definition: '
-                        + ', '.join(unresolved)
-                        + '. Add each to custom_ccd_molecules or use a standard CCD code.'
-                    ),
-                    'backend': backend,
-                    'missing_ccd': unresolved,
-                }), 400
-
-        # Dry-run the production CCD builders so bad chemistry fails as 400
-        # here instead of inside a GPU task. Engines with relaxed CCD parsing
-        # (esmfold2/mol1) skip the strict contract check.
-        strict_ccd_backends = {'boltz', 'alphafold3', 'protenix', 'protenix2dock'}
-        if custom_ccd_molecules and backend in strict_ccd_backends:
-            from backend.runtime.custom_ccd_builder import _build_custom_ccd_bundle
-            from backend.runtime.ccd_contract import validate_ccd_additions
+        if is_structure_backend(backend):
             try:
-                ccd_bundle_text, _ = _build_custom_ccd_bundle(custom_ccd_molecules)
-                validate_ccd_additions(ccd_bundle_text)
-            except (ValueError, RuntimeError) as ccd_error:
-                return jsonify({
-                    'error': f'Custom CCD rejected: {ccd_error}',
-                    'backend': backend,
-                }), 400
+                structure_backend(backend).validate_ccd_input(
+                    PredictionRequest.from_yaml(yaml_content), custom_ccd_molecules)
+            except ValueError as ccd_error:
+                return jsonify({'error': str(ccd_error), 'backend': backend}), 400
 
         template_inputs = []
         template_meta_raw = request.form.get('template_meta')

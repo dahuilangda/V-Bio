@@ -113,7 +113,6 @@ def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int
 
 from backend.runtime.constraints_pipeline import _normalize_chain_id_list
 from backend.runtime.peptide_design_backend import (
-    _merge_peptide_preset_molecules_by_code,
     _normalize_peptide_backend,
     _normalize_peptide_design_mode,
     _peptide_subtask_registry_key,
@@ -124,7 +123,7 @@ from backend.runtime.rfd4_strategy import (
     run_rfd4_backend,
     run_rfd4_design_strategy,
 )
-from backend.runtime.backends import structure_backend
+from backend.runtime.backends import resolve_ccd_before_gpu, structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
 
@@ -1862,95 +1861,6 @@ def _linker_ccd_mmcif_bundle(codes: Iterable[str]) -> str:
     return "\n".join(parts)
 
 
-PEPTIDE_NATURAL_THREE_TO_ONE = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
-}
-PEPTIDE_PRESET_BASE_RESIDUE = {
-    "AIB": "A", "NLE": "L", "NVA": "V", "ORN": "K", "CIT": "R",
-    "HSE": "S", "HCY": "C", "MSE": "M", "SEC": "C", "HYP": "P",
-    "PCA": "E", "SEP": "S", "TPO": "T", "PTR": "Y", "CSO": "C",
-    "MLY": "K", "DAL": "A", "BALA": "A", "MANS": "S", "MANT": "T",
-    "MANN": "N", "NAGS": "S", "NAGT": "T", "NAGN": "N", "GALS": "S",
-    "GALT": "T", "FUCS": "S", "GLCS": "S", "XYLS": "S",
-}
-
-PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES = {
-    "AIB": {"smiles": "NC(C)(C)C(=O)O", "label": "alpha-aminoisobutyric acid"},
-    "NLE": {"smiles": "N[C@@H](CCCCC)C(=O)O", "label": "norleucine"},
-    "NVA": {"smiles": "N[C@@H](CCC)C(=O)O", "label": "norvaline"},
-    "ORN": {"smiles": "N[C@@H](CCCN)C(=O)O", "label": "ornithine"},
-    "CIT": {"smiles": "N[C@@H](CCCNC(N)=O)C(=O)O", "label": "citrulline"},
-    "HSE": {"smiles": "N[C@@H](CCO)C(=O)O", "label": "homoserine"},
-    "HCY": {"smiles": "N[C@@H](CCS)C(=O)O", "label": "homocysteine"},
-    "MSE": {"smiles": "N[C@@H](CC[Se]C)C(=O)O", "label": "selenomethionine"},
-    "SEC": {"smiles": "N[C@@H](C[SeH])C(=O)O", "label": "selenocysteine"},
-    "HYP": {"smiles": "O=C(O)[C@@H]1CC(O)CN1", "label": "hydroxyproline"},
-    "PCA": {"smiles": "O=C(O)[C@@H]1CCC(=O)N1", "label": "pyroglutamic acid"},
-    "SEP": {"smiles": "N[C@@H](COP(=O)(O)O)C(=O)O", "label": "phosphoserine"},
-    "TPO": {"smiles": "N[C@@H]([C@H](C)OP(=O)(O)O)C(=O)O", "label": "phosphothreonine"},
-    "PTR": {"smiles": "N[C@@H](Cc1ccc(OP(=O)(O)O)cc1)C(=O)O", "label": "phosphotyrosine"},
-    "CSO": {"smiles": "N[C@@H](CSO)C(=O)O", "label": "S-hydroxycysteine"},
-    "MLY": {"smiles": "N[C@@H](CCCCNC)C(=O)O", "label": "N6-methyllysine"},
-    "DAL": {"smiles": "N[C@H](C)C(=O)O", "label": "D-alanine"},
-    "BALA": {"smiles": "NCCC(=O)O", "label": "beta-alanine"},
-    "MANS": {"smiles": "N[C@@H](CO[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Man-Ser"},
-    "MANT": {"smiles": "N[C@@H]([C@H](C)O[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Man-Thr"},
-    "MANN": {"smiles": "N[C@@H](CC(=O)N[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "N-Man-Asn"},
-    "NAGS": {"smiles": "N[C@@H](CO[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1NC(C)=O)C(=O)O", "label": "O-GlcNAc-Ser"},
-    "NAGT": {"smiles": "N[C@@H]([C@H](C)O[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1NC(C)=O)C(=O)O", "label": "O-GlcNAc-Thr"},
-    "NAGN": {"smiles": "N[C@@H](CC(=O)N[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1NC(C)=O)C(=O)O", "label": "N-GlcNAc-Asn"},
-    "GALS": {"smiles": "N[C@@H](CO[C@H]1O[C@H](CO)[C@@H](O)[C@@H](O)[C@H]1O)C(=O)O", "label": "O-Gal-Ser"},
-    "GALT": {"smiles": "N[C@@H]([C@H](C)O[C@H]1O[C@H](CO)[C@@H](O)[C@@H](O)[C@H]1O)C(=O)O", "label": "O-Gal-Thr"},
-    "FUCS": {"smiles": "N[C@@H](CO[C@H]1O[C@@H](C)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Fuc-Ser"},
-    "GLCS": {"smiles": "N[C@@H](CO[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1O)C(=O)O", "label": "O-Glc-Ser"},
-    "XYLS": {"smiles": "N[C@@H](CO[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Xyl-Ser"},
-}
-
-PEPTIDE_PRESET_PLACEMENT_RULES = {
-    "PCA": "n_term",
-}
-
-
-def _collect_preset_modification_ccds_from_yaml(yaml_content: str) -> List[str]:
-    try:
-        data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return []
-    if not isinstance(data, dict):
-        return []
-    codes: List[str] = []
-    seen: set[str] = set()
-    for entry in data.get("sequences") or []:
-        if not isinstance(entry, dict):
-            continue
-        protein = entry.get("protein")
-        if not isinstance(protein, dict):
-            continue
-        for mod in protein.get("modifications") or []:
-            if not isinstance(mod, dict):
-                continue
-            raw = mod.get("ccd") or mod.get("ptmType") or mod.get("modification")
-            code = re.sub(r"[^A-Za-z0-9_-]", "", str(raw or "")).upper()[:12]
-            if not code or code in seen or code not in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES:
-                continue
-            seen.add(code)
-            codes.append(code)
-    return codes
-
-
-def _merge_referenced_preset_modification_molecules(
-    custom_molecules: List[Dict[str, str]],
-    yaml_content: str,
-) -> List[Dict[str, str]]:
-    return _merge_peptide_preset_molecules_by_code(
-        custom_molecules,
-        _collect_preset_modification_ccds_from_yaml(yaml_content),
-    )
-
-
 def _extract_user_ccd_one_letter_overrides(user_ccd_text: Optional[str]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
     current_id = ""
@@ -2309,6 +2219,17 @@ def main():
             os.makedirs(worker_temp_dir, exist_ok=True)
             worker_gpu_id = -1
             worker_release_gpu = None
+            worker_seed = worker_predict_args.pop("seed", None)
+            worker_custom_ccd_molecules = worker_predict_args.pop("custom_ccd_molecules", [])
+            worker_ipsae_ligand_chain = str(
+                worker_predict_args.pop("ipsaeLigandChainId", None)
+                or worker_predict_args.pop("ipsae_ligand_chain_id", None)
+                or ""
+            ).strip() or None
+            if worker_seed is not None:
+                worker_predict_args["seed"] = worker_seed
+            worker_ccd_resolution = resolve_ccd_before_gpu(
+                worker_backend, worker_yaml_content, worker_custom_ccd_molecules)
             try:
                 if worker_acquire_gpu:
                     from gpu_manager import (
@@ -2340,15 +2261,6 @@ def main():
                     )
                     os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_gpu_id)
 
-                worker_seed = worker_predict_args.pop("seed", None)
-                worker_custom_ccd_molecules = worker_predict_args.pop("custom_ccd_molecules", [])
-                worker_ipsae_ligand_chain = str(
-                    worker_predict_args.pop("ipsaeLigandChainId", None)
-                    or worker_predict_args.pop("ipsae_ligand_chain_id", None)
-                    or ""
-                ).strip() or None
-                if worker_seed is not None:
-                    worker_predict_args["seed"] = worker_seed
                 worker_options = {
                     **worker_predict_args,
                     "predict_args": worker_predict_args,
@@ -2356,6 +2268,7 @@ def main():
                     "custom_ccd_molecules": (
                         worker_custom_ccd_molecules
                         if isinstance(worker_custom_ccd_molecules, list) else []),
+                    "ccd_resolution": worker_ccd_resolution,
                     "ipsae_ligand_chain_id": worker_ipsae_ligand_chain,
                     "model_name": worker_model_name,
                     "pocket_sequence_contacts": predict_args.pop(
@@ -2432,6 +2345,8 @@ def main():
         seed = predict_args.pop("seed", None)
         template_inputs = predict_args.pop("template_inputs", None)
         custom_ccd_molecules = predict_args.pop("custom_ccd_molecules", [])
+        custom_ccd_molecules = custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else []
+        ccd_resolution = predict_args.pop("ccd_resolution", None)
         strict_ligand_confidence_contract = _read_bool_option(
             predict_args,
             "strict_ligand_confidence_contract",
@@ -2541,9 +2456,8 @@ def main():
                         task_id=runtime_task_id,
                         options={
                             "low_vram": low_vram,
-                            "custom_ccd_molecules": (
-                                custom_ccd_molecules
-                                if isinstance(custom_ccd_molecules, list) else []),
+                            "custom_ccd_molecules": custom_ccd_molecules,
+                            "ccd_resolution": ccd_resolution,
                             "template_payloads": af3_template_payloads,
                             "msa_mode": str(predict_args.get("msa_mode") or "auto"),
                         },
@@ -2575,8 +2489,8 @@ def main():
                         task_id=runtime_task_id,
                         options={
                             "use_msa_server": use_msa_server,
-                            "custom_ccd_molecules": custom_ccd_molecules
-                            if isinstance(custom_ccd_molecules, list) else [],
+                            "custom_ccd_molecules": custom_ccd_molecules,
+                            "ccd_resolution": ccd_resolution,
                         },
                     ),
                 )
@@ -2594,8 +2508,8 @@ def main():
                         seed=seed or 101,
                         task_id=runtime_task_id,
                         options={
-                            "custom_ccd_molecules": custom_ccd_molecules
-                            if isinstance(custom_ccd_molecules, list) else [],
+                            "custom_ccd_molecules": custom_ccd_molecules,
+                            "ccd_resolution": ccd_resolution,
                         },
                     ),
                 )
@@ -2626,9 +2540,8 @@ def main():
                             "model_name": model_name,
                             "strict_ligand_confidence_contract": strict_ligand_confidence_contract,
                             "low_vram": low_vram,
-                            "custom_ccd_molecules": (
-                                custom_ccd_molecules
-                                if isinstance(custom_ccd_molecules, list) else []),
+                            "custom_ccd_molecules": custom_ccd_molecules,
+                            "ccd_resolution": ccd_resolution,
                         },
                     ),
                 )

@@ -18,6 +18,7 @@ import yaml
 
 from backend.runtime.backends.base import BackendRunContext, StructureBackend
 from backend.runtime.backends.request import PredictionRequest
+from backend.runtime.ccd import CcdCatalog, MmcifCcdCatalog, apply_custom_ccd_code_remap
 
 _PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
 _PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mmcif"
@@ -25,6 +26,13 @@ _PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mm
 
 class ProtenixBackend(StructureBackend):
     name = "protenix"
+    ccd_code_pattern = r"[A-Z0-9]{1,12}"
+    injects_referenced_presets = True
+    validates_ccd_mmcif = True
+
+    def ccd_catalog(self) -> CcdCatalog:
+        from backend.core.config import PROTENIX_COMMON_CACHE_DIR
+        return MmcifCcdCatalog(self.name, Path(PROTENIX_COMMON_CACHE_DIR) / "components.cif")
 
     def post_validate(self, request: PredictionRequest) -> PredictionRequest:
         from backend.runtime.constraints_pipeline import (
@@ -67,8 +75,6 @@ class ProtenixBackend(StructureBackend):
             _linker_ccd_mmcif_bundle,
             _linker_ccd_mols,
             _merge_custom_ccd_with_existing_cache,
-            _merge_referenced_preset_modification_molecules,
-            _normalize_custom_ccd_molecules,
             _normalize_protenix_output_permissions,
             _PROTENIX_INPUT_CONTAINER_DIR,
             _PROTENIX_TEMPLATE_CONTAINER_DIR,
@@ -94,12 +100,7 @@ class ProtenixBackend(StructureBackend):
             resolve_backend_results_root,
             resolve_backend_work_root,
         )
-        from backend.runtime.custom_ccd_builder import (
-            _append_custom_residues_ccd_from_molecules,
-            apply_custom_ccd_code_remap,
-            load_standard_ccd_codes,
-            resolve_custom_ccd_code_collisions,
-        )
+        from backend.runtime.custom_ccd_builder import _append_custom_residues_ccd_from_molecules
         from backend.runtime.docker_exec import remove_container, run_docker_streaming
         from backend.runtime.msa_pipeline import cache_msa_files_from_temp_dir
         from backend.services.common_utils import ProteinMsaMode
@@ -113,8 +114,6 @@ class ProtenixBackend(StructureBackend):
 
         msa_mode = str(ctx.options.get("msa_mode") or "auto")
         ipsae_ligand_chain_id = ctx.options.get("ipsae_ligand_chain_id")
-        custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
-                                if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
         low_vram = bool(ctx.options.get("low_vram", False))
         template_payloads = (ctx.options.get("template_payloads")
                              if isinstance(ctx.options.get("template_payloads"), list) else None)
@@ -124,16 +123,12 @@ class ProtenixBackend(StructureBackend):
         ensure_image(str(PROTENIX_DOCKER_IMAGE or "vbio-protenix-v2-runtime:2.0.0").strip())
         print("Using Protenix backend", file=sys.stderr)
 
-        custom_molecules = _merge_referenced_preset_modification_molecules(
-            _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
-            yaml_content,
-        )
+        ccd = self.ccd_resolution(request, ctx.options)
+        custom_molecules = ccd.molecules
+        if ccd.remap:
+            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd.remap)
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd.remap}", file=sys.stderr)
         protenix_common_dir = Path(str(PROTENIX_COMMON_CACHE_DIR).strip())
-        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
-            custom_molecules, load_standard_ccd_codes(protenix_common_dir / "components.cif"))
-        if ccd_remap:
-            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
-            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)
 
         prep = parse_yaml_for_protenix(yaml_content)
         protenix_json = prep.payload

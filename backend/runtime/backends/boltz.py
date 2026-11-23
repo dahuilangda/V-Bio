@@ -15,10 +15,37 @@ import yaml
 
 from backend.runtime.backends.base import BackendRunContext, StructureBackend
 from backend.runtime.backends.request import PredictionRequest
+from backend.runtime.ccd import CcdCatalog, ImageCcdCatalog, apply_custom_ccd_code_remap
+
+_BOLTZ_CCD_READER = (
+    "import pickle\n"
+    "with open('{cache}/ccd.pkl', 'rb') as handle:\n"
+    "    codes = pickle.load(handle)")
+
+
+def _boltz_cache_dirs() -> tuple[str, str]:
+    from backend.core.config import BOLTZ2_CONTAINER_CACHE_DIR, BOLTZ2_HOST_CACHE_DIR
+
+    host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
+    container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
+    return host_cache_dir, container_cache_dir
 
 
 class BoltzBackend(StructureBackend):
     name = "boltz"
+    injects_referenced_presets = True
+    validates_ccd_mmcif = True
+
+    def ccd_catalog(self) -> CcdCatalog:
+        from backend.core.config import BOLTZ2_DOCKER_IMAGE
+
+        host_cache_dir, container_cache_dir = _boltz_cache_dirs()
+        if not host_cache_dir:
+            raise RuntimeError("BOLTZ2_HOST_CACHE_DIR is required to resolve CCD codes.")
+        return ImageCcdCatalog(
+            self.name, BOLTZ2_DOCKER_IMAGE, "python",
+            _BOLTZ_CCD_READER.format(cache=container_cache_dir),
+            volumes=[(host_cache_dir, container_cache_dir)])
 
     def post_validate(self, request: PredictionRequest) -> PredictionRequest:
         from backend.runtime.constraints_pipeline import (
@@ -46,25 +73,17 @@ class BoltzBackend(StructureBackend):
 
         from backend.core.config import (
             BASE_DIR,
-            BOLTZ2_CONTAINER_CACHE_DIR,
             BOLTZ2_DOCKER_EXTRA_ARGS,
             BOLTZ2_DOCKER_IMAGE,
             BOLTZ2_DOCKER_SHM_SIZE,
-            BOLTZ2_HOST_CACHE_DIR,
         )
         from backend.runtime.constraints_pipeline import print_constraint_residue_summary
-        from backend.runtime.custom_ccd_builder import (
-            apply_custom_ccd_code_remap,
-            resolve_custom_ccd_code_collisions,
-        )
         from backend.runtime.msa_pipeline import cache_msa_files_from_temp_dir
         from backend.runtime.run_single_prediction import (
             _append_custom_residues_ccd_from_molecules,
             _assert_msa_server_configured,
             _docker_warn,
             _inject_local_msa_paths_into_yaml,
-            _merge_referenced_preset_modification_molecules,
-            _normalize_custom_ccd_molecules,
             _prepare_task_boltz_custom_mols_dir,
             _require_complete_external_msa,
             _run_boltz_ipsae_postprocess,
@@ -93,26 +112,15 @@ class BoltzBackend(StructureBackend):
         model_name = ctx.options.get("model_name")
         strict_ligand_confidence_contract = bool(
             ctx.options.get("strict_ligand_confidence_contract", False))
-        custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
-                                if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
         low_vram = bool(ctx.options.get("low_vram", False))
         ipsae_ligand_chain_id = ctx.options.get("ipsae_ligand_chain_id")
 
-        custom_molecules = _merge_referenced_preset_modification_molecules(
-            _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
-            normalized_yaml,
-        )
-        host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
-        if custom_molecules and host_cache_dir:
-            base_mol_codes = {
-                path.stem.upper() for path in (Path(host_cache_dir) / "mols").glob("*.pkl")
-            }
-            custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(
-                custom_molecules, base_mol_codes)
-            if ccd_remap:
-                normalized_yaml = apply_custom_ccd_code_remap(normalized_yaml, ccd_remap)
-                print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}",
-                      file=sys.stderr)
+        host_cache_dir, container_cache_dir = _boltz_cache_dirs()
+        ccd = self.ccd_resolution(request, ctx.options)
+        custom_molecules = ccd.molecules
+        if ccd.remap:
+            normalized_yaml = apply_custom_ccd_code_remap(normalized_yaml, ccd.remap)
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd.remap}", file=sys.stderr)
 
         ensure_image(str(BOLTZ2_DOCKER_IMAGE or "").strip())
         print_constraint_residue_summary(normalized_yaml)
@@ -253,11 +261,8 @@ class BoltzBackend(StructureBackend):
         if runtime_task_id:
             docker_command.extend(["--env", f"VBIO_TASK_ID={runtime_task_id}"])
 
-        container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
         container_base_mols_dir = "/root/.boltz_base_mols"
         custom_mols_dir: Optional[Path] = None
-        if custom_molecules and not host_cache_dir:
-            raise RuntimeError("BOLTZ2_HOST_CACHE_DIR is required when using custom drawn residue CCD molecules.")
         if custom_molecules:
             custom_mols_dir = _prepare_task_boltz_custom_mols_dir(
                 ctx.temp_dir,

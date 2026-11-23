@@ -130,7 +130,7 @@ from backend.runtime.linker_measurement import (
     _pdb_link_line,
     _rebuild_single_atom_linker_anchor,
 )
-from backend.runtime.backends import structure_backend
+from backend.runtime.backends import is_structure_backend, structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
 from backend.runtime.msa_pipeline import (
@@ -141,6 +141,7 @@ from backend.runtime.msa_pipeline import (
 from backend.runtime import bicyclic_linkers
 import gemmi
 from rdkit import Chem
+from backend.runtime.ccd import normalize_ccd_code
 from backend.runtime.custom_ccd_builder import _normalize_custom_ccd_molecules
 
 from backend.runtime.msa_pipeline import MSA_CACHE_CONFIG
@@ -864,17 +865,20 @@ def _merge_selected_peptide_preset_molecules(
     )
 
 
-
-
-def _load_standard_ccd_codes_for_validation() -> set:
-    """mol1/protenix 共享的标准 CCD 编码集合，进程内缓存一次读取。"""
-    cached = globals().get("_STANDARD_CCD_CODES_CACHE")
-    if cached is not None:
-        return cached
-    from backend.runtime.custom_ccd_builder import load_standard_ccd_codes
-    codes = load_standard_ccd_codes()
-    globals()["_STANDARD_CCD_CODES_CACHE"] = codes
-    return codes
+def merge_referenced_preset_molecules(
+    custom_molecules: List[Dict[str, str]],
+    yaml_content: str,
+) -> List[Dict[str, str]]:
+    """yaml 修饰位引用、而自定义表里没有的 preset，补入其定义。"""
+    data = yaml.safe_load(yaml_content) or {}
+    referenced: List[str] = []
+    for entry in (data.get("sequences") or []) if isinstance(data, dict) else []:
+        protein = entry.get("protein") if isinstance(entry, dict) else None
+        for mod in (protein or {}).get("modifications") or []:
+            code = normalize_ccd_code((mod or {}).get("ccd") or (mod or {}).get("ptmType"))
+            if code in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES and code not in referenced:
+                referenced.append(code)
+    return _merge_peptide_preset_molecules_by_code(custom_molecules, referenced)
 
 
 def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[str, str]]) -> Tuple[List[str], List[Dict[str, str]]]:
@@ -4707,17 +4711,11 @@ def run_peptide_design_backend(
             if isinstance(pos, (int, float)) and int(pos) >= 1 and ccd:
                 fixed_modifications.append({"position": int(pos), "ccd": ccd})
 
-    # 固定修饰的 CCD 必须可解析（标准 CCD 或已提交的自定义定义），
-    # 否则所有候选子任务都会在引擎深处 KeyError——这里快速失败并点名。
-    manifest_codes = {str(m.get("ccd") or "").strip().upper() for m in custom_molecules}
-    missing_fixed_ccds = sorted(
-        {m["ccd"] for m in fixed_modifications} - manifest_codes
-        - set(_load_standard_ccd_codes_for_validation()))
-    if missing_fixed_ccds:
-        raise ValueError(
-            "Fixed modifications reference CCD codes with no definition: "
-            + ", ".join(missing_fixed_ccds)
-            + ". Add each to the submitted custom_ccd_molecules or use a standard CCD code.")
+    # 派发侧不读引擎字典；编码能否被引擎解析由候选子任务在申请 GPU 前检查。
+    if is_structure_backend(backend):
+        scorer = structure_backend(backend)
+        scorer.check_ccd_codes(m["ccd"] for m in fixed_modifications)
+        scorer.validate_ccd_input(PredictionRequest.from_yaml(yaml_content), custom_molecules)
 
     used_chain_ids = _extract_chain_ids_from_yaml(base_yaml_data)
     chain_order = list(used_chain_ids)

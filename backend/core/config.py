@@ -294,6 +294,8 @@ MOL1_DOCKER_IMAGE = os.environ.get(
     "MOL1_DOCKER_IMAGE", "vbio-mol1-runtime:1.0.3"
 )
 MOL1_DATA_DIR = os.environ.get("MOL1_DATA_DIR", "/data/mol1")
+MOL1_COMMON_DIR = os.environ.get(
+    "MOL1_COMMON_DIR", os.path.join(MOL1_DATA_DIR, "common", "common"))
 RFD4_DOCKER_IMAGE = os.environ.get(
     "RFD4_DOCKER_IMAGE", "rfd4-proteina-engine:cu13"
 )

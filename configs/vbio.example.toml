@@ -171,6 +171,7 @@ P2D_IMAGE = "vbio-protenix-v2-runtime:2.0.0"
 [mol1]
 MOL1_DOCKER_IMAGE = "vbio-mol1-runtime:1.0.3"
 MOL1_DATA_DIR = "/data/mol1"
+MOL1_COMMON_DIR = "/data/mol1/common/common"
 MOL1_ATOM_CONFIDENCE = ""
 
 [esmfold2]

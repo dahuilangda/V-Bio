@@ -27,6 +27,7 @@ from backend.monitoring.event_transport import publish_task_heartbeat, publish_t
 from backend.services.common_utils import coerce_bool
 from backend.scheduling.capability_router import parse_capability_queue
 from backend.core.errors import DomainError, TransientError
+from backend.runtime.backends import resolve_ccd_before_gpu
 from backend.runtime.docker_exec import remove_container
 from backend.worker.docker_cmd import (
     collect_gpu_device_group_ids,
@@ -1194,6 +1195,10 @@ def predict_task(self, predict_args: dict):
             )
             tracker.update_status("preparing", "Scheduling peptide candidate subtasks")
         else:
+            tracker.update_status("preparing", "Resolving CCD codes")
+            predict_args["ccd_resolution"] = resolve_ccd_before_gpu(
+                predict_args.get("backend"), predict_args.get("yaml_content"),
+                predict_args.get("custom_ccd_molecules"))
             logger.info(f"Task {task_id}: Attempting to acquire GPU.")
             task_capability, task_priority = _task_schedule_info(self)
             tracker.update_status("acquiring_gpu", "Waiting for GPU allocation" + _describe_gpu_wait(task_capability))

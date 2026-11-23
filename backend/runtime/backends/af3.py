@@ -13,6 +13,11 @@ from pathlib import Path
 
 from backend.runtime.backends.base import BackendRunContext, StructureBackend
 from backend.runtime.backends.request import PredictionRequest
+from backend.runtime.ccd import CcdCatalog, ImageCcdCatalog, apply_custom_ccd_code_remap
+
+_AF3_CCD_READER = (
+    "from alphafold3.constants import chemical_components\n"
+    "codes = chemical_components.cached_ccd()")
 
 
 _SITECUSTOMIZE_CODE = r"""import logging
@@ -202,6 +207,11 @@ except Exception:
 
 class Af3Backend(StructureBackend):
     name = "alphafold3"
+    validates_ccd_mmcif = True
+
+    def ccd_catalog(self) -> CcdCatalog:
+        from backend.core.config import ALPHAFOLD3_DOCKER_IMAGE
+        return ImageCcdCatalog(self.name, ALPHAFOLD3_DOCKER_IMAGE, "python3", _AF3_CCD_READER)
 
     def post_validate(self, request: PredictionRequest) -> PredictionRequest:
         from backend.runtime.run_single_prediction import (
@@ -227,7 +237,6 @@ class Af3Backend(StructureBackend):
             _extract_user_ccd_one_letter_overrides,
             _force_af3_release_date_text,
             _linker_ccd_mmcif_bundle,
-            _normalize_custom_ccd_molecules,
             _require_complete_external_msa,
             _run_af3_ipsae_postprocess,
             _sanitize_release_date_text_with_gemmi,
@@ -262,11 +271,6 @@ class Af3Backend(StructureBackend):
             resolve_backend_work_root,
         )
         from backend.services.common_utils import ProteinMsaMode
-        from backend.runtime.custom_ccd_builder import (
-            apply_custom_ccd_code_remap,
-            load_standard_ccd_codes,
-            resolve_custom_ccd_code_collisions,
-        )
         from backend.worker.docker_cmd import (
             collect_gpu_device_group_ids,
             ensure_image,
@@ -276,17 +280,14 @@ class Af3Backend(StructureBackend):
         seed = ctx.seed or 101
         template_payloads = (ctx.options.get("template_payloads")
                              if isinstance(ctx.options.get("template_payloads"), list) else None)
-        custom_ccd_molecules = (ctx.options.get("custom_ccd_molecules")
-                                if isinstance(ctx.options.get("custom_ccd_molecules"), list) else [])
         low_vram = bool(ctx.options.get("low_vram", False))
 
-        custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
-        base_ccd_codes = load_standard_ccd_codes()
-        custom_molecules, ccd_remap = resolve_custom_ccd_code_collisions(custom_molecules, base_ccd_codes)
-        if ccd_remap:
-            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd_remap)
+        ccd = self.ccd_resolution(request, ctx.options)
+        custom_molecules = ccd.molecules
+        if ccd.remap:
+            yaml_content = apply_custom_ccd_code_remap(yaml_content, ccd.remap)
             yaml_data = self._load_yaml_for_affinity(yaml_content)
-            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd_remap}", file=sys.stderr)
+            print(f"[WARN] 自定义 CCD 编码与标准冲突，已自动重命名: {ccd.remap}", file=sys.stderr)
 
         image = str(ALPHAFOLD3_DOCKER_IMAGE or "jurgjn/alphafold3:v3.0.2").strip()
         ensure_image(image)

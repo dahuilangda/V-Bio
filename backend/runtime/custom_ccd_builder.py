@@ -17,7 +17,6 @@ from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
-from backend.core.config import PROTENIX_COMMON_CACHE_DIR
 from backend.core.errors import UserInputError
 
 
@@ -89,75 +88,6 @@ def _boltz_custom_ccd_aliases(ccd: str) -> List[str]:
         if candidate and candidate not in aliases:
             aliases.append(candidate)
     return aliases
-
-
-STANDARD_CCD_COMPONENTS_CIF = Path(PROTENIX_COMMON_CACHE_DIR) / "components.cif"
-
-
-def load_standard_ccd_codes(cif_path: Optional[Path] = None) -> set:
-    path = Path(cif_path) if cif_path is not None else STANDARD_CCD_COMPONENTS_CIF
-    if not path.is_file():
-        raise FileNotFoundError(f"标准 CCD components.cif 不存在: {path}")
-    return {
-        line[5:].strip().upper()
-        for line in path.read_text(errors="replace").splitlines()
-        if line.startswith("data_")
-    }
-
-
-
-def _preset_custom_ccd_codes() -> set:
-    from backend.runtime.peptide_design_backend import PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES
-    return {str(code or "").strip().upper() for code in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES}
-
-
-def _next_free_z_code(used: set) -> str:
-    seq = 1
-    while f"Z{seq:03d}" in used:
-        seq += 1
-    code = f"Z{seq:03d}"
-    used.add(code)
-    return code
-
-
-def resolve_custom_ccd_code_collisions(
-    molecules: List[Dict[str, Any]],
-    taken_codes: set,
-    protected_codes: set = frozenset(),
-) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
-    if not taken_codes:
-        raise ValueError("基础 CCD 编码集合为空，无法执行编码冲突检查。")
-    protected = {str(code or "").strip().upper() for code in protected_codes}
-    remap: Dict[str, str] = {}
-    used = set(taken_codes)
-    for item in molecules:
-        code = str(item.get("ccd") or "").strip().upper()
-        if not code or code not in used or code in protected:
-            continue
-        new_code = _next_free_z_code(used)
-        remap[code] = new_code
-        item["ccd"] = new_code
-    return molecules, remap
-
-
-def apply_custom_ccd_code_remap(yaml_content: str, remap: Dict[str, str]) -> str:
-    if not remap:
-        return yaml_content
-    import yaml as _yaml
-    data = _yaml.safe_load(yaml_content) or {}
-    for entity in data.get("sequences") or []:
-        if not isinstance(entity, dict):
-            continue
-        for key in ("protein", "proteinChain", "ligand", "ion", "rna", "dna"):
-            inner = entity.get(key)
-            if not isinstance(inner, dict):
-                continue
-            if str(inner.get("ccd") or "").upper() in remap:
-                inner["ccd"] = remap[str(inner.get("ccd")).upper()]
-            for mod in inner.get("modifications") or []:
-                if isinstance(mod, dict) and str(mod.get("ccd") or "").upper() in remap:
-                    mod["ccd"] = remap[str(mod.get("ccd")).upper()]
-    return _yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 def _custom_ccd_has_amino_acid_backbone(mol: Chem.Mol) -> bool:
