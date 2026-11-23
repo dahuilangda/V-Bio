@@ -59,7 +59,7 @@
   text-align: center;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) thead th:last-child {
-  width: 148px;
+  width: 184px;
   text-align: right;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) tbody td:last-child {
