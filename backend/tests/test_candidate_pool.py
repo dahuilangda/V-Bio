@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from backend.runtime import candidate_pool
@@ -46,6 +48,9 @@ class Harness:
         self.reports: list[dict] = []
         monkeypatch.setattr(candidate_pool.time, "sleep", lambda _seconds: self._tick())
         monkeypatch.setattr(candidate_pool, "register_subtask", self._register)
+        monkeypatch.setattr(
+            candidate_pool, "dispatch_window",
+            lambda: int(os.environ.get("PEPTIDE_CANDIDATE_DISPATCH_WINDOW") or 4))
 
     def _tick(self) -> None:
         for result in self.results.values():

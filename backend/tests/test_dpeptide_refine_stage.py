@@ -11,7 +11,16 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
+import pytest
+
+from backend.runtime import candidate_pool
 from backend.runtime.run_single_prediction import _run_dpeptide_refine_stage
+
+
+@pytest.fixture(autouse=True)
+def offline_pool(monkeypatch):
+    monkeypatch.setattr(candidate_pool, "register_subtask", lambda *args: None)
+    monkeypatch.setattr(candidate_pool, "dispatch_window", lambda: 16)
 
 
 class _FakeAsyncResult:
