@@ -3591,7 +3591,7 @@ def run_peptide_design_backend(
     if is_structure_backend(backend):
         scorer = structure_backend(backend)
         scorer.check_ccd_codes(m["ccd"] for m in fixed_modifications)
-        scorer.validate_ccd_input(PredictionRequest.from_yaml(yaml_content), custom_molecules)
+        scorer.validate_ccd_input(PredictionRequest.from_yaml(yaml_content), custom_ccd_molecules)
 
     used_chain_ids = _extract_chain_ids_from_yaml(base_yaml_data)
     chain_order = list(used_chain_ids)
