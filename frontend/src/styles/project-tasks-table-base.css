@@ -31,6 +31,45 @@
   top: auto;
 }
 
+/* 列规划：默认预测任务表（指标列数量动态，均分余量） */
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) {
+  table-layout: fixed;
+  width: 100%;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) thead th:first-child {
+  width: 340px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-submitted {
+  width: 200px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-backend {
+  width: 116px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-seed {
+  width: 84px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-mode {
+  width: 92px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-sort {
+  white-space: nowrap;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-metric,
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-metric {
+  text-align: center;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) thead th:last-child {
+  width: 148px;
+  text-align: right;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) tbody td:last-child {
+  text-align: right;
+  padding-right: 18px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .project-action-row {
+  justify-content: flex-end;
+}
+
 .task-table td {
   padding-top: var(--task-row-pad-y);
   padding-bottom: var(--task-row-pad-y);

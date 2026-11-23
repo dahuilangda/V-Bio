@@ -1727,6 +1727,7 @@ button.peptide-residue-config-head .peptide-residue-selection-summary {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 .project-page-size select {
   width: auto;
