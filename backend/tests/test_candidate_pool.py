@@ -198,3 +198,27 @@ def test_registered_and_forgotten_subtasks(monkeypatch, capsys):
     monkeypatch.setattr("gpu_manager.get_redis_client", broken)
     forget_subtasks("p1")
     assert "子任务登记表清理失败" in capsys.readouterr().err
+
+
+def test_revoking_registered_subtasks_reaches_the_registry_cleanup(monkeypatch):
+    from backend.worker import tasks
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        def smembers(self, key):
+            assert key == "boltz_peptide_subtasks:parent-1"
+            return {"cand-a", ""}
+
+        def delete(self, key):
+            self.deleted.append(key)
+
+    revoked = []
+    client = Client()
+    monkeypatch.setattr(tasks, "get_redis_client", lambda: client)
+    monkeypatch.setattr(tasks.celery_app.control, "revoke", lambda task_id, **kwargs: revoked.append((task_id, kwargs)))
+    result = tasks._revoke_registered_peptide_subtasks("parent-1", terminate=True)
+    assert result == {"found": ["cand-a"], "revoked": ["cand-a"], "failed": []}
+    assert revoked == [("cand-a", {"terminate": True, "signal": "SIGTERM", "send_event": True})]
+    assert client.deleted == ["boltz_peptide_subtasks:parent-1"]

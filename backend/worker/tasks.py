@@ -160,6 +160,7 @@ def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool 
         result["failed"].append(f"redis_unavailable:{exc}")
         return result
 
+    key = candidate_pool.subtask_registry_key(task_token)
     try:
         raw_members = candidate_pool.registered_subtasks(redis_client, task_token)
     except Exception as exc:
