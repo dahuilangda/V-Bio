@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 import shlex
 import subprocess
@@ -122,6 +123,9 @@ def protenix2dock_task(self, score_args: dict):
     tracker = _tasks.TaskProgressTracker(task_id, redis_client)
     tracker.start_heartbeat()
     gpu_id = -1
+    task_temp_dir = ""
+    output_archive_path = ""
+    uploaded = False
 
     try:
         tracker.update_status("waiting_gpu", "Waiting for GPU allocation", payload={"progress": {"progress_percent": 5.0}})
@@ -460,6 +464,7 @@ def protenix2dock_task(self, score_args: dict):
         upload_response = _tasks.upload_result_to_central_api(
             task_id, output_archive_path, os.path.basename(output_archive_path)
         )
+        uploaded = True
 
         summary_path = os.path.join(output_dir, "protenix2dock_summary.json")
         summary: dict[str, Any] = {}
@@ -500,3 +505,4 @@ def protenix2dock_task(self, score_args: dict):
         _tasks._terminate_task_containers_by_task_id(task_id)
         if gpu_id != -1:
             release_gpu(gpu_id=gpu_id, task_id=task_id)
+        _tasks._discard_task_workspace(task_id, task_temp_dir, output_archive_path, uploaded)

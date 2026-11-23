@@ -254,3 +254,39 @@ def test_monitor_revocation_reaches_the_registry_cleanup(monkeypatch):
     assert result == {"found": ["cand-b"], "revoked": ["cand-b"], "failed": [], "msa_tickets_cancelled": []}
     assert revoked == ["cand-b"]
     assert client.deleted == ["boltz_peptide_subtasks:parent-2"]
+
+
+def test_task_workspace_is_discarded_after_a_successful_upload(tmp_path, monkeypatch):
+    from backend.worker import tasks
+
+    monkeypatch.setattr(tasks, "_resolve_worker_temp_root", lambda: str(tmp_path / "_runtime_tmp"))
+    workspace = tmp_path / "_runtime_tmp" / "p2d_task_t1"
+    archive = workspace / "t1_results.zip"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"PK")
+    tasks._discard_task_workspace("t1", str(workspace), str(archive), uploaded=True)
+    assert not workspace.exists()
+    assert not (tmp_path / "_quarantined_uploads").exists()
+
+
+def test_unuploaded_archive_is_quarantined_before_the_workspace_is_discarded(tmp_path, monkeypatch):
+    from backend.worker import tasks
+
+    monkeypatch.setattr(tasks, "_resolve_worker_temp_root", lambda: str(tmp_path / "_runtime_tmp"))
+    workspace = tmp_path / "_runtime_tmp" / "p2d_task_t2"
+    archive = workspace / "t2_results.zip"
+    archive.parent.mkdir(parents=True)
+    (workspace / "work").mkdir()
+    (workspace / "work" / "cache.npz").write_bytes(b"x" * 10)
+    archive.write_bytes(b"PK")
+    tasks._discard_task_workspace("t2", str(workspace), str(archive), uploaded=False)
+    assert not workspace.exists()
+    assert (tmp_path / "_quarantined_uploads" / "t2_t2_results.zip").read_bytes() == b"PK"
+
+
+def test_workspace_discard_is_a_noop_without_a_workspace(tmp_path):
+    from backend.worker import tasks
+
+    tasks._discard_task_workspace("t3", "", "", uploaded=False)
+    assert list(tmp_path.iterdir()) == []
+

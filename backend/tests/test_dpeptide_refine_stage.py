@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from backend.runtime import candidate_pool
+from backend.runtime import candidate_pool, peptide_design_backend
 from backend.runtime.run_single_prediction import _run_dpeptide_refine_stage
 
 
@@ -168,3 +168,27 @@ def test_dispatch_exception_rejects_candidate_and_others_still_run(monkeypatch):
     by_name = {ctx["name"]: ctx for ctx in finalized}
     assert isinstance(by_name["explodes"].get("refine_error"), RuntimeError)
     assert by_name["good"].get("refine_error") is None
+
+
+def test_refine_handoff_directory_is_removed_once_the_candidate_is_finalized(tmp_path, monkeypatch):
+    handoff = tmp_path / "_runtime_tmp" / "dpeptide_task_refine-1"
+    (handoff / "out").mkdir(parents=True)
+    (handoff / "out" / "confidence.json").write_text("{}")
+    monkeypatch.setattr(peptide_design_backend, "RESULTS_BASE_DIR", str(tmp_path))
+    finalized = []
+    results = []
+
+    def dispatch():
+        result = _FakeAsyncResult("refine-1", ["PENDING", "SUCCESS"])
+        results.append(result)
+        return result
+
+    _patch_sleep(monkeypatch, results)
+    _run_dpeptide_refine_stage(
+        [{"name": "cand", "dispatch": dispatch}],
+        parent_task_id="parent",
+        finalize_context=lambda ctx: finalized.append(ctx["name"]),
+        poll_interval=0.01,
+    )
+    assert finalized == ["cand"]
+    assert not handoff.exists()

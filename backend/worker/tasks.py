@@ -144,6 +144,18 @@ def _quarantine_result_archive(task_id: str, archive_path: str) -> str:
         return ""
 
 
+def _discard_task_workspace(task_id: str, temp_dir: str, archive_path: str, uploaded: bool) -> None:
+    if not temp_dir:
+        return
+    if not uploaded and archive_path and os.path.exists(archive_path):
+        _quarantine_result_archive(task_id, archive_path)
+    try:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logger.info(f"Task {task_id}: Cleaned up temporary directory '{temp_dir}'.")
+    except OSError as cleanup_exc:
+        logger.warning(f"Task {task_id}: temp dir cleanup failed ({cleanup_exc}).")
+
+
 def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool = True) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {
         "found": [],

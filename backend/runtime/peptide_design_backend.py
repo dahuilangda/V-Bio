@@ -1376,6 +1376,11 @@ def _run_dpeptide_refine_stage(
             ctx["refine_error"] = RuntimeError(
                 f"D-space refine task {getattr(ctx.get('async_result'), 'id', '')} failed.")
         finalize_context(ctx)
+        refine_task_id = str(getattr(ctx.get("async_result"), "id", "") or "")
+        if refine_task_id:
+            shutil.rmtree(
+                os.path.join(RESULTS_BASE_DIR, "_runtime_tmp", f"dpeptide_task_{refine_task_id}"),
+                ignore_errors=True)
 
     candidate_pool.drain(
         [ctx for ctx in stage_contexts if ctx.get("dispatch") is not None],
