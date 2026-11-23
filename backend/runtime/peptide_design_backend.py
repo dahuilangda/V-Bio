@@ -3911,7 +3911,7 @@ def run_peptide_design_backend(
             template_inputs=template_inputs if isinstance(template_inputs, list) else None,
             spec=predict_args.get("rfd4_spec"),
             parent_task_id=parent_task_id,
-            queue=subtask_queue or rfd4_generation_queue(),
+            queue=rfd4_generation_queue(),
         )
     else:
         strategy = _build_esm3_strategy(

@@ -78,3 +78,6 @@ def test_dispatch_builds_the_strategy_with_arguments_its_signature_accepts(
     with pytest.raises(ReachedStrategyConstruction):
         dispatch(tmp_path, [], [], backend=backend, **options)
     assert built["design_mode"] == "linear"
+    if owner is design_strategy.Rfd4Strategy:
+        assert built["queue"] == design_strategy.rfd4_generation_queue()
+        assert built["template_inputs"] is None
