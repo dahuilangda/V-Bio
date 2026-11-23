@@ -10,6 +10,7 @@ from flask import jsonify, request
 from rdkit import Chem
 from backend.core.engine_capabilities import active_engine_ids, get_engine
 from backend.runtime.backends import is_structure_backend, structure_backend
+from backend.runtime.design_strategy import rfd4_score_backend
 from backend.runtime.backends.request import PredictionRequest
 from backend.runtime.nesso_backend import normalize_nesso_screening_input_yaml
 from backend.runtime.screening_library import merge_screening_compounds_file_into_yaml
@@ -577,8 +578,7 @@ def register_prediction_routes(
         if proposer_uses_rfd4:
             try:
                 subtask_capability = capability_from_prediction_backend(
-                    str(peptide_design_options.get('peptideScorerBackend')
-                        or peptide_design_options.get('peptide_scorer_backend') or 'protenix').strip().lower())
+                    rfd4_score_backend(backend, peptide_design_options))
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
             scorer_selection = select_queue_for_capability(subtask_capability, priority)

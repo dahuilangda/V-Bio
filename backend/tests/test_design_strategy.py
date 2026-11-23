@@ -73,3 +73,12 @@ def test_strategy_defaults_differ_where_the_engines_differ():
     assert strategy_class("rfd4") is Rfd4Strategy
     with pytest.raises(ValueError, match="不支持的设计策略"):
         strategy_class("unknown")
+
+
+def test_rfd4_score_backend_prefers_the_option_then_the_task_backend():
+    from backend.runtime.design_strategy import rfd4_score_backend
+
+    assert rfd4_score_backend("mol1", {"peptideScorerBackend": "alphafold3"}) == "alphafold3"
+    assert rfd4_score_backend("mol1", {"peptide_scorer_backend": "esmfold2"}) == "esmfold2"
+    assert rfd4_score_backend("mol1", {}) == "mol1"
+    assert rfd4_score_backend("rfd4", {}) == "protenix"

@@ -2304,9 +2304,8 @@ def main():
                         raise ValueError(
                             f"RFD4-Proteina 不支持 {chirality_raw.upper()} 肽设计；"
                             "D 肽请使用 ESM3 + RL 策略。")
-                    score_backend_sel = str(
-                        peptide_design_options.get("peptideScorerBackend")
-                        or peptide_design_options.get("peptide_scorer_backend") or "protenix").strip().lower()
+                    from backend.runtime.design_strategy import rfd4_score_backend
+                    score_backend_sel = rfd4_score_backend(backend, peptide_design_options)
                 else:
                     score_backend_sel = backend
                 try:

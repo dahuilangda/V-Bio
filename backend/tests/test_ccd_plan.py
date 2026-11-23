@@ -363,3 +363,11 @@ class PredictRouteDesignQueueTests(unittest.TestCase):
         response = _post_design(app, "rfd4", {"peptideProposerBackend": "rfd4", "peptideScorerBackend": "mol1"})
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json()["capability"], "mol1")
+
+
+    def test_rfd4_scoring_defaults_to_the_task_backend(self):
+        app, predict_task = _register_predict_app()
+        response = _post_design(app, "mol1", {"peptideProposerBackend": "rfd4"})
+        self.assertEqual(response.status_code, 202, response.get_json())
+        submitted = predict_task.apply_async.call_args.kwargs["args"][0]
+        self.assertEqual(submitted["peptide_subtask_queue"], "cap.mol1.default")

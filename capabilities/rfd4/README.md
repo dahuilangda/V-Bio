@@ -156,7 +156,8 @@ so concurrent tasks never collide.
 As a peptide-design proposer: `workflow=peptide_design` with
 `peptide_design_options.peptideProposerBackend=rfd4`. Generation runs as a subtask
 on `cap.rfd4.default` (one job for linear/cyclic, one per NCAA × length for
-bicyclic); candidates are scored by `peptideScorerBackend` (default protenix) in the
+bicyclic); candidates are scored by `peptideScorerBackend`, else the task backend, else
+protenix, in the
 shared design loop. The parent task is orchestration-only on the CPU queue. Results
 land in `design_results.json` with `structures/rank_NN.*`; generated structures are
 kept under `rfd4_generated/`.

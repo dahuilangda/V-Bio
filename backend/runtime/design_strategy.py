@@ -181,6 +181,15 @@ def strategy_class(name: str) -> type[DesignStrategy]:
     return strategy
 
 
+def rfd4_score_backend(task_backend: str, options: dict) -> str:
+    chosen = str(
+        options.get("peptideScorerBackend") or options.get("peptide_scorer_backend") or "").strip().lower()
+    if chosen:
+        return chosen
+    task_backend = task_backend.strip().lower()
+    return "protenix" if task_backend == "rfd4" else task_backend
+
+
 def rfd4_generation_queue(priority: str = "default") -> str:
     return build_capability_queue("rfd4", priority)
 
