@@ -228,6 +228,7 @@ def split_complex_file(complex_path: Path, work_dir: Path):
 def _restore_ligand_bond_orders(mol, ligand) -> None:
     import pickle
 
+    from rdkit import Chem
     from rdkit.Chem import AllChem
 
     ccd_path = (Path(os.environ.get("PROTENIX_ROOT_DIR", "/cache"))

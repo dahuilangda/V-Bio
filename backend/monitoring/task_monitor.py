@@ -240,6 +240,7 @@ class TaskMonitor:
         }
         if not parent_task_id:
             return result
+        key = candidate_pool.subtask_registry_key(parent_task_id)
         try:
             task_ids = candidate_pool.registered_subtasks(self.redis_client, parent_task_id)
         except Exception as exc:

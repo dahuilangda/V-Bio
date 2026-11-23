@@ -19,6 +19,7 @@ All state is persisted under run_dir for resumability and analysis.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 import time

@@ -222,3 +222,30 @@ def test_revoking_registered_subtasks_reaches_the_registry_cleanup(monkeypatch):
     assert result == {"found": ["cand-a"], "revoked": ["cand-a"], "failed": []}
     assert revoked == [("cand-a", {"terminate": True, "signal": "SIGTERM", "send_event": True})]
     assert client.deleted == ["boltz_peptide_subtasks:parent-1"]
+
+
+def test_monitor_revocation_reaches_the_registry_cleanup(monkeypatch):
+    from backend.monitoring import task_monitor
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        def smembers(self, key):
+            assert key == "boltz_peptide_subtasks:parent-2"
+            return {"cand-b"}
+
+        def delete(self, key):
+            self.deleted.append(key)
+
+    revoked = []
+    client = Client()
+    monitor = task_monitor.TaskMonitor.__new__(task_monitor.TaskMonitor)
+    monitor.redis_client = client
+    monitor.logger = None
+    monkeypatch.setattr(monitor, "_cancel_active_msa_tickets", lambda task_id: [])
+    monkeypatch.setattr(task_monitor.celery_app.control, "revoke", lambda task_id, **kwargs: revoked.append(task_id))
+    result = monitor._revoke_peptide_subtasks("parent-2", force=True)
+    assert result == {"found": ["cand-b"], "revoked": ["cand-b"], "failed": [], "msa_tickets_cancelled": []}
+    assert revoked == ["cand-b"]
+    assert client.deleted == ["boltz_peptide_subtasks:parent-2"]
