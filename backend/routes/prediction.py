@@ -573,6 +573,21 @@ def register_prediction_routes(
                 'capability': requested_capability,
                 'queue_selection': queue_selection,
             }), 503
+        subtask_capability = requested_capability
+        if proposer_uses_rfd4:
+            try:
+                subtask_capability = capability_from_prediction_backend(
+                    str(peptide_design_options.get('peptideScorerBackend')
+                        or peptide_design_options.get('peptide_scorer_backend') or 'protenix').strip().lower())
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+            scorer_selection = select_queue_for_capability(subtask_capability, priority)
+            if not bool(scorer_selection.get('online', False)):
+                return jsonify({
+                    'error': 'No online workers available for the RFD4 scoring backend.',
+                    'capability': subtask_capability,
+                    'queue_selection': scorer_selection,
+                }), 503
         target_queue = str(queue_selection.get('queue') or '').strip()
         if not target_queue:
             return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
@@ -728,7 +743,7 @@ def register_prediction_routes(
             # for hours, and a high-priority claim would starve short user
             # jobs (single structure predictions) behind hundreds of
             # candidates. Short jobs keep the high lane.
-            subtask_selection = select_queue_for_capability(requested_capability, 'default')
+            subtask_selection = select_queue_for_capability(subtask_capability, 'default')
             predict_args['peptide_subtask_queue'] = str(subtask_selection.get('queue') or '').strip()
             if peptide_structure_input:
                 predict_args['peptide_structure_input'] = peptide_structure_input

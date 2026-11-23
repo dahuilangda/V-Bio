@@ -255,7 +255,7 @@ from backend.scheduling.capability_router import capability_from_prediction_back
 from backend.services.common_utils import infer_use_msa_server_from_yaml_text  # noqa: E402
 
 
-def _register_predict_app() -> tuple[Flask, mock.Mock]:
+def _register_predict_app(offline: tuple[str, ...] = ()) -> tuple[Flask, mock.Mock]:
     app = Flask(__name__)
     predict_task = mock.Mock()
     predict_task.apply_async.return_value = SimpleNamespace(id="task-1")
@@ -271,7 +271,7 @@ def _register_predict_app() -> tuple[Flask, mock.Mock]:
         extract_template_meta_from_yaml=lambda _source: {},
         normalize_chain_id_list=lambda _value: [],
         select_queue_for_capability=lambda capability, priority: {
-            "online": True, "queue": f"cap.{capability}.{priority}"},
+            "online": capability not in offline, "queue": f"cap.{capability}.{priority}"},
         capability_from_prediction_backend=capability_from_prediction_backend,
     )
     return app, predict_task
@@ -327,3 +327,39 @@ class PredictRouteCcdTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _post_design(app, backend, options):
+    data = {
+        "backend": backend,
+        "workflow": "peptide_design",
+        "use_msa_server": "false",
+        "yaml_file": (io.BytesIO(yaml.safe_dump({"sequences": [
+            {"protein": {"id": "A", "sequence": "IHATCPAEAWAWINRK"}}]}).encode()), "input.yaml"),
+        "peptide_design_options": json.dumps(options),
+    }
+    return app.test_client().post("/predict", data=data, content_type="multipart/form-data")
+
+
+class PredictRouteDesignQueueTests(unittest.TestCase):
+    def test_candidate_scoring_follows_the_scoring_backend(self):
+        app, predict_task = _register_predict_app()
+        response = _post_design(app, "protenix2dock", {"peptideDesignMode": "linear"})
+        self.assertEqual(response.status_code, 202, response.get_json())
+        submitted = predict_task.apply_async.call_args.kwargs["args"][0]
+        self.assertEqual(submitted["peptide_subtask_queue"], "cap.protenix2dock.default")
+
+    def test_rfd4_scoring_follows_the_scoring_backend_not_the_generator(self):
+        app, predict_task = _register_predict_app()
+        options = {"peptideProposerBackend": "rfd4", "peptideScorerBackend": "mol1"}
+        response = _post_design(app, "rfd4", options)
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(predict_task.apply_async.call_args.kwargs["queue"], "cap.peptide_design.default")
+        submitted = predict_task.apply_async.call_args.kwargs["args"][0]
+        self.assertEqual(submitted["peptide_subtask_queue"], "cap.mol1.default")
+
+    def test_rfd4_design_needs_both_the_generator_and_the_scorer_online(self):
+        app, _ = _register_predict_app(offline=("mol1",))
+        response = _post_design(app, "rfd4", {"peptideProposerBackend": "rfd4", "peptideScorerBackend": "mol1"})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["capability"], "mol1")
