@@ -784,22 +784,23 @@ return 1
 
 
 def acquire_gpu(
-    task_id: str, timeout: int = 3600, priority: str = "default", cancel_check=None
+    task_id: str, timeout: int = 0, priority: str = "default", cancel_check=None
 ) -> int:
-    """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；超时抛 TimeoutError。
+    """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；显式超时才抛 TimeoutError。
 
-    注意 timeout=0 表示立即超时（不等待）；无限等待是 peptide 变体的语义。
+    timeout<=0 表示无限等待：GPU 排队是正常等待状态，任务生死不由等卡时长
+    决定——取消权在用户（cancel_check），卡池楔死由 reconcile 自愈。
     priority="high" 的任务在等待期间登记进 priority_waiting，default 任务会让出
     下一张空卡（GPU 等待阶段的插队）；高优自身不受该让位约束。
     cancel_check 在每轮等待前调用，抛异常即中止（取消可见性）。
     """
     client = get_redis_client()
     pool_key = config.GPU_POOL_KEY
-    timeout_seconds = max(0, int(timeout))
-    deadline = time.monotonic() + timeout_seconds
+    deadline = None if int(timeout) <= 0 else (time.monotonic() + int(timeout))
     blpop_slice = 30  # seconds to wait per blpop cycle before re-checking reconcile
 
-    logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout_seconds}s, priority={priority})...")
+    logger.info(
+        f"任务 {task_id}: 正在尝试获取 GPU (等待上限 {'无限' if deadline is None else f'{int(timeout)}s'}, priority={priority})...")
 
     last_reconcile = 0.0
     rejected_gpu_ids: set[int] = set()
@@ -811,15 +812,15 @@ def acquire_gpu(
             if cancel_check is not None:
                 cancel_check()  # 取消可见性:等卡期间轮询取消标记,不再干等 3600s
             last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 hint = ""
                 if rejected_gpu_ids:
                     hint = (
                         f"（其中 GPU {sorted(rejected_gpu_ids)} 存在池外计算型占用，"
                         "已被跳过——请清理外部进程或释放对应 GPU）"
                     )
-                raise TimeoutError(f"任务 {task_id}: 在 {timeout_seconds}s 内未能获取 GPU。{hint}")
+                raise TimeoutError(f"任务 {task_id}: 在 {int(timeout)}s 内未能获取 GPU。{hint}")
             # 让位检查（MSA 软保留 + 优先级让位）：不弹卡，把空卡留给对应等待方。
             yield_reason = _yield_reason(client, task_id, priority)
             if yield_reason:
@@ -827,10 +828,11 @@ def acquire_gpu(
                 if now_mono - last_reserve_log >= 60.0:
                     logger.info("任务 %s: 让位等待 (%s)。", task_id, yield_reason)
                     last_reserve_log = now_mono
-                time.sleep(min(1.0, max(0.2, remaining)))
+                time.sleep(min(1.0, max(0.2, remaining if remaining is not None else 1.0)))
                 continue
+            wait_slice = blpop_slice if remaining is None else min(blpop_slice, remaining)
             try:
-                result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
+                result = client.blpop(pool_key, timeout=int(max(1, math.ceil(wait_slice))))
             except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as exc:
                 logger.warning(
                     "任务 %s: GPU 池 redis 读取失败（%s），在 deadline 内重试。", task_id, exc)

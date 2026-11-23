@@ -125,7 +125,7 @@ def protenix2dock_task(self, score_args: dict):
 
     try:
         tracker.update_status("waiting_gpu", "Waiting for GPU allocation", payload={"progress": {"progress_percent": 5.0}})
-        gpu_id = _tasks._acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
+        gpu_id = _tasks._acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=0)
         reported_gpu = gpu_id
         tracker.update_status("running", f"Acquired GPU {gpu_id}. Starting protenix2dock.", payload={"progress": {"progress_percent": 10.0}})
         _tasks._raise_if_task_cancelled(self, redis_client, task_id)

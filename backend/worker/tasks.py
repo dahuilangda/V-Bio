@@ -1199,7 +1199,7 @@ def predict_task(self, predict_args: dict):
             tracker.update_status("acquiring_gpu", "Waiting for GPU allocation" + _describe_gpu_wait(task_capability))
             _raise_if_task_cancelled(self, redis_client, task_id)
             gpu_id = _acquire_gpu_with_non_peptide_wait_registration(
-                task_id=task_id, timeout=3600, priority=task_priority,
+                task_id=task_id, timeout=0, priority=task_priority,
                 cancel_check=lambda: _raise_if_task_cancelled(self, redis_client, task_id))
             gpu_acquired_at = time.time()
             _raise_if_task_cancelled(self, redis_client, task_id)
@@ -1669,7 +1669,7 @@ def boltz2score_task(self, score_args: dict):
         tracker.update_status("acquiring_gpu", "Waiting for GPU allocation" + _describe_gpu_wait(task_capability))
 
         gpu_id = _acquire_gpu_with_non_peptide_wait_registration(
-            task_id=task_id, timeout=3600, priority=task_priority,
+            task_id=task_id, timeout=0, priority=task_priority,
             cancel_check=lambda: _raise_if_task_cancelled(self, redis_client, task_id))
         gpu_acquired_at = time.time()
         reported_gpu_id = gpu_id
