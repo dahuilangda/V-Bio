@@ -75,6 +75,8 @@ Targets:
   alphafold3  alphafold3 GPU worker
   protenix    protenix GPU worker
   nesso       Nesso-1 GPU worker
+  esmfold2    ESMFold2 GPU worker
+  rfd4        RFD4 GPU worker
 
 Options:
   --build     Build/rebuild images on start/restart
@@ -208,7 +210,7 @@ run_logs() {
   compose_cmd "${compose_file}" "${env_file}" "${args[@]}" "$@"
 }
 
-GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso esm3)
+GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso esmfold2 rfd4 esm3)
 
 gpu_profile_args() {
   local profiles=("$@")
@@ -228,6 +230,8 @@ gpu_service_name() {
     alphafold3) echo "gpu-worker-alphafold3" ;;
     protenix) echo "gpu-worker-protenix" ;;
     nesso) echo "gpu-worker-nesso" ;;
+    esmfold2) echo "gpu-worker-esmfold2" ;;
+    rfd4) echo "gpu-worker-rfd4" ;;
     esm3) echo "esm3-service" ;;
     *) return 1 ;;
   esac
@@ -330,7 +334,7 @@ for target in "${EXPANDED_TARGETS[@]}"; do
       if ! has_stack_files "${CPU_COMPOSE}" "${CPU_ENV}"; then warn_missing_stack "${target}" "${CPU_COMPOSE}" "${CPU_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_compose "${CPU_COMPOSE}" "${CPU_ENV}" cpu-worker
       ;;
-    boltz2|boltz2score|affinity|alphafold3|protenix|nesso)
+    boltz2|boltz2score|affinity|alphafold3|protenix|nesso|esmfold2|rfd4)
       if ! has_stack_files "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}"; then warn_missing_stack "${target}" "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_gpu_caps "${target}"
       ;;
