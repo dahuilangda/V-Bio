@@ -72,7 +72,7 @@ try:
         for _ccd, _one in _ccd_overrides.items():
             _ccd = str(_ccd or "").strip().upper()
             _one = str(_one or "").strip().upper()[:1]
-            if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
+            if _ccd and len(_one) == 1 and _one in "ARNDCQEGHILKMFPSTWYV":
                 _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
 except Exception as _exc:
     logging.warning("Failed to apply userCCD residue one-letter overrides: %s", _exc)

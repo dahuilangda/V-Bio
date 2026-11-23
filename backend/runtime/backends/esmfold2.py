@@ -28,6 +28,7 @@ def esmfold2_hf_cache_dir() -> str:
 
 class EsmFold2Backend(StructureBackend):
     name = "esmfold2"
+    serializes_ccd_blocks = False
 
     def ccd_catalog(self) -> CcdCatalog:
         from backend.core.config import ESMFOLD2_DOCKER_IMAGE

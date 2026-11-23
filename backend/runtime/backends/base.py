@@ -52,6 +52,8 @@ def _platform_ccd_codes() -> frozenset[str]:
 class StructureBackend(ABC):
     name: ClassVar[str] = ""
     ccd_code_pattern: ClassVar[str] = r"[A-Z0-9_-]{1,12}"
+    # 是否把自定义 CCD 写成 mmCIF 块交给引擎
+    serializes_ccd_blocks: ClassVar[bool] = True
     injects_referenced_presets: ClassVar[bool] = False
     validates_ccd_mmcif: ClassVar[bool] = False
 
@@ -73,12 +75,28 @@ class StructureBackend(ABC):
         if rejected:
             raise UserInputError(f"{self.name} 不接受的 CCD 编码: {', '.join(rejected)}")
 
-    def validate_ccd_input(self, request: PredictionRequest, custom_ccd_molecules) -> CcdResolution:
-        """不读引擎字典的校验，提交侧即可执行。"""
+    def build_ccd(self, molecules: list[dict]) -> None:
+        """按引擎实际使用的形式把自定义分子构建一遍，构建不了的在此报错。"""
         from backend.runtime.custom_ccd_builder import (
             _build_custom_ccd_bundle,
-            _normalize_custom_ccd_molecules,
+            _build_custom_ccd_mol,
         )
+
+        if not self.serializes_ccd_blocks:
+            for molecule in molecules:
+                if molecule["kind"] == "residue":
+                    _build_custom_ccd_mol(
+                        molecule["smiles"], kind="residue", backbone=molecule["backbone"],
+                        amidated=molecule["cTerminalAmidated"])
+            return
+        bundle, _ = _build_custom_ccd_bundle(molecules)
+        if self.validates_ccd_mmcif:
+            from backend.runtime.ccd_contract import validate_ccd_additions
+            validate_ccd_additions(bundle)
+
+    def validate_ccd_input(self, request: PredictionRequest, custom_ccd_molecules) -> CcdResolution:
+        """不读引擎字典的校验，提交侧即可执行。"""
+        from backend.runtime.custom_ccd_builder import _normalize_custom_ccd_molecules
 
         self.validate_modifications(request, custom_ccd_molecules)
         molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
@@ -95,11 +113,7 @@ class StructureBackend(ABC):
                 raise UserInputError(
                     f"链 {entity.chain_id} 第 {', '.join(map(str, stacked))} 位叠加了多个修饰；"
                     "每个残基位只能有一个修饰，需要叠加时请合并为一个自定义残基。")
-        if molecules:
-            bundle, _ = _build_custom_ccd_bundle(molecules)
-            if self.validates_ccd_mmcif:
-                from backend.runtime.ccd_contract import validate_ccd_additions
-                validate_ccd_additions(bundle)
+        self.build_ccd(molecules)
         return CcdResolution(molecules=molecules)
 
     def resolve_ccd_codes(self, request: PredictionRequest,

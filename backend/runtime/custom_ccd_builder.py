@@ -383,7 +383,7 @@ def _custom_ccd_mol_to_cif_block(
     name = label or ccd
     clean_name = name.replace(chr(39), "")
     base = str(base_residue or "").strip().upper()[:1]
-    if kind == "residue" and base not in "ARNDCQEGHILKMFPSTWYV":
+    if kind == "residue" and (len(base) != 1 or base not in "ARNDCQEGHILKMFPSTWYV"):
         raise ValueError(f"Custom residue CCD {ccd} requires a valid base_residue for canonical mapping.")
     one_letter_code = base if kind == "residue" else "?"
     parent_comp_id = base if kind == "residue" else "?"

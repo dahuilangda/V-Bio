@@ -148,6 +148,16 @@ class PlanTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "terminal carboxyl"):
                     structure_backend(name).validate_ccd_input(request, [AMIDE_FLAGGED_AS_ACID])
 
+    def test_residue_parent_is_required_wherever_ccd_blocks_are_serialized(self):
+        orphan = {key: value for key, value in D_ARG.items() if key != "base_residue"}
+        for name in ENGINES:
+            with self.subTest(name):
+                if name == "esmfold2":
+                    structure_backend(name).validate_ccd_input(request_with((3, "DRG")), [orphan])
+                    continue
+                with self.assertRaisesRegex(ValueError, "requires a valid base_residue"):
+                    structure_backend(name).validate_ccd_input(request_with((3, "DRG")), [orphan])
+
     def test_resolve_reports_codes_the_engine_cannot_resolve(self):
         engine = Engine(StubCatalog({"ACE"}))
         request = request_with((1, "ACE"), (3, "ZAC"))
@@ -301,10 +311,12 @@ class PredictRouteCcdTests(unittest.TestCase):
 
     def test_submit_side_rejects_bad_ccd_input(self):
         app, _ = _register_predict_app()
+        orphan = {key: value for key, value in D_ARG.items() if key != "base_residue"}
         cases = [
             ("boltz", [{"position": 1, "ccd": "ACE"}, {"position": 1, "ccd": "DRG"}], [D_ARG]),
             ("esmfold2", [{"position": 3, "ccd": "DRG"}], [AMIDE_FLAGGED_AS_ACID]),
             ("mol1", [{"position": 3, "ccd": "DRG"}], [AMIDE_FLAGGED_AS_ACID]),
+            ("protenix", [{"position": 3, "ccd": "DRG"}], [orphan]),
             ("protenix", [{"position": 3, "ccd": "NME_TBA"}], [dict(D_ARG, ccd="NME_TBA")]),
         ]
         for backend, modifications, molecules in cases:
