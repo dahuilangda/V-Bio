@@ -866,6 +866,17 @@ def _merge_selected_peptide_preset_molecules(
 
 
 
+def _load_standard_ccd_codes_for_validation() -> set:
+    """mol1/protenix 共享的标准 CCD 编码集合，进程内缓存一次读取。"""
+    cached = globals().get("_STANDARD_CCD_CODES_CACHE")
+    if cached is not None:
+        return cached
+    from backend.runtime.custom_ccd_builder import load_standard_ccd_codes
+    codes = load_standard_ccd_codes()
+    globals()["_STANDARD_CCD_CODES_CACHE"] = codes
+    return codes
+
+
 def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[str, str]]) -> Tuple[List[str], List[Dict[str, str]]]:
     natural: List[str] = []
     unnatural: List[Dict[str, str]] = []
@@ -4695,6 +4706,18 @@ def run_peptide_design_backend(
             ccd = str(item.get("ccd") or "").strip().upper()
             if isinstance(pos, (int, float)) and int(pos) >= 1 and ccd:
                 fixed_modifications.append({"position": int(pos), "ccd": ccd})
+
+    # 固定修饰的 CCD 必须可解析（标准 CCD 或已提交的自定义定义），
+    # 否则所有候选子任务都会在引擎深处 KeyError——这里快速失败并点名。
+    manifest_codes = {str(m.get("ccd") or "").strip().upper() for m in custom_molecules}
+    missing_fixed_ccds = sorted(
+        {m["ccd"] for m in fixed_modifications} - manifest_codes
+        - set(_load_standard_ccd_codes_for_validation()))
+    if missing_fixed_ccds:
+        raise ValueError(
+            "Fixed modifications reference CCD codes with no definition: "
+            + ", ".join(missing_fixed_ccds)
+            + ". Add each to the submitted custom_ccd_molecules or use a standard CCD code.")
 
     used_chain_ids = _extract_chain_ids_from_yaml(base_yaml_data)
     chain_order = list(used_chain_ids)

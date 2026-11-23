@@ -618,6 +618,40 @@ def register_prediction_routes(
                 'backend': backend,
             }), 400
 
+        # 修饰引用完整性：yaml 里每个 modification ccd 必须可解析——
+        # 标准 CCD 或已提交的自定义 manifest，二者皆非则在提交时报 400，
+        # 而不是 GPU 阶段引擎深处 KeyError。全部后端统一执行。
+        referenced_ccds = set()
+        yaml_sequences = (yaml_payload or {}).get('sequences')
+        if isinstance(yaml_sequences, list):
+            for seq_entry in yaml_sequences:
+                if not isinstance(seq_entry, dict):
+                    continue
+                for entity in seq_entry.values():
+                    if not isinstance(entity, dict):
+                        continue
+                    for mod in entity.get('modifications') or []:
+                        if isinstance(mod, dict):
+                            code = str(mod.get('ccd') or mod.get('ptmType') or '').strip().upper()
+                            if code:
+                                referenced_ccds.add(code.removeprefix('CCD_'))
+        if referenced_ccds:
+            from backend.runtime.custom_ccd_builder import load_standard_ccd_codes
+            from backend.runtime.custom_ccd_builder import STANDARD_CCD_COMPONENTS_CIF
+            known = load_standard_ccd_codes(STANDARD_CCD_COMPONENTS_CIF)
+            known |= {str(m.get('ccd') or '').strip().upper() for m in custom_ccd_molecules}
+            unresolved = sorted(code for code in referenced_ccds if code not in known)
+            if unresolved:
+                return jsonify({
+                    'error': (
+                        'YAML modifications reference CCD codes with no definition: '
+                        + ', '.join(unresolved)
+                        + '. Add each to custom_ccd_molecules or use a standard CCD code.'
+                    ),
+                    'backend': backend,
+                    'missing_ccd': unresolved,
+                }), 400
+
         # Dry-run the production CCD builders so bad chemistry fails as 400
         # here instead of inside a GPU task. Engines with relaxed CCD parsing
         # (esmfold2/mol1) skip the strict contract check.
