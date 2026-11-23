@@ -37,10 +37,13 @@
   width: 100%;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) thead th:first-child {
-  width: 340px;
+  width: 300px;
+}
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-metric {
+  width: 92px;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-submitted {
-  width: 200px;
+  width: 176px;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-backend {
   width: 116px;
