@@ -193,7 +193,7 @@ class TestCombinedAndSpec:
         assert "sel('B/*/11')" not in text
 
 
-class TestVerifyPayload:
+class TestBinderExtraction:
     def test_binder_and_yaml(self):
         rows = []
         aid = 0
@@ -208,16 +208,6 @@ class TestVerifyPayload:
         assert mods == [{"position": 3, "ccd": "NLE", "baseResidue": "L"}]
         assert cys == [1, 4, 6]
 
-        y = yaml.safe_load(rb.build_verify_yaml("MKV", binder, mods, cys, "SEZ", ["CD", "C1", "C2"]))
-        assert y["sequences"][1]["protein"]["modifications"][0]["ccd"] == "NLE"
-        assert y["sequences"][2]["ligand"] == {"id": "L", "ccd": "SEZ"}
-        bonds = [c["bond"] for c in y["constraints"]]
-        assert bonds[0]["atom1"] == ["B", 1, "SG"] and bonds[0]["atom2"] == ["L", 1, "CD"]
-        assert bonds[2]["atom2"] == ["L", 1, "C2"]
-
-    def test_wrong_cys_count_rejected(self):
-        with pytest.raises(ValueError, match="3 Cys"):
-            rb.build_verify_yaml("MKV", "AAA", [], [1, 2], "SEZ", ["CD", "C1", "C2"])
 
 
 def test_combined_template_input(tmp_path):

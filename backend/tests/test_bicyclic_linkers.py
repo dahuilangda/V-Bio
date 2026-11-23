@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import gemmi
-import yaml
 import pytest
 
 from backend.runtime import rfd4_adapter as rb
@@ -47,27 +46,6 @@ class TestLinkerRegistry:
         assert "mol1" not in bcl.get_linker("SEZ").engines
         assert "mol1" in bcl.get_linker("ZBR").engines
         assert list(bcl.get_linker("ZBR").arm_atoms) == ["C7", "C8", "C9"]
-
-
-class TestVerifyPayloadGuards:
-    SEQ = "CALGCC"
-
-    def test_arm_count_guard(self):
-        with pytest.raises(ValueError, match="exactly 3 arm atoms"):
-            rb.build_verify_yaml("MKV", self.SEQ, [], [1, 4, 6], "ZBR", ["C7", "C8"])
-
-    def test_ascending_cys_guard(self):
-        with pytest.raises(ValueError, match="ascending"):
-            rb.build_verify_yaml("MKV", self.SEQ, [], [6, 4, 1], "ZBR", ["C7", "C8", "C9"])
-
-    def test_cys_within_sequence_guard(self):
-        with pytest.raises(ValueError, match="outside binder sequence"):
-            rb.build_verify_yaml("MKV", self.SEQ, [], [1, 4, 9], "ZBR", ["C7", "C8", "C9"])
-
-    def test_three_constraints_emitted(self):
-        y = yaml.safe_load(rb.build_verify_yaml(
-            "MKV", self.SEQ, [], [1, 4, 6], "ZBR", ["C9", "C8", "C7"]))
-        assert len(y["constraints"]) == 3
 
 
 class TestBinderExtraction:

@@ -11,7 +11,7 @@ Sections:
 - candidate extraction   candidates_from_summary, binder_from_cif_text
 - bicyclic geometry      load_anchor_skeleton, build_bicyclic_skeleton,
                          pocket_centroid, write_combined_cif, chain_centroids
-- verification payload   build_verify_yaml, combined_template_input
+- template packaging     combined_template_input
 
 Bicyclic layout: anchor1 -[seed]- anchor2 -[NCAA + fillers]- anchor3. Anchor
 folds come from per-linker assets (rfd4_assets/bicyc_anchor_<CCD>.cif,
@@ -557,42 +557,6 @@ def chain_centroids(combined_cif: Path) -> Dict[str, Tuple[float, float, float]]
 
 
 # ---------------------------------------------------------------- verification payload
-
-def build_verify_yaml(target_sequence: str, binder_sequence: str,
-                      mods: List[Dict[str, Any]], cys_positions: List[int],
-                      linker_ccd: str, linker_atoms: Sequence[str]) -> str:
-    """Bicyclic co-folding yaml: linker ligand + three SG bonds (Cys order to
-    linker arm order)."""
-    if len(cys_positions) != 3:
-        raise ValueError(
-            f"bicyclic verification needs 3 Cys, got {len(cys_positions)}: {cys_positions}")
-    if len(linker_atoms) != 3:
-        raise ValueError(
-            f"linker {linker_ccd} must provide exactly 3 arm atoms, got {len(linker_atoms)}")
-    if cys_positions != sorted(cys_positions):
-        raise ValueError(f"Cys positions must be ascending, got {cys_positions}")
-    if any(pos < 1 or pos > len(binder_sequence) for pos in cys_positions):
-        raise ValueError(
-            f"Cys positions {cys_positions} outside binder sequence length {len(binder_sequence)}")
-    mod_lines = ""
-    if mods:
-        mod_lines = "    modifications:\n" + "".join(
-            f"    - position: {m['position']}\n      ccd: {m['ccd']}\n"
-            f"      baseResidue: {m['baseResidue']}\n" for m in mods)
-    bonds = "".join(
-        f"- bond:\n    atom1: [B, {cys}, SG]\n    atom2: [L, 1, {atom}]\n"
-        for cys, atom in zip(cys_positions, linker_atoms))
-    return (
-        "version: 1\nsequences:\n"
-        "- protein:\n    id: A\n"
-        f"    sequence: {target_sequence}\n"
-        "- protein:\n    id: B\n"
-        f"    sequence: {binder_sequence}\n"
-        + mod_lines +
-        "- ligand:\n    id: L\n"
-        f"    ccd: {linker_ccd}\n"
-        "constraints:\n" + bonds)
-
 
 def combined_template_input(combined_cif: Path) -> Dict[str, str]:
     """Package the combined cif as a template_inputs entry (staged as the RFD4
