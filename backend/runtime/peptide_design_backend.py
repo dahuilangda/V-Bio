@@ -122,6 +122,7 @@ from backend.runtime.linker_measurement import (
     _rebuild_single_atom_linker_anchor,
 )
 from backend.runtime import candidate_pool
+from backend.runtime.design_strategy import Esm3Strategy, keep_best_by_prior
 from backend.runtime.backends import is_structure_backend, structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
@@ -3839,10 +3840,8 @@ def run_peptide_design_backend(
     proposer_backend_sel = str(
         options.get("peptideProposerBackend")
         or options.get("peptide_proposer_backend") or "esm3").strip().lower()
-    if proposer_backend_sel == "rfd4":
-        raise ValueError(
-            "RFD4 提案器与世代循环的在线融合在下一版本开放；"
-            "当前请先用 peplm 提案器产出母本，再经 Mol-1 成熟化环掺入 NCAA。")
+    if proposer_backend_sel != "esm3":
+        raise ValueError(f"不支持的设计策略: {proposer_backend_sel}")
     proposer = ESM3Proposer(
         chirality=peptide_chirality,
         project_id=str(predict_args.get("project_id") or ""),
@@ -3864,6 +3863,7 @@ def run_peptide_design_backend(
     _proposer_log(
         f"ESM3 proposal engine ready (length={binder_length or 'adaptive'}, "
         f"mode={design_mode}, structure={structure_mode}, GPU={_esm3_gpu})")
+    strategy = Esm3Strategy(proposer, natural_pool, unnatural_pool)
 
     pocket_constraint_blueprint: Optional[Dict[str, Any]] = (
         {"contacts": [[c, n] for c, n in pocket_author_contacts]}
@@ -4032,13 +4032,11 @@ def run_peptide_design_backend(
                         {"sequence": s, "modifications": [], "plddts": []}
                         for s in seed_sequences[:2]
                     ]
-            for lm_base, lm_mods, lm_anchors, lm_group in proposer.propose(
-                natural_pool,
-                unnatural_pool,
-                _proposer_elites,
-                population_size * 2,
-            ):
-                lm_sequence = _apply_sequence_mask(str(lm_base or "").upper(), sequence_mask)
+            for candidate in strategy.propose(_proposer_elites, population_size * 2):
+                lm_sequence = _apply_sequence_mask(candidate.sequence.upper(), sequence_mask)
+                lm_mods = candidate.modifications
+                lm_anchors = candidate.cys_positions
+                lm_group = candidate.group
                 if design_mode == "bicyclic":
                     lm_sequence, lm_anchors = _stamp_bicyclic_cysteines(
                         lm_sequence,
@@ -4108,13 +4106,8 @@ def run_peptide_design_backend(
             _screened.append(_c)
         if len(_screened) > population_size:
             try:
-                _scored = sorted(
-                    ((proposer.pseudo_perplexity(
-                        str(c.get("sequence") or "")), c)
-                     for c in _screened),
-                    key=lambda pair: pair[0])
                 _before = len(_screened)
-                _screened = [c for _, c in _scored[:population_size]]
+                _screened = keep_best_by_prior(strategy.prior_score, _screened, population_size)
                 print(
                     f"[d-peptide] prior pre-rank: {_before} -> "
                     f"{len(_screened)} (ESM3 likelihood top half)",
@@ -4687,7 +4680,7 @@ def run_peptide_design_backend(
             )
             if pending_generation_finalizations <= 0:
                 try:
-                    proposer.learn(
+                    strategy.learn(
                         elite_population,
                         [row for row in all_results if row.get("generation") == generation]
                         + generation_rejected_rows,
