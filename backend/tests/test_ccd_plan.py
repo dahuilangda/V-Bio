@@ -1,4 +1,3 @@
-"""标准 CCD 编码集合的读取、自定义编码的改名与校验、提交侧与任务入口。"""
 from __future__ import annotations
 
 import io

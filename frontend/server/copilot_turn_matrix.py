@@ -1,14 +1,3 @@
-"""Copilot turn matrix: realistic requests through the real CopilotAssistant.
-
-Uses the real LLM endpoint and the online sources behind the configured proxy, with the
-requests the frontend sends, and records each turn's state, actions, questions and
-observations. Checked per scenario:
-- docking by target name: rcsb.search, then the user chooses (never a silent pick)
-- ligand by common or CAS name: pubchem.search
-- ligand given as SMILES: applied directly, no lookup
-- sequence target (prediction): uniprot with valid field syntax
-- 4xx rejections from a source are not reported as "source unavailable"
-"""
 from __future__ import annotations
 
 import json
@@ -154,9 +143,6 @@ def run_scenario(assistant, name, context_type, payload, content, checks):
     started = time.time()
     print(f"\n=== {name} ===")
     print(f"user: {content}")
-    # Default gate: a happy-path scenario must reach a usable terminal state. A turn that burns
-    # the round budget and ends "failed" is a regression even when a narrow check (e.g. "used
-    # uniprot") happens to pass on the way down.
     checks = [("turn reached a usable terminal state", lambda t: t.get("state") != "failed")] + list(checks)
     try:
         turn = assistant.plan_turn(
@@ -216,7 +202,6 @@ def main():
     assistant = build_assistant()
     scenarios = []
 
-    # 1. The exact production failure: docking target by name -> RCSB + user choice
     scenarios.append(run_scenario(
         assistant, "docking/target-by-name", "task_detail", TASK_DETAIL_AFFINITY,
         "Fill in the human DHODH into the target",
@@ -227,7 +212,6 @@ def main():
         ],
     ))
 
-    # 2. Ligand by common name -> pubchem
     scenarios.append(run_scenario(
         assistant, "docking/ligand-by-common-name", "task_detail", TASK_DETAIL_AFFINITY,
         "The ligand uses brequinar",
@@ -236,7 +220,6 @@ def main():
         ],
     ))
 
-    # 3. Ligand by CAS registry number -> pubchem name namespace
     scenarios.append(run_scenario(
         assistant, "docking/ligand-by-cas", "task_detail", TASK_DETAIL_AFFINITY,
         "Help me find the ligand with CAS number 96187-53-0",
@@ -245,7 +228,6 @@ def main():
         ],
     ))
 
-    # 4. Ligand given as SMILES -> direct apply, NO lookup
     scenarios.append(run_scenario(
         assistant, "docking/ligand-by-smiles", "task_detail", TASK_DETAIL_AFFINITY,
         "The ligand's SMILES is CCOc1ccccc1, just fill it in directly",
@@ -255,7 +237,6 @@ def main():
         ],
     ))
 
-    # 5. Sequence target on prediction -> uniprot with field syntax
     scenarios.append(run_scenario(
         assistant, "prediction/sequence-by-name", "task_detail", TASK_DETAIL_PREDICTION,
         "Fill in the sequence of human DHODH into the protein component",
@@ -264,7 +245,6 @@ def main():
         ],
     ))
 
-    # 6. Environment guard: runDisabled draft -> must NOT propose submit
     scenarios.append(run_scenario(
         assistant, "prediction/no-submit-while-blocked", "task_detail", TASK_DETAIL_PREDICTION,
         "Just run the current task",
@@ -273,8 +253,6 @@ def main():
         ],
     ))
 
-    # 7. project_list: docking alias creates the right workflow (direct action OR a confirm
-    #    question naming the workflow first — asking before creating is equally correct)
     scenarios.append(run_scenario(
         assistant, "project_list/create-docking", "project_list", PROJECT_LIST,
         "Create a new docking project",
@@ -283,9 +261,6 @@ def main():
         ],
     ))
 
-    # 9. docking: "complete it for me" plans THROUGH the gate — ligand apply chained with the
-    #    run submit it unblocks (depends_on), so confirming the pair starts the computation
-    #    without the user having to re-prompt.
     gated_affinity = json.loads(json.dumps(TASK_DETAIL_AFFINITY))
     gated_affinity["affinityUploads"]["targetUploaded"] = True
     gated_affinity["affinityUploads"]["targetFileName"] = "4NFF.cif"
@@ -299,7 +274,6 @@ def main():
         ],
     ))
 
-    # 8. project_list: stats answered from context
     scenarios.append(run_scenario(
         assistant, "project_list/stats-from-context", "project_list", PROJECT_LIST,
         "How many of my projects are currently running tasks?",

@@ -1,8 +1,3 @@
-"""Mol1 后端：环肽头尾酰胺/二硫原生支持，pocket SITE 条件。
-
-原 run_mol1_backend（run_single_prediction.py）整体迁入：
-docker 执行、pocket→SITE 约束、ipSAE/表位后处理、归档。
-"""
 from __future__ import annotations
 
 import json
@@ -115,7 +110,6 @@ class Mol1Backend(StructureBackend):
             command += ["--constraints-json", str(constraints_path)]
         ipsae_enabled = False
         if str(os.environ.get("MOL1_ATOM_CONFIDENCE", "")).strip().lower() in ("1", "true", "yes"):
-            # 输出 token/原子级置信（含 PAE），供 ipSAE 等后处理使用；归档体积显著增大
             command.append("--atom-confidence")
             ipsae_enabled = True
         print(f"Mol-1 docker: {shlex.join(command)}", file=sys.stderr)
@@ -157,9 +151,6 @@ class Mol1Backend(StructureBackend):
         return constraints_path
 
     def _ipsae_and_epitope_postprocess(self, output_dir: str) -> None:
-        # atom-confidence 运行后计算逐样本 ipSAE（与 protenix 同源评估器）。
-        # best_ipsae.json / ipsae_*.json 写入输出树进归档——前端 IPSAE 列与
-        # 结果视图的数据源；失败仅告警不阻断。
         repo = Path(__file__).resolve().parents[3]
         p2d = str(repo / "capabilities" / "protenix2dock")
         if p2d not in sys.path:
@@ -244,7 +235,6 @@ class Mol1Backend(StructureBackend):
 
     def _write_archive(self, work_root: str, output_dir: str, yaml_content: str,
                        output_archive_path: str) -> None:
-        # 归档：mol1/<name>.json + input.yaml + output/ 树 + README
         input_json_path = os.path.join(work_root, "mol1_input.json")
         input_name = "mol1_input"
         if os.path.exists(input_json_path):

@@ -31,7 +31,6 @@ class CustomCCDError(UserInputError):
     always names the offending CCD code so HTTP-level rejections are actionable."""
 
 
-
 def _normalize_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
     """Validate/normalize a manual backbone override (5 non-negative integer slots)."""
     if not isinstance(raw, dict):
@@ -359,7 +358,6 @@ def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optio
     return mol
 
 
-
 def _custom_ccd_mol_to_cif_block(
     ccd: str,
     mol: Chem.Mol,
@@ -491,8 +489,6 @@ def _custom_ccd_mol_to_cif_block(
         ])
         lines.extend(bond_rows)
     lines.append("#")
-    # AF3 的 constants/chemical_components.mmcif_to_info 直接读取
-    # _pdbx_chem_comp_descriptor.type/.descriptor，缺该类别会 KeyError。
     descriptor_smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
     rdkit_version = Chem.rdBase.rdkitVersion
     lines.extend([

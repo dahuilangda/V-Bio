@@ -1,8 +1,3 @@
-"""平台预测请求的类型化模型：所有后端的统一输入形态。
-
-由平台 yaml（boltz 风格）解析而来；引擎子类将其映射为各自的
-原生输入。输出统一遵循 mol1/protenix 契约（cif + token PAE + 置信度）。
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

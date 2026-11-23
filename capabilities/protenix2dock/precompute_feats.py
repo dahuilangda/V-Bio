@@ -86,7 +86,6 @@ def main() -> None:
         seed = args.seed
     sa = _A()
 
-    # 各 shard 独立写文件，避免整文件覆写互抹条目
     shard_suffix = os.environ.get("P2D_FEATS_SHARD") or str(os.getpid())
     nt_map_path = out_dir / f"n_token_map_shard_{shard_suffix}.json"
     nt_map = json.loads(nt_map_path.read_text()) if nt_map_path.exists() else {}

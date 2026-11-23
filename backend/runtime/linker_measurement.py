@@ -1,6 +1,3 @@
-"""双环链接器的键注入与测量：LINK 记录生成、首尾键报告、
-锚点重建与逐锚点键长门禁。从 run_single_prediction 拆出，
-供 refine 链路与测试共用。"""
 from __future__ import annotations
 
 import math
@@ -20,10 +17,6 @@ def _pdb_link_line(
     atom1: str, res1: str, chain1: str, seq1: int,
     atom2: str, res2: str, chain2: str, seq2: int,
 ) -> str:
-    """Column-exact PDB LINK record. Atom names must sit right-aligned in
-    cols 13-16/43-46 — a left-aligned name makes gemmi infer a metal
-    coordination (MetalC) instead of a covalent bond, and boltz2 only honors
-    Covale connections."""
     cols = [" "] * 78
 
     def put(start: int, text: str) -> None:
@@ -49,15 +42,6 @@ def _append_staged_bicyclic_links(
     cys_positions: Optional[List[int]],
     linker_ccd: str,
 ) -> int:
-    """(Re-)append the Cys-SG <-> linker-anchor LINK records to a staged PDB.
-
-    gemmi 0.7.5's write_pdb silently drops connections, so every rewrite of
-    the staged file (pocket placement, L-space staging) loses the covalent
-    topology the refine engine needs to hold the ring together. Idempotent:
-    returns 0 when the file already carries LINK records. Pairs each peptide
-    Cys (in cys_positions, or every Cys when None) with the linker anchors in
-    BICYCLIC_LINKER_ATOM_MAP order.
-    """
     text = staged_path.read_text(errors="replace")
     if any(line.startswith("LINK") for line in text.splitlines()):
         return 0
@@ -68,8 +52,6 @@ def _append_staged_bicyclic_links(
     ]
     if not polymers:
         return 0
-    # the peptide is the SHORTEST polymer chain (multimer targets have
-    # receptor copies that carry Cys and would win a first-CYS scan)
     peptide_chain = min(polymers,
                         key=lambda c: sum(1 for r in c if r.het_flag != "H"))
     receptor_name = next(c.name for c in polymers if c is not peptide_chain)
@@ -101,7 +83,6 @@ def _append_staged_bicyclic_links(
             "SG", "CYS", peptide_chain.name, sg_resnum,
             anchor, linker_ccd, linker_chain_name, 1,
         ))
-    # insert before the trailing END record — PDB parsers stop at END
     lines = [line for line in text.splitlines() if line.strip()]
     while lines and lines[-1].strip() in ("END", "ENDMDL"):
         lines.pop()
@@ -115,11 +96,6 @@ def _append_staged_bicyclic_links(
 
 
 def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
-    """Measure whether a cyclic peptide's head-to-tail bond survived the
-    refine: N(residue 1) <-> C(residue L) on the second-largest polymer
-    chain (the peptide, mirror-space contract). A peptide N-C amide bond is
-    ~1.33 A; 2.5 A is the reporting cut-off — anything beyond means the ring
-    opened (or never closed) and the product is not cyclic."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     polymer = sorted(
@@ -128,10 +104,6 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
     )
     if len(polymer) < 2:
         return {"chain": None, "n_c_distance": None, "all_bonded": False}
-    # the peptide is the SHORTEST polymer chain (multi-chain receptors put
-    # receptor copies at every length tier; the old polymer[1] pick read
-    # a second receptor copy's termini -- a constant ~15.8 A on the RANKL
-    # trimer, phantom-"opening" every ring,
     pep = polymer[-1]
     residues = [r for r in pep if r.het_flag != "H"]
     if len(residues) < 4:
@@ -151,10 +123,6 @@ def _cyclic_headtail_bond_report(structure_path: Path) -> Dict[str, Any]:
 
 
 def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str | None = None) -> Optional[Dict[str, Any]]:
-    """单原子链接器（BS3=Bi）锚点几何重建：以三个匹配 Cys-SG 的外心、
-    Bi-S 静息长度重摆锚点，再做锚点+SG 受限微松弛。原位改写 cif/pdb；
-    多原子链接器或拓扑不完整时返回 None。
-    """
     path = Path(structure_path)
     st = gemmi.read_structure(str(path))
     st.setup_entities()
@@ -223,11 +191,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
     normal = np.cross(p2 - p1, p3 - p1)
     n_len = float(np.linalg.norm(normal))
     normal = normal / n_len if n_len > 1e-8 else np.array([0.0, 0.0, 1.0])
-    # Circumcenter of the SG triangle (equidistant from all three vertices):
-    # solve |O-p1| = |O-p2| = |O-p3| with O in the triangle plane. Placing at
-    # circumcenter + normal*h puts the anchor exactly `rest` from every SG
-    # before relaxation. h collapses to 0 once R >= rest (ring too small to
-    # host the anchor at the ideal length — the gate judges the outcome).
     b_len = float(np.linalg.norm(p2 - p3))
     c_len = float(np.linalg.norm(p1 - p3))
     a_len = float(np.linalg.norm(p1 - p2))
@@ -236,8 +199,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
     area = float(np.sqrt(area2))
     circum_r = (a_len * b_len * c_len) / (4.0 * area) if area > 1e-6 else 0.0
     h = float(np.sqrt(max(rest * rest - circum_r * circum_r, 0.0)))
-    # in-plane offset from centroid to circumcenter: barycentric weights
-    # sin(2A):sin(2B):sin(2C) computed from edge lengths
     w1 = a_len * a_len * (b_len * b_len + c_len * c_len - a_len * a_len)
     w2 = b_len * b_len * (c_len * c_len + a_len * a_len - b_len * b_len)
     w3 = c_len * c_len * (a_len * a_len + b_len * b_len - c_len * c_len)
@@ -246,8 +207,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
         circumcenter = (w1 * p1 + w2 * p2 + w3 * p3) / w_sum
     else:
         circumcenter = centroid
-    # numerical guard: keep the offset in-plane (component along the normal
-    # would tilt the placement) and within the triangle's scale
     in_plane = circumcenter - centroid
     in_plane = in_plane - normal * float(np.dot(in_plane, normal))
 
@@ -259,9 +218,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
     clearance0, chosen_sign, point = candidates[0]
     anchor.pos = gemmi.Position(*(point.tolist()))
 
-    # capped joint micro-relaxation: anchor carries most of the correction,
-    # SGs may drift at most ~1.5 A total (their residues stay untouched —
-    # moving a cysteine's SG without its residue would tear the backbone)
     sg_positions = {num: np.array([a.pos.x, a.pos.y, a.pos.z]) for num, a in matched}
     sg_start = {num: v.copy() for num, v in sg_positions.items()}
     bond_lo, bond_hi = (2.20, 2.90) if anchor.name == "BI" else (1.75, 2.05)
@@ -277,8 +233,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
             if abs(viol) < 1e-3:
                 continue
             u = (p_an - p_sg) / max(d, 1e-8)
-            # d > rest (viol>0): 锚沿 -u 向 SG 收拢, SG 沿 +u 向锚收拢;
-            # d < rest (viol<0): 双方反向分开——符号与距离变化量对应
             anchor_step = np.clip(-0.7 * viol * u, -0.3, 0.3)
             new_an = p_an + anchor_step
             sg_step = np.clip(0.3 * viol * u, -0.15, 0.15)
@@ -288,7 +242,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
                 sg_positions[num] = new_sg
             anchor.pos = gemmi.Position(*(new_an.tolist()))
             p_an = new_an
-        # self-clash repulsion for the anchor
         p_an = np.array([anchor.pos.x, anchor.pos.y, anchor.pos.z])
         if len(pep_pts):
             d = np.linalg.norm(pep_pts - p_an, axis=1)
@@ -328,16 +281,6 @@ def _rebuild_single_atom_linker_anchor(structure_path: Path, *, prefer_code: str
 
 
 def _structure_linker_anchor_map(st, prefer_code: str | None = None) -> Dict[str, List[str]]:
-    """Registry anchors overlaid with single-atom metal anchors shipped in
-    the structure. BS3 (bare Bi3+) is not offered as a design linker — its
-    symmetric arms cannot express three distinct covalent bonds — but
-    custom-CCD bicyclics arrive with it, and the bond gate / anchor rebuild
-    must still measure Bi-S coordination instead of reporting "no linker".
-
-    A registry residue always wins: a stray Bi ion must never shadow the
-    real linker (or pass the gate on fake coordination). Overlay codes are
-    only collected when no registry residue exists, and — when the caller
-    knows the design's linker CCD — only that code qualifies."""
     registry_present = any(
         residue.name in BICYCLIC_LINKER_ATOM_MAP
         for chain in st[0] for residue in chain)
@@ -353,7 +296,6 @@ def _structure_linker_anchor_map(st, prefer_code: str | None = None) -> Dict[str
                     continue
                 heavy = [a.name for a in residue
                          if a.element != gemmi.Element("H")]
-                # one physical atom, three anchor slots (['BI','BI','BI'])
                 if len(heavy) == 1 and heavy[0].upper() == "BI":
                     overlay[code] = [heavy[0].upper()] * 3
     if not overlay:
@@ -362,8 +304,6 @@ def _structure_linker_anchor_map(st, prefer_code: str | None = None) -> Dict[str
 
 
 def _dpeptide_linker_bond_report(structure_path: Path, *, prefer_code: str | None = None) -> Dict[str, Any]:
-    """逐锚点测量链接器-Cys SG 距离；C-S 键长约 1.8 A，报告阈值 2.5 A
-    （Bi 配位窗口另计）。"""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     anchor_map = _structure_linker_anchor_map(st, prefer_code=prefer_code)
@@ -382,9 +322,6 @@ def _dpeptide_linker_bond_report(structure_path: Path, *, prefer_code: str | Non
         return {"linker": None, "all_bonded": None, "bonds": []}
 
     anchors = anchor_map[linker_code]
-    # SG pool: peptide-side chains only. The receptor carries its own Cys;
-    # letting a receptor SG into the pool lets the one-to-one greedy match
-    # a receptor Cys to an anchor and mis-judge the design linkage.
     polymer_lens = {
         c.name: sum(1 for r in c if r.het_flag != "H") for c in st[0]
     }
@@ -423,9 +360,6 @@ def _dpeptide_linker_bond_report(structure_path: Path, *, prefer_code: str | Non
             (best[1].pos.x - anchor_atom.pos.x) ** 2
             + (best[1].pos.y - anchor_atom.pos.y) ** 2
             + (best[1].pos.z - anchor_atom.pos.z) ** 2)
-        # Bonded window per anchor chemistry: C-S (SEZ/29N) ~1.82 A,
-        # Bi-S coordination (BS3) ~2.4-2.7 A. Below ~1.2 A (C-S) or
-        # ~1.6 A (Bi-S) the pair is an overlap, not a bond.
         lo, hi = (1.6, 3.2) if anchor_name == "BI" else (1.2, 2.5)
         bonds.append({
             "anchor": anchor_name,
@@ -434,8 +368,6 @@ def _dpeptide_linker_bond_report(structure_path: Path, *, prefer_code: str | Non
             "bonded": bool(lo <= dist <= hi),
         })
     distinct = len({b["cys_resnum"] for b in bonds if b["cys_resnum"] is not None})
-    # 锚点自碰撞门禁:链接器锚(如 BS3 的 Bi)压进自身肽骨架(键长合格但物理
-    # 重叠)在化学上不可用, 与键长一同判失败。
     self_clash_min = None
     if linker_res is not None:
         anchor_atoms = [a for a in linker_res if a.element != gemmi.Element("H")]

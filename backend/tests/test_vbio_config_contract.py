@@ -34,10 +34,7 @@ RUNTIME_INJECTED = {
 
 VENDORED_PATH_PARTS = ("Mol-1-source", ".venv", "esm3_local")
 
-# 引擎容器内部键：在引擎镜像里读取，不经宿主 toml 配置。
-# 豁免名单即文档——新增容器内部键时登记到这里。
 ENGINE_INTERNAL_ENV_KEYS = {
-    # protenix2dock：runner -> 容器参数注入通道
     "PROTENIX_INIT_COORDS_PATH",
     "PROTENIX_TFG_CONSTRAINTS_PATH",
     "PROTENIX_TFG_CONTACTS_PATH",
@@ -53,26 +50,21 @@ ENGINE_INTERNAL_ENV_KEYS = {
     "HF_HUB_OFFLINE",
     "P2D_INTERFACE_WEIGHTS",
     "P2D_PEPTIDE_MSA_TIMEOUT_SECONDS",
-    # mol1 容器内路径与服务地址
     "MOL_ROOT_DIR",
     "MOL_CHECKPOINT_DIR",
     "MOL_MSA_CACHE_DIR",
     "MOL_MSA_SERVER_URL",
     "MOL_MSA_FILL_DEADLINE_SECONDS",
-    # protenix2dock 离线预处理 shard 标记
     "P2D_FEATS_SHARD",
-    # esm3 / peplm 容器内调优
     "ESM3_ADAPTER_ROOT",
     "ESM3_IDLE_RELEASE_SECONDS",
     "ESM3_GPU_ACQUIRE_TIMEOUT",
     "ESM3_MAX_LIVE_OPTIMIZERS",
     "PEPLM_BETA_KL",
     "PEPLM_ENTROPY_COEF",
-    # d 肽 boltz 评分
     "DPEPTIDE_BOLTZ_CACHE",
     "DPEPTIDE_BOLTZ_ROOT",
     "DPEPTIDE_USE_MSA",
-    # halo / 基准脚本
     "HALO_RUNS_DIR",
     "COMPARE_FEP_GPU_IDS",
 }

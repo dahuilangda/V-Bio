@@ -39,8 +39,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-# ---------------------------------------------------------------- CCD 覆盖层
-
 def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path:
     import pickle
     from rdkit import Chem
@@ -90,8 +88,6 @@ def _build_ccd_overlay(custom_molecules: list[dict], work_dir: Path) -> Path:
     return overlay_root
 
 
-
-
 # ---------------------------------------------------------------- 输入转换
 
 def _to_mol_modifications(mods: list | None) -> list[dict]:
@@ -108,9 +104,6 @@ def _to_mol_modifications(mods: list | None) -> list[dict]:
     return out
 
 
-# Mol-1 引擎的 1->3 字母表只有 20 标准 aa + X；O/U 是合法氨基酸字母
-# （O=PYL 吡咯赖氨酸，U=SEC 硒代半胱氨酸），components.cif 有对应 CCD。
-# 翻译成引擎原生的 CCD 修饰表达，字母占位为 X 后由修饰位覆盖残基。
 NONSTANDARD_AA_LETTER_CCD = {"O": "PYL", "U": "SEC"}
 PROTEIN_KNOWN_LETTERS = frozenset("ARNDCQEGHILKMFPSTWYVX")
 
@@ -475,7 +468,6 @@ def _compact_pae_block(full_data: dict, max_dim: int = 134) -> dict | None:
         for j in range(0, n0, down):
             row.append(round(float(pae[i][j]), 2))
         matrix.append(row)
-    # 边界为全 token 空间坐标，前端自行缩放
     for idx, chain in enumerate(asym):
         last = bounds[-1] if bounds else None
         if last and last["chain"] == chain:

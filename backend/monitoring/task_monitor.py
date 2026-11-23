@@ -127,7 +127,6 @@ class TaskMonitor:
         if not result['docker_available']:
             return result
 
-        # 单次 ps 带格式化输出（名称 + 任务标签），避免逐容器 inspect。
         try:
             listing = self._run_docker_command(
                 ['ps', '-a', '--format',
@@ -386,7 +385,6 @@ class TaskMonitor:
                     result['errors'].append(str(exc))
 
         try:
-
             self.redis_client.delete(f'task_heartbeat:{task_id}')
             self.redis_client.delete(f'task_status:{task_id}')
             self.redis_client.delete(f'task_process:{task_id}')

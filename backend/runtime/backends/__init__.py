@@ -1,4 +1,3 @@
-"""结构预测后端注册表。"""
 from __future__ import annotations
 
 from backend.runtime.backends.af3 import Af3Backend
@@ -30,7 +29,6 @@ def is_structure_backend(name: str) -> bool:
 
 
 def resolve_ccd_before_gpu(backend: str, yaml_content: str, custom_ccd_molecules) -> dict | None:
-    """申请 GPU 前解析 CCD 编码；输入问题在此报错，结果随任务带入执行。"""
     if not is_structure_backend(backend):
         return None
     engine = structure_backend(backend)

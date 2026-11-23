@@ -1,4 +1,3 @@
-"""重算已带 pair_ipsae 行的官方聚合值；在 backfill_refresh_contract.py 之后运行。"""
 import json, os, sys, threading, logging, zipfile
 from concurrent.futures import ThreadPoolExecutor
 

@@ -236,7 +236,6 @@ def register_affinity_routes(
         if train_args['timeout_seconds'] < 0:
             return jsonify({'error': 'timeout_seconds must be non-negative.'}), 400
 
-        # 训练产物与输入限定在训练数据根下，防止在宿主任意路径建目录。
         for path_key in ('work_dir', 'index_csv', 'val_csv', 'resume_ckpt'):
             value = train_args.get(path_key)
             if value and not os.path.abspath(value).startswith('/data/affinity_training/'):
@@ -308,7 +307,6 @@ def register_affinity_routes(
                 'error': 'MSA_SERVER_URL is required for boltz2score execution.',
                 'capability': 'boltz2score',
             }), 503
-        # boltz2score 依赖 MSA 特征，恒经服务器取 MSA
         requested_use_msa_server = True
 
         try:

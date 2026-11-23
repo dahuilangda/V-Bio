@@ -1,8 +1,3 @@
-"""结构预测后端的抽象接口。
-
-能力（chirality / 约束类型 / 设计模式）由子类声明，输入输出校验
-由基类统一执行；子类只实现请求到引擎原生调用的映射。
-"""
 from __future__ import annotations
 
 import re
@@ -28,8 +23,6 @@ class BackendRunContext:
 
 @dataclass(frozen=True)
 class CcdResolution:
-    """molecules：补全后的自定义分子；remap：被改名的自定义编码，旧编码 → 新编码。"""
-
     molecules: list[dict]
     remap: dict[str, str] = field(default_factory=dict)
 
@@ -42,7 +35,6 @@ def _referenced_ccd_codes(request: PredictionRequest) -> set[str]:
 
 
 def _platform_ccd_codes() -> frozenset[str]:
-    """平台自带定义的编码：多肽 preset 与双环 linker。"""
     from backend.runtime.bicyclic_linkers import atom_map
     from backend.runtime.peptide_design_backend import PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES
 
@@ -52,13 +44,10 @@ def _platform_ccd_codes() -> frozenset[str]:
 class StructureBackend(ABC):
     name: ClassVar[str] = ""
     ccd_code_pattern: ClassVar[str] = r"[A-Z0-9_-]{1,12}"
-    # 是否把自定义 CCD 写成 mmCIF 块交给引擎
     serializes_ccd_blocks: ClassVar[bool] = True
     injects_referenced_presets: ClassVar[bool] = False
     validates_ccd_mmcif: ClassVar[bool] = False
 
-    # 能力全部来自 configs/engine_capabilities.json（单一事实源）；
-    # 子类不再手写，避免与矩阵漂移。
     @classmethod
     def supported_constraints(cls) -> frozenset[str]:
         from backend.core.engine_capabilities import engine_constraints
@@ -66,7 +55,7 @@ class StructureBackend(ABC):
 
     @abstractmethod
     def ccd_catalog(self) -> CcdCatalog:
-        """引擎自带的标准 CCD 编码集合。"""
+        pass
 
     def check_ccd_codes(self, codes: Iterable[str]) -> None:
         accepted = re.compile(self.ccd_code_pattern)
@@ -76,7 +65,6 @@ class StructureBackend(ABC):
             raise UserInputError(f"{self.name} 不接受的 CCD 编码: {', '.join(rejected)}")
 
     def build_ccd(self, molecules: list[dict]) -> None:
-        """按引擎实际使用的形式把自定义分子构建一遍，构建不了的在此报错。"""
         from backend.runtime.custom_ccd_builder import (
             _build_custom_ccd_bundle,
             _build_custom_ccd_mol,
@@ -95,7 +83,6 @@ class StructureBackend(ABC):
             validate_ccd_additions(bundle)
 
     def validate_ccd_input(self, request: PredictionRequest, custom_ccd_molecules) -> CcdResolution:
-        """不读引擎字典的校验，提交侧即可执行。"""
         from backend.runtime.custom_ccd_builder import _normalize_custom_ccd_molecules
 
         self.validate_modifications(request, custom_ccd_molecules)
@@ -118,7 +105,6 @@ class StructureBackend(ABC):
 
     def resolve_ccd_codes(self, request: PredictionRequest,
                           resolution: CcdResolution) -> CcdResolution:
-        """对照引擎字典：改名与标准编码同名的自定义编码，确认引用的编码都能解析。"""
         referenced = _referenced_ccd_codes(request)
         if not resolution.molecules and not referenced:
             return resolution
@@ -134,7 +120,6 @@ class StructureBackend(ABC):
         return CcdResolution(molecules=molecules, remap=remap)
 
     def ccd_resolution(self, request: PredictionRequest, options: Mapping[str, Any]) -> CcdResolution:
-        """优先用申请 GPU 前算好的结果（options['ccd_resolution']），否则现算。"""
         prepared = options.get("ccd_resolution")
         if prepared is not None:
             return CcdResolution(molecules=prepared["molecules"], remap=prepared["remap"])
@@ -157,7 +142,6 @@ class StructureBackend(ABC):
 
     def validate_modifications(self, request: PredictionRequest,
                                custom_ccd_molecules=None) -> None:
-        """修饰能力按矩阵强制：standard_ccd / custom_residue_upload。"""
         from backend.core.engine_capabilities import engine_modification_support
         support = engine_modification_support(self.name)
         has_modifications = any(e.modifications for e in request.entities)
@@ -182,10 +166,8 @@ class StructureBackend(ABC):
                         f"bond residue {residue} out of range 1..{expected} for chain {chain}")
 
     def post_validate(self, request: PredictionRequest) -> PredictionRequest:
-        """引擎约束管线钩子：重映射/清洗/域校验。默认原样返回。"""
         return request
 
     @abstractmethod
     def execute(self, request: PredictionRequest, ctx: BackendRunContext) -> None:
-        """执行预测并写出 output_archive_path。实现应先调用
-        self.validate(request) 与 self.post_validate(request)。"""
+        pass

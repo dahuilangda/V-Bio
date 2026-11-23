@@ -1,10 +1,3 @@
-"""Multi-turn Copilot checks against the real LLM and the real databases.
-
-One panel session per scenario. Every turn carries the transcript, the cross-turn
-copilot_memory, simulated confirmation receipts (applied / failed) and a context_payload
-that changes between turns the way the frontend's does (uploads appear, run blockers
-change). Scenarios mix several user goals in one session, switch topics and come back.
-"""
 from __future__ import annotations
 
 import copy
@@ -21,7 +14,6 @@ RECENT_TURNS = 8
 
 
 def build_conversation(history, injected_resolutions=None):
-    """Mirror the frontend's buildCopilotConversationContext: recent visible messages + receipts."""
     visible = [m for m in history if m["role"] in ("user", "assistant")]
     recent = [
         {"role": m["role"], "at": m.get("at", ""), "content": m["content"][:1200]}
@@ -41,8 +33,6 @@ def build_conversation(history, injected_resolutions=None):
 
 
 class MultiturnSession:
-    """Drives one Copilot panel session across turns with evolving context."""
-
     def __init__(self, assistant, context_type, base_payload):
         self.assistant = assistant
         self.context_type = context_type
@@ -52,8 +42,6 @@ class MultiturnSession:
         self.results = []
 
     def turn(self, user_text, *, payload_patch=None, receipts=None, expect=None, label=""):
-        """Run one user turn. ``receipts`` simulates confirmation outcomes the user just clicked;
-        ``payload_patch`` evolves the live context the way the real page state would."""
         display = label or user_text[:52]
         print(f"\n--- turn: {display}")
         payload = copy.deepcopy(self.base_payload)
@@ -83,7 +71,6 @@ class MultiturnSession:
         print(f"  state={result.get('state')} actions={actions} questions={questions} obs={sources}")
         print(f"  msg: {str(result.get('content') or '')[:170].replace(chr(10), ' ')}")
 
-        # carry forward memory exactly like the frontend does (identity records only)
         obs_map = {}
         for index, record in enumerate(result.get("observations") or []):
             obs_map[f"prev:{index}"] = {
@@ -144,10 +131,6 @@ def action_arg(result, skill, key):
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Scenario A — one docking task, six interleaved turns, evolving environment
-# --------------------------------------------------------------------------- #
-
 def scenario_a(assistant):
     from copilot_turn_matrix import TASK_DETAIL_AFFINITY
 
@@ -162,7 +145,6 @@ def scenario_a(assistant):
         label="A1 target-by-name -> rcsb + choice",
     )
 
-    # user answers the choice question with a concrete pick (frontend sends it as a user message)
     session.turn(
         "Use 9V34",
         payload_patch={"affinityUploads": {"targetFileName": "9V34.pdb", "targetUploaded": True}},
@@ -217,10 +199,6 @@ def scenario_a(assistant):
     return session
 
 
-# --------------------------------------------------------------------------- #
-# Scenario B — a confirmed action FAILS; the next turn must recover
-# --------------------------------------------------------------------------- #
-
 def scenario_b(assistant):
     from copilot_turn_matrix import TASK_DETAIL_AFFINITY
 
@@ -270,10 +248,6 @@ def scenario_b(assistant):
     )
     return session
 
-
-# --------------------------------------------------------------------------- #
-# Scenario C — prediction task + literature side quest + return to main line
-# --------------------------------------------------------------------------- #
 
 def scenario_c(assistant):
     from copilot_turn_matrix import TASK_DETAIL_PREDICTION

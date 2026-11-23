@@ -26,7 +26,6 @@ from peplm.vocab import to_modifications
 BOLTZ_PY = str(Path(__file__).resolve().parents[3]
                / "boltz2score" / ".venv" / "bin" / "python")
 
-# 镜像 backend/runtime/bicyclic_linkers.py；oracle 独立导入，注册表变更需手动同步
 BICYCLIC_LINKER_ATOM_MAP = {
     "ZBR": ["C7", "C8", "C9"],
     "SEZ": ["CD", "C1", "C2"],

@@ -1,8 +1,3 @@
-"""AlphaFold3 后端：bond 约束经适配器映射为 bondedAtomPairs。
-
-原 run_alphafold3_backend（run_single_prediction.py）整体迁入：
-AF3 JSON 构建、MSA/模板准备、容器执行、ipSAE 与亲和力后处理、归档。
-"""
 from __future__ import annotations
 
 import json
@@ -310,10 +305,6 @@ class Af3Backend(StructureBackend):
 
         af3_results_root = resolve_backend_results_root(self.name, ctx.task_id, ctx.temp_dir)
         af3_work_root = resolve_backend_work_root(af3_results_root)
-        # AF3 ships the full RCSB CCD (NLE/AIB/HYP included); preset modification
-        # molecules must not be injected as userCCD (their generated cif lacks the
-        # descriptor category and breaks AF3 parsing). Explicit custom molecules
-        # (ligands, linkers) still pass through.
         _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
         user_ccd_text = None
         if custom_molecules:
@@ -392,7 +383,6 @@ class Af3Backend(StructureBackend):
                         "queryIndices": tpl["queryIndices"],
                         "templateIndices": tpl["templateIndices"],
                     })
-                    # AF3 requires MSA fields to be set when templates are provided
                     protein.setdefault("unpairedMsa", "")
                     protein.setdefault("pairedMsa", "")
 

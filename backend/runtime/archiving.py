@@ -1,4 +1,3 @@
-"""结果归档：各引擎输出树的 zip 打包与 MSA 缓存读取。"""
 from __future__ import annotations
 
 import json
@@ -47,10 +46,7 @@ def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> No
     )
 
 
-
-
 def get_cached_a3m_files(yaml_content: str) -> list:
-    """Collect sequence-addressed A3M cache files for declared MSA inputs."""
     cached_a3m_files = []
 
     if not MSA_CACHE_CONFIG['enable_cache']:
@@ -94,38 +90,27 @@ def get_cached_a3m_files(yaml_content: str) -> list:
     return cached_a3m_files
 
 
-
 def create_archive_with_a3m(
     output_archive_path: str,
     output_directory_path: str,
     yaml_content: str,
     extra_files: Optional[List[Tuple[Path, str]]] = None,
 ):
-    """
-    创建包含预测结果和a3m缓存文件的zip归档
-    """
     try:
-        # 获取相关的a3m缓存文件
         cached_a3m_files = get_cached_a3m_files(yaml_content)
         
-        # 创建zip文件
         with zipfile.ZipFile(output_archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # 添加预测结果文件
             for root, dirs, files in os.walk(output_directory_path):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    # 计算相对路径，保持目录结构
                     arcname = os.path.relpath(file_path, output_directory_path)
                     zipf.write(file_path, arcname)
                     print(f"添加结果文件: {arcname}", file=sys.stderr)
             
-            # 添加a3m缓存文件
             if cached_a3m_files:
-                # 在zip中创建msa目录
                 for a3m_info in cached_a3m_files:
                     cache_file_path = a3m_info['path']
                     filename = a3m_info['filename']
-                    # 将a3m文件放在msa子目录中
                     arcname = f"msa/{filename}"
                     zipf.write(cache_file_path, arcname)
                     print(f"添加a3m缓存文件: {arcname}", file=sys.stderr)
@@ -145,14 +130,8 @@ def create_archive_with_a3m(
         print(f"归档创建完成: {output_archive_path}", file=sys.stderr)
         
     except Exception:
-        # A silent fallback here would produce a DIFFERENT archive (no MSA
-        # files) at the same path — the caller could not tell. Fail loudly.
         print(f"[ERROR] 创建包含a3m文件的归档失败:", file=sys.stderr)
         raise
-
-
-
-
 
 
 def create_af3_archive(
@@ -165,9 +144,6 @@ def create_af3_archive(
     af3_output_dir: Optional[str] = None,
     extra_files: Optional[List[Tuple[Path, str]]] = None,
 ) -> None:
-    """
-    Create an archive containing AF3-compatible assets (FASTA, JSON, and MSAs).
-    """
     try:
         with zipfile.ZipFile(output_archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.writestr(f"af3/{prep.jobname}_input.fasta", fasta_content)
@@ -230,8 +206,6 @@ def create_af3_archive(
         raise RuntimeError(f"Failed to create AF3 archive: {e}") from e
 
 
-
-
 def create_protenix_archive(
     output_archive_path: str,
     protenix_json: Any,
@@ -241,9 +215,6 @@ def create_protenix_archive(
     protenix_output_dir: Optional[str] = None,
     extra_files: Optional[List[Tuple[Path, str]]] = None,
 ) -> None:
-    """
-    Create an archive containing Protenix-compatible assets and outputs.
-    """
     try:
         with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             zipf.writestr(f"protenix/{input_name}.json", serialize_protenix_json(protenix_json))
@@ -291,6 +262,5 @@ def create_protenix_archive(
         print(f"Protenix 归档创建完成: {output_archive_path}", file=sys.stderr)
     except Exception as exc:
         raise RuntimeError(f"Failed to create Protenix archive: {exc}") from exc
-
 
 

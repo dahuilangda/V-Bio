@@ -172,7 +172,6 @@ def _parse_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
 
 
 def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> Optional[list[Dict[str, Any]]]:
-    """合法返回分子列表；输入非法返回 None（提交方据此 400）。"""
     if raw_value is None or not str(raw_value).strip():
         return []
     try:
@@ -753,7 +752,6 @@ def register_prediction_routes(
                     return jsonify({'error': 'rfd4_spec must be a YAML mapping.'}), 400
                 predict_args['rfd4_spec'] = rfd4_spec
 
-        # 配额校验前置拦截超额提交；计数在派发成功后落地，dispatch 失败不烧额度。
         quota_response = _check_tenant_quota(tenant_id)
         if quota_response:
             return quota_response

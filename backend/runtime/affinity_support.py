@@ -1,8 +1,3 @@
-"""亲和力后处理：boltz2score 结果解析、配体链推断与结构装载。
-
-原 run_single_prediction.py 的亲和力辅助簇整体迁入，
-供 run_af3_affinity_pipeline / run_protenix_affinity_pipeline 调用。
-"""
 from __future__ import annotations
 
 import json
@@ -46,29 +41,19 @@ from backend.worker.docker_cmd import (
 
 
 def extract_affinity_config_from_yaml(yaml_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """
-    从 YAML 数据中提取亲和力配置，兼容 list / dict 等写法。
-    支持两种格式：
-    1. affinity: true
-    2. affinity: {binder: "B"}
-    """
     for entry in _iter_affinity_entries(yaml_data.get("properties")):
         affinity_info = entry.get("affinity")
 
-        # 格式1: affinity: {binder: "B"} 或 affinity: {chain: "B"}
         if isinstance(affinity_info, dict):
             binder = affinity_info.get("binder") or affinity_info.get("chain")
             if binder:
                 return {"binder": str(binder).strip()}
 
-        # 格式2: affinity: true (需要单独查找binder)
         elif affinity_info is True:
-            # 在同一层级或properties层级查找binder字段
             binder = entry.get("binder") or entry.get("chain")
             if binder:
                 return {"binder": str(binder).strip()}
 
-            # 如果entry中没有binder，尝试从properties的其他条目中查找
             for other_entry in _iter_affinity_entries(yaml_data.get("properties")):
                 binder = other_entry.get("binder") or other_entry.get("chain")
                 if binder:
@@ -77,10 +62,7 @@ def extract_affinity_config_from_yaml(yaml_data: Dict[str, Any]) -> Optional[Dic
     return None
 
 
-
-
 def _legacy_parse_ligand_from_text(cif_path: Path, binder_chain: str) -> Optional[str]:
-    """在缺少 gemmi 时回退到文本解析。"""
     try:
         with cif_path.open("r") as cif_file:
             for line in cif_file:
@@ -98,13 +80,7 @@ def _legacy_parse_ligand_from_text(cif_path: Path, binder_chain: str) -> Optiona
     return None
 
 
-
-
 def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[str]:
-    """
-    在结构文件中查找指定链的配体残基名称。
-    优先使用 gemmi 解析 mmCIF / PDB，若不可用则退回文本解析。
-    """
     try:
         import gemmi  # type: ignore
     except ImportError:
@@ -127,10 +103,7 @@ def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[st
     return None
 
 
-
-
 def _sanitize_atom_name_for_affinity(name: str) -> str:
-    """Normalize atom names to avoid unsupported characters in Boltz featurizer."""
     cleaned = name.strip()
     if not cleaned:
         return name
@@ -148,10 +121,7 @@ def _sanitize_atom_name_for_affinity(name: str) -> str:
     return sanitized or name
 
 
-
-
 def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
-    """Create a sanitized copy of the structure with normalized atom names."""
     try:
         import gemmi  # type: ignore
     except ImportError:
@@ -200,10 +170,7 @@ def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
     return sanitized_path
 
 
-
-
 def _stage_structure_for_affinity_container(source_path: Path, work_dir: Path) -> Path:
-    """Place the scoring input inside the directory mounted into Boltz2Score."""
     source_path = Path(source_path)
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -225,13 +192,9 @@ def _stage_structure_for_affinity_container(source_path: Path, work_dir: Path) -
     return staged_path
 
 
-
-
 def _is_protein_like_residue_name(resname: str) -> bool:
     normalized = str(resname or "").strip().upper()
     return normalized in AMINO_ACID_MAPPING
-
-
 
 
 def _infer_affinity_chain_plan(
@@ -290,18 +253,7 @@ def _infer_affinity_chain_plan(
     }
 
 
-
-
 def _extract_ligand_smiles_list(yaml_data: Dict[str, Any]) -> List[str]:
-    """按 YAML 出现顺序取全部小分子配体的 SMILES。
-
-    覆盖两种配体写法：本后端解析器的 `ligand: {smiles: <SMILES>}` 与
-    boltz2 兼容的 `ligand: <SMILES>` / `ligand: {ligand: <SMILES>}`。
-    `smiles:` 键是显式声明，原样采用；裸字符串按保守方向分类——纯大写
-    字母数字短串视为 CCD 代码（CCD 误入 SMILES 路径会让 RDKit 解析直接
-    失败，SMILES 误判为 CCD 只会退回有界的坐标感知路径）。Protenix 以
-    出现顺序命名配体实体（l01、l02…），故顺序即实体序号。
-    """
     smiles_list: List[str] = []
     for entry in (yaml_data or {}).get("sequences") or []:
         if not isinstance(entry, dict) or "ligand" not in entry:
@@ -320,8 +272,6 @@ def _extract_ligand_smiles_list(yaml_data: Dict[str, Any]) -> List[str]:
         if ligand and (explicit_smiles or not re.fullmatch(r"[A-Z0-9]{1,5}", ligand)):
             smiles_list.append(ligand)
     return smiles_list
-
-
 
 
 def _run_boltz2score_affinity_postprocess(
@@ -392,15 +342,9 @@ def _run_boltz2score_affinity_postprocess(
         ",".join(target_chain_ids),
         "--ligand_chain",
         resolved_ligand_chain,
-        # cuequivariance 融合 kernel 在 RTX 4090 上申请的 shared memory
-        # （106496 字节）超硬件上限（101376 字节），亲和力/置信度前向必现
-        # OutOfResources——本部署全部为 4090，统一走 eager kernel。
         "--no_kernels",
     ]
     if ligand_smiles_list and ligand_resname:
-        # 预测输出的 CIF 只带坐标不带键级；坐标感知键级对高共轭配体会指数
-        # 爆炸（曾挂死 3 小时）。任务 YAML 里的 SMILES 是权威拓扑，按
-        # Protenix 配体实体命名序号（l01→第 1 条）确定性下发。
         m = re.fullmatch(r"l(\d+)", ligand_resname, re.IGNORECASE)
         smiles_idx = int(m.group(1)) - 1 if m else None
         smiles = (
@@ -522,9 +466,6 @@ def _run_boltz2score_affinity_postprocess(
             f" Tail:\n{_tail_lines(score_log, 120)}",
             file=sys.stderr,
         )
-        # The requester explicitly opted into affinity — record the failure inside the output
-        # archive instead of degrading silently, so the frontend/user can see WHY affinity data
-        # is missing instead of parsing stderr.
         try:
             (output_dir / "affinity_error.txt").write_text(
                 f"Boltz2Score affinity postprocess failed with exit code {score_return}.\n"
@@ -583,6 +524,5 @@ def _run_boltz2score_affinity_postprocess(
 
     print("亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
     return affinity_entries
-
 
 

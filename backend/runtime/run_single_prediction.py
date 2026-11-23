@@ -52,9 +52,6 @@ from backend.runtime.linker_measurement import (
 _PROTENIX_INPUT_CONTAINER_DIR = "/workspace/protenix_input"
 
 _PROTENIX_TEMPLATE_CONTAINER_DIR = f"{_PROTENIX_INPUT_CONTAINER_DIR}/template_mmcif"
-# 用户模板缺少 PDB 注册元数据（release_dates、chem_comp.type），由后端按
-# 任务补齐：合成 ID 形如 t001（4 字符字母数字，满足 hit 名约束），日期取
-# 泄漏截止期（2021-09-30）之前的固定值。
 
 _PROTENIX_CCD_CIF = "components.cif"
 
@@ -73,7 +70,6 @@ def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
     for item in yaml_data.get("sequences", []):
         if not isinstance(item, dict):
             continue
-        # Support both "protein" (Boltz format) and "proteinChain" (V-Bio format)
         protein = item.get("protein") or item.get("proteinChain")
         if protein is None or not isinstance(protein, dict):
             continue
@@ -165,19 +161,12 @@ def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SE
 
 
 def _ensure_af3_required_fields(cif_text: str) -> str:
-    """
-    Ensure mmCIF contains all fields required by AlphaFold3 for template parsing.
-
-    AF3 requires _atom_site.pdbx_PDB_model_num field which may be missing
-    when converting from PDB or generating mmCIF with gemmi.
-    """
     try:
         doc = gemmi.cif.read_string(cif_text)
         if len(doc) == 0:
             return cif_text
         block = doc.sole_block()
 
-        # Check if _atom_site table exists
         atom_site_loop = block.find_loop("_atom_site")
         if not atom_site_loop:
             return cif_text
@@ -206,7 +195,6 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
                         in_atom_site_loop = True
                         atom_site_tags_found = True
 
-                        # pdbx_PDB_model_num belongs after group_PDB and before id.
                         insert_idx = -1
                         for idx, tag in enumerate(atom_site_tags):
                             if tag == "_atom_site.group_PDB":
@@ -223,7 +211,6 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
                                 model_num_idx = insert_idx
                             result_lines.append(lines[i + 1 + k])
 
-                        # If we didn't find a place to insert, add at the end
                         if insert_idx == -1:
                             result_lines.append("_atom_site.pdbx_PDB_model_num")
                             model_num_idx = len(atom_site_tags)
@@ -336,9 +323,6 @@ def prepare_template_payloads(
         except Exception as exc:
             print(f"[WARN] 保存模板文件失败 {raw_path}: {exc}", file=sys.stderr)
             continue
-        # The single-chain conversion writes into cif_path, which for cif
-        # uploads equals raw_path and would clobber it; keep a copy with the
-        # original author numbering for pocket-residue translation.
         author_path = templates_dir / f"{Path(file_name).stem}_author{Path(file_name).suffix or '.cif'}"
         try:
             author_path.write_bytes(raw_bytes)
@@ -389,16 +373,12 @@ def prepare_template_payloads(
 
         query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
 
-        # Boltz template entry
         boltz_entry: Dict[str, Any] = {"cif": str(cif_path)}
-        # pocket-residue translation needs the author numbering of the
-        # original upload; the converted mmcif renumbers residues 1..N
         boltz_entry["author_pdb"] = str(author_path)
         if target_chain_ids:
             boltz_entry["chain_id"] = target_chain_ids if len(target_chain_ids) > 1 else target_chain_ids[0]
         boltz_templates.append(boltz_entry)
 
-        # AF3 template payload
         if query_indices and template_indices:
             af3_source_text = cif_text
             af3_mmcif = _sanitize_release_date_text_with_gemmi(
@@ -526,12 +506,7 @@ def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dic
     return af3_templates
 
 
-# 用户模板缺少 PDB 注册元数据（release_dates、chem_comp.type），由后端按
-# 任务补齐：合成 ID 形如 t001（4 字符字母数字，满足 hit 名约束），日期取
-# 泄漏截止期（2021-09-30）之前的固定值。
 _PROTENIX_TEMPLATE_RELEASE_DATE = "2019-01-01"
-# 标准氨基酸的 PDB 注册 _chem_comp.type：Protenix 解析模板时以该字段判定
-# 蛋白链（须含 "peptide"）。
 _PROTENIX_STD_AA_CHEM_COMP_TYPES = {
     **{aa: "L-peptide linking" for aa in
        ("ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "HIS", "ILE",
@@ -542,10 +517,6 @@ _PROTENIX_STD_AA_CHEM_COMP_TYPES = {
 
 
 def validate_af3_database_files(database_dir: str) -> None:
-    """
-    Perform lightweight sanity checks on key AF3 database FASTA files to fail fast
-    when files are missing or corrupted (common cause of jackhmmer 'Parse failed').
-    """
     required_files = [
         "uniref90_2022_05.fa",
         "uniprot_all_2021_04.fa",
@@ -553,7 +524,6 @@ def validate_af3_database_files(database_dir: str) -> None:
         "bfd-first_non_consensus_sequences.fasta",
     ]
 
-    # Allow common amino-acid symbols plus gap/stop placeholders; digits are not valid.
     allowed_seq_pattern = re.compile(r"^[A-Za-z\-\.*?]+$")
     max_lines_scan = AF3_VALIDATE_MAX_LINES  # scan early part; set to 0 to scan full file
 
@@ -570,7 +540,6 @@ def validate_af3_database_files(database_dir: str) -> None:
                     raise RuntimeError(
                         f"检测到文件包含非法空字节，可能已损坏: {path}. 请重新下载/解压该文件。"
                     )
-                # 第一条非空行应为 FASTA 标题
                 first_line = head.splitlines()[0] if head else b""
                 if not first_line.startswith(b">"):
                     raise RuntimeError(
@@ -578,7 +547,6 @@ def validate_af3_database_files(database_dir: str) -> None:
                         "请重新下载/解压 AF3 数据库。"
                     )
 
-            # Streaming scan of the early portion of the file to catch corruption quickly.
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 header_seen = False
                 for lineno, line in enumerate(f, start=1):
@@ -658,8 +626,6 @@ def _assert_msa_server_configured(backend: str) -> str:
         )
     return msa_server_url
 
-# How many lines of each AF3 FASTA to scan for corruption. Set env ALPHAFOLD3_VALIDATE_MAX_LINES=0
-# to scan the whole file (may take time but catches deep corruption).
 AF3_VALIDATE_MAX_LINES = os.environ.get("ALPHAFOLD3_VALIDATE_MAX_LINES")
 AF3_VALIDATE_MAX_LINES = int(AF3_VALIDATE_MAX_LINES) if AF3_VALIDATE_MAX_LINES else 200000
 DEFAULT_TEMPLATE_RELEASE_DATE = "1987-11-16"
@@ -750,7 +716,6 @@ def _ensure_release_date(
 ) -> None:
     date_value = release_date if _is_valid_release_date(release_date) else DEFAULT_TEMPLATE_RELEASE_DATE
 
-    # Always set pair tags to a valid ISO date to avoid "0"/"?" placeholders.
     for tag in _RELEASE_DATE_PAIR_TAGS:
         block.set_pair(tag, date_value)
 
@@ -778,7 +743,6 @@ def _ensure_release_date(
         )
         db_loop.add_row(["1", date_value, date_value])
     else:
-        # Drop audit/history loops to avoid malformed loop rows; rely on pair tags instead.
         _remove_loops_with_prefix(block, ("_pdbx_audit_revision_history.", "_database_PDB_rev."))
         block.set_pair(_REVISION_DATE_TAG, date_value)
 
@@ -844,7 +808,6 @@ def _inject_release_date_text(
 
 
 def _force_af3_release_date_text(cif_text: str, release_date: Optional[str] = None) -> str:
-    """Ensure AF3 can read a release date by injecting a proper audit loop + db status pairs."""
     date_value = release_date if _is_valid_release_date(release_date) else DEFAULT_TEMPLATE_RELEASE_DATE
     stripped = _strip_problem_loops_text(
         cif_text,
@@ -858,7 +821,6 @@ def _force_af3_release_date_text(cif_text: str, release_date: Optional[str] = No
             continue
         cleaned.append(line)
 
-    # Replace or insert database_status pairs
     for tag in _RELEASE_DATE_PAIR_TAGS:
         replaced = False
         for idx, line in enumerate(cleaned):
@@ -902,7 +864,6 @@ def _strip_problem_loops_text(cif_text: str, prefixes: Tuple[str, ...]) -> str:
                 any(tag.lower().startswith(prefix.lower()) for tag in tag_lines)
                 for prefix in prefixes
             ):
-                # Skip loop data rows until next item/loop/data block
                 k = j
                 while k < len(lines):
                     row_stripped = lines[k].strip()
@@ -1095,7 +1056,6 @@ def _build_single_chain_structure(
     if len(structure) == 0:
         raise ValueError("No model found in template structure.")
 
-    # keep only first model
     while len(structure) > 1:
         del structure[1]
 
@@ -1126,16 +1086,10 @@ def _build_single_chain_structure(
             f"Template chain '{selected_chain}' has no supported amino-acid residues after cleanup."
         )
 
-    # Some model/mmCIF providers preserve source PDB residue numbers (for
-    # example 241..625) while their ``_entity_poly_seq`` table starts at 1.
-    # AF3 joins atoms to the polymer scheme using these numbers, so normalize
-    # the sanitized single chain before rebuilding its entity sequence tables.
     for residue_index, residue in enumerate(chain, start=1):
         residue.seqid = gemmi.SeqId(residue_index, ' ')
         residue.label_seq = residue_index
 
-    # Drop any pre-existing sequence tables that may not match the selected
-    # chain, then rebuild the entity sequence from the residues we retained.
     structure.clear_sequences()
     structure.setup_entities()
     residue_names = [gemmi.Entity.first_mon(res.name) for res in chain]
@@ -1144,11 +1098,9 @@ def _build_single_chain_structure(
         if any(sc in entity.subchains for sc in subchains):
             entity.full_sequence = list(residue_names)
 
-    # Ensure label_seq_id and related tables are consistent with the sequence.
     try:
         structure.assign_label_seq_id()
     except Exception:
-        # If label assignment fails, AF3 parsing will likely fail too; keep original
         pass
 
     return structure, selected_chain
@@ -1183,7 +1135,6 @@ def convert_structure_to_single_chain_mmcif(
     except Exception:
         pass
     cif_text = doc.as_string()
-    # Ensure AF3-required fields are present
     cif_text = _ensure_af3_required_fields(cif_text)
     cif_text = _sanitize_release_date_text_with_gemmi(
         cif_text,
@@ -1196,10 +1147,6 @@ def convert_structure_to_single_chain_mmcif(
 
 
 def _complete_template_chem_comp_types(cif_text: str) -> str:
-    """补全模板 cif 中缺失的标准氨基酸 _chem_comp.type 元数据。
-
-    id/type 两列由转换管线保证存在且等长，缺失即上游产物违约，抛错。
-    """
     doc = gemmi.cif.read_string(cif_text)
     block = doc.sole_block()
     id_col = block.find_loop("_chem_comp.id")
@@ -1217,7 +1164,6 @@ def _complete_template_chem_comp_types(cif_text: str) -> str:
         if str(type_col[i]) in (".", "?"):
             canonical = _PROTENIX_STD_AA_CHEM_COMP_TYPES.get(comp)
             if canonical:
-                # 含空格的值必须走 cif 引号序列化，否则 loop 行值数错乱。
                 type_col[i] = gemmi.cif.quote(canonical)
                 changed = True
     return doc.as_string() if changed else cif_text
@@ -1229,17 +1175,6 @@ def _stage_protenix_user_templates(
     protenix_input_dir: str,
     prep: Any,
 ) -> bool:
-    """把用户模板注册进 Protenix 推理模板体系。
-
-    Protenix 按 hit ID 查 release_dates 并从 mmcif 目录取模板结构。用户
-    模板缺注册元数据，由本函数补齐：分配合成 ID、写出对应 cif、聚合
-    hit a3m、生成按任务 release_dates 覆盖文件；过滤/取结构/对齐全部
-    原样复用。实体定位与 MSA 挂载同源（entity_seq_positions 映射，
-    实体下标与 sequences 位置不保证一致）。
-
-    契约：空内容、无蛋白链、target_chain_ids 不匹配任一蛋白实体时抛
-    ValueError；payloads 非空时全部注册成功返回 True，空列表返回 False。
-    """
     if not template_payloads:
         return False
     template_dir = os.path.join(protenix_input_dir, "template_mmcif")
@@ -1259,7 +1194,6 @@ def _stage_protenix_user_templates(
         for c in chains
     })
 
-    # 先全部校验并构建，后落盘——失败时不留半成品文件。
     release_dates_overlay: Dict[str, Dict[str, str]] = {}
     hits_by_seq_pos: Dict[int, List[str]] = {}
     for idx, payload in enumerate(template_payloads, start=1):
@@ -1308,8 +1242,6 @@ def _stage_protenix_user_templates(
                   "w", encoding="utf-8") as f:
             f.write(completed_cif)
 
-    # 每个拿到命中的蛋白实体写聚合 a3m 并挂 templatesPath
-    # （templatesPath 每条蛋白链只能指向一个文件，多模板合并多 hit）。
     for seq_pos, hit_blocks in hits_by_seq_pos.items():
         a3m_name = f"entity_{seq_pos:02d}_templates.a3m"
         with open(os.path.join(template_dir, a3m_name),
@@ -1385,7 +1317,6 @@ def _structure_candidate_priority(name: str, base_priority: int, jobname: str) -
 
 
 def locate_af3_structure_file(af3_output_dir: Path, jobname: str) -> Optional[Path]:
-    """Locate the primary AlphaFold3 structure file (.cif or .pdb) for affinity post-processing."""
     base_dir = Path(af3_output_dir)
     if not base_dir.exists():
         return None
@@ -1522,10 +1453,6 @@ def run_af3_affinity_pipeline(
     af3_output_dir: str,
     results_root: Optional[Path] = None,
 ) -> List[Tuple[Path, str]]:
-    """
-    若 YAML 配置请求亲和力预测，则在 AlphaFold3 结果上运行 Boltz-2 亲和力流程。
-    返回需要附加到归档中的额外文件列表 (Path, arcname)。
-    """
     affinity_config = extract_affinity_config_from_yaml(yaml_data)
     if not affinity_config:
         return []
@@ -1631,7 +1558,6 @@ def _raise_if_protenix_reported_error_without_structure(protenix_output_dir: Pat
 
 
 def locate_protenix_structure_file(protenix_output_dir: Path, input_name: str) -> Optional[Path]:
-    """Locate the primary Protenix structure file (.cif or .pdb) for affinity post-processing."""
     base_dir = Path(protenix_output_dir)
     if not base_dir.exists():
         return None
@@ -1670,10 +1596,6 @@ def run_protenix_affinity_pipeline(
     protenix_output_dir: str,
     results_root: Optional[Path] = None,
 ) -> List[Tuple[Path, str]]:
-    """
-    若 YAML 配置请求亲和力预测，则在 Protenix 结果上运行 Boltz-2 亲和力流程。
-    返回需要附加到归档中的额外文件列表 (Path, arcname)。
-    """
     affinity_config = extract_affinity_config_from_yaml(yaml_data)
     if not affinity_config:
         return []
@@ -1834,7 +1756,6 @@ def _normalize_protenix_output_permissions(
         print(f"[WARN] 无法自动修复 Protenix 输出目录权限: {perm_err}", file=sys.stderr)
 
 
-# Legacy shape derived from the unified linker registry (bicyclic_linkers.py)
 BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = bicyclic_linkers.atom_map()
 
 
@@ -1905,9 +1826,6 @@ def _extract_user_ccd_one_letter_overrides(user_ccd_text: Optional[str]) -> Dict
 
 
 def _validate_amidated_terminal_constraints(yaml_text: str, custom_molecules: List[Dict[str, Any]]) -> None:
-    """C-terminal amidated custom residues carry no leaving atom on the backbone carbon, so they
-    can only occupy the last position of a LINEAR protein chain. Reject them on cyclic chains or at
-    non-terminal positions. The frontend locks this; this function is the backend guard."""
     amidated_codes = {
         str(m.get("ccd") or "").upper()
         for m in custom_molecules or []
@@ -1948,22 +1866,10 @@ def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
 
 
 def _binder_msa_assignment(binder_sequence: str) -> str:
-    """MSA for one designed binder, cache-first, HARD failure on miss.
-
-    Policy ("MSA everywhere" + no-fallback): the env-database MSA
-    service returns usable alignments for designed peptides too, and the MSA
-    measurably improves results — a candidate without its MSA is not
-    equivalent and must not silently run degraded. A transport/search failure
-    raises; the generation prefetch propagates it and the design task fails
-    loudly instead of burning GPU hours on no-MSA conformers.
-    Returns the shared-cache a3m path.
-    """
     sequence = str(binder_sequence or "").strip().upper()
     if not sequence:
         raise RuntimeError("binder MSA 预取收到空序列")
     sequence_hash = get_sequence_hash(sequence)
-    # auto 分层与 input_prep.resolve_msa 一致: 短肽 uniref(秒级), 长链 env。
-    # 分层缓存文件名同样对齐(msa_<h>_<tier>.a3m), 两端共享同一份缓存。
     normalized = "".join(
         aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A"
         for aa in sequence)
@@ -1978,10 +1884,6 @@ def _binder_msa_assignment(binder_sequence: str) -> str:
         if _ensure_nonempty_a3m_file(cached_msa_path, sequence, context="binder 缓存校验", header="binder"):
             return cached_msa_path
     msa_timeout = MSA_SERVER_TIMEOUT_SECONDS if MSA_SERVER_TIMEOUT_SECONDS > 0 else 600
-    # Measured boundary: the env-db CPU stages (result2msa) on a
-    # short designed peptide can run tens of minutes — the GPU prefilter is
-    # NOT the bottleneck. The auto tier (uniref for short binders) keeps the
-    # per-generation prefetch at seconds; env stays available for long chains.
     binder_timeout = min(int(msa_timeout), 1800)
     msa_result = request_msa_from_server(sequence, timeout=binder_timeout, msa_mode=binder_tier)
     if not msa_result or not save_msa_result_to_file(msa_result, cached_msa_path):
@@ -1995,9 +1897,6 @@ def _binder_msa_assignment(binder_sequence: str) -> str:
     return cached_msa_path
 
 
-# Interface engagement floor for sample selection: receptor-peptide heavy-atom
-# pairs within 4.5 A. A docked 12-20-mer buries dozens of pairs; below this
-# the sample never docked and must not ship regardless of clash-freedom.
 ENGAGE_MIN_CONTACTS = 8
 
 
@@ -2550,7 +2449,6 @@ if __name__ == "__main__":
     main()
 
 
-# 历史测试路径与肽设计簇符号统一转发（实现在各自源模块）
 def __getattr__(name: str):
     if name == 'generate_msa_for_sequences':
         from backend.runtime.msa_pipeline import generate_msa_for_sequences as _v

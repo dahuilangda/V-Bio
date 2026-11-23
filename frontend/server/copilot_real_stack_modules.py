@@ -1,14 +1,3 @@
-"""Module coverage against the deployed API with the real LLM and the real sources.
-
-One turn per family unless noted:
-  lookup families   pubchem / rcsb / uniprot / alphafold / chembl(+compute) / pubmed /
-                    clinicaltrials / translate
-  host actions      tasks:update_view (+tasks:failure) / tasks:rename / tasks:open /
-                    tasks:copy / tasks:create_with_sequence / tasks:create_virtual_screening /
-                    task_detail:apply_parameter_patch / apply_metadata_patch
-  data values       every answer's PDB ids, accessions, SMILES and sequences trace to
-                    retrieval (the identifier audit enforces this)
-"""
 from __future__ import annotations
 
 import sys
@@ -57,7 +46,6 @@ def run_all():
         results.extend(s.results)
         return s
 
-    # ── lookup families ─────────────────────────────────────────────────────────────
     one("mod-pubchem", ("project_list", {"page": {"contextType": "project_list"}, "summary": {"all": 2}}),
         "查一下阿司匹林的分子式和SMILES",
         [("pubchem", obs_source("pubchem")), ("cites retrieved identity", msg_contains(r"CID|aspirin|阿司匹林"))])
@@ -90,7 +78,6 @@ def run_all():
         "有关于 DHODH 抑制的临床试验吗",
         [("clinicaltrials", obs_source("clinicaltrials"))])
 
-    # ── host actions ────────────────────────────────────────────────────────────────
     one("host-failure-filter", ("task_list", TASK_LIST_WITH_ROWS),
         "只显示失败的任务",
         [("filter", lambda r: has_action_skill("tasks:failure")(r) or has_action_skill("tasks:update_view")(r))])

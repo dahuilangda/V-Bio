@@ -1,9 +1,3 @@
-"""Protenix 后端：bond/pocket 原生支持，MSA/模板/自定义 CCD 全流程。
-
-原 run_protenix_backend（run_single_prediction.py）整体迁入：
-Protenix JSON 构建、MSA/模板准备、自定义 CCD overlay、容器执行、
-权限归一、ipSAE 与亲和力后处理、归档。
-"""
 from __future__ import annotations
 
 import json
@@ -156,7 +150,6 @@ class ProtenixBackend(StructureBackend):
 
         protenix_results_root = resolve_backend_results_root(self.name, ctx.task_id, temp_dir)
         protenix_work_root = resolve_backend_work_root(protenix_results_root)
-        # preset 合并后的分子表可能比 raw 请求多出酰胺化条目，按合并表再校验
         _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
         linker_codes = [c for c in _detect_bicyclic_linker_codes(yaml_content)
                         if get_linker(c).protenix_overlay]
@@ -191,7 +184,6 @@ class ProtenixBackend(StructureBackend):
         os.makedirs(protenix_msa_dir, exist_ok=True)
 
         try:
-            # MSA 解析只需序列；去掉约束避免 AF3 解析器拒绝其不建模的类型
             msa_yaml_data = yaml.safe_load(yaml_content) or {}
             if isinstance(msa_yaml_data, dict):
                 msa_yaml_data.pop("constraints", None)
@@ -231,7 +223,6 @@ class ProtenixBackend(StructureBackend):
         if assigned_count:
             print(f"已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
 
-        # 用户模板注册：仅当至少一条蛋白链挂到模板时开启 use_template
         use_template = _stage_protenix_user_templates(
             template_payloads or [],
             protenix_json,
@@ -306,8 +297,6 @@ class ProtenixBackend(StructureBackend):
         protenix_container_env = [
             f"PYTHONPATH={container_app_dir}",
             "PROTENIX_ROOT_DIR=/cache",
-            # 降低 CUDA 分配器碎片化（PyTorch 缓存已释放块；大 pair/template
-            # 张量留下空洞导致下个 ~1GB 分配 OOM）。零速度成本。
             "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
         ]
         if low_vram:
@@ -361,8 +350,6 @@ class ProtenixBackend(StructureBackend):
             "--use_msa", "true" if effective_use_msa else "false",
         ])
         if use_template:
-            # 模板目录与 release_dates 覆盖文件由 _stage_protenix_user_templates
-            # 按任务生成，默认 /cache 路径不含用户模板的合成 ID。
             docker_command.extend([
                 "--use_template", "True",
                 "--data.template.prot_template_mmcif_dir", _PROTENIX_TEMPLATE_CONTAINER_DIR,
@@ -372,8 +359,6 @@ class ProtenixBackend(StructureBackend):
         if seed is not None:
             docker_command.extend(["--seeds", str(int(seed))])
         if linker_codes and os.environ.get("PROTENIX_DISABLE_TFG", "") != "1":
-            # 链接器配体需要 TFG 引导：protenix 默认关闭 guidance，没有化学
-            # 约束的 CCD 配体将被直接采样。RDKit 约束套件随同一配置附带权重。
             docker_command.extend(["--sample_diffusion.guidance.enable", "True"])
         docker_command.extend(infer_extra_args)
 
@@ -384,15 +369,12 @@ class ProtenixBackend(StructureBackend):
         protenix_log_path = str(protenix_results_root / "protenix_docker.log")
         return_code, output_tail_text = run_docker_streaming(docker_command, protenix_log_path)
 
-        # 官方镜像默认 root；归一化挂载临时目录属主以便宿主清理
         _normalize_protenix_output_permissions(
             temp_dir=temp_dir,
             image=image,
             paths=[protenix_input_dir, protenix_output_dir, protenix_log_path],
         )
 
-        # overlay（合并 CCD + 硬链 common cache）仅为容器挂载存在；容器退出后
-        # 立即清理，避免结果根下每任务累积数 GB。
         if protenix_common_overlay_root is not None and protenix_common_overlay_root.is_dir():
             overlay_unique_bytes = 0
             try:
@@ -468,7 +450,6 @@ class ProtenixBackend(StructureBackend):
                 explicit_ligand_chain=ipsae_ligand_chain_id,
             )
             extra_files.extend(ipsae_entries)
-            # IPSAE json 镜像进引擎输出目录：候选解析器扫描 protenix/output/**
             if ipsae_entries:
                 ipsae_mirror_dir = Path(protenix_output_dir) / "ipsae"
                 ipsae_mirror_dir.mkdir(parents=True, exist_ok=True)

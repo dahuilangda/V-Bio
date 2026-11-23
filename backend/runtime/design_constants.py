@@ -12,9 +12,6 @@ from __future__ import annotations
 
 import os
 
-# --- Residue code tables --------------------------------------------------
-# Three-letter-to-one-letter mapping shared by template prep, ipSAE chain
-# typing and affinity chain inference.
 AMINO_ACID_MAPPING = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
     "GLU": "E", "GLN": "Q", "GLY": "G", "HIS": "H", "ILE": "I",

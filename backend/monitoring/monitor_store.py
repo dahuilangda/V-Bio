@@ -642,8 +642,6 @@ class MonitorStore:
                 item["gpu_slots_total"] += worker["resources"]["gpu_slots_total"]
                 item["cpu_slots_total"] += worker["resources"]["cpu_slots_total"]
                 for slot in ("active", "reserved", "scheduled"):
-                    # 任务按已标注 capability 归属唯一桶；未标注只进 "other"，
-                    # 否则同一任务会在多个 capability 下重复计数。
                     matching = [task for task in worker["tasks"][slot]
                                 if task.get("capability") == capability]
                     item[f"{slot}_tasks"].extend(matching)

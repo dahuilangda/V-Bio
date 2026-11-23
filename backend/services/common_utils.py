@@ -17,7 +17,6 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
 
 
 def to_finite_float(value):
-    """Parse a number-or-string into a finite float; None when unusable."""
     try:
         parsed = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -26,7 +25,6 @@ def to_finite_float(value):
 
 
 def normalize_peptide_design_mode(raw) -> str:
-    """linear/cyclic/bicyclic 别名归一（cycle/ring、bicycle/bi-cyclic）。"""
     token = str(raw or "").strip().lower()
     if token in {"linear"}:
         return "linear"
@@ -38,8 +36,6 @@ def normalize_peptide_design_mode(raw) -> str:
 
 
 def error_payload(message: str, details=None) -> dict:
-    """用户安全的错误载荷：message 始终返回；内部细节仅在
-    EXPOSE_ERROR_DETAILS 开启时附带（服务端日志另由调用点负责）。"""
     from backend.core import config
     if details is not None and config.EXPOSE_ERROR_DETAILS:
         return {'error': message, 'details': str(details)}
@@ -84,10 +80,6 @@ def parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[i
         return int(value)
     except ValueError:
         return default
-
-
-
-
 
 
 def normalize_chain_id_list(value: Any) -> list[str]:

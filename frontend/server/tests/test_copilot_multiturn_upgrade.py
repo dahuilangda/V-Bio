@@ -4,7 +4,6 @@ These encode the structural gaps a simulated gemma4-strength planner exposed whe
 FULL loop (model call → audit → skill execution → replan → final-answer verification) through
 realistic complex conversations. The model's JSON turns are scripted to be CORRECT planner
 behavior; each test pins that the harness/planner machinery lets a competent plan complete:
-
   - OutlineBudgetScalingTests: a correctly-planned 6-step outline needs ~13 rounds — the fixed
     8-round budget used to kill it. The budget now scales with the outline.
   - DataAnswerEnrichmentTests: lookup answers used to leave the grammar-constrained short
@@ -495,8 +494,6 @@ class ComputeSkillUpgradeTests(unittest.TestCase):
             sequence_stats({"sequence": "12345678901"})
 
     def test_sequence_stats_consumes_observation_reference_in_loop(self):
-        # Resolve a sequence, then feed it to compute.sequence_stats via $fromObservation:
-        # the chain a "分子量多少" question should drive.
         assistant, session = make_assistant([
             turn("解析序列。", operations=[rop("r1", "uniprot.resolve", {"q": "P00533"})]),
             turn(

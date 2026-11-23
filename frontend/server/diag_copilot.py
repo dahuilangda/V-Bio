@@ -1,8 +1,3 @@
-"""Rerun selected scenarios and print every trace round.
-
-Not a test. Prints each round (model call, audit rejection, observations, terminal state)
-so a routing or capability failure can be traced to its cause.
-"""
 from __future__ import annotations
 
 import json

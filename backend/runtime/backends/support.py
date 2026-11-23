@@ -1,8 +1,3 @@
-"""后端共用基础设施：GPU 参数、结果目录布局。
-
-供 backends 子类与 run_single_prediction 双向使用，
-避免子类反向依赖调度模块。
-"""
 from __future__ import annotations
 
 import os
@@ -17,7 +12,6 @@ from backend.core.config import RESULTS_BASE_DIR
 
 
 def discover_cuda_devices() -> List[str]:
-    """返回宿主机可用的 CUDA 设备索引。"""
     devices: List[str] = []
     try:
         smi_proc = subprocess.run(
@@ -39,7 +33,6 @@ def discover_cuda_devices() -> List[str]:
 
 
 def determine_docker_gpu_arg(visible_devices: Optional[str]) -> str:
-    """校验 CUDA 可用性并构造 docker --gpus 参数。"""
     available = discover_cuda_devices()
     if not available:
         raise RuntimeError(

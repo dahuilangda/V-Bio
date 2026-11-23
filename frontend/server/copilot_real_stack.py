@@ -1,21 +1,3 @@
-"""Copilot checks against the deployed management API over HTTP.
-
-Unlike copilot_turn_matrix (in-process assistant), this goes through the running server:
-its loaded settings (real LLM, real database proxy) and every audit and gate compiled into
-the deployed process. Sessions are multi-turn: the context payload changes between turns,
-confirmation receipts are injected the way the frontend persists them, and cross-turn memory
-rides along (see buildCopilotConversationContext).
-
-Scenario groups:
-  S1  ambiguous entity (KLK, no isoform/organism): a choice that states identity; the user
-      picks; the create action is proposed in proposal wording, never as a completion claim
-  S2  recovery from receipts: an applied receipt lets the next turn propose the pocket box
-      the blocker names; a FAILED receipt is re-proposed corrected, never claimed done
-  S3  module matrix: pubchem / rcsb / uniprot / alphafold / chembl+compute / host actions
-  S4  status reporting grounded in receipts (no fabricated machine state)
-
-Run:  python copilot_real_stack.py [--base http://127.0.0.1:5055]
-"""
 from __future__ import annotations
 
 import copy
@@ -169,8 +151,6 @@ class RealStackSession:
                 target[key] = value
 
 
-# ── assertion helpers ────────────────────────────────────────────────────────────────────
-
 def state_is(expected):
     return lambda r: r.get("state") == expected
 
@@ -191,8 +171,6 @@ def question_options_match(pattern):
     def check(r):
         for q in (r.get("questions") or []):
             for opt in (q.get("options") or []):
-                # Identity lives in the label OR the hint (the retrieved title carries
-                # organism/protein — the harness-synthesized choices put it in hint).
                 if rx.search(str(opt.get("label") or "")) or rx.search(str(opt.get("hint") or "")):
                     return True
             if rx.search(str(q.get("text") or "")):
@@ -208,7 +186,6 @@ def msg_contains(pattern):
     return lambda r: bool(rx.search(str(r.get("content") or "")))
 
 def msg_lacks_completion_claims(r):
-    # No past-tense lifecycle claims: nothing has been applied in a pure proposal turn.
     return not re.search(r"(任务|项目|草稿)[^。！？!?\n]{0,32}?(已创建|已提交|已打开)", str(r.get("content") or ""))
 
 def trace_has(event):
@@ -235,8 +212,6 @@ APPLIED_SUBMIT_RECEIPT = [{
     "arguments": {},
 }]
 
-
-# ── scenarios ────────────────────────────────────────────────────────────────────────────
 
 def scenario_s1_ambiguity():
     s = RealStackSession("S1-klk", "task_list", TASK_LIST_AFFINITY)
@@ -297,13 +272,9 @@ def scenario_s3_modules():
         [("uniprot retrieved", obs_source("uniprot"))]))
     results.append(one("S3-alphafold", ("task_detail", TASK_DETAIL_PREDICTION),
         "给我人DHODH的AlphaFold预测模型",
-        # Accept: the model resolves (possibly via uniprot first), or reports an authoritative
-        # NO_MATCH and asks the fallback — but never a bare memory accession claim.
         [("alphafold resolved or fallback asked", lambda r: obs_source("alphafold")(r) or (r.get("state") == "needs_input" and bool(r.get("questions"))))]))
     results.append(one("S3-chembl-compute", ("project_list", {"page": {"contextType": "project_list"}, "summary": {"all": 1}}),
         "查BTK激酶的ChEMBL活性数据并计算平均IC50",
-        # Either the full retrieval+compute chain, or the identity contract fires first
-        # (BTK spans organisms — asking species/isoform BEFORE retrieving is correct).
         [("retrieval or identity determination", lambda r: obs_source("chembl")(r) or has_choice_question(r))]))
     results.append(one("S3-host-filter", ("task_list", TASK_LIST_WITH_ROWS),
         "只看失败的任务",
@@ -338,7 +309,6 @@ def main():
     print("\n=== S4 receipt-grounded status ===", flush=True)
     sessions.append(scenario_s4_receipt_grounded_status())
 
-    # module one-shots return results (dicts), sessions return session objects — normalize
     all_results = []
     for item in sessions:
         if isinstance(item, RealStackSession):

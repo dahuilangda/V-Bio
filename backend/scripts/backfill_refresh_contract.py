@@ -1,5 +1,3 @@
-"""重提 alphafold3/protenix/mol1 成功行 compact 指标并合并写入 confidence；
-pair ipSAE 在此跳过，由 backfill_refresh_ipsae.py 补齐。"""
 import json, os, sys, threading, logging
 from concurrent.futures import ThreadPoolExecutor
 

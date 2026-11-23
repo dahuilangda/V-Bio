@@ -984,10 +984,6 @@ class ProgressiveDisclosureTests(unittest.TestCase):
         self.assertIn("Never invent or complete field values from memory", prompt)
 
     def test_system_prompt_load_bearing_sections_present(self):
-        # Measured with the real model (3 runs × 3 scenarios): the deployed planner model
-        # depends on the explicit sourcing and discipline sections. Without them target-by-name
-        # passed 1/3 and sequence-by-name 0/3; the full prompt passed 9/9. Do not remove these
-        # sections. Revisit only together with a model upgrade and a rerun of diag_copilot.py.
         payload = {"page": {"contextType": "task_detail", "workflowKey": "prediction"}, "project": {"id": "p"}}
         responses = [_turn("好的。"), "好的。"]
         assistant, session = make_assistant(responses)

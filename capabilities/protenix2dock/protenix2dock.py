@@ -2,7 +2,6 @@
 """protenix2dock — protein-ligand structure workflow on the Protenix engine.
 
 Six modes with Boltz2Score-compatible semantics:
-
     score      score an input complex as-is (diffusion bypassed)
     pose       refine around the input pose        (sigma_max 0.02)
     refine     general flexible refinement         (sigma_max 0.03)
@@ -227,11 +226,6 @@ def split_complex_file(complex_path: Path, work_dir: Path):
 
 
 def _restore_ligand_bond_orders(mol, ligand) -> None:
-    """PDB 无键级信息：MolFromPDBFile 的近似成键把芳香/双键全部写成单键。
-
-    按残基名从 CCD rdkit 缓存取模板，AssignBondOrdersFromTemplate 回填真实
-    键级；无模板的残基响亮报错——静默输出错误分子比失败更有害。
-    """
     import pickle
 
     from rdkit.Chem import AllChem

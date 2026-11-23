@@ -1,4 +1,3 @@
-"""结构后端抽象层：请求解析、约束能力门禁、注册表。"""
 import unittest
 
 from backend.runtime.backends import structure_backend
@@ -80,8 +79,6 @@ if __name__ == "__main__":
 
 
 class ModificationSupportTests(unittest.TestCase):
-    """修饰能力矩阵声明与 base 校验行为一致。"""
-
     def test_mol1_supports_standard_ccd_and_custom_upload(self):
         from backend.core.engine_capabilities import engine_modification_support
         support = engine_modification_support("mol1")

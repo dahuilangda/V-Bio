@@ -6,7 +6,6 @@ prediction request (boltz-style sequences + constraints), folds it with
 ESMFold2, and writes results in the mol1/protenix output contract so the
 platform's downstream (result archive metrics, PAE heatmap, ipSAE, MSA
 depth) consumes it unchanged:
-
   <output>/input/seed_<seed>/predictions/
     input_sample_<i>.cif                      all-atom model
     input_full_data_sample_<i>.json           token_pair_pae, token_asym_id,
@@ -53,10 +52,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def inject_custom_ccd(request) -> None:
-    """自定义残基注入 esm CCD 表（本进程内，按任务隔离）。
-
-    编码已由平台在申请 GPU 前对照本引擎的 CCD 表改过名，这里只构建与注入。
-    """
     from backend.runtime.custom_ccd_builder import _build_custom_ccd_mol
     from esm.models.esmfold2.conformers import load_ccd
 
@@ -137,8 +132,6 @@ def build_sequences(request: PredictionRequest) -> list:
 
 
 def build_covalent_bonds(request: PredictionRequest, sequences: list) -> list:
-    """平台 bond 约束 -> SDK CovalentBond；原子名到位置的映射
-    委托 SDK tokenizer 预扫，自动处理离去基剥离与修饰残基原子序。"""
     from collections import defaultdict
 
     from esm.models.esmfold2 import CovalentBond, StructurePredictionInput
@@ -150,7 +143,6 @@ def build_covalent_bonds(request: PredictionRequest, sequences: list) -> list:
         end1 = (bond.chain1, bond.residue1, bond.atom1)
         end2 = (bond.chain2, bond.residue2, bond.atom2)
         ends.append((end1, end2))
-        # 占位键触发共价链的离去基剥离，使原子表与正式运行一致
         placeholder_bonds.append(CovalentBond(
             chain_id1=end1[0], res_idx1=end1[1] - 1, atom_idx1=0,
             chain_id2=end2[0], res_idx2=end2[1] - 1, atom_idx2=0))

@@ -1,8 +1,3 @@
-"""肽设计后端编排：提案、细化、D/L 双空间精修与候选归档。
-
-原 run_peptide_design_backend 及其辅助簇（run_single_prediction.py）
-整体迁入。调度符号经模块 __getattr__ 从 run_single_prediction 惰性解析。
-"""
 from __future__ import annotations
 
 import base64
@@ -50,13 +45,10 @@ from backend.runtime.msa_pipeline import (
 )
 
 
-# 能力目录挂载（与 run_single_prediction 同规则；脚本本体依赖其下模块路径）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = PROJECT_ROOT / "capabilities"
 if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
     sys.path.insert(0, str(CAPABILITIES_DIR))
-
-
 
 
 def _resolve_capability_dir(name: str) -> Path:
@@ -157,8 +149,6 @@ _BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IG
 _PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
 
 
-
-
 def _a3m_has_sequence_content(content: str) -> bool:
     saw_header = False
     for raw_line in sanitize_a3m_content(content).splitlines():
@@ -171,8 +161,6 @@ def _a3m_has_sequence_content(content: str) -> bool:
         if saw_header and any(ch not in {"-", "."} for ch in line):
             return True
     return False
-
-
 
 
 def find_results_dir(base_dir: str) -> str:
@@ -214,8 +202,6 @@ def find_results_dir(base_dir: str) -> str:
     )
 
 
-
-
 def _extract_peptide_candidate_archive_for_metrics(candidate_dir: str, archive_path: str) -> str:
     candidate_root = str(candidate_dir or "").strip()
     if not candidate_root:
@@ -240,15 +226,10 @@ def _extract_peptide_candidate_archive_for_metrics(candidate_dir: str, archive_p
             f"Peptide candidate archive is not a valid zip: {archive_file}"
         ) from exc
 
-    # parse_confidence_metrics expects af3/ or protenix/ as a direct child of the result root.
-    # If the extracted archive contains af3/ or protenix/ at the top level, return extract_root
-    # so that parse_confidence_metrics can find them at root_path / "af3" (or "protenix").
     if (extract_root / "af3").is_dir() or (extract_root / "protenix").is_dir():
         return str(extract_root)
 
     return find_results_dir(str(extract_root))
-
-
 
 
 def _extract_protein_chain_lengths_from_yaml(yaml_data: Dict[str, Any]) -> Dict[str, int]:
@@ -276,8 +257,6 @@ def _extract_protein_chain_lengths_from_yaml(yaml_data: Dict[str, Any]) -> Dict[
     return chain_lengths
 
 
-
-
 def _read_int_option(
     options: Dict[str, Any],
     key: str,
@@ -294,8 +273,6 @@ def _read_int_option(
     return max(min_value, min(max_value, parsed))
 
 
-
-
 def _read_bool_option(options: Dict[str, Any], key: str, default: bool) -> bool:
     raw = options.get(key, default)
     if isinstance(raw, bool):
@@ -310,27 +287,19 @@ def _read_bool_option(options: Dict[str, Any], key: str, default: bool) -> bool:
     return default
 
 
-
-
 def _normalize_peptide_design_mode(raw: Any) -> str:
     from backend.services.common_utils import normalize_peptide_design_mode
     return normalize_peptide_design_mode(raw)
 
 
-
-
 def _normalize_peptide_backend(raw: Any) -> str:
     token = str(raw or "").strip().lower()
     if token == "rfd4":
-        # rfd4 是设计引擎，不是打分后端；静默映射成 boltz 会误导验证结论
         raise ValueError(
             "rfd4 不能作为打分后端：请用 peptideProposerBackend=rfd4 指定设计引擎，"
             "并以 peptideScorerBackend 选择 mol1/protenix/alphafold3。")
     if token in {"alphafold3", "protenix", "mol1", "esmfold2"}:
         return token
-    # docking engines map onto their corresponding full predictors at the
-    # engine level (queue selection, prediction calls); the docking semantics
-    # themselves are carried by _is_docking_peptide_backend / peptideChirality
     if token in {"protenix2dock", "protenix-2-dock"}:
         return "protenix"
     if token in {"mol1dock", "mol-1-dock", "mol-1"}:
@@ -338,35 +307,16 @@ def _normalize_peptide_backend(raw: Any) -> str:
     return "boltz"
 
 
-
-
 def _is_docking_peptide_backend(raw: Any) -> bool:
-    """Structure-based peptide docking engines (protenix2dock; boltz2dock 与
-mol1dock 已下线，token 仅为历史任务行保留).
-
-    They map onto the corresponding full predictors at the engine level but
-    carry docking semantics: a target structure is required (uploaded, or
-    predicted first with the full engine when absent) and D-peptide design
-    (mirror workflow) is available.
-    """
     return str(raw or "").strip().lower() in {"boltz2dock", "boltz-2-dock",
                                               "protenix2dock", "protenix-2-dock",
                                               "mol1dock", "mol-1-dock"}
 
 
-# Legacy shape derived from the unified linker registry (bicyclic_linkers.py)
 BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = bicyclic_linkers.atom_map()
 
 
-
-
 def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[int, int]]:
-    """Author-to-sequence residue numbering per YAML chain.
-
-    Returns {query_chain_id: {author_resnum: 1-based_sequence_position}} built
-    by aligning each YAML chain sequence against the uploaded template chains.
-    Chains without a resolvable template are absent from the result.
-    """
     templates = yaml_data.get("templates")
     if not isinstance(templates, list) or not templates:
         return {}
@@ -397,10 +347,6 @@ def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[in
         if not template_chains:
             continue
 
-        # No chain meta (bare template_files upload): align every YAML chain
-        # against every template chain and keep the best match per query
-        # chain. Contacts then use template chain names/author numbers, so
-        # each template chain's map is stored under its own name as well.
         query_candidates = chain_ids or sorted(chain_seq_map)
         for query_chain in query_candidates:
             query_seq = str(chain_seq_map.get(query_chain) or "").strip()
@@ -429,16 +375,10 @@ def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[in
     return mapping_by_chain
 
 
-
-
-
-
 def _load_template_chain_mappings(
     template_path: Path,
     preferred_chain: Optional[str] = None,
 ) -> List[Tuple[str, str, List[int]]]:
-    """All polymer chains of a template as (chain name, sequence, author
-    residue numbers); the preferred chain, if present, comes first."""
     structure = gemmi.read_structure(str(template_path))
     structure.setup_entities()
     if len(structure) == 0:
@@ -469,10 +409,6 @@ def _load_template_chain_mappings(
     return chains
 
 
-
-
-
-
 def _linker_ccd_mols(codes: Iterable[str]) -> Dict[str, Chem.Mol]:
     pkl_path = Path(__file__).resolve().parent / "linker_ccd" / "linker_mols.pkl"
     if not pkl_path.is_file():
@@ -485,8 +421,6 @@ def _linker_ccd_mols(codes: Iterable[str]) -> Dict[str, Chem.Mol]:
     if missing:
         raise KeyError(f"Bicyclic linker mols missing for: {missing}")
     return {code: mols[code] for code in codes}
-
-
 
 
 def _extract_chain_ids_from_yaml(yaml_data: Dict[str, Any]) -> List[str]:
@@ -515,8 +449,6 @@ def _extract_chain_ids_from_yaml(yaml_data: Dict[str, Any]) -> List[str]:
     return chain_ids
 
 
-
-
 def _next_available_chain_id(used_chain_ids: List[str], preferred: str) -> str:
     token = str(preferred or "").strip()
     if token and token not in used_chain_ids:
@@ -533,11 +465,7 @@ def _next_available_chain_id(used_chain_ids: List[str], preferred: str) -> str:
         suffix += 1
 
 
-
-
 def _pocket_residue_letters(pocket_contacts, yaml_data, target_chain_id):
-    """One-letter codes for the user's pocket residues from the target chain's
-    sequence — the chemistry profile for warm-start seed construction."""
     if not pocket_contacts:
         return ""
     seq_by_pos = {}
@@ -554,8 +482,6 @@ def _pocket_residue_letters(pocket_contacts, yaml_data, target_chain_id):
                 seq_by_pos[int(pos)] = seq[int(pos) - 1]
         break
     return "".join(seq_by_pos.get(p, "X") for _, p in sorted(pocket_contacts))
-
-
 
 
 def _normalize_sequence_mask(raw_mask: Any, binder_length: int) -> str:
@@ -577,11 +503,7 @@ def _normalize_sequence_mask(raw_mask: Any, binder_length: int) -> str:
     return mask
 
 
-
-
 def _mask_fixed_edges(mask: str) -> tuple[str, str]:
-    """掩码两端的固定残基段(首个/末个 X 之前的部分)。固定段是用户设计,
-    序列质量检查与排除名单都须豁免。"""
     prefix = ""
     for ch in mask or "":
         if ch == "X":
@@ -595,11 +517,7 @@ def _mask_fixed_edges(mask: str) -> tuple[str, str]:
     return prefix, suffix
 
 
-
-
 def _normalize_excluded_aas(raw: Any) -> List[str]:
-    """用户排除的氨基酸(omit_AAs 式)。接受列表或逗号/空白分隔串, 归一化
-    为 20 种天然氨基酸单字母的去重排序; 含非法字母抛 ValueError。"""
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -616,14 +534,7 @@ def _normalize_excluded_aas(raw: Any) -> List[str]:
     return excluded
 
 
-
-
 def _adapt_mask_to_length(mask: str, length: int) -> Optional[str]:
-    """把掩码适配到目标长度: 两端固定段保留, 自由 X 段伸缩。
-
-    仅当全部固定残基都落在两端时安全(双环 CREEEC+自由段+C); 中部
-    还有固定残基(如额外锚点 Cys)的掩码无法伸缩, 返回 None, 调用方
-    退回按原掩码处理。"""
     if "X" not in mask:
         return None
     prefix, suffix = _mask_fixed_edges(mask)
@@ -635,14 +546,11 @@ def _adapt_mask_to_length(mask: str, length: int) -> Optional[str]:
     return prefix + "X" * free + suffix
 
 
-
-
 def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     if not sequence_mask:
         return sequence
     mask = sequence_mask
     if len(sequence) != len(mask):
-        # 掩码与候选长度不等(长度窗口所致): 伸缩适配失败时沿用原掩码。
         adapted = _adapt_mask_to_length(mask, len(sequence))
         if adapted is not None:
             mask = adapted
@@ -652,18 +560,12 @@ def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
             break
         if mask_char != "X":
             seq_chars[idx] = mask_char
-    # a bicyclic topology needs exactly the masked cysteines: ESM3's
-    # mutation path can propose Cys at free positions, tripping the
-    # "exactly 3" validation downstream. Free positions never carry Cys,
-    # and anything past the mask length is dropped.
     if "C" in mask:
         for idx, mask_char in enumerate(mask):
             if mask_char == "X" and idx < len(seq_chars) and seq_chars[idx] == "C":
                 seq_chars[idx] = "S"
         seq_chars = seq_chars[:len(mask)]
     return "".join(seq_chars)
-
-
 
 
 def _substitute_ncaa_residues(
@@ -675,12 +577,6 @@ def _substitute_ncaa_residues(
     cys_positions: List[int],
     rng: random.Random,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """Overlay user-selected non-natural residues onto the proposer's
-    standard-20 backbone. The sequence keeps standard base letters; the
-    modifications list tells protenix which positions carry a CCD
-    substitution. Protenix's CCD coverage provides the generalization;
-    the LoRA adapter learns which substitutions improve binding from
-    the GRPO reward."""
     if not unnatural_pool or nonnatural_max <= 0:
         return sequence, modifications
     protected = {int(p) for p in cys_positions}
@@ -688,8 +584,6 @@ def _substitute_ncaa_residues(
     available = [i for i in range(len(sequence)) if i not in protected]
     rng.shuffle(available)
 
-    # placement rules: "n_term" locks to the first residue, "c_term" to the
-    # last; "any" takes the remaining slots
     n_term = [e for e in unnatural_pool if e.get("placement") == "n_term"]
     c_term = [e for e in unnatural_pool if e.get("placement") == "c_term"]
     any_pool = [e for e in unnatural_pool
@@ -731,8 +625,6 @@ def _substitute_ncaa_residues(
     return sequence, mods
 
 
-
-
 def _stamp_bicyclic_cysteines(
     sequence: str,
     *,
@@ -742,13 +634,6 @@ def _stamp_bicyclic_cysteines(
     allow_extra_cys: bool,
     resolve_anchors: Callable[[int, Optional[dict], tuple, Optional[dict]], Optional[tuple]],
 ) -> Tuple[str, List[int]]:
-    """Stamp the bicyclic anchor cysteines onto a proposed sequence.
-
-    The ESM3 proposer samples raw sequences with no notion of bicyclic
-    topology, while the candidate YAML builder accepts exactly 3 Cys at the
-    anchor positions. Anchors are stamped C; stray Cys outside anchors
-    demote to A (mirrors peplm.loop.constraints.apply_post_edit).
-    """
     chars = list(sequence)
     length = len(chars)
     if length < 5:
@@ -826,7 +711,6 @@ PEPTIDE_PRESET_PLACEMENT_RULES = {
 }
 
 
-
 def _merge_peptide_preset_molecules_by_code(
     custom_molecules: List[Dict[str, str]],
     ccd_codes: Iterable[str],
@@ -849,8 +733,6 @@ def _merge_peptide_preset_molecules_by_code(
     return merged
 
 
-
-
 def _merge_selected_peptide_preset_molecules(
     custom_molecules: List[Dict[str, str]],
     unnatural_pool: List[Dict[str, str]],
@@ -869,7 +751,6 @@ def merge_referenced_preset_molecules(
     custom_molecules: List[Dict[str, str]],
     yaml_content: str,
 ) -> List[Dict[str, str]]:
-    """yaml 修饰位引用、而自定义表里没有的 preset，补入其定义。"""
     data = yaml.safe_load(yaml_content) or {}
     referenced: List[str] = []
     for entry in (data.get("sequences") or []) if isinstance(data, dict) else []:
@@ -916,9 +797,6 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
                     if kind == "preset":
                         placement = PEPTIDE_PRESET_PLACEMENT_RULES.get(code, "any")
                     else:
-                        # A C-terminal amidated custom residue has no leaving atom on its backbone C,
-                        # so it can only sit at the C-terminus: placement == "c_term"
-                        # (the PeptideLM decoder enforces last-position only).
                         custom_def = custom_by_code.get(code, {})
                         placement = "c_term" if bool(custom_def.get("cTerminalAmidated") or False) else "any"
                     unnatural.append({
@@ -938,8 +816,6 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
     return natural, unnatural
 
 
-
-
 def _peptide_allowed_residues(natural_pool: List[str], design_mode: str) -> List[str]:
     residues: List[str] = []
     for aa in natural_pool:
@@ -956,8 +832,6 @@ def _peptide_allowed_residues(natural_pool: List[str], design_mode: str) -> List
     return residues
 
 
-
-
 def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     seq = str(sequence or "").upper()
     length = max(1, len(seq))
@@ -967,8 +841,6 @@ def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[L
     pro_gly_ratio = sum(counts.get(aa, 0) for aa in "PG") / length
     max_run = 1
     run = 1
-    # run>=4 阈值与 peplm.sequence_quality._MIN_RUN 联动: 本处按可开发性
-    # 计一层惩罚, 序列门禁再按预测器虚高置信计一层, 两处需同步修改。
     for idx in range(1, len(seq)):
         if seq[idx] == seq[idx - 1]:
             run += 1
@@ -999,13 +871,7 @@ def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[L
     }
 
 
-
-
 def _extract_peptide_plddts(structure_file) -> list:
-    """Per-residue pLDDT for the peptide chain, read from the CA B-factor
-    column of the refined structure (protenix writes plddt*100 there).
-    Returns [] on any failure — the proposer treats empty plddts as
-    uniform weight (no pLDDT guidance), matching the pre-upgrade path."""
     try:
         st = gemmi.read_structure(str(structure_file))
         st.setup_entities()
@@ -1020,8 +886,6 @@ def _extract_peptide_plddts(structure_file) -> list:
             for r in pep
             if r.het_flag != "H" and r.find_atom("CA", "*") is not None
         ]
-        # Staged PDB writers leave B-factor at 0.0 — fall back to the
-        # engine's CIF in the same directory (protenix writes plddt there)
         if plddts and max(plddts) < 0.01:
             for cif in Path(structure_file).parent.glob("*.cif"):
                 try:
@@ -1035,14 +899,10 @@ def _extract_peptide_plddts(structure_file) -> list:
         return []
 
 
-
-
 def _peptide_sequence_similarity(seq_a: str, seq_b: str) -> float:
     if not seq_a or not seq_b or len(seq_a) != len(seq_b):
         return 0.0
     return sum(1 for aa, bb in zip(seq_a, seq_b) if aa == bb) / max(1, len(seq_a))
-
-
 
 
 def _peptide_rank_score(row: Dict[str, Any]) -> float:
@@ -1052,15 +912,11 @@ def _peptide_rank_score(row: Dict[str, Any]) -> float:
     return float("-inf")
 
 
-
-
 def _peptide_float(row: Dict[str, Any], key: str, default: float = 0.0) -> float:
     value = row.get(key)
     if isinstance(value, (int, float)) and math.isfinite(float(value)):
         return float(value)
     return default
-
-
 
 
 def _peptide_objectives(row: Dict[str, Any]) -> Tuple[float, float, float, float]:
@@ -1072,14 +928,10 @@ def _peptide_objectives(row: Dict[str, Any]) -> Tuple[float, float, float, float
     )
 
 
-
-
 def _peptide_dominates(row_a: Dict[str, Any], row_b: Dict[str, Any]) -> bool:
     obj_a = _peptide_objectives(row_a)
     obj_b = _peptide_objectives(row_b)
     return all(a >= b for a, b in zip(obj_a, obj_b)) and any(a > b for a, b in zip(obj_a, obj_b))
-
-
 
 
 def _peptide_non_dominated_fronts(results: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -1116,8 +968,6 @@ def _peptide_non_dominated_fronts(results: List[Dict[str, Any]]) -> List[List[Di
     return fronts
 
 
-
-
 def _peptide_crowding_distance(front: List[Dict[str, Any]]) -> Dict[int, float]:
     distances = {idx: 0.0 for idx in range(len(front))}
     if len(front) <= 2:
@@ -1138,8 +988,6 @@ def _peptide_crowding_distance(front: List[Dict[str, Any]]) -> Dict[int, float]:
             next_value = values[order[rank_idx + 1]]
             distances[order[rank_idx]] += (next_value - prev_value) / span
     return distances
-
-
 
 
 def _select_nsga2_peptide_elites(results: List[Dict[str, Any]], elite_size: int) -> List[Dict[str, Any]]:
@@ -1179,12 +1027,8 @@ def _select_nsga2_peptide_elites(results: List[Dict[str, Any]], elite_size: int)
     return selected[:elite_size]
 
 
-
-
 def _peptide_candidate_key(sequence: str, modifications: List[Dict[str, Any]]) -> str:
     return f"{sequence}|{json.dumps(modifications, sort_keys=True, separators=(',', ':'))}"
-
-
 
 
 def _normalize_initial_sequence(
@@ -1193,8 +1037,6 @@ def _normalize_initial_sequence(
     binder_length: int,
     sequence_mask: str,
 ) -> str:
-    """User seed sequence for generation 1: A-Z only, padded/truncated to the
-    binder length, then overlaid with the fixed-position mask."""
     cleaned = "".join(ch for ch in str(raw_sequence or "").upper() if "A" <= ch <= "Z")
     if not cleaned:
         raise ValueError("peptideUseInitialSequence 已启用，但 peptideInitialSequence 为空。")
@@ -1203,8 +1045,6 @@ def _normalize_initial_sequence(
     else:
         cleaned = cleaned[:binder_length]
     return _apply_sequence_mask(cleaned, sequence_mask)
-
-
 
 
 def _build_peptide_candidate_yaml(
@@ -1226,10 +1066,6 @@ def _build_peptide_candidate_yaml(
 ) -> str:
     yaml_data = copy.deepcopy(base_yaml_data)
     if binder_only:
-        # D-route conformer prediction: the isolated candidate only (ring,
-        # linker and NCAA topology included) — the receptor never enters a
-        # de novo complex prediction. Constraints reference the target chain
-        # by name and would crash the isolated prediction.
         yaml_data["sequences"] = []
         yaml_data.pop("templates", None)
         yaml_data.pop("properties", None)
@@ -1242,10 +1078,6 @@ def _build_peptide_candidate_yaml(
         "protein": {
             "id": binder_chain_id,
             "sequence": binder_sequence,
-            # Binder MSA policy (user directive: MSA everywhere): the orchestrator
-            # pre-fetches this candidate's MSA into the shared cache and passes the a3m
-            # path here (PROVIDED mode — the worker needs no server round trip). When the
-            # search fails for this one candidate, "empty" keeps the run alive.
             "msa": binder_msa,
         }
     }
@@ -1258,8 +1090,6 @@ def _build_peptide_candidate_yaml(
             if not ccd:
                 continue
             base_residue = str(item.get("baseResidue") or item.get("base_residue") or "").strip().upper()[:1]
-            # 修饰位置来自提案期序列；最终链长可能不同。
-            # 酰胺化残基锚到交付 C 端，其余限制在链内。
             seq_len = len(binder_sequence)
             position = int(item.get("position") or item.get("ptmPosition") or 1)
             if amidated_ccds and ccd in amidated_ccds:
@@ -1276,9 +1106,6 @@ def _build_peptide_candidate_yaml(
         if _normalize_peptide_backend(backend) == "boltz":
             binder_entry["protein"]["cyclic"] = True
         else:
-            # AF3/Protenix have no native cyclic flag; express head-to-tail cyclization
-            # as an explicit N(1)-C(L) bond (adapters map YAML bonds → bondedAtomPairs /
-            # covalent_bonds).
             constraints = yaml_data.get("constraints")
             if not isinstance(constraints, list):
                 constraints = []
@@ -1336,19 +1163,12 @@ def _build_peptide_candidate_yaml(
     return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
 
 
-
-
 def _materialize_candidate_template_paths(
     base_yaml_data: Dict[str, Any],
     *,
     candidate_dir: str,
     temp_dir: str,
 ) -> Dict[str, Any]:
-    """
-    Copy template files into candidate-local directory and rewrite template paths.
-    This guarantees each peptide worker can access template files via its own mounted
-    `candidate_dir` without depending on parent-task runtime paths.
-    """
     yaml_data = copy.deepcopy(base_yaml_data)
     template_entries = yaml_data.get("templates")
     if not isinstance(template_entries, list) or not template_entries:
@@ -1378,7 +1198,6 @@ def _materialize_candidate_template_paths(
         if source_path.is_absolute():
             candidates.append(source_path)
         else:
-            # Relative template paths are resolved against task temp root first.
             candidates.append(Path(temp_dir) / source_path)
             candidates.append(source_path)
 
@@ -1408,8 +1227,6 @@ def _materialize_candidate_template_paths(
 
     yaml_data["templates"] = rewritten_entries
     return yaml_data
-
-
 
 
 def _select_primary_structure_file(results_dir: str) -> Optional[Path]:
@@ -1447,8 +1264,6 @@ def _select_primary_structure_file(results_dir: str) -> Optional[Path]:
     return sorted(candidates, key=_score)[0]
 
 
-
-
 def _write_peptide_progress(progress_path: Optional[str], payload: Dict[str, Any]) -> None:
     if not progress_path:
         return
@@ -1458,8 +1273,6 @@ def _write_peptide_progress(progress_path: Optional[str], payload: Dict[str, Any
         path_obj.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         print(f"[WARN] Failed to write peptide progress file: {exc}", file=sys.stderr)
-
-
 
 
 def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
@@ -1479,8 +1292,6 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
         seen.add(parsed)
         normalized.append(parsed)
     return normalized
-
-
 
 
 def _execute_peptide_generation_jobs(
@@ -1565,10 +1376,7 @@ def _run_dpeptide_refine_stage(
         poll_interval=poll_interval)
 
 
-
-
 def _dpeptide_target_sequence(base_yaml_data: Dict[str, Any], target_chain_id: str) -> str:
-    """First (or requested) protein chain sequence from the design YAML."""
     target = (target_chain_id or "").strip()
     fallback = ""
     for block in base_yaml_data.get("sequences", []) or []:
@@ -1587,13 +1395,7 @@ def _dpeptide_target_sequence(base_yaml_data: Dict[str, Any], target_chain_id: s
     raise ValueError("D-peptide design requires a protein target chain in the input YAML.")
 
 
-
-
 def _dpeptide_uploaded_target_structure(predict_args: Dict[str, Any], out_dir: Path) -> Optional[Path]:
-    """First uploaded template structure file, decoded to disk.
-
-    Deterministic pick: entries arrive in upload order; extras are ignored
-    (logged once at the call site via returned metadata when needed)."""
     for entry in predict_args.get("template_inputs") or []:
         content = entry.get("content_base64") if isinstance(entry, dict) else None
         if not content:
@@ -1610,18 +1412,7 @@ def _dpeptide_uploaded_target_structure(predict_args: Dict[str, Any], out_dir: P
     return None
 
 
-
-
 def _seed_single_sequence_binder_msas(sequences: List[str]) -> int:
-    """Write query-only a3m entries into the shared MSA cache for de novo
-    binders, keyed exactly like input_prep.resolve_msa reads them.
-
-    Single-sequence policy made durable: on a cache miss the engine falls
-    through to the MSA server (30-min hard timeout under GPU starvation);
-    a seeded self-only a3m gives it the official N_msa=1 cache hit instead.
-    Existing entries are never overwritten — a real cached MSA (e.g. a seed
-    sequence fetched by the prefetch path) always wins.
-    """
     cache_dir = MSA_CACHE_CONFIG["cache_dir"]
     if not MSA_CACHE_CONFIG.get("enable_cache", True):
         return 0
@@ -1651,21 +1442,10 @@ def _seed_single_sequence_binder_msas(sequences: List[str]) -> int:
     return seeded
 
 
-
-
 def _prefetch_generation_binder_msas(
     sequences: List[str],
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> Dict[str, str]:
-    """Binder MSAs for one generation, deduped and fetched concurrently.
-
-    Serial per-candidate prefetch would stack population_size MSA searches of
-    pure wall time onto every generation; the searches are HTTP-bound, so a
-    small thread pool overlaps them (cache hits return instantly — elites and
-    repeated proposals dominate later generations). ``on_progress(done, total)``
-    fires after each search lands so the task status can show the prefetch
-    instead of a silent multi-minute stall before the first candidates.
-    """
     unique = list(dict.fromkeys(str(s or "").strip().upper() for s in sequences if str(s or "").strip()))
     if not unique:
         return {}
@@ -1695,30 +1475,16 @@ def _prefetch_generation_binder_msas(
     return assignments
 
 
-
-
 def _dpeptide_predict_target_structure(
     sequence: str,
     backend: str,
     work_dir: Path,
     seed: int,
 ) -> Path:
-    """Full-structure prediction of the L-target when nothing was uploaded.
-
-    boltz2dock -> boltz2 predict (local venv); protenix2dock -> Protenix
-    docker.
-    """
     work_dir.mkdir(parents=True, exist_ok=True)
     fasta = work_dir / "target.fasta"
     fasta.write_text(f">target\n{sequence}\n")
 
-    # Single-engine policy (no cross-engine fallback): boltz2dock uses the
-    # Boltz-2 predictor; protenix2dock uses Protenix. A failure surfaces so it
-    # can be fixed at the root.
-    # Orchestrator containers carry neither the Boltz2Score venv nor a docker
-    # CLI — the target-structure prediction is dispatched as a standard
-    # predict_task to the selected engine's GPU queue, and its result archive
-    # lands on the shared results volume where this loop reads it back.
     from backend.core.celery_app import celery_app as _celery
 
     yaml_min = (
@@ -1730,14 +1496,6 @@ def _dpeptide_predict_target_structure(
 
     from backend.worker.tasks import predict_task  # same entry used by routes
 
-    # Receptor-MSA prefetch on the CPU side (this orchestrator holds no GPU):
-    # the dispatched prediction task resolves its MSA INSIDE its GPU lease, so
-    # a cache miss there + a full GPU pool forms a circular wait — every
-    # refine wave holds all cards while the target's mmseqs search queues
-    # behind them, and vice versa on a design task).
-    # Seeding the shared cache (prediction-side plain key msa_<md5>.a3m)
-    # turns the in-task fetch into a cache hit. Failure is non-fatal: the
-    # sub-task retries in-task exactly as before this prefetch existed.
     try:
         _h = get_sequence_hash(sequence)
         _cached = os.path.join(MSA_CACHE_CONFIG["cache_dir"], f"msa_{_h}.a3m")
@@ -1763,7 +1521,6 @@ def _dpeptide_predict_target_structure(
             "backend": ("boltz" if str(backend).startswith("boltz") else "protenix"),
             "model_name": None,
             "seed": int(seed),
-            # MSA is mandatory: it locks the target fold (MSA-watershed result)
             "use_msa_server": True,
             "workflow": "prediction",
         }},
@@ -1776,20 +1533,10 @@ def _dpeptide_predict_target_structure(
         str(getattr(__import__("backend.core.config", fromlist=["RESULTS_BASE_DIR"]),
                     "RESULTS_BASE_DIR", "/data/boltz_central_results")),
     ))
-    # The dispatched predict_task writes engine outputs under
-    # <results_base>/<engine_cap>/<CELERY task id>/ (see _resolve_backend_results_root,
-    # which keys on the runtime task id == the celery id), and the worker uploads its
-    # archive flat to <results_base>/<CELERY task id>_results.zip (upload_result saves
-    # under UPLOAD_FOLDER, no engine subfolder). Poll exactly those two layouts — the
-    # poll exactly the two layouts predict_task writes; no speculative layouts.
     result_roots = [
         results_base / engine_cap / str(async_result.id),
     ]
 
-    # The target prediction rides the shared GPU queue BEHIND bulk candidate
-    # work, so the bound must cover queue wait plus runtime, not just runtime
-    # (a fixed runtime-only deadline fails the parent whenever a backlog
-    # exists). Env-tunable for deployments that run a dedicated lane.
     deadline = time.time() + int(
         os.environ.get("DPEPTIDE_TARGET_PREDICT_TIMEOUT_SECONDS", "21600"))
     cif_pat = re.compile(r".*model.*\.cif$|.*_sample_.*\.cif$", re.IGNORECASE)
@@ -1818,17 +1565,12 @@ def _dpeptide_predict_target_structure(
                     if cif_pat.search(str(c)) and c.stat().st_size > 0)
         if cifs:
             return max(cifs, key=lambda p: p.stat().st_mtime)
-        # Results may exist only as the uploaded zip (<celery_id>_results.zip at the
-        # results root); read straight from it instead of waiting on an unpack step.
         zip_candidate = results_base / f"{async_result.id}_results.zip"
         if zip_candidate.is_file():
             extracted = _extract_first_cif(zip_candidate)
             if extracted is not None:
                 return extracted
         if async_result.state in ("FAILURE", "REVOKED"):
-            # Surface the engine's real failure (OOM traceback, docker exit
-            # details) — a bare state string hid the cause behind "FAILURE"
-            # and made the whole peptide task undiagnosable from the UI.
             inner = getattr(async_result, "result", None)
             detail = f": {inner}" if inner is not None else ""
             raise RuntimeError(
@@ -1841,13 +1583,7 @@ def _dpeptide_predict_target_structure(
         time.sleep(6)
 
 
-
-
 def _read_pocket_radius_option(options: Dict[str, Any]) -> float:
-    """User pocket radius in A: peptidePocketBox clamped to 4-40, default 6.
-
-    The interactive box picker derives it from the box size (max edge / 2),
-    mirroring boltz2score's box->radius conversion."""
     raw = options.get("peptidePocketBox")
     if raw is None:
         raw = options.get("peptide_pocket_box")
@@ -1860,22 +1596,11 @@ def _read_pocket_radius_option(options: Dict[str, Any]) -> float:
     return max(4.0, min(40.0, value))
 
 
-
-
 def _plain_positions_as_author_contacts(
     base_yaml_data: Dict[str, Any],
     positions: List[int],
     target_chain_id: Optional[str],
 ) -> List[Tuple[str, int]]:
-    """Sequence positions on the target chain as pocket contacts.
-
-    Sequence-only targets cannot be picked in 3D, so the user names residues
-    directly on the target sequence ("25,26,27"). With an uploaded template the
-    YAML pocket constraint keeps author numbering, so translate sequence ->
-    author through the template map (the engines remap author -> sequence back
-    at backend entry). Without a template the YAML numbers polymer residues
-    1..N and the positions pass through unchanged.
-    """
     chain_lengths = _extract_protein_chain_lengths_from_yaml(base_yaml_data)
     if not chain_lengths:
         raise ValueError(
@@ -1918,32 +1643,11 @@ def _plain_positions_as_author_contacts(
     return contacts
 
 
-
-
 def _pocket_contacts_for_staged_space(
     base_yaml_data: Dict[str, Any],
     options: Dict[str, Any],
     target_chain_id: Optional[str] = None,
 ) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
-    """Pocket specification in both numbering systems.
-
-    Returns (author_contacts, sequence_contacts). Native predictions (and the
-    staged PDBs derived from them) number polymer residues 1..N over the input
-    sequence, while the user picks residues by author numbering of the
-    uploaded structure ("A:152"). Sequence-only targets instead name positions
-    directly on the target chain sequence ("25,26,27") — without a template
-    those positions already are the author numbering. The YAML pocket
-    constraint keeps author numbering (backends translate it via template
-    alignment); the staged-space placement consumes the sequence-numbered
-    list. An explicit pocket center selects the surrounding template residues
-    within the peptidePocketBox radius. Every requested residue must resolve
-    — a silently wrong pocket site is worse than a loud failure.
-    """
-    # Residue-list input resolves to the centroid of the requested template
-    # residues and then takes the same center path. The diffusion-stage
-    # PocketPotential stays removed (it buckled aromatic rings); what
-    # survives is the model's own pocket conditioning in the candidate
-    # co-folding YAML.
     author_contacts: List[Tuple[str, int]] = []
     plain_positions: List[int] = []
     raw_residues = str(
@@ -1999,10 +1703,6 @@ def _pocket_contacts_for_staged_space(
     mapping_by_chain = _build_template_residue_maps(base_yaml_data)
     if not mapping_by_chain:
         if not chain_prefixed_given:
-            # Sequence-only target: the YAML numbers polymer residues 1..N
-            # over the input sequence, so the plain positions already are the
-            # author numbering (a center input is impossible here — it raised
-            # above when it selected no template residues).
             return list(author_contacts), list(author_contacts)
         raise ValueError(
             "Pocket residues need the uploaded target structure: the YAML "
@@ -2031,23 +1731,10 @@ def _pocket_contacts_for_staged_space(
     return author_contacts, translated
 
 
-
-
 def _pocket_residues_centroid(
     base_yaml_data: Dict[str, Any],
     raw_residues: str,
 ) -> Optional[np.ndarray]:
-    """Heavy-atom centroid of the requested template residues.
-
-    Accepts the frontend picker's formats: "A:54,A:55" (chain:author),
-    "54,55" (plain author numbers on the single target chain), or the
-    3D-residue pick encoding. Returns None when nothing resolves — the
-    caller then reports the site as invalid rather than guessing.
-
-    The centroid feeds the center path: the model's pocket conditioning
-    in the candidate co-folding YAML, not the removed diffusion-stage
-    PocketPotential.
-    """
     tokens = [t.strip() for t in raw_residues.replace(";", ",").split(",") if t.strip()]
     if not tokens:
         return None
@@ -2062,7 +1749,6 @@ def _pocket_residues_centroid(
         try:
             num = int(num_text.strip())
         except ValueError:
-            # 3D pick style "A/54" or non-numeric — take trailing digits
             digits = "".join(ch for ch in num_text if ch.isdigit())
             if not digits:
                 continue
@@ -2115,15 +1801,11 @@ def _pocket_residues_centroid(
     return None
 
 
-
-
 def _template_residues_near_center(
     base_yaml_data: Dict[str, Any],
     center: np.ndarray,
     radius: float,
 ) -> List[Tuple[str, int]]:
-    """Author-numbered residues whose CA falls within radius of center, read
-    from the uploaded templates (the same source the numbering map uses)."""
     templates = base_yaml_data.get("templates")
     if not isinstance(templates, list):
         return []
@@ -2160,10 +1842,7 @@ def _template_residues_near_center(
     return hits
 
 
-
-
 def _dpeptide_kabsch_rotation(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """Rotation R (about the centroids) minimizing |R @ (mobile-m) - (target-t)|."""
     m = mobile.mean(axis=0)
     t = target.mean(axis=0)
     H = (mobile - m).T @ (target - t)
@@ -2172,24 +1851,9 @@ def _dpeptide_kabsch_rotation(mobile: np.ndarray, target: np.ndarray) -> np.ndar
     return Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
 
 
-
-
 def _dpeptide_align_product_to_input(product_pdb: Path,
                                      input_structure_path: Path) -> float:
-    """Restore the flipped product into the USER's coordinate frame.
-
-    The modeling complex lived in the engine's output frame: even with a
-    fixed receptor the writer applies its own global placement. Mapping back
-    is the second half of the exact display transform
-    upload -> x->-x -> [engine] -> -x->x -> rigid-align-to-upload; because
-    the receptor was held fixed during sampling, shape identity holds and
-    any residual offset is reported as telemetry. Returns RMSD."""
     def _ca_in_chain_order(path: Path, min_protein_chains: int):
-        """CA coordinates of the largest protein chain, in chain order.
-
-        Engine writers renumber residues and rename chains, so neither resnum
-        nor chain name is a stable key — the mirrored target and the user
-        upload are the SAME sequence in the SAME order by construction."""
         st = gemmi.read_structure(str(path))
         st.setup_entities()
         chains = sorted(
@@ -2206,15 +1870,9 @@ def _dpeptide_align_product_to_input(product_pdb: Path,
                 pts.append(np.array([ca.pos.x, ca.pos.y, ca.pos.z]))
         return st, np.stack(pts)
 
-    # the PRODUCT carries target + peptide (>=2 protein chains); the user's
-    # REFERENCE is the bare target upload and is valid with a single chain.
     product_st, P = _ca_in_chain_order(product_pdb, min_protein_chains=2)
     _, Q = _ca_in_chain_order(input_structure_path, min_protein_chains=1)
     if len(P) != len(Q):
-        # telemetry, not a crash: count mismatch means the predicted receptor
-        # and the upload differ in resolved residues; align on the common
-        # prefix (both are the same sequence in the same order by
-        # construction, so a prefix alignment is exact for the shared part)
         n = min(len(P), len(Q))
         print(
             f"[d-peptide] product frame: CA count product={len(P)} vs "
@@ -2224,13 +1882,6 @@ def _dpeptide_align_product_to_input(product_pdb: Path,
         P, Q = P[:n], Q[:n]
     pc, qc = P.mean(axis=0), Q.mean(axis=0)
 
-    # Frame restoration needs the full rigid transform: the receptor was
-    # pinned to the staged pose, but the staged pose itself is the mirror of
-    # a de novo prediction that lives in an arbitrary SE(3) frame. The
-    # rotation below is computed from matched CA pairs of the SAME receptor,
-    # so it is an exact transform (not a least-squares fit between different
-    # atoms) and carries the peptide rigidly. Residual RMSD measures the
-    # de novo backbone accuracy vs the upload.
     rot = _dpeptide_kabsch_rotation(P, Q)
 
     shift = qc - rot @ pc
@@ -2248,8 +1899,6 @@ def _dpeptide_align_product_to_input(product_pdb: Path,
     return float(np.sqrt(((moved - Q) ** 2).sum(axis=1).mean()))
 
 
-
-
 def _relax_staged_bicyclic_strain(
     staged_path: Path,
     *,
@@ -2259,8 +1908,6 @@ def _relax_staged_bicyclic_strain(
     cb_hi: float = 1.75,
     sweeps: int = 120,
 ) -> Dict[str, Any]:
-    """Bond window follows anchor chemistry: C-S (SEZ/29N) ~1.82 A,
-    Bi-S coordination (BS3) ~2.55 A."""
     if any(anchor == "BI" for _, anchor in bond_specs):
         bond_lo, bond_hi = 2.20, 2.90
     else:
@@ -2298,12 +1945,10 @@ def _relax_staged_bicyclic_strain(
             return {"relaxed": False, "reason": f"missing atom for {cys_num}:{anchor_name}"}
         pairs.append((cys_num, anchor_name))
 
-    # 单原子链接器(BS3=Bi): 先确定性重建锚点，后续投影微调
     single_atom_rebuild = None
     if sum(1 for a in linker_res if a.element != gemmi.Element("H")) == 1:
         single_atom_rebuild = _rebuild_single_atom_linker_anchor(
             staged_path, prefer_code=linker_res.name)
-        # 重建重写了文件, 重读以同步内存中的结构
         st = gemmi.read_structure(str(staged_path))
         st.setup_entities()
         polymer = sorted(
@@ -2323,10 +1968,6 @@ def _relax_staged_bicyclic_strain(
     def _residue_atoms(residue):
         return [a for a in residue if a.element != gemmi.Element("H")]
 
-    # Linker anchor-neighbor bonds: the rigid placement puts the anchor atoms
-    # on the SG triangle while their bonded neighbors keep the CCD geometry,
-    # stretching the internal bonds. Relax them to their CCD lengths,
-    # splitting the correction between the two bonded atoms.
     neighbor_bonds = []
     try:
         mols = _linker_ccd_mols([linker_code])
@@ -2351,10 +1992,6 @@ def _relax_staged_bicyclic_strain(
         print(f"[d-peptide] linker neighbor bonds unavailable: {exc}",
               file=sys.stderr)
 
-    # Receptor steric guard: the bond projections below can shove peptide
-    # or linker atoms into the receptor wall. Every sweep, push any free heavy atom
-    # closer than 2.3 A to a receptor atom back out along the contact
-    # normal; the bond projections and this guard converge jointly.
     from scipy.spatial import cKDTree as _RelaxKD
     rec_pts = np.array([
         [a.pos.x, a.pos.y, a.pos.z]
@@ -2377,9 +2014,6 @@ def _relax_staged_bicyclic_strain(
                     atom.pos = gemmi.Position(*(rec_pts[j] + 2.3 * u))
         return worst
 
-    # iterative bond relaxation: the SG absorbs the correction, its residue
-    # follows at 30% (flexible propagation so the residue is not torn apart),
-    # the linker anchor keeps its CCD geometry
     for _ in range(sweeps):
         max_v = 0.0
         for (cys_num, anchor_name) in pairs:
@@ -2395,8 +2029,6 @@ def _relax_staged_bicyclic_strain(
             if abs(viol) < 1e-3:
                 continue
             u = (p_an - p_sg) / max(d, 1e-8)
-            # moving SG by t along u changes the distance to |d - t|;
-            # t = viol = d - target lands exactly on the band edge
             step = np.clip(viol * u, -0.5, 0.5)
             sg.pos = gemmi.Position(*(p_sg + step))
             for atom in _residue_atoms(residue):
@@ -2404,9 +2036,6 @@ def _relax_staged_bicyclic_strain(
                     continue
                 v = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
                 atom.pos = gemmi.Position(*(v + 0.3 * step))
-        # linker anchor-neighbor bonds: split the correction between the two
-        # bonded atoms (the anchor may move a little; its target is
-        # re-projected by the SG relaxation on the next sweep)
         for (na, nb, target) in neighbor_bonds:
             aa = linker_res.find_atom(na, "*")
             ab = linker_res.find_atom(nb, "*")
@@ -2427,7 +2056,6 @@ def _relax_staged_bicyclic_strain(
         if max_v < 5e-3:
             break
 
-    # CA-CB renormalization across the peptide
     fixed_cb = 0
     for residue in pep:
         ca = residue.find_atom("CA", "*")
@@ -2442,13 +2070,10 @@ def _relax_staged_bicyclic_strain(
         direction = (v_cb - v_ca) / max(d, 1e-8)
         cb.pos = gemmi.Position(*(v_ca + 1.53 * direction))
         fixed_cb += 1
-    # the renormalisation above can push CBs back into the receptor wall;
-    # final guard so the written pose honours the staging contract
     _steric_guard()
 
     st.setup_entities()
     st.write_pdb(str(staged_path))
-    # gemmi's write_pdb drops connections — restore the covalent topology
     _append_staged_bicyclic_links(
         staged_path,
         [n - 1 for (n, _) in bond_specs],
@@ -2466,19 +2091,11 @@ def _relax_staged_bicyclic_strain(
             "anchor_rebuild": single_atom_rebuild}
 
 
-
-
 def _dpeptide_prepare_reference_peptide(
     predict_args: Dict[str, Any],
     out_dir: Path,
     binder_length: int,
 ) -> Optional[Path]:
-    """Uploaded initial peptide structure, mirrored into design space.
-
-    The upload must share the coordinate frame of the uploaded target
-    structure (a reference complex). Returns the mirrored peptide PDB with
-    residues renumbered 1..N, or None when nothing was uploaded. Used only
-    for chirality='d' mode-anchored design."""
     entry = predict_args.get("peptide_structure_input")
     if not isinstance(entry, dict) or not entry.get("content_base64"):
         return None
@@ -2500,7 +2117,6 @@ def _dpeptide_prepare_reference_peptide(
                 pep_chain = chain
                 break
     if pep_chain is None:
-        # largest polymer chain that is plausibly peptide-sized
         polys = sorted(
             (c for c in st[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
             key=lambda c: sum(1 for r in c if r.het_flag != "H"))
@@ -2546,8 +2162,6 @@ def _dpeptide_prepare_reference_peptide(
     return out_path
 
 
-
-
 def _dpeptide_prepare_d_target(
     predict_args: Dict[str, Any],
     base_yaml_data: Dict[str, Any],
@@ -2557,16 +2171,9 @@ def _dpeptide_prepare_d_target(
     work_root: Path,
     seed: int,
 ) -> Tuple[Path, Path]:
-    """D-route target preparation: uploaded structure (or single-chain
-    prediction) plus its x->-x mirror.
-
-    Returns (l_target_path, d_target_path). The mirror is written with
-    polymer residues renumbered 1..N in sequence order so pocket contacts in
-    sequence numbering resolve on it."""
     work_root.mkdir(parents=True, exist_ok=True)
     uploaded = _dpeptide_uploaded_target_structure(predict_args, work_root)
     if uploaded is None:
-        # yaml-referenced template paths are a valid upload form too
         for entry in base_yaml_data.get("templates") or []:
             for key in ("author_pdb", "pdb", "cif", "mmcif"):
                 cand = str((entry or {}).get(key) or "").strip()
@@ -2609,11 +2216,6 @@ def _dpeptide_prepare_d_target(
     dpm.mirror_structure(target_d)
 
     d_path = work_root / "d_target.pdb"
-    # write EVERY polymer chain (not just the first): functional sites like
-    # the RANKL trimer groove span two adjacent monomers — dropping the
-    # second chain would model only half the binding cleft. Chain IDs are
-    # re-lettered A, B, C... with per-chain 1..N residue numbering (the
-    # staged-complex contract downstream).
     lines: List[str] = []
     serial = 1
     poly_chains_written = 0
@@ -2628,12 +2230,6 @@ def _dpeptide_prepare_d_target(
         polymer = [r for r in chain if r.het_flag != "H"]
         if len(polymer) < 3:
             continue
-        # Trim terminal residues the model would have to rebuild: a staged
-        # residue without complete backbone (or CB for non-Gly) is re-grown
-        # from its L-CCD token with L chirality and then fails the D
-        # chirality gate for every candidate (1HL3 THR332: terminal residue
-        # carrying a single N atom). Head/tail only — interior ordinals stay
-        # put so pocket contacts in sequence numbering keep resolving.
         tail = len(polymer)
         while tail > 0 and not _stageable(polymer[tail - 1]):
             tail -= 1
@@ -2641,10 +2237,6 @@ def _dpeptide_prepare_d_target(
         while head < tail and not _stageable(polymer[head]):
             head += 1
         if head >= tail:
-            # Fully unstageable chain (e.g. every residue lacks backbone
-            # atoms): skip without consuming a chain letter — an empty
-            # re-lettered chain would shift every later chain's ID and break
-            # the staged-complex chain contract downstream.
             continue
         chain_letter = chr(ord("A") + poly_chains_written)
         for ordinal, residue in enumerate(polymer[head:tail], start=1):
@@ -2665,8 +2257,6 @@ def _dpeptide_prepare_d_target(
     return Path(uploaded), d_path
 
 
-
-
 def _dpeptide_stage_conformer_in_pocket(
     d_target_path: Path,
     conformer_path: Path,
@@ -2677,23 +2267,12 @@ def _dpeptide_stage_conformer_in_pocket(
     reference_peptide_path: Optional[Path] = None,
     pose_matters: bool = True,
 ) -> Path:
-    """Stage the design-space complex: pinned D-target + placed L-conformer.
-
-    The conformer (isolated candidate prediction, already L, ring and NCAA
-    topology included) is rigidly placed against the mirrored D-target either
-    anchored to the uploaded reference peptide pose (mode A: CA-trace
-    alignment over the residue-index window, keeping the known binding mode)
-    or with the clash-free surface search at the user pocket; a bicyclic
-    linker chain rides along from the conformer."""
     target = gemmi.read_structure(str(d_target_path))
     target.setup_entities()
     conf = gemmi.read_structure(str(conformer_path))
     conf.setup_entities()
     conf.remove_alternative_conformations()
 
-    # aggregate receptor atoms across EVERY polymer chain (multi-chain
-    # targets like the RANKL trimer groove span two monomers; pocket
-    # positions are chain-tagged so contacts can name either wall)
     rec_chains = [ch for ch in target[0]
                   if sum(1 for r in ch if r.het_flag != "H") >= 3]
     rec_atoms = np.array([
@@ -2722,10 +2301,6 @@ def _dpeptide_stage_conformer_in_pocket(
             + ",".join(f"{c}:{n}" for c, n in pocket_sequence_contacts)
             + " not found on the mirrored D-target")
     if not pocket_pts and not has_reference and pose_matters:
-        # No silent centroid fallback when the pose feeds the sampler: without
-        # a pocket the binder gets buried at the receptor centroid        # 0.16 A min distance on the MDM2 runs). pose_matters=False
-        # (blind inpainting route) discards the peptide start entirely — the
-        # engine re-noises those rows — so any placement is acceptable.
         raise ValueError(
             "D-肽 staging 需要口袋定义(残基或中心)或参考肽结构;无口袋时不存在"
             "合法摆位。线性盲对接模式不需要口袋。")
@@ -2742,9 +2317,6 @@ def _dpeptide_stage_conformer_in_pocket(
         for c in conf_chains for r in c for a in r
         if a.element != gemmi.Element("H")])
     if reference_peptide_path is not None and os.path.isfile(str(reference_peptide_path)):
-        # mode A: anchor the candidate backbone to the uploaded reference
-        # peptide pose (CA trace, residue-index correspondence over a
-        # centered window) — keeps the known binding mode
         ref_st = gemmi.read_structure(str(reference_peptide_path))
         ref_st.setup_entities()
         ref_ca = np.array([
@@ -2759,9 +2331,6 @@ def _dpeptide_stage_conformer_in_pocket(
             co = (len(cand_ca) - n) // 2
             rot = _dpeptide_kabsch_rotation(cand_ca[co:co + n], ref_ca[ro:ro + n])
             free_center = cand_ca[co:co + n].mean(axis=0)
-            # emit loops transform as rot @ (x - free_center) + free_center + shift;
-            # at x = free_center that is free_center + shift, so the shift is
-            # just the centroid difference
             shift = ref_ca[ro:ro + n].mean(axis=0) - free_center
             fitted = (cand_ca[co:co + n] - free_center) @ rot.T \
                 + ref_ca[ro:ro + n].mean(axis=0)
@@ -2774,9 +2343,6 @@ def _dpeptide_stage_conformer_in_pocket(
             free_center = free_atoms.mean(axis=0)
             shift = center - free_center
     else:
-        # Blind route: the peptide rows are re-noised by the engine, so
-        # the placed pose never reaches the sampler — an identity transform
-        # is the only correct input (no rigid placement is performed).
         rot = np.eye(3)
         shift = np.zeros(3)
         free_center = free_atoms.mean(axis=0)
@@ -2803,8 +2369,6 @@ def _dpeptide_stage_conformer_in_pocket(
                 _emit("ATOM", atom.name, residue.name, chain_letter, ordinal,
                       (atom.pos.x, atom.pos.y, atom.pos.z), atom.element.name)
 
-    # the designed peptide takes the chain letter right after the last
-    # receptor chain (B for a monomer target, C for a dimer, ...)
     pep_chain_letter = chr(ord("A") + len(rec_chains))
     pep_chain = conf_chains[0]
     sg_rows: List[Tuple[int, np.ndarray]] = []
@@ -2821,8 +2385,6 @@ def _dpeptide_stage_conformer_in_pocket(
 
     linker_name = None
     if len(conf_chains) > 1:
-        # the linker chain is identified by its CCD, not het flags — PDB
-        # roundtrips do not preserve them reliably
         for extra in conf_chains[1:]:
             if any(r.name in BICYCLIC_LINKER_ATOM_MAP for r in extra):
                 linker_res = extra[0]
@@ -2848,9 +2410,6 @@ def _dpeptide_stage_conformer_in_pocket(
             v = rot @ (np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - free_center) \
                 + free_center + shift
             placed_linker[atom.name.strip()] = v
-        # one-to-one greedy assignment: symmetric linkers list the SAME
-        # anchor atom several times (BS3 = BI,BI,BI), and a plain
-        # nearest-per-anchor would bond one SG three times
         remaining = list(sg_rows)
         for anchor in anchors:
             av = placed_linker.get(anchor)
@@ -2869,16 +2428,9 @@ def _dpeptide_stage_conformer_in_pocket(
     if link_rows:
         pairs = _staged_bicyclic_bond_pairs(out_path)
         if pairs:
-            # each pair is "B:<cys>:SG,L:<pos>:<anchor>" — the relaxer resolves
-            # the atom on the LINKER residue, so take the anchor half
             specs = []
             for pair in pairs.split(";"):
                 a1, a2 = pair.split(",")
-                # a1 = peptide side "B:<cys>:SG" (the residue to project),
-                # a2 = linker side "L:1:<anchor>" (the anchor atom). The old
-                # parser took a2's resnum — the linker residue is always 1,
-                # so EVERY anchor relaxed against Cys-1 staged
-                # ring bonds landed 3.4 A while two converged by accident).
                 _, cys_num, _ = a1.strip().split(":")
                 _, _, anchor = a2.strip().split(":")
                 specs.append((int(cys_num), anchor))
@@ -2892,14 +2444,6 @@ def _dpeptide_stage_conformer_in_pocket(
         raise RuntimeError(
             f"D-peptide staging: written PDB missing chains (got {names}).")
 
-    # Self-check hard gate: the staged pose ENTERS the diffusion sampler as
-    # the inpainting reference. A pose with inter-chain hard clashes is a
-    # garbage reference
-    # flipped >50% of binder CA chiralities in every refined sample. The
-    # sampler must never receive a buried pose silently: zero <2.2 A pairs
-    # and at least one <6 A contact (anchored, not floating) or we fail.
-    # Skipped when pose_matters=False (blind route: peptide rows are
-    # re-noised; only the receptor + sequences feed the engine).
     if pose_matters:
         _poly_chk = sorted(
             (c for c in check[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
@@ -2926,13 +2470,7 @@ def _dpeptide_stage_conformer_in_pocket(
     return out_path
 
 
-
-
 def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
-    """Reconstruct 'chain:resnum:atom,chain:resnum:atom;...' bond pairs from a
-    staged complex: each linker anchor bonds to its NEAREST peptide Cys-SG
-    (the staged geometry carries the constructive 1.8 A contacts). Returns
-    None when the complex has no linker chain."""
     st = gemmi.read_structure(str(staged_path))
     st.setup_entities()
     linker_chain = None
@@ -2950,9 +2488,6 @@ def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
     ]
     if len(polymer) < 2:
         return None
-    # the peptide is the SHORTEST polymer chain; polymer[1] would pick a
-    # second receptor copy on multimer targets (same bug fixed at
-    # _cyclic_headtail_bond_report and _dpeptide_refined_chirality_gate)
     peptide = min(polymer, key=lambda c: sum(1 for r in c if r.het_flag != "H"))
     receptor = next(c for c in polymer if c is not peptide)
     anchors = BICYCLIC_LINKER_ATOM_MAP[linker_chain[0].name]
@@ -2986,8 +2521,6 @@ def _staged_bicyclic_bond_pairs(staged_path: Path) -> Optional[str]:
     return ";".join(pairs)
 
 
-
-
 def _dpeptide_dispatch_refine(
     staged_path: Path, seed: int, queue: str, blind: bool = False,
     cyclic_headtail: bool = False,
@@ -2995,33 +2528,10 @@ def _dpeptide_dispatch_refine(
     peptide_chain_letter: str = "B",
     receptor_chain_letters: str = "A",
 ) -> Any:
-    """Dispatch one protenix2dock ``peptide`` refine task and return its
-    AsyncResult immediately (pair with :func:`_dpeptide_collect_refine`).
-
-    The receptor is pinned to the staged coordinates for every diffusion step
-    (vendor inpainting side channel), the peptide enters the input json as a
-    proteinChain, and bicyclic ring bonds (peptide SG <-> linker anchors) are
-    carried both as input.json covalent_bonds and as hard TFG contacts.
-    ``cyclic_headtail`` adds the head-to-tail N-C bond of a cyclic peptide in
-    both channels — pose-independent chemistry, so it composes with the blind
-    (pure-noise peptide start) route where the placed pose never reaches the
-    sampler. Without it a cyclic peptide refines as a linear chain and the
-    ring silently opens (or worse, collapses).
-    ``pocket_res`` ("A:18,A:76,...", staged/sequence numbering) activates the
-    native boltz2-style PocketPotential guidance — the pocket conditions the
-    SAMPLER, never a hand-rolled placement.
-    """
     from backend.core.celery_app import celery_app as _celery
 
     bond_pairs = _staged_bicyclic_bond_pairs(staged_path)
     if cyclic_headtail and not bond_pairs:
-        # Find the PEPTIDE chain from the staged complex instead of
-        # assuming "B": multi-chain receptors (e.g. the RANKL trimer A/B/C)
-        # re-letter the peptide to D and the hardcoded B bond pointed at a
-        # receptor chain (rejected with "bond pair does not touch the peptide chain"). The
-        # peptide is the shortest polymer chain (receptors are 80-600 aa,
-        # designed peptides 4-25); residues are numbered 1..L by the
-        # production writer contract.
         st_len = gemmi.read_structure(str(staged_path))
         st_len.setup_entities()
         poly = [(ch.name, sum(1 for r in ch if r.het_flag != "H"))
@@ -3032,8 +2542,6 @@ def _dpeptide_dispatch_refine(
                 "carries no polymer chains")
         poly.sort(key=lambda kv: kv[1])
         pep_letter, pep_len = poly[0]
-        # guard: the peptide must be clearly the small chain (a malformed
-        # staging with two receptor-sized chains would mis-pick)
         if pep_len >= 4 and (len(poly) == 1 or pep_len * 3 < poly[1][1]):
             bond_pairs = f"{pep_letter}:1:N,{pep_letter}:{pep_len}:C"
     linker_ccd = "SEZ"
@@ -3047,16 +2555,9 @@ def _dpeptide_dispatch_refine(
                         linker_ccd = residue.name
                         break
         except Exception as exc:  # noqa: BLE001
-            # A parse failure here silently defaults the linker CCD to SEZ —
-            # the wrong chemistry with no trace. Surface it in the dispatch log.
             print(f"[WARN] linker CCD scan failed on {staged_path}: {exc}",
                   file=sys.stderr)
 
-    # linker chain only exists for bicyclic topology (SG <-> linker anchors);
-    # cyclic head-tail pairs are intra-peptide and carry no linker entity.
-    # The staged linker chain letter follows the receptor chains (C for a
-    # monomer target, D for a dimer, ...) — NOT the literal "L" — so derive
-    # the letter from any cross-chain bond ref.
     linker_letter = ""
     if bond_pairs and "," in bond_pairs:
         refs = [r for r in bond_pairs.replace(";", ",").split(",") if ":" in r]
@@ -3071,34 +2572,19 @@ def _dpeptide_dispatch_refine(
             "mode": "peptide",
             "input_file_content": staged_path.read_text(),
             "input_filename": f"{staged_path.stem}.pdb",
-            # peptide letter follows the LAST receptor chain (B for a
-            # monomer target, C for a dimer, ...) — matches the staged
-            # complex written by _dpeptide_stage_conformer_in_pocket
             "peptide_chain": peptide_chain_letter,
-            # interface metrics scoped to target<->peptide only; the linker
-            # pair would drag the reported iptm
             "interface_chains": receptor_chain_letters + "," + peptide_chain_letter,
             "bond_pairs": bond_pairs or "",
             "linker_chain": linker_letter,
             "linker_ccd": linker_ccd,
             "pocket_res": pocket_res or "",
             "seed": int(seed),
-            # Optional fast-screen: the worker passes --sampling_steps /
-            # --diffusion_samples through to protenix2dock; unset → engine
-            # default (200 steps). Operators can halve refine cost on
-            # screening runs via PROTENIX2DOCK_REFINE_SAMPLING_STEPS.
             **(
                 {"sampling_steps": int(os.environ["PROTENIX2DOCK_REFINE_SAMPLING_STEPS"])}
                 if os.environ.get("PROTENIX2DOCK_REFINE_SAMPLING_STEPS", "").strip().isdigit()
                 else {}
             ),
-            # blind inpainting route flag — the worker appends --blind_peptide
-            # and echoes it back; the collector's expect_blind contract guard
-            # fails the candidate if it's missing.
             "blind_peptide": bool(blind),
-            # PocketPotential per-pair upper bound: boltz2's pocket
-            # max_distance default is 6.0 (= POCKET_CONTACT_MAX_A + 1, so the
-            # guidance envelope strictly contains the acceptance gate)
             "pocket_upper": float(POCKET_CONTACT_MAX_A) + 1.0,
             "dpeptide_contract": True,
         }},
@@ -3106,22 +2592,7 @@ def _dpeptide_dispatch_refine(
     )
 
 
-
-
 def _dpeptide_refined_chirality_gate(refined_path: Path) -> float:
-    """Chirality gate on a REFINED mirror-space complex; returns score penalty.
-
-    Returns 0.0 for a clean complex, or a composite-score penalty
-    proportional to the peptide's CA-violation fraction (≤0.15 max).
-
-    Mirror-space contract: receptor chain must be all-D, designed peptide
-    all-L (the product flip then yields L-target + D-peptide). The diffusion
-    sampler has no improper-dihedral term — under contradictory guidance it
-    inverts CA centres (observed: 11-15 of 17 residues flipped on
-    buried starts). A mixed-chirality refined complex is a sampler failure:
-    reject the candidate loudly instead of shipping a product whose peptide
-    is part-L after the flip.
-    """
     peplm_root = str(_resolve_capability_dir("peptide_lm"))
     if peplm_root not in sys.path:
         sys.path.insert(0, peplm_root)
@@ -3137,28 +2608,17 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> float:
     if len(protein_chains) < 2:
         raise RuntimeError(
             f"精修产物缺少两条聚合链: {[c.name for c in st[0]]}")
-    # The peptide is the SHORTEST polymer chain, every other chain is a
-    # receptor copy to check. The old chains[0]/chains[1] pick assumed a
-    # single receptor: on a multi-chain receptor (RANKL trimer A/B/C + D)
-    # chains[1] was a second RECEPTOR copy and every candidate died at the
-    # gate with 144/144 phantom violations.
     peptide = protein_chains[-1]
     receptor_chains = protein_chains[:-1]
     rec_bad = []
     for _rec in receptor_chains:
         rec_bad.extend(chirality_violations(st, _rec.name, "D"))
     pep_bad = chirality_violations(st, peptide.name, "L")
-    # Receptor flips = real sampler failure (the receptor is PINNED — any
-    # inversion means the inpainting contract broke). Hard reject.
     if rec_bad:
         raise RuntimeError(
             f"受体链 {[c.name for c in receptor_chains]} 应为 D, "
             f"违规 {len(rec_bad)}: "
             + ",".join(f"{n}{r}" for n, r, _ in rec_bad[:6]))
-    # Peptide flips: the free-diffusion chain has no improper-dihedral term;
-    # 1-3 CA inversions per 11-13-mer are numerical artifacts of the mirror
-    # refinement, not design failures. The SEQUENCE is the chirality source of truth; the product
-    # flip mirrors coordinates wholesale. Score-penalize, don't kill.
     pep_total = sum(1 for r in peptide if r.het_flag != "H"
                     and r.name not in ("GLY",))
     pep_violation_frac = (len(pep_bad) / max(pep_total, 1)) if pep_total else 0.0
@@ -3167,12 +2627,7 @@ def _dpeptide_refined_chirality_gate(refined_path: Path) -> float:
             f"肽链 {peptide.name} 手性违规超过 30%（{len(pep_bad)}/{pep_total}）"
             f"— 采样器产生了结构性手性混乱: "
             + ",".join(f"{n}{r}" for n, r, _ in pep_bad[:6]))
-    # penalty in [0, 0.15]: proportional to violation fraction — the sequence
-    # is the real chirality; structural flips are cosmetic, but candidates
-    # with zero artifacts should still rank above ones with several
     return pep_violation_frac * 0.15
-
-
 
 
 def _dpeptide_composite_from_refined(
@@ -3182,18 +2637,6 @@ def _dpeptide_composite_from_refined(
     developability_score: float,
     has_pocket: bool,
 ) -> Dict[str, Any]:
-    """Ranking inputs recomputed from the REFINED D-space complex.
-
-    Interface objective is ipSAE (interface_score), matching the published
-    Mirror-Peptidizer BO fitness (0.6*ipsae_dom + 0.4*plddt - ...) and the
-    engine's own ipsae-favoring ranking weights — ipTM systematically
-    overrates strained/anchored poses (A/B comparison: the
-    staged-local arm scored ipTM 0.82 while its poses were 10-21 A off and
-    chirality-broken; the blind arm's honest ipTM was 0.73 with 1.5-2.0 A
-    redock RMSD). Weights mirror the native interface branch: with a user
-    pocket the base sums to 0.68 so the refined-pocket rescore composes to
-    1.0; without a pocket the terms sum to 1.0. Pure function — unit tested.
-    """
     interface_confidence = max(0.0, min(1.0, float(refined_ipsae)))
     binder_confidence = (
         max(0.0, min(1.0, float(binder_avg_plddt) / 100.0))
@@ -3219,34 +2662,15 @@ def _dpeptide_composite_from_refined(
     }
 
 
-
-
 def _dpeptide_collect_refine(
     async_result: Any,
     staged_path: Path,
     refined_cif: Path,
     expect_blind: bool = False,
 ) -> Dict[str, Any]:
-    """Wait for a dispatched refine task, then rank its diffusion samples.
-
-    The confidence head scores the refined coordinates; the best sample (by
-    ipTM, gated on covalent integrity + clash-freedom) is copied to
-    refined_cif and its metrics returned.
-
-    expect_blind: the dispatch asked for the blind-inpainting route — verify
-    the worker's contract echo agrees. A stale worker process silently drops
-    the flag (fork children inherit the parent's imports, so respawns do not
-    reload the file); fail the task loudly instead of letting a downgraded
-    staged-local refine chirality-reject every candidate for hours.
-    """
     task_tmp = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / \
         f"dpeptide_task_{async_result.id}"
     conf_path = task_tmp / "out" / "confidence.json"
-    # Poll no longer than the dispatched GPU task itself is allowed to run
-    # (SUBPROCESS_TIMEOUT) plus a small grace for result writes — plus a
-    # queue grace: refines dispatch into the shared GPU queue behind bulk
-    # candidate work, so a deep backlog alone can outlast the runtime cap.
-    # Env-tunable.
     from backend.worker import tasks as _worker_tasks
 
     refine_deadline = time.time() + int(
@@ -3270,12 +2694,6 @@ def _dpeptide_collect_refine(
             f"实际 echo={metrics.get('blind_peptide')!r}) — protenix GPU worker 进程"
             "运行的是旧任务代码(更新代码后未重启,fork 子进程不会重新加载文件)。"
             "请重启 protenix GPU worker 容器后重跑任务。")
-    # Interface objective is ipSAE (published Mirror-Peptidizer BO fitness
-    # uses ipsae_dom; the engine's own ranking weights default to ipsae too).
-    # The per-sample confidence jsons carry raw engine numbers only — the
-    # ipSAE metrics live in the task RESULT summary (best_by_interface),
-    # exactly the source Mirror-Peptidizer consumes. Hard-require them: a
-    # refine that produced no ipSAE is a broken refine, not a 0.
     try:
         _res = async_result.result
         _best = (_res.get("best_by_interface") or _res.get("best") or {}) \
@@ -3290,13 +2708,6 @@ def _dpeptide_collect_refine(
         raise RuntimeError(
             "D-space refine 结果未携带 ipSAE interface_score — 评分目标为 "
             "ipSAE(非 ipTM),缺数即拒绝")
-    # persist staged + refined samples for post-run audits (task tmp dirs are
-    # auto-cleaned); keep under the TASK-scoped candidate dir — a shared
-    # "cand_001" name let consecutive tasks overwrite each other's evidence
-    # exactly when a defect needed diagnosing. The GENERATION is part of the
-    # dir name too: cand_001 recurs in every generation, and a gen-agnostic
-    # dir let the last writer win — a redelivered export's keep fallback then
-    # shipped gen-6 structures for gen-2 rows.
     runtime_task_id = str(os.environ.get("VBIO_TASK_ID") or "").strip().replace(":", "_")
     _cand_dir = Path(refined_cif).parent
     _gen_dir = _cand_dir.parent.name if _cand_dir.parent.name.startswith("gen_") else ""
@@ -3315,19 +2726,12 @@ def _dpeptide_collect_refine(
     for conf_json in sorted(structure_dir.glob("confidence_*_model_*.json")):
         payload = json.loads(conf_json.read_text())
         iptm = float(payload.get("iptm") or 0.0)
-        # No sample filtering: all samples rank; the model's own confidence
-        # orders them (a collapsed sample sorts last). Selection-by-confidence
-        # is engine capability, not a discard rule.
         cif = structure_dir / conf_json.name.replace("confidence_", "").replace(".json", ".cif")
         if cif.is_file():
             scored.append((iptm, cif))
     if not scored:
         raise RuntimeError(
             f"D-space refine produced no samples under {structure_dir}.")
-    # Selection policy: module-level _select_dspace_samples, unit tested
-    # against the MDM-2 failure set.
-    # Tuple layout (see _select_dspace_samples): 0 intact, 1 engaged,
-    # 2 -clashes, 3 iptm, 4 cif.NAME, 5 cif PATH, 6 detached, 7 contacts.
     ranked = _select_dspace_samples(scored)
     best = ranked[0]
     if best[1] != 1:
@@ -3335,17 +2739,7 @@ def _dpeptide_collect_refine(
             "D-space refine 无界面结合样本: 所有样本受体-肽接触 <4.5 A 均低于 "
             f"{ENGAGE_MIN_CONTACTS} 对（最优 {best[4]} 仅 {best[7]} 对）— "
             "采样器未把肽停靠到受体上")
-    # Absolute inter-chain clash gate: a physically impossible pose is a
-    # failed candidate, not a low-ranked one. Ranking alone could not
-    # prevent this — when every sample interpenetrates the least-jammed
-    # one shipped and the composite's contact count then REWARDED the
-    # buried-inside poses carried peptide atoms 1.2-1.9 A
-    # from receptor atoms).
     _min_d, _n22, _n28 = _interchain_clash_profile(Path(best[5]))
-    # Gate aligned with physical interfaces: crystals carry contacts down
-    # to 2.52 A (3LNJ) and post-polish samples sit at 2.55-2.6,
-    # so the packing-band COUNT (pairs < 2.8) is not a violation signal.
-    # True interpenetration is min < 2.3 or ANY pair < 2.2.
     if _min_d < REFINE_INTERPENETRATION_MIN_A or _n22 > 0:
         raise RuntimeError(
             f"D-space refine 界面物理违规: 受体-肽最小重原子距离 {_min_d:.2f} A, "
@@ -3359,11 +2753,6 @@ def _dpeptide_collect_refine(
     metrics["refined_covalent_intact"] = bool(best[0])
     metrics["refined_interchain_clashes"] = _n22
     metrics["shipped_interface_contacts"] = best[7]
-    # Score-structure consistency: the confidence.json interface numbers come
-    # from the worker's best-by-iptm sample — possibly a DIFFERENT sample than
-    # this geometry-driven pick. Overwrite with the SHIPPED sample's own ipSAE
-    # (the worker copies per-sample ipsae jsons next to the model cif) so the
-    # row's interface score always describes the coordinates it ships.
     metrics["interface_metric_sample_consistent"] = _apply_shipped_sample_ipsae(
         Path(best[5]), metrics)
     for r in ranked:
@@ -3375,11 +2764,6 @@ def _dpeptide_collect_refine(
             f"atoms (no intact sample survived): {best[6][:4]}",
             file=sys.stderr,
         )
-    # Per-chain mean pLDDT from the confidence B-factors of the SHIPPED
-    # (best) sample — scored[0] is merely the alphabetically-first sample,
-    # not the ranking winner. The design candidate rows need a native
-    # pLDDT (binder_avg_plddt); the engine never emits it as a scalar,
-    # but the CIF B-factor column carries the per-atom confidence.
     try:
         metrics["chain_mean_plddt"] = _chain_mean_plddt_from_structure(best[5])
     except Exception:  # noqa: BLE001
@@ -3387,10 +2771,7 @@ def _dpeptide_collect_refine(
     return metrics
 
 
-
-
 def _celery_revoke_quiet(async_result: Any, *, terminate: bool = True) -> float:
-    """Best-effort revoke; a control-bus hiccup must not mask the real error."""
     try:
         from backend.core.celery_app import celery_app as _celery
 
@@ -3399,16 +2780,7 @@ def _celery_revoke_quiet(async_result: Any, *, terminate: bool = True) -> float:
         pass
 
 
-
-
 def _chain_mean_plddt_from_structure(path: Path) -> Dict[str, float]:
-    """Mean B-factor (== per-atom pLDDT in engine structure output) per chain.
-
-    Chains with a short polymer (the SEZ linker: one HETATM residue carrying a
-    handful of high-confidence atoms) are EXCLUDED: their mean reads ~0.93 and,
-    with chain letters sorted, would outrank the actual peptide — feeding the
-    linker's confidence into binder_avg_plddt, the pLDDT gate, and the
-    composite's binder term for every bicyclic candidate."""
     st = gemmi.read_structure(str(path))
     st.setup_entities()
     means: Dict[str, float] = {}
@@ -3423,24 +2795,14 @@ def _chain_mean_plddt_from_structure(path: Path) -> Dict[str, float]:
                 if b_iso > 0:
                     values.append(b_iso)
         if values:
-            # 0-1 scale: the candidate-row contract multiplies by 100 downstream.
             means[chain.name] = sum(values) / len(values) / 100.0
     return means
-
-
 
 
 def _covalent_detached_atoms(
     structure_path: Path,
     threshold: float = 2.2,
 ) -> List[str]:
-    """Heavy atoms further than `threshold` from any atom of their own chain.
-
-    Catches every covalent tear the diffusion projections produced on the
-    free chains — terminal side chains (OH/CD1/CD2/...), backbone C-N, even
-    whole-residue rips — which the CA-CB-only integrity report misses
-.
-    """
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     detached: List[str] = []
@@ -3468,26 +2830,13 @@ def _covalent_detached_atoms(
     return detached
 
 
-
-
 def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
-    """Penalty (0..1) for molten, unstructured cyclic peptides.
-
-    Structured rings of 10-16 residues (cyclic RGDfK, SFTI-style) run
-    Rg/n ~0.7-0.9 with several non-local contacts (beta-turns); molten
-    blobs measure 0.42-0.60 with 0-2 contacts (audit of every
-    sample). The confidence head cannot separate them (pLDDT 80 on
-    blobs), so the shape signal has to come from geometry. Soft penalty,
-    not rejection — early generations may legitimately hold only blobs
-    and starving them kills the search."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     st.remove_hydrogens()
     chains = sorted(st[0], key=lambda c: -sum(1 for r in c if r.het_flag != "H"))
     if len(chains) < 2:
         return (0.0, {})
-    # peptide = shortest polymer chain with >= 8 residues (excludes the
-    # single-residue linker chain that bicyclic complexes carry)
     _pep_candidates = [c for c in chains
                        if sum(1 for r in c if r.het_flag != "H") >= 8]
     if not _pep_candidates:
@@ -3506,14 +2855,6 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
     nonlocal_c = int(((np.abs(iuj[0] - iuj[1]) >= 3) & (d[iuj] < 4.5)).sum())
     rg_ratio = rg / n
     penalty = 0.0
-    # Calibrated against known structured cyclic peptides:
-    # SFTI-1 (14aa, disulfide-stapled) runs rg/n ~0.46; kalata B1
-    # cyclotide (29aa) ~0.29 — small rings are NATURALLY compact and the
-    # the old flat 0.62 cutoff penalised every 10-16aa candidate (RANKL cyclic at 0.48-0.61 got -0.30, crushing every
-    # composite to zero). The size-aware expected band scales as
-    # ~2.8/sqrt(n) (empirical fit to structured macrocycles); use the
-    # tighter of that and 0.62, and require BOTH low compactness AND
-    # near-zero nonlocal contacts (the true molten signature).
     expected_rg_ratio = min(0.62, 2.8 / (n ** 0.5))
     if rg_ratio < expected_rg_ratio * 0.75 and nonlocal_c < 2:
         penalty = 0.30
@@ -3522,22 +2863,13 @@ def _ring_shape_penalty(structure_path: Path) -> Tuple[float, Dict[str, float]]:
                       "nonlocal_contacts": nonlocal_c})
 
 
-# Interface engagement floor for sample selection: receptor-peptide heavy-atom
-# pairs within 4.5 A. A docked 12-20-mer buries dozens of pairs; below this
-# the sample never docked and must not ship regardless of clash-freedom.
 ENGAGE_MIN_CONTACTS = 8
-
-
 
 
 def _interchain_contact_count(
     structure_path: Path,
     cutoff: float = 4.5,
 ) -> int:
-    """Heavy-atom pairs across the receptor/peptide interface within cutoff.
-
-    Same chain convention as _interchain_clash_profile (largest chain =
-    receptor, every other poly chain counts as peptide side)."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     st.remove_hydrogens()
@@ -3561,20 +2893,10 @@ def _interchain_contact_count(
     return n
 
 
-
-
 def _backbone_intact(cif: Path, min_ca_ca: float = BACKBONE_CA_CA_MIN_A) -> bool:
-    """Every consecutive CA-CA virtual bond >= min_ca_ca.
-
-    Guards against backbone crush: clash pushes without an omega-band can
-    fold CA(i) onto CA(i+1)    sampler output was a clean helix).
-    """
     st = gemmi.read_structure(str(cif))
     st.setup_entities()
     for chain in st[0]:
-        # virtual bonds are WITHIN a chain: reset per chain, else the last
-        # CA of chain A gets compared with the first CA of chain B (multi-
-        # chain receptors put unrelated CAs within 2.8 A at their interface)
         prev = None
         for res in chain:
             ca = res.find_atom("CA", "*")
@@ -3587,15 +2909,7 @@ def _backbone_intact(cif: Path, min_ca_ca: float = BACKBONE_CA_CA_MIN_A) -> bool
     return True
 
 
-
-
 def _apply_shipped_sample_ipsae(shipped_cif: Path, metrics: dict) -> bool:
-    """Overwrite the interface metrics with the SHIPPED sample's own ipSAE.
-
-    The confidence.json numbers describe the worker's best-by-iptm sample,
-    which may differ from the geometry-driven pick; the per-sample ipsae
-    json sits next to the shipped cif. Returns whether the override ran.
-    """
     ipsae_path = shipped_cif.with_name(
         "ipsae_" + shipped_cif.stem + ".json")
     if not ipsae_path.is_file():
@@ -3612,19 +2926,7 @@ def _apply_shipped_sample_ipsae(shipped_cif: Path, metrics: dict) -> bool:
     return True
 
 
-
-
 def _select_dspace_samples(scored):
-    """Rank D-space diffusion samples for shipping.
-
-    Sort key (descending): covalent integrity, interface ENGAGEMENT, clash
-    count, ipTM, name. Engagement must outrank clash-freedom (a detached
-    peptide has zero clashes and would outrank every bound sample) and
-    outrank ipSAE (detached poses can carry deceptively high values).
-
-    Tuple layout: (intact, engaged, -clashes, iptm, cif.name, cif,
-    detached, contacts).
-    """
     ranked = []
     for iptm, cif in scored:
         try:
@@ -3642,16 +2944,7 @@ def _select_dspace_samples(scored):
     return ranked
 
 
-
-
 def _pdb_peptide_sequence(pdb_path: Path, binder_chain_id: str = "B") -> str:
-    """One-letter peptide sequence of a staged PDB, auto-detected.
-
-    The named chain is tried first (design-space staging writes the peptide on
-    B), but multi-chain targets re-letter chains — staging writes receptors
-    A..N and the peptide on the next letter ("B for a monomer, C for a
-    dimer"). Fallback: the polymer chain whose length is peptide-sized
-    (8-40 residues). Empty when nothing qualifies."""
     three2one = {
         "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
         "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
@@ -3676,8 +2969,6 @@ def _pdb_peptide_sequence(pdb_path: Path, binder_chain_id: str = "B") -> str:
     named = by_chain.get(binder_chain_id, [])
     if 8 <= len(named) <= 40:
         return "".join(named)
-    # Multi-chain staging re-letters chains; the peptide is the polymer chain
-    # of peptide size (8-40 residues) — receptors are longer.
     for chain in sorted(by_chain):
         residues = by_chain[chain]
         if 8 <= len(residues) <= 40:
@@ -3685,21 +2976,10 @@ def _pdb_peptide_sequence(pdb_path: Path, binder_chain_id: str = "B") -> str:
     return ""
 
 
-
-
 def _polymer_chain_roles(
     structure: "gemmi.Structure",
     binder_chain_id: str = "",
 ) -> Tuple[Optional[str], List[str], List[str]]:
-    """Classify chains into (binder, target_chains, linker_or_short_chains).
-
-    Binder = the named chain when it holds a peptide-length polymer (8-40
-    residues), else the first chain of that size. Target = every polymer chain
-    LONGER than 40 residues (multi-copy receptors included). Everything with a
-    shorter polymer (SEZ linker: one HETATM residue) is excluded from binding
-    measurements — the linker is COVALENTLY bonded to the binder, so counting
-    it as 'target' side pins min distance at the bond length (~1.8 A) and
-    neutralizes any dissociation check for bicyclic products."""
     binder, targets, others = None, [], []
     for ch in structure[0]:
         polymer = [r for r in ch if r.het_flag != "H"]
@@ -3725,8 +3005,6 @@ def _polymer_chain_roles(
     return binder, targets, others
 
 
-
-
 def _assert_product_bound(
     structure_path: Path,
     binder_chain_id: str,
@@ -3735,18 +3013,6 @@ def _assert_product_bound(
     sequence: str,
     max_distance: float = PRODUCT_BOUND_MAX_DISTANCE_A,
 ) -> float:
-    """Export gate: a shipped product must be a BOUND complex.
-
-    A dissociated product (binder farther than max_distance from the target
-    protein chains) means an upstream stage shipped a pre-docking frame —
-    staged geometries sit 50-100 A off-target. A detached "result" with a high
-    score attached is actively misleading, so the export fails loudly instead.
-    Chain roles come from polymer length, not chain letters: the flipped
-    product re-letters chains (multi-chain targets make the designed peptide
-    chain D, E, ...), and the SEZ linker is covalently bonded to the binder —
-    counting it on the target side would pin min distance at the bond length
-    and neutralize the gate for every bicyclic product.
-    Returns the measured min binder-to-target heavy-atom distance."""
     try:
         st = gemmi.read_structure(str(structure_path))
         st.setup_entities()
@@ -3791,19 +3057,9 @@ def _assert_product_bound(
     return min_d
 
 
-
-
 def _interchain_clash_profile(
     structure_path: Path,
 ) -> Tuple[float, int, int]:
-    """(min binder-target heavy-atom distance, pairs < 2.2 A, pairs < 2.8 A).
-
-    The peptide side is the designed binder ONLY (polymer of 8-40 residues);
-    the receptor side is every chain longer than 40 residues. Receptor-receptor
-    pairs are excluded: multi-copy receptors with inter-chain disulfides
-    (SG-SG ~2.0 A) or metal sites otherwise read as permanent "peptide embedded
-    in receptor" and reject every candidate for that target. Linker chains
-    (< 8 residues, covalently bonded to the binder) are excluded too."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     st.remove_hydrogens()
@@ -3836,15 +3092,10 @@ def _interchain_clash_profile(
     return (min_d, n22, n28)
 
 
-
-
 def _interchain_clash_count(
     structure_path: Path,
     threshold: float = 2.2,
 ) -> int:
-    """Heavy-atom contacts below `threshold` between the largest (receptor)
-    chain and every other chain. Complements the covalent check: the
-    projections can leave the pose chemically intact yet clashing."""
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     chains = sorted(st[0], key=lambda c: -len(c))
@@ -3869,18 +3120,9 @@ def _interchain_clash_count(
     return count
 
 
-
-
 def _structure_integrity_report(
     structure_path: Path,
 ) -> Dict[str, Any]:
-    """Per-residue backbone bond integrity of every polymer chain.
-
-    A CB pushed tens of A away passes the chirality gate (the sign still
-    reads D) and the linker gate (SG untouched)
-    product: CA-CB 30.4 A. Any broken bond here means some projection or
-    transform deformed the structure; callers reject on it.
-    """
     st = gemmi.read_structure(str(structure_path))
     st.setup_entities()
     broken: List[Dict[str, Any]] = []
@@ -3903,16 +3145,10 @@ def _structure_integrity_report(
     return {"broken_bonds": broken, "all_intact": not broken}
 
 
-
-
 def _pocket_contact_report(
     structure_path: Path,
     pocket_sequence_contacts: List[Tuple[str, int]],
 ) -> Dict[str, Any]:
-    """Min heavy-atom distance between the pocket residues and every chain
-    other than the largest (receptor) chain. Bound peptides sit well under
-    4.5 A; the gate cut-off is POCKET_CONTACT_MAX_A. Chain names match modulo
-    boltz2's processed-structure suffix ("A" matches "A1")."""
     def _strip_suffix(name: str) -> str:
         return name[:-1] if len(name) > 1 and name[-1].isdigit() else name
 
@@ -3954,24 +3190,10 @@ def _pocket_contact_report(
 POCKET_CONTACT_MAX_A = 5.0
 
 
-
-
 def _pocket_chemistry_demands(
     target_sequence: str,
     pocket_sequence_contacts: List[Tuple[str, int]],
 ) -> Optional[Dict[str, int]]:
-    """Side-chain chemistry demands implied by the user pocket's composition.
-
-    Returns {"acid": n, "basic": n, "aromatic": n} anchors the peptide should
-    supply, or None when the pocket makes no strong demand (term inactive).
-    Interface physics diagnostics: a peptide
-    can pack as well as the native ligand (Sc 0.445 vs 0.424) yet score
-    poorly when the polar lock is missing — zero salt bridges against a
-    4-Lys/1-Arg rim, zero aromatics against Y/H. A basic rim demands acidic
-    anchors (Glu > Asp: longer side chain reaches the NZ), an acidic rim
-    demands basic residues, aromatic pockets (Y/F/H/W) demand aromatic
-    partners. Anchor counts are halved with a floor of 2: a 4-Lys rim is
-    locked by 2 well-placed carboxylates, not 4."""
     pocket_aas = "".join(
         target_sequence[int(pos) - 1]
         for _chain, pos in pocket_sequence_contacts
@@ -3992,16 +3214,9 @@ def _pocket_chemistry_demands(
     return demands or None
 
 
-
-
 def _pocket_chemistry_complementarity(
     sequence: str, demands: Optional[Dict[str, int]],
 ) -> Optional[float]:
-    """Match of the peptide's side-chain supply to the pocket demands, [0, 1].
-
-    Glu counts fully toward the acid demand and Asp at half weight (side-chain
-    reach); Lys/Arg symmetrically for a basic rim; F/Y/W for aromatic stacking
-    (peptide His is pH-ambiguous and excluded)."""
     if not demands:
         return None
     seq = str(sequence or "").upper()
@@ -4014,8 +3229,6 @@ def _pocket_chemistry_complementarity(
     return sum(scores) / len(scores)
 
 
-
-
 def _pocket_place_for_refine(
     staged_path: Path,
     *,
@@ -4026,16 +3239,6 @@ def _pocket_place_for_refine(
     linker_ccd: str = "SEZ",
     keep_pose: bool = False,
 ) -> None:
-    """CPU half of the pocket route (pairs with dispatch + collect): rigidly
-    place the free chains (peptide+linker) at the user pocket on the staged
-    receptor — skipped when keep_pose is set (the staged pose is already
-    anchored to a reference) — and restore the covalent LINK topology that
-    gemmi's write_pdb drops, so the refine diffusion keeps the ring intact.
-
-    Raises ValueError when the pocket residues are not on the staged receptor.
-    """
-    # rigid placement at the pocket center (contacts already sequence-numbered
-    # to match the staged PDB's 1..N polymer numbering)
     st_pl = gemmi.read_structure(str(staged_path))
     st_pl.setup_entities()
     pl_ch = sorted((c for c in st_pl[0] if sum(1 for r in c if r.het_flag != "H") >= 3),
@@ -4062,21 +3265,11 @@ def _pocket_place_for_refine(
             + f" not found on the staged receptor (chain {st_rec.name})"
         )
     _target_center = np.mean(np.array(pts), axis=0)
-    # clash-minimal rigid placement: deterministic rotations x radial offsets,
-    # scored against the staged receptor (centroid-on-pocket buries the binder
-    # in the pocket wall
-    # the staged pose already carries the reference binding mode
-    # Reference-anchored only: the staged pose (user's upload or model
-    # output) is kept as-is; the covalent LINK topology is restored below
     st_pl.setup_entities()
     st_pl.write_pdb(str(staged_path))
-    # gemmi's write_pdb dropped the LINK records above — restore the covalent
-    # topology or the refine diffusion breaks the ring
     if require_bonds:
         _append_staged_bicyclic_links(
             staged_path, bicyclic_cys_positions, linker_ccd)
-
-
 
 
 def _pocket_collect_refine(
@@ -4090,21 +3283,10 @@ def _pocket_collect_refine(
     expect_blind: bool = False,
     linker_ccd: str = "SEZ",
 ) -> Dict[str, Any]:
-    """GPU-result half of the pocket route (pairs with
-    :func:`_pocket_place_for_refine` + dispatch): collect the dispatched
-    refine, then report on the shipped structure.
-
-    Raises ValueError when a gate fails; the caller rejects the candidate.
-    """
     metrics = _dpeptide_collect_refine(
         async_result, staged_path, refined_cif, expect_blind=expect_blind)
     refined_path = str(refined_cif)
 
-    # Quality TELEMETRY, not filtering: the staged strain relief upstream
-    # makes the refine start chemically sound, so these reports describe the
-    # shipped structure (and would expose any residual defect) without
-    # rejecting the candidate — rejection hides engine problems instead of
-    # solving them at the source.
     integrity = _structure_integrity_report(Path(refined_path))
 
     if require_bonds:
@@ -4136,14 +3318,6 @@ def _pocket_collect_refine(
         f"flags={flags or 'none'}",
         file=sys.stderr,
     )
-    # Integrity stays a HARD gate: a collapsed structure (broken CA-CB) is
-    # physically invalid — no argument rescues it.
-    # The pocket gate is now SOFT: rejecting every off-pocket candidate left
-    # the frontend with zero results whenever the sampler's site preference
-    # disagreed with the user pocket contention). Instead the candidate ships with off_pocket=True; the
-    # composite heavily penalizes it (pocket_satisfaction near 0), so
-    # in-pocket candidates always outrank off-pocket ones when both exist —
-    # but the user always gets results, ranked honestly.
     if "integrity" in flags:
         raise ValueError(
             f"精修产物完整性破损（broken CA-CB: "
@@ -4160,12 +3334,8 @@ def _pocket_collect_refine(
     }
 
 
-
-
 def _lpeptide_keep_dir(parent_task_id: str) -> Path:
     return Path(RESULTS_BASE_DIR) / "_runtime_tmp" / f"lpeptide_keep_{parent_task_id}"
-
-
 
 
 def _persist_lpeptide_structure_keep(
@@ -4174,14 +3344,6 @@ def _persist_lpeptide_structure_keep(
     sequence: str,
     structure_file,
 ) -> str:
-    """Persist an L candidate's native product under the shared keep root.
-
-    The D route recovers refined samples from dpeptide_keep_* at zip time
-    because its per-candidate structures only live in the run's tmp dir; an
-    L candidate's structure has the same lifetime problem, and a checkpoint
-    resume + tmp cleanup would leave its archive rows permanently
-    structureless. Returns the keep file name, '' when the copy failed.
-    """
     if structure_file is None or not Path(structure_file).is_file():
         return ""
     keep_name = f"gen{generation:03d}_{sequence}.pdb"
@@ -4198,12 +3360,7 @@ def _persist_lpeptide_structure_keep(
         return ""
 
 
-
-
 def _lpeptide_keep_structure(parent_task_id: str, keep_file_name: str, sequence: str) -> str:
-    """Recover a persisted L product, guarding against generation collisions
-    (a cand index recurs every generation — accept the keep only when its
-    peptide matches the row's sequence)."""
     if not keep_file_name:
         return ""
     keep_path = _lpeptide_keep_dir(parent_task_id) / keep_file_name
@@ -4213,15 +3370,7 @@ def _lpeptide_keep_structure(parent_task_id: str, keep_file_name: str, sequence:
     return ""
 
 
-
-
 def _count_dpeptide_chirality_violations(structure_path) -> Optional[int]:
-    """CA-chirality violation count of a shipped D display structure.
-
-    Telemetry only: the hard gate covers the rank-1 product, and the
-    diffusion refine can leave minority CA inversions on lower ranks
-    (minority inversions can survive on lower ranks). None = unmeasurable.
-    """
     try:
         peplm_root = str(_resolve_capability_dir("peptide_lm"))
         if peplm_root not in sys.path:
@@ -4240,16 +3389,11 @@ def _count_dpeptide_chirality_violations(structure_path) -> Optional[int]:
         return None
 
 
-
-
 def _assert_product_chirality(
     product_pdb: Path,
     reference_structure_path: Optional[Path] = None,
     rmsd_limit: Optional[float] = 0.5,
 ) -> Dict[str, Any]:
-    """Hard gate on the flipped product: receptor must be L (positive CA
-    volumes), peptide must be D (negative), and the receptor must coincide
-    with the ORIGINAL input geometry (exact x->-x round trip)."""
     peplm_root = str(_resolve_capability_dir("peptide_lm"))
     if peplm_root not in sys.path:
         sys.path.insert(0, peplm_root)
@@ -4258,8 +3402,6 @@ def _assert_product_chirality(
     st = gemmi.read_structure(str(product_pdb))
     st.setup_entities()
 
-    # receptor = the protein chain with the most standard residues; peptide =
-    # the next-largest protein chain. Ligand/HETATM chains are ignored.
     protein_chains = [
         chain for chain in st[0]
         if sum(1 for res in chain if res.het_flag != "H") >= 3
@@ -4270,32 +3412,18 @@ def _assert_product_chirality(
             f"D-peptide product gate failed: expected >=2 protein chains, got "
             f"{[c.name for c in st[0]]}"
         )
-    # peptide = SHORTEST chain (multi-chain receptors put receptor copies at
-    # every length tier; chains[1] was a second receptor copy on trimers)
     receptor_chains = protein_chains[:-1]
     peptide_chain = protein_chains[-1]
 
-    # chirality_report returns a ChiralityReport (not iterable); the
-    # downstream gate reads .n_scored / .n_positive — use the first
-    # receptor chain's report, per-chain violations covered by rec_bad
     rec_report = chirality_report(st, receptor_chains[0].name)
     pep_report = chirality_report(st, peptide_chain.name)
     from peplm.dpeptide import chirality_violations
-    # Product frame contract: receptor ALL-L, peptide ALL-D — per residue.
-    # The mean-volume check silently passed 11L/9D mixtures (the mean stays on
-    # the expected side); a mixed-chirality product is a failed product.
     rec_bad = chirality_violations(st, receptor_chains[0].name, "L")
     pep_bad = chirality_violations(st, peptide_chain.name, "D")
     if rec_report.n_scored <= 0 or pep_report.n_scored <= 0:
         raise RuntimeError(
             "D-peptide product gate: no scorable CA chiral volumes "
             f"(receptor {rec_report.n_scored}, peptide {pep_report.n_scored})")
-    # Policy mirrors the per-candidate evaluation gate: free peptide chains
-    # diffuse without improper-dihedral restraints, so a minority of CA
-    # inversions per chain are numerical artifacts — evaluation tolerates
-    # <30% with a proportional score penalty, and the product gate must not
-    # be stricter than the policy that ranked the candidates. A receptor
-    # (pinned every step) or a majority-inverted peptide is a real failure.
     if len(rec_bad) > 0.3 * rec_report.n_scored:
         raise RuntimeError(
             "D-peptide product chirality gate FAILED — receptor not all-L: "
@@ -4314,8 +3442,6 @@ def _assert_product_chirality(
 
     rmsd = None
     if reference_structure_path is not None:
-        # order-based pairing: engine writers renumber residues and rename
-        # chains (A -> A1), so resnum/name matching silently mispairs.
         ref_pts = []
         ref_st = gemmi.read_structure(str(reference_structure_path))
         ref_st.setup_entities()
@@ -4354,8 +3480,6 @@ def _assert_product_chirality(
         "receptor_violations": len(rec_bad),
         "peptide_violations": len(pep_bad),
     }
-
-
 
 
 def run_peptide_design_backend(
@@ -4399,10 +3523,6 @@ def run_peptide_design_backend(
     peptide_chirality = str(options.get("peptideChirality") or options.get("peptide_chirality") or "l").strip().lower()
     if peptide_chirality not in ("l", "d"):
         raise ValueError(f"Invalid peptide chirality '{peptide_chirality}'. Must be 'l' or 'd'.")
-    # Secondary-structure mode for the ESM3 proposal engine: auto leaves
-    # the ss8 track off (model decides), helix/hairpin/strand_loop shape
-    # the proposal composition. Absent key falls back to the
-    # ESM3_SS_PROFILE deployment default ("env") for older task payloads.
     structure_mode = str(
         options.get("peptideStructureMode")
         or options.get("structure_mode") or "env").strip().lower()
@@ -4414,26 +3534,10 @@ def run_peptide_design_backend(
         raise ValueError(
             f"Invalid peptide structure mode '{structure_mode}'. Must be "
             f"one of {'/'.join(_SS_MODES)}.")
-    # NOTE: the docking-engine REQUIREMENT intentionally lives in the
-    # frontend/API contract only. Here `peptideChirality == 'd'` alone triggers
-    # the mirror workflow, because live deployments may still submit legacy
-    # backend tokens (boltz/protenix) until they restart into the version that
-    # understands the dock aliases. Linear-only remains authoritative below.
-    # Cyclic/bicyclic are SUPPORTED with D chirality: cyclization is a
-    # topological (scalar distance) constraint and mirror x->-x preserves it,
-    # so D-cyclic/D-bicyclic compose freely with the mirror workflow.
-    # The candidate prediction stage (proposer + candidate YAML) already carries
-    # cyclic/bicycling/linker/NCAA constraints unchanged.
     if peptide_backend == "alphafold3" and design_mode in ("cyclic", "bicyclic"):
         raise ValueError(
             "AlphaFold3 仅支持直链肽（linear）；环肽/双环肽请使用 Protenix 后端。"
         )
-    # Constrained rings require HARD covalent-bond enforcement. Protenix's TFG
-    # projects bond/angle atom pairs back into their RDKit bounds every
-    # guidance step; Boltz2's bond feature is
-    # only a soft diffusion prior and lets constrained rings fall apart under
-    # refinement. Rings are therefore Protenix-only for
-    # both chirality settings; linear peptides may use any engine.
     if design_mode in ("cyclic", "bicyclic") and peptide_backend != "protenix":
         raise ValueError(
             "环肽/双环肽仅支持 Protenix（protenix2dock）后端：共价键约束需要 "
@@ -4447,10 +3551,6 @@ def run_peptide_design_backend(
         min_value=min_binder_len,
         max_value=80,
     )
-    # explicit length window (frontend min/max inputs): candidates adapt within
-    # [lo, hi]; single-length consumers below (sequence mask, initial sequence,
-    # NCAA clamps) operate against the window max, matching the frontend's
-    # effectiveDesignLength
     _length_lo: Optional[int] = None
     _length_hi: Optional[int] = None
     if "peptideLengthMin" in options or "peptide_length_min" in options:
@@ -4471,15 +3571,12 @@ def run_peptide_design_backend(
     if (mask_stripped and _length_lo
             and len(mask_stripped) != binder_length
             and _length_lo <= len(mask_stripped) <= _length_hi):
-        # 掩码长在窗口内即合法: 掩码定布局, 自由段随候选伸缩;
-        # _normalize_sequence_mask 返回值弃用, 仅借其校验字符集。
         sequence_mask = mask_stripped
         _normalize_sequence_mask(sequence_mask, len(sequence_mask))
     else:
         sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
     excluded_aas = _normalize_excluded_aas(options.get("peptideExcludedAAs"))
     linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
-    # 固定非天然残基修改: [{position, ccd}] — 每个候选在该位置替换为指定 CCD
     fixed_mods_raw = options.get("peptideFixedModifications")
     fixed_modifications: List[Dict[str, Any]] = []
     if isinstance(fixed_mods_raw, list):
@@ -4491,7 +3588,6 @@ def run_peptide_design_backend(
             if isinstance(pos, (int, float)) and int(pos) >= 1 and ccd:
                 fixed_modifications.append({"position": int(pos), "ccd": ccd})
 
-    # 派发侧不读引擎字典；编码能否被引擎解析由候选子任务在申请 GPU 前检查。
     if is_structure_backend(backend):
         scorer = structure_backend(backend)
         scorer.check_ccd_codes(m["ccd"] for m in fixed_modifications)
@@ -4526,23 +3622,11 @@ def run_peptide_design_backend(
         cys_position_mode = str(options.get("peptideBicyclicCysPositionMode") or "auto").strip().lower()
         fix_terminal_cys = _read_bool_option(options, "peptideBicyclicFixTerminalCys", True)
         allow_extra_cys = _read_bool_option(options, "peptideBicyclicIncludeExtraCys", False)
-        # Anchor layout semantics: the peptide length is a range,
-        # so absolute Cys positions alone cannot express the user's intent.
-        # `peptideBicyclicCysLayout` selects how anchors follow the length:
-        #   ring     — pin the two ring sizes; Cys3 rides the C-terminus and
-        #              the N-flank absorbs the range (rigid topology).
-        #   ratio    — pin percentages of the length; anchors scale with
-        #              every candidate (shape preserved, rings flex).
-        #   absolute — literal positions; only valid when min == max.
-        #   auto     — engine layout (first / interior / last).
-        # Legacy option mapping: mode=manual == absolute.
         layout_raw = str(options.get("peptideBicyclicCysLayout") or "").strip().lower()
         cys_layout_mode = layout_raw if layout_raw in {"auto", "ring", "ratio", "absolute"} else (
             "absolute" if cys_position_mode == "manual" else "auto")
 
         def _reject_mask_conflicts(layout_label: str) -> None:
-            """Length-function anchors move with the candidate length, so a
-            mask can only pin X (free) or C (extra cysteine) residues."""
             if not sequence_mask:
                 return
             bad = [(idx + 1, ch) for idx, ch in enumerate(sequence_mask)
@@ -4619,8 +3703,6 @@ def run_peptide_design_backend(
 
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
-    # A C-terminal amidated residue needs a free C-terminus, which cyclic/bicyclic
-    # peptides lack. Reject it up front so no generation is wasted.
     if design_mode in ("cyclic", "bicyclic") and any(row.get("placement") == "c_term" for row in unnatural_pool):
         raise ValueError("C-terminal amidated residues cannot be used in cyclic/bicyclic peptide design (no free C-terminus). Remove them or switch to linear mode.")
     custom_molecules = _merge_selected_peptide_preset_molecules(custom_molecules, unnatural_pool)
@@ -4647,10 +3729,6 @@ def run_peptide_design_backend(
     all_results: List[Dict[str, Any]] = []
     peptide_started_at = time.time()
 
-    # Generation checkpoint: acks_late redelivers a predict_task whose worker
-    # died mid-run; without persistence the redesign restarts from generation
-    # 1 and burns hours of GPU time. The checkpoint lives under the stable
-    # VBIO_TASK_ID (same across redeliveries), not the per-attempt temp dir.
     _ckpt_root = Path(RESULTS_BASE_DIR) / "_runtime_tmp" / "peptide_checkpoints"
     _ckpt_path = _ckpt_root / f"{os.environ.get('VBIO_TASK_ID') or 'local'}.json"
     _start_generation = 1
@@ -4665,15 +3743,10 @@ def run_peptide_design_backend(
                 "elite_population": elite_population,
                 "all_results": all_results,
             })
-            # Atomic replace: a process death mid-write_text used to leave a
-            # truncated JSON, and the resume path then silently restarted from
-            # generation 1 (losing every completed generation).
             _tmp_ckpt = _ckpt_path.with_suffix(".json.tmp")
             _tmp_ckpt.write_text(payload)
             os.replace(_tmp_ckpt, _ckpt_path)
         except OSError as exc:
-            # Checkpoint is best-effort, but ENOSPC/permission failures silently
-            # disabled multi-day resume — print so the operator sees it.
             print(f"[peptide-design] WARNING: checkpoint save failed: {exc}",
                   file=sys.stderr)
 
@@ -4695,32 +3768,10 @@ def run_peptide_design_backend(
             _start_generation = 1
 
 
-
-    # PeptideLM proposal engine — the ONLY peptide design algorithm in
-    # V-Bio (two-tier language-model design; see capabilities/peptide_lm).
-    # No fallback: a failure here is a task failure. Length is optional:
-    # when the user did not set peptideBinderLength the engine explores an
-    # adaptive range; NCAA residues come ONLY from the user-selected pool
-    # (peptideResiduePool non-natural entries + custom CCDs).
-    # user pocket (optional): "chain:num,chain:num" receptor residues (author
-    # numbering of the upload) or an explicit x,y,z center. Translated here to
-    # 1-based sequence positions — staged structures and native predictions
-    # number polymer residues 1..N — and consumed by the pocket placement in
-    # the collect loop (both chiralities). Empty = global (no pocket).
     try:
         pocket_author_contacts, pocket_sequence_contacts = (
             _pocket_contacts_for_staged_space(
                 base_yaml_data, options, resolved_target_chain_id))
-        # mol1 走 mol-1-constraint：口袋以序列号 SITE 条件注入候选共折叠
-        # yaml 之外的 --constraints-json（作者编号换算已在上方完成）。
-        # ── Chemistry-informed warm-start seeds (BindCraft motif-grafting) ──
-        # When the user provides NO seed sequence but defined a pocket, derive
-        # generation-1 anchor sequences from the pocket's amino-acid composition:
-        # a basic-rich pocket (K/R/H) demands acidic residues (E/D) on the
-        # peptide for salt bridges; aromatic pocket residues demand F/Y/W.
-        # These aren't the designed binders — they're chemistry-compatible
-        # starting points that the evolutionary loop refines. The prior's SS
-        # conditioning (if provided) shapes the backbone preference.
         seed_sequences: List[str] = []
         if not initial_sequence and pocket_sequence_contacts:
             pocket_res = "".join(
@@ -4731,10 +3782,8 @@ def run_peptide_design_backend(
                 n_basic = sum(comp.get(a, 0) for a in "KRH")
                 n_aromatic = sum(comp.get(a, 0) for a in "FYW")
                 seed_len = binder_length if binder_length else 12
-                # acidic seed: E/D-rich (salt-bridge the basic rim)
                 frac_acid = min(0.4, n_basic / max(len(pocket_res), 1))
                 n_acid = max(2, int(seed_len * frac_acid))
-                # aromatic anchor: 2-3 F/Y (hydrophobic contacts)
                 n_aro = min(3, max(1, n_aromatic))
                 _seed_rng = random.Random(42)
                 acid_seed = list("ED" * seed_len)
@@ -4762,11 +3811,6 @@ def run_peptide_design_backend(
             file=sys.stderr,
         )
 
-    # ---- Proposal engine: ESM3 (3B masked LM + GRPO) ----
-    # Sequences come from a receptor-conditioned ESM3 policy running in a
-    # GPU subprocess; GRPO updates between generations steer the policy
-    # toward high-scoring interfaces. The adapter persists across
-    # generations within one design task.
     _proposer_log_path = Path(temp_dir) / "proposals.log"
 
     def _proposer_log(message: str) -> None:
@@ -4787,17 +3831,11 @@ def run_peptide_design_backend(
         sys.path.remove(_esm3_sys_path)
 
     _esm3_gpu = os.environ.get("ESM3_GPU_ID", "0")
-    # 双环布局按平台约定固定 CREEEC 面 + 末端锚点 C; 掩码固定了哪端就用
-    # 掩码端, 空缺的一端仍补约定段。
     proposer_prefix, proposer_suffix = _mask_fixed_edges(sequence_mask)
     if not proposer_prefix and design_mode == "bicyclic":
         proposer_prefix = "CREEEC"
     if not proposer_suffix and design_mode == "bicyclic":
         proposer_suffix = "C"
-    # Proposer backend selection: peptideProposerBackend=rfd4 produces
-    # candidates via the RFD4 all-atom generative model (same propose
-    # contract, elite rows fed back as motif resampling). Online generation
-    # fusion opens in a separate change; error out explicitly for now.
     proposer_backend_sel = str(
         options.get("peptideProposerBackend")
         or options.get("peptide_proposer_backend") or "esm3").strip().lower()
@@ -4811,8 +3849,6 @@ def run_peptide_design_backend(
         receptor_sequence=(
             _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id)
             if peptide_chirality in ("d", "l") else ""),
-        # 长度窗口时置 None: de novo 在窗口内随机取长, 掩码自由段按候选
-        # 伸缩(_apply_sequence_mask); 无窗口仍钉死。
         peptide_length=None if _length_lo else binder_length,
         len_range=(_length_lo or 8, _length_hi or 25),
         cyclic=(design_mode == "cyclic"),
@@ -4829,15 +3865,10 @@ def run_peptide_design_backend(
         f"ESM3 proposal engine ready (length={binder_length or 'adaptive'}, "
         f"mode={design_mode}, structure={structure_mode}, GPU={_esm3_gpu})")
 
-    # D-peptide mirror workflow context: mirror the target once so every
-    # candidate is designed against the fixed D-target (see module docstring
-    # block above). Chirality 'l' keeps the plain L-frame loop.
     pocket_constraint_blueprint: Optional[Dict[str, Any]] = (
         {"contacts": [[c, n] for c, n in pocket_author_contacts]}
         if pocket_author_contacts else None
     )
-    # Pocket chemistry demands (capability C): pre-folding reward shaping
-    # derived from the pocket's own composition — generalizes to any target
     pocket_chem_demands = (
         _pocket_chemistry_demands(
             _dpeptide_target_sequence(base_yaml_data, resolved_target_chain_id),
@@ -4853,28 +3884,15 @@ def run_peptide_design_backend(
     dpeptide_reference_target: Optional[Path] = None
     d_target_staged: Optional[Path] = None
     if peptide_chirality == 'd':
-        # template_inputs were popped from predict_args at the main boundary;
-        # without re-attaching them the uploaded structure is invisible here
-        # and the display products cannot be aligned to the user's frame.
         if template_inputs:
             predict_args = dict(predict_args)
             predict_args["template_inputs"] = template_inputs
-        # D-route target preparation: uploaded structure (or single-chain
-        # prediction) mirrored x->-x ONCE; every candidate stages against
-        # this exact D-target (the legacy de novo L-L complex prediction is
-        # gone — a designed peptide carries no coevolution signal, so its
-        # interface was unreliable)
         l_target, d_target_staged = _dpeptide_prepare_d_target(
             predict_args, base_yaml_data, options, target_chain_id,
             _normalize_peptide_backend(backend),
             Path(temp_dir) / "d_target_prep", int(seed if isinstance(seed, int) else 7),
         )
         dpeptide_reference_target = l_target
-        # Mode-anchored design: an uploaded initial peptide structure (same
-        # coordinate frame as the target structure) switches placement from
-        # the generic pocket surface search to reference-pose anchoring.
-        # Anchoring requires an UPLOADED target: against a de novo predicted
-        # target the reference frame can never match.
         d_reference_peptide = None
         if predict_args.get("peptide_structure_input"):
             if not template_inputs:
@@ -4886,29 +3904,10 @@ def run_peptide_design_backend(
                 binder_length=binder_length)
     else:
         d_reference_peptide = None
-    # 协议修订（对齐 dock 模式 决策 + boltz2 原生口袋
-    # 语义）：一切 de-novo D-肽（linear/cyclic/bicyclic，无参考肽结构）走
-    # native blind inpainting——肽纯噪声 + 完整调度，受体每步钉住，姿态由
-    # 扩散先验生成；环拓扑以 pose 无关的 TFG 键对随精修携带；用户口袋经
-    # PocketPotential 在采样期引导（不再有任何自研刚体摆位——该路由把肽
-    # Cage 在任意局部姿态，sigma_max=0.05 的局部窗口无法逃逸，精修矛盾以
-    # 塌缩收场：实测 pocket_min 0.35 A / CA-CB 断裂 / integrity=BROKEN，
-    # 16-mer 对照 bb734f9e 复现 13/16 塌缩）。参考锚定模式（用户上传初始
-    # 肽结构）是唯一保留的 staged 路径——那是真实结合模式，非发明摆位。
     blind_linear_route = (
         peptide_chirality == 'd' and d_reference_peptide is None)
     if (peptide_chirality == 'd' and not pocket_sequence_contacts
             and not blind_linear_route):
-        # 无口袋 D-肽使用 blind inpainting(受体钉住+肽从噪声)。BICYCLIC/参考锚定模式必须有口袋或参考;
-        # 线性/环肽模式走盲 inpainting(受体钉住+肽从噪声,姿态由 MSA 先验产生,
-        # A/B 实测红dock RMSD 1.5-2.0 A),不需要口袋。
-        # 协议修订(与 dock 模式 决策对齐): cyclic+D 不再
-        # 走"自研刚体摆位+局部精修"——该路由把肽 Cage 在任意局部摆位
-        # (sigma_max=0.05 ≈ ±0.8 A 活动半径),精修矛盾以塌缩收场(实测
-        # pocket_min 0.35 A、CA-CB 断裂,integrity=BROKEN)。cyclic 与 linear
-        # 同走 native blind inpainting;环头尾 N-C 键以 pose 无关的 TFG 键对
-        # 随精修携带;用户口袋退为后置过滤(_pocket_contact_report 硬门槛
-        # + composite 0.32 权重),永不条件化采样器。
         raise ValueError(
             "D-肽设计(双环/参考锚定)必须提供口袋定义或上传初始肽结构。")
 
@@ -4973,9 +3972,6 @@ def run_peptide_design_backend(
     runtime_predict_args.pop("peptideParallelGpus", None)
     if custom_molecules:
         runtime_predict_args["custom_ccd_molecules"] = custom_molecules
-    # Interface scoring (ipSAE) for candidates: the binder chain is the interface "ligand".
-    # Without it the ipsae postprocess looks for a small-molecule ligand chain in the
-    # candidate YAML, finds none, and every row ships ligand_ipsae_max=None.
     if peptide_backend in ("protenix", "boltz"):
         runtime_predict_args["ipsaeLigandChainId"] = binder_chain_id
 
@@ -4985,8 +3981,6 @@ def run_peptide_design_backend(
     )
     peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
     parent_task_id = str(os.environ.get("VBIO_TASK_ID") or "peptide-design").strip() or "peptide-design"
-    # 候选子任务全量入队：共享 GPU 池 + worker 并发是唯一的并发边界，
-    # 不在编排侧做容量快照或窗口猜测。
     if peptide_gpu_ids:
         print(
             f"Peptide design candidate subtasks dispatch unbounded (requested_gpu_ids={peptide_gpu_ids})",
@@ -5022,17 +4016,8 @@ def run_peptide_design_backend(
         )
 
         generation_candidates: List[Dict[str, Any]] = []
-        # Gate-rejected candidates of the current generation, kept for the
-        # GRPO update as floor-reward negative samples. Dropping rejects
-        # starved every group of variance (2/48 survival -> <4 learnable
-        # rows -> zero policy updates for the whole run).
         generation_rejected_rows: List[Dict[str, Any]] = []
 
-        # PeptideLM proposals — the single proposal source. When the user
-        # supplied an initial (seed) sequence, generation 1 anchors edits on
-        # it instead of de novo sampling. Length may be adaptive; the
-        # bicyclic Cys layout and NCAA pool are enforced by the proposer's
-        # decode-time constraint plan.
         try:
             _proposer_elites: List[Dict[str, Any]] = list(elite_population)
             if generation == 1 and not _proposer_elites:
@@ -5043,9 +4028,6 @@ def run_peptide_design_backend(
                         "plddts": [],
                     }]
                 elif seed_sequences:
-                    # chemistry-informed warm-start (BindCraft motif-graft
-                    # analog): the pocket composition dictates complementary
-                    # residues; the RL refines from this starting point
                     _proposer_elites = [
                         {"sequence": s, "modifications": [], "plddts": []}
                         for s in seed_sequences[:2]
@@ -5054,15 +4036,10 @@ def run_peptide_design_backend(
                 natural_pool,
                 unnatural_pool,
                 _proposer_elites,
-                # 2x oversample: the pseudo-PPL pre-rank below keeps the best
-                # half, so the oracle only sees prior-plausible sequences
                 population_size * 2,
             ):
                 lm_sequence = _apply_sequence_mask(str(lm_base or "").upper(), sequence_mask)
                 if design_mode == "bicyclic":
-                    # The proposer samples raw sequences with no notion of the
-                    # bicyclic topology; anchor stamping must happen here or the
-                    # candidate YAML builder rejects every de-novo proposal.
                     lm_sequence, lm_anchors = _stamp_bicyclic_cysteines(
                         lm_sequence,
                         explicit_positions=list(design_params.get("cys_positions") or []),
@@ -5071,10 +4048,6 @@ def run_peptide_design_backend(
                         allow_extra_cys=allow_extra_cys,
                         resolve_anchors=_resolve_bicyclic_anchors,
                     )
-                # NCAA overlay: replace user-selected positions with
-                # non-natural residues from the pool. The backbone stays in
-                # ESM3's known space; the modifications list tells protenix
-                # which positions carry a CCD substitution.
                 if unnatural_pool and nonnatural_max > 0:
                     lm_sequence, lm_mods = _substitute_ncaa_residues(
                         lm_sequence,
@@ -5095,8 +4068,6 @@ def run_peptide_design_backend(
                     "sequence": lm_sequence,
                     "modifications": lm_mods,
                     "cys_positions": [int(p) for p in (lm_anchors or [])],
-                    # GRPO grouping key from the proposer (de novo pool /
-                    # per-parent edit cohort) — carried through to learn
                     "proposal_group": lm_group,
                 })
                 if len(generation_candidates) >= population_size:
@@ -5107,11 +4078,6 @@ def run_peptide_design_backend(
         if not generation_candidates:
             break
 
-        # Binder MSA (user policy: MSA everywhere) — prefetch the generation's
-        # candidates concurrently before dispatch; per-candidate failure degrades
-        # to "empty" without touching the run. The prefetch is reported into the
-        # task status: without it the first minutes of every generation look
-        # like a dead stall ("老是不开始").
         def _report_msa_prefetch(done: int, total: int) -> None:
             _write_peptide_progress(
                 progress_path,
@@ -5132,16 +4098,6 @@ def run_peptide_design_backend(
                 },
             )
 
-        # Fail-fast surrogate screen (dedup + prior pre-rank):
-        # (a) exact-duplicate kill — GRPO needs intra-group diversity;
-        #     clones produce identical rewards → zero advantage
-        # (b) prior plausibility ranking: when 2x oversampled, keep the
-        #     top population_size by ESM3 log-likelihood. ZERO GPU cost.
-        # Exact-dedup within the generation only: edit children are SUPPOSED
-        # to be near their parent (that's how the pLDDT-weighted editor
-        # explores); near-dup filtering here killed generations 2+ entirely
-        #.
-        # Cross-generation exact dedup lives in evaluated_sequences.
         _screened: list = []
         _seen_seqs: set = set()
         for _c in generation_candidates:
@@ -5173,14 +4129,6 @@ def run_peptide_design_backend(
                 file=sys.stderr)
         generation_candidates = _screened
 
-        # De novo peptides: MSA is evolutionary noise (a designed sequence
-        # has no homologs — any hits mis-anchor the folder's coevolution
-        # assumptions, +340s/generation of pure polling waste).
-        # Literature: "AF2 with MSA is overconfident on poor de novo designs"
-        # (Korbeld 2024); practitioner consensus is single-sequence mode for
-        # the binder + receptor template for the target side. Only SEED/
-        # reference sequences (uploaded initial peptide = known binder with
-        # real homologs) keep their MSA.
         if use_initial_sequence and initial_sequence:
             generation_binder_msa = _prefetch_generation_binder_msas(
                 [str(c.get("sequence") or "") for c in generation_candidates
@@ -5193,15 +4141,6 @@ def run_peptide_design_backend(
                 f"[d-peptide] de novo binder MSA SKIPPED (evolutionary noise; "
                 f"single-sequence mode for designed peptides, literature-backed)",
                 file=sys.stderr)
-            # Materialize the single-sequence decision in the SHARED MSA
-            # cache: the engine-side resolve_msa is cache-first and falls
-            # through to the MSA SERVER on a miss — a de novo candidate
-            # would hard-fetch (30-min timeout when the server is starved,
-            # generation 1 lost 3/8 candidates) instead
-            # of running single-sequence. A query-only a3m under the exact
-            # cache key (tier = length rule, aligned with input_prep and
-            # _binder_msa_assignment) turns that miss into the official
-            # N_msa=1 contract the no-server path already uses.
             try:
                 _seed_single_sequence_binder_msas(
                     [str(c.get("sequence") or "") for c in generation_candidates])
@@ -5211,7 +4150,6 @@ def run_peptide_design_backend(
                     f"({_msa_seed_exc}); engine-side server fetch remains "
                     "the fallback", file=sys.stderr)
 
-        # 与终端校验器同一判定来源
         amidated_ccds = {
             str(m.get("ccd") or "").strip().upper()
             for m in custom_molecules or []
@@ -5229,20 +4167,12 @@ def run_peptide_design_backend(
                 candidate_dir=candidate_dir,
                 temp_dir=temp_dir,
             )
-            # user pocket (optional): contacts come straight from the frontend
-            # residue list ("chain:num,...") in author numbering of the
-            # uploaded structure. Both engines remap to 1-based sequence
-            # positions at backend entry (boltz: BoltzBackend, protenix:
-            # run_protenix_backend) and enforce the pocket natively during
-            # candidate prediction.
             candidate_pocket_constraint = None
             candidate_pocket_sequence = None
             if pocket_constraint_blueprint:
                 candidate_pocket_constraint = dict(pocket_constraint_blueprint)
                 candidate_pocket_constraint["binder"] = binder_chain_id
                 if peptide_backend == "mol1":
-                    # mol1 的 SITE 条件用序列号（候选 worker 载荷注入），
-                    # yaml 里保留作者编号口袋会与约束注入冲突
                     candidate_pocket_sequence = [
                         [c, int(n)] for c, n in pocket_sequence_contacts]
                     candidate_pocket_constraint = None
@@ -5282,9 +4212,6 @@ def run_peptide_design_backend(
             generation_jobs.append(
                 {
 
-                    # GRPO cohort key (de novo pool / per-parent cohort) — without it
-                    # every row lands in "ungrouped" and the group-relative advantage
-                    # degenerates to batch-relative.
                     "proposal_group": candidate.get("proposal_group") or "ungrouped",
                     "generation": generation,
                     "candidate_index": idx,
@@ -5338,9 +4265,6 @@ def run_peptide_design_backend(
                 },
             )
 
-        # chirality=d candidates predict the ISOLATED conformer
-        # (binder_only); the D-space staging + refine happens in the
-        # collection loop below.
         completed_generation_jobs = _execute_peptide_generation_jobs(
             generation_jobs,
             resolved_subtask_queue,
@@ -5351,14 +4275,6 @@ def run_peptide_design_backend(
             raise RuntimeError(f"Peptide generation {generation} completed with no candidate results.")
 
         generation_done = 0
-        # ==== Candidate finalize: runs as each candidate's refine lands ====
-        # (The GPU refine previously ran inline in a strictly serial per-candidate
-        # loop — one ~4-5 min protenix2dock task at a time while every other
-        # GPU idled for the whole generation. The loop is now a two-stage
-        # pipeline: the prepare pass below stages/dispatches, and
-        # _run_dpeptide_refine_stage finalizes each candidate as its refine
-        # completes. Finalization order is completion order; all_results is
-        # re-sorted by rank score on every append.)
         def _finalize_candidate(ctx: Dict[str, Any]) -> None:
             nonlocal completed_tasks, generation_done, elite_population
             gate_result = None
@@ -5397,8 +4313,6 @@ def run_peptide_design_backend(
             composite_score = ctx["composite_score"]
             structure_file = ctx["structure_file"]
             staged_path = ctx["staged_path"]
-            # 兜底锚点重建: 双环路径未过 refine 时也拿到几何正确的单原子链接器;
-            # 非双环布局无链接器，不改动游离离子。
             if (design_mode == "bicyclic"
                     and structure_file is not None
                     and Path(structure_file).is_file()):
@@ -5416,9 +4330,6 @@ def run_peptide_design_backend(
             pocket_report_row = ctx["pocket_report_row"]
 
             def _rescore_with_refined_pocket(refined_path: Path) -> None:
-                """Recompute the composite once the REFINED pocket distance
-                exists — the ranking must reflect the shipped pose, not the
-                native prediction's."""
                 nonlocal composite_score
                 if not (pocket_sequence_contacts and isinstance(composite_score, (int, float))):
                     return
@@ -5429,17 +4340,8 @@ def run_peptide_design_backend(
                 pm = rpr.get("pocket_min_distance")
                 if not isinstance(pm, (int, float)):
                     return
-                # pocket satisfaction: proximity alone rewards
-                # grazing contacts; half the weight now comes from the REAL
-                # interface size — heavy-atom pairs within 4.5 A of the user's
-                # pocket residues (already computed by the report). ~50 pairs
-                # is a saturated 12-16-mer epitope engagement.
                 n45 = int(rpr.get("pocket_contacts_within_4p5") or 0)
                 ps_prox = max(0.0, min(1.0, (8.0 - float(pm)) / 3.0)) if pm > 5.0 else 1.0
-                # contact counts must be CLEAN: buried-inside poses would otherwise
-                # maximize this term (every overlapping pair also counted as
-                # an interface contact). Overlapping pairs (<= 2.8 A) count
-                # double against the total — a jammed pose nets zero.
                 try:
                     _, _, n_overlap = _interchain_clash_profile(refined_path)
                 except Exception:
@@ -5449,9 +4351,6 @@ def run_peptide_design_backend(
                 ps = 0.5 * ps_prox + 0.5 * ps_contacts
                 composite_score = 0.68 * composite_score + 0.32 * ps
 
-            # D-route (chirality=d): collect the dispatched fixed-D diffusion
-            # refine; per-candidate failure rejects the candidate, the task
-            # only fails when NO candidate survives.
             if peptide_chirality == 'd':
                 try:
                     if ctx.get("refine_error") is not None:
@@ -5497,15 +4396,9 @@ def run_peptide_design_backend(
                                     file=sys.stderr,
                                 )
                                 return
-                    # 硬手性门(阈值版): 受体零容忍; 肽≤30%违规过门但记分数惩罚。
                     chirality_penalty = _dpeptide_refined_chirality_gate(
                         Path(d_space_refined))
                     if design_mode == "cyclic":
-                        # ring integrity gate: the head-tail N-C bond rides the
-                        # refine as pose-independent TFG chemistry; a product
-                        # with an open ring is not a cyclic peptide — reject
-                        # loudly instead of shipping a macrocycle that is
-                        # actually a linear chain
                         ring = _cyclic_headtail_bond_report(Path(d_space_refined))
                         if not ring.get("all_bonded"):
                             print(
@@ -5529,9 +4422,6 @@ def run_peptide_design_backend(
                         file=sys.stderr,
                     )
                 except DpeptideStaleWorkerError:
-                    # infrastructure failure, not a candidate defect — fail
-                    # the whole task now with the actionable message instead
-                    # of rejecting every candidate for the rest of the run
                     raise
                 except (RuntimeError, ValueError) as d_exc:
                     print(
@@ -5549,8 +4439,6 @@ def run_peptide_design_backend(
                     })
                     return
 
-            # L chirality + user pocket: collect the dispatched pocket refine;
-            # the refined structure becomes the candidate's shipped product.
             if (peptide_chirality == 'l' and pocket_sequence_contacts
                     and structure_file is not None):
                 try:
@@ -5588,11 +4476,6 @@ def run_peptide_design_backend(
                     })
                     return
 
-            # L chirality WITHOUT pocket: collect the dispatched fixed-receptor
-            # refine through the SAME gates as the D route (engagement, clash
-            # floor, backbone integrity, ipSAE consistency). Before this
-            # block the L-blind candidate shipped the raw native prediction
-            # with no geometric gate at all.
             if (peptide_chirality == 'l' and not pocket_sequence_contacts
                     and ctx.get("route") == "plain"):
                 try:
@@ -5607,16 +4490,10 @@ def run_peptide_design_backend(
                     d_space_refined = str(ctx["refined_cif"])
                     structure_file = Path(d_space_refined)
                     if design_mode == "bicyclic":
-                        # Single-atom anchor rebuild BEFORE the gate: the
-                        # refine can leave the ion inside the peptide; the
-                        # deterministic circumcenter placement decides the
-                        # chemistry-feasible side, the gate then judges.
                         rebuild_info = _rebuild_single_atom_linker_anchor(
                             Path(d_space_refined), prefer_code=linker_ccd)
                         if rebuild_info:
                             metrics["linker_anchor_rebuild"] = rebuild_info
-                        # Same require_bonds guarantee the pocket route and
-                        # the D route enforce on their collects.
                         bond_report = _dpeptide_linker_bond_report(
                             Path(d_space_refined), prefer_code=linker_ccd)
                         if not bond_report.get("all_bonded"):
@@ -5640,13 +4517,6 @@ def run_peptide_design_backend(
                     return
 
             if peptide_chirality == 'd' and isinstance(d_space_metrics, dict):
-                # The refined D-space complex is the ONLY interface readout for
-                # D candidates (binder-only conformers carry none). Recompute
-                # every ranking input from it — the conformer-stage code merged only
-                # pair_iptm and left interface/binder confidences at the
-                # conformer-stage zeros, freezing every composite at the
-                # developability floor (all rows scored exactly 0.08 and the
-                # 12-generation search random-walked).
                 try:
                     refined_ipsae = d_space_metrics.get("interface_score")
                     if not isinstance(refined_ipsae, (int, float)):
@@ -5657,9 +4527,6 @@ def run_peptide_design_backend(
                     pair_iptm = float(refined_ipsae)
                     pair_iptm_formula = "d_space_refined_ipsae"
                     chain_plddt = d_space_metrics.get("chain_mean_plddt")
-                    # peptide chain = LAST entity letter (receptors are
-                    # written first, the peptide appended last; hard "B"
-                    # read a receptor copy's plddt on multi-chain targets)
                     _pep_key = (sorted(chain_plddt)[-1]
                                 if isinstance(chain_plddt, dict) and chain_plddt
                                 else None)
@@ -5676,11 +4543,8 @@ def run_peptide_design_backend(
                         developability_score=developability_score,
                         has_pocket=bool(pocket_sequence_contacts),
                     )
-                    # chirality artifact penalty from the gate (0 = clean)
                     resc["composite_score"] = max(
                         0.0, resc["composite_score"] - chirality_penalty)
-                    # molten-ring penalty: geometry-based, the confidence
-                    # head cannot see it
                     try:
                         ring_pen, ring_stats = _ring_shape_penalty(
                             Path(d_space_refined))
@@ -5718,22 +4582,13 @@ def run_peptide_design_backend(
                 developability_score = resc["developability_score"]
                 composite_score = resc["composite_score"]
                 _rescore_with_refined_pocket(Path(d_space_refined))
-                # surface the raw ipSAE components on the row: the frontend's
-                # interface resolver keys on ligand_ipsae_max/ipsae_dom
                 metrics["ipsae_dom"] = d_space_metrics.get("ipsae_dom")
                 metrics["ligand_ipsae_max"] = d_space_metrics.get("ligand_ipsae_max")
 
-            # L route: persist the native product next to the D keep dirs so a
-            # checkpoint resume + tmp cleanup cannot leave the archive rows
-            # structureless (see _persist_lpeptide_structure_keep).
             lpeptide_keep_file = ""
             if peptide_chirality != 'd':
                 lpeptide_keep_file = _persist_lpeptide_structure_keep(
                     parent_task_id, generation, candidate_sequence, structure_file)
-            # Degenerate-sequence deduction goes into composite_score itself:
-            # ranking, elite selection and the GRPO reward all read that one
-            # field. Fixed mask positions are exempt — they are user design,
-            # not proposer collapse.
             degeneracy_flags = _seq_quality.degeneracy_flags(
                 candidate_sequence,
                 fixed_prefix=proposer_prefix,
@@ -5746,15 +4601,9 @@ def run_peptide_design_backend(
                 "modifications": candidate_modifications,
                 "cys_positions": job.get("cys_positions") if isinstance(job.get("cys_positions"), list) else [],
                 "generation": generation,
-                # GRPO cohort key set by the proposer (de novo pool /
-                # per-parent edit group) — consumed by learn
                 "proposal_group": job.get("proposal_group") or "ungrouped",
-                # pre-folding chemistry match vs the pocket's demands —
-                # consumed by learn as the chem_comp reward part
                 "chem_comp": _pocket_chemistry_complementarity(
                     candidate_sequence, pocket_chem_demands),
-                # pocket-route rows carry the soft off-pocket flag; the
-                # plain/blind routes have no pocket gate result at all
                 "off_pocket": bool(gate_result.get("off_pocket"))
                 if isinstance(gate_result, dict) else False,
                 "iptm": pair_iptm,
@@ -5809,26 +4658,12 @@ def run_peptide_design_backend(
                 if structure_file else [],
             }
             all_results.append(result_row)
-            # Keep the pool rank-sorted on every append: progress reporting
-            # publishes all_results[0] as best_score and all_results[:10] as
-            # current_best_sequences, and design_results.json serializes this
-            # list verbatim. In completion order those described the
-            # first-evaluated (generation-1) candidates for the entire run —
-            # the "best" the UI showed never improved no matter what later
-            # generations found.
             all_results.sort(key=_peptide_rank_score, reverse=True)
             completed_tasks += 1
             generation_done += 1
 
-            # pLDDT hard gate for the generation's elite pool: the next
-            # generation's parents and the GRPO advantage baseline only
-            # see foldable candidates. Without this the composite's ipSAE
-            # dominance reinforces contact-maximizing junk (H/G-rich
-            # sequences with no fold) as parents for mutation.
             _PLDDT_GATE = plddt_gate_for_chirality(peptide_chirality)
 
-            # pLDDT hard gate for this generation's elite pool: only
-            # foldable candidates become parents for mutation and GRPO.
             gated_gen = [r for r in all_results
                          if isinstance(r.get("binder_avg_plddt"), (int, float))
                          and r["binder_avg_plddt"] >= _PLDDT_GATE]
@@ -5842,15 +4677,7 @@ def run_peptide_design_backend(
                 }
                 for row in _select_nsga2_peptide_elites(elite_pool, elite_size)
             ]
-            # persist after the elites of this generation are final: a worker
-            # death before the next generation's save would otherwise lose it
             _save_generation_checkpoint(generation)
-            # PeptideLM: GRPO update on this generation's scored rows so the
-            # proposal policy improves round over round. The update fires ONCE,
-            # on the COMPLETE cohort (successes + rejects): per-candidate calls
-            # trained on a partial queue whose advantage baseline drifted with
-            # completion order, and early finishers were trained repeatedly
-            # while late ones were never trained.
             rejects_this_generation = sum(
                 1 for row in generation_rejected_rows
                 if row.get("generation") == generation
@@ -5894,7 +4721,6 @@ def run_peptide_design_backend(
             }
             _write_peptide_progress(progress_path, progress_payload)
 
-        # ==== Stage 1 (CPU, per candidate): extract, score, stage, dispatch ====
         stage_contexts: List[Dict[str, Any]] = []
         for job in completed_generation_jobs:
             idx = int(job.get("candidate_index") or 0)
@@ -5953,16 +4779,7 @@ def run_peptide_design_backend(
             liability = _peptide_sequence_liability_penalty(candidate_sequence, candidate_modifications)
             liability_penalty = float(liability.get("penalty") or 0.0)
             developability_score = max(0.0, 1.0 - liability_penalty)
-            # Pocket satisfaction enters the RANKING when the user defined a
-            # pocket — a ranking signal, never a filter: every candidate
-            # ships. Measured motivation: with pure confidence ranking the
-            # rank-1 pick ignored the user's pocket even though 9-10 of 16
-            # candidates sat inside it (some at 0.6-0.9 A). The refined
-            # pocket distance arrives later (after the refine below), so the
-            # initial composite uses the native pose's pocket contact and is
-            # recomputed once the refined report exists.
             _native_structure = _select_primary_structure_file(result_dir)
-            # 先于 interface 计分解析，避免首候选 NameError、后续候选读到上一候选残留值。
             structure_file = _native_structure
             native_pocket_min = None
             if pocket_sequence_contacts and _native_structure is not None:
@@ -6000,11 +4817,6 @@ def run_peptide_design_backend(
                         + 0.32 * pocket_satisfaction
                     )
                 else:
-                    # Interface engagement (BindCraft2's highest-weight signal):
-                    # clean cross-chain heavy-atom contacts at 4.5 A, saturated
-                    # at 40 pairs. ipSAE is a saturating confidence — contacts
-                    # provide the per-candidate discrimination that GRPO needs
-                    # for credit assignment.
                     try:
                         _iface_count = _interchain_contact_count(
                             Path(structure_file))
@@ -6023,11 +4835,6 @@ def run_peptide_design_backend(
             else:
                 composite_score = None
 
-            # D-route (chirality=d): stage the candidate's isolated conformer
-            # against the prepared D-target at the user pocket, then dispatch
-            # the fixed-D diffusion refine (collected in _finalize_candidate
-            # as it completes). Failure here fails the task — the D-space
-            # numbers are a mandatory deliverable, never skipped.
             staged_path = ""
             d_space_refined = ""
             d_space_metrics: Optional[Dict[str, Any]] = None
@@ -6036,14 +4843,7 @@ def run_peptide_design_backend(
             route: Optional[str] = None
             dispatch = None
             refined_cif = ""
-            # all D candidates go through fixed-D diffusion: it resolves the
-            # placement clashes of the staged pose; the per-candidate bond gate
-            # in _finalize_candidate rejects any bicyclic candidate whose ring
-            # bonds broke
             if peptide_chirality == 'd' and structure_file is None:
-                # a worker archive without a structure cannot enter the D
-                # route (staging/refine need coordinates); reject the
-                # candidate instead of failing the task at zip time
                 stage_contexts.append({
                     "reject": (
                         f"[d-peptide] candidate {candidate_sequence[:12]}… "
@@ -6054,15 +4854,8 @@ def run_peptide_design_backend(
                 })
                 continue
             if peptide_chirality == 'd':
-                # A candidate whose staging/refine degenerates (e.g. a
-                # collapsed diffusion sample) is rejected individually; the
-                # task only fails when NO candidate survives.
                 try:
                     _job_seed = job.get("predict_args") if isinstance(job.get("predict_args"), dict) else {}
-                    # Deterministic refine seed: (task, generation, sequence).
-                    # The resume-dependent counters seed+generation_completed_base+idx
-                    # made the same sequence re-evaluate with a different seed after
-                    # a checkpoint resume — unreproducible rewards are GRPO noise.
                     _seed_v = int.from_bytes(
                         hashlib.sha256(
                             f"{parent_task_id}|d|{generation}|{candidate_sequence}".encode()
@@ -6081,12 +4874,6 @@ def run_peptide_design_backend(
                     )
                     refined_cif = str(Path(candidate_dir) / "d_space_refined.cif")
                     if pocket_sequence_contacts and d_reference_peptide is not None:
-                        # mode A (reference-anchored) only: restore the
-                        # covalent LINK topology; the user's uploaded pose IS
-                        # the binding mode (never clash-searched). The de-novo
-                        # clash-free placement route was removed —
-                        # its invented pose only fed the sampler a wrong local
-                        # minimum the local refine window could not escape.
                         _pocket_place_for_refine(
                             Path(staged_path),
                             pocket_sequence_contacts=pocket_sequence_contacts,
@@ -6100,9 +4887,6 @@ def run_peptide_design_backend(
                         )
                         route = "pocket"
                     elif pocket_sequence_contacts:
-                        # blind de-novo + user pocket: the pocket conditions
-                        # the sampler (PocketPotential) and gates the
-                        # collected result; the pose belongs to the model
                         route = "pocket"
                     else:
                         route = "plain"
@@ -6113,9 +4897,6 @@ def run_peptide_design_backend(
                         if pocket_sequence_contacts else None)
 
                     def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch, _pk: Optional[str] = _pocket_res_for_dispatch):  # noqa: E731
-                        # detect the staged complex's chain layout: the
-                        # designed peptide is the LAST protein chain, every
-                        # chain before it is receptor
                         _st = gemmi.read_structure(str(_staged))
                         _st.setup_entities()
                         _poly = [ch.name for ch in _st[0]
@@ -6140,14 +4921,6 @@ def run_peptide_design_backend(
                     })
                     continue
 
-            # L chirality + user pocket: protenix-v2 has no constraint
-            # embedder, so the native prediction's peptide pose does not
-            # follow the pocket. The native product already carries a
-            # MODEL-generated pose — keep it (mode-A style, keep_pose=True)
-            # and let the refine run under the fixed receptor with native
-            # PocketPotential guidance pulling the peptide into the user
-            # pocket. The clash-search re-placement was removed
-            # it discarded the model pose in favor of an invented one.
             if (peptide_chirality == 'l' and pocket_sequence_contacts
                     and structure_file is not None):
                 try:
@@ -6208,18 +4981,6 @@ def run_peptide_design_backend(
                     })
                     continue
 
-            # L chirality WITHOUT pocket: the native prediction carries a
-            # model-generated pose that has bypassed every geometric gate
-            # 12/24 shipped ranks with interface
-            # min 1.66-2.23 A). Stage the native complex and dispatch the
-            # same fixed-receptor refine the pocket route uses -- minus the
-            # pocket conditioning. The state guard, constraint bands, and
-            # the collector's engagement/clash/backbone gates then apply.
-            # With the docking engine the native pose goes through the
-            # fixed-receptor refine + covalent gate. Without it (原版
-            # protenix option) the co-folding prediction IS the deliverable:
-            # stage_contexts with dispatch=None finalize immediately from
-            # the native metrics parsed above.
             if (peptide_chirality == 'l'
                     and not pocket_sequence_contacts
                     and structure_file is not None):
@@ -6244,19 +5005,12 @@ def run_peptide_design_backend(
                     _seed_for_dispatch = _seed_v
 
                     def dispatch(_staged: Path = _staged_for_dispatch, _seed: int = _seed_for_dispatch):  # noqa: E301
-                        # detect the staged complex's chain layout (same as
-                        # the D plain route)
                         _st = gemmi.read_structure(str(_staged))
                         _st.setup_entities()
                         _poly = [ch.name for ch in _st[0]
                                  if sum(1 for r in ch if r.het_flag != "H") >= 3]
                         _pep_letter = _poly[-1] if _poly else "B"
                         _rec_letters = ",".join(_poly[:-1]) if len(_poly) > 1 else "A"
-                        # Blind inpainting (aligned with the D route): the
-                        # peptide denoises from pure noise so the constraint
-                        # bands converge from scratch. Refining the staged
-                        # native pose instead leaves residual covalent
-                        # strain that survives the full band set.
                         return _dpeptide_dispatch_refine(
                             _staged, _seed, build_capability_queue("protenix", "default"),
                             blind=True,
@@ -6306,26 +5060,14 @@ def run_peptide_design_backend(
                 "async_result": None,
             })
 
-        # ==== Stage 2 (GPU): collect refines, finalize ====
-        # All refines dispatch immediately — the GPU pool + worker concurrency
-        # schedule them across every idle card, and each candidate still
-        # finalizes (score/learn/progress) the moment its own refine lands.
         _run_dpeptide_refine_stage(
             stage_contexts,
             parent_task_id,
             _finalize_candidate,
         )
 
-    # pLDDT hard gate: only foldable candidates compete for elite slots,
-    # then composite (ipSAE-dominant) ranks within the qualified set.
-    # Without this, GRPO reinforces contact-maximizing junk — histidine/
-    # glycine-rich "peptides" that score ipSAE but have no fold (measured
-    # H 19%, G 16%, hydrophobic 8% after 7 auto-mode generations).
     _PLDDT_GATE = plddt_gate_for_chirality(peptide_chirality)
 
-    # Hard gate BEFORE NSGA-II: below-gate candidates are excluded from
-    # the pool entirely — NSGA-II ignores list order, so sorting alone
-    # would not keep them out of the elite set.
     gated = [r for r in all_results
              if isinstance(r.get("binder_avg_plddt"), (int, float))
              and r["binder_avg_plddt"] >= _PLDDT_GATE]
@@ -6349,13 +5091,6 @@ def run_peptide_design_backend(
                 if refined_ref and os.path.isfile(refined_ref):
                     staged_path = refined_ref
                 else:
-                    # acks_late redelivery after tmp cleanup: the refined
-                    # sample persists under dpeptide_keep_<task>_<gen>_<cand>/
-                    # (legacy dirs without the gen segment also match). The
-                    # STAGED frame is deliberately NOT a fallback: staging
-                    # places the peptide by surface search BEFORE docking, so
-                    # a staged "product" is a dissociated complex — shipping
-                    # it presented a floating peptide to the user as a result.
                     cand_dir = Path(refined_ref or staged_ref or "x").parent
                     gen_dir = cand_dir.parent.name if cand_dir.parent.name.startswith("gen_") else ""
                     staged_path = ""
@@ -6369,11 +5104,6 @@ def run_peptide_design_backend(
                         if refined_ref and (keep_dir / Path(refined_ref).name).is_file():
                             staged_path = str(keep_dir / Path(refined_ref).name)
                             break
-                        # The keep stores the ranked SAMPLE cifs, not the
-                        # refined_cif basename. Accept a keep sample only when
-                        # its staged.pdb peptide matches this row's sequence —
-                        # a cand index recurs every generation, and a
-                        # generation-collided keep belongs to another sequence.
                         keep_staged = keep_dir / "staged.pdb"
                         keep_samples = sorted(keep_dir.glob("d_space_staged_model_*.cif"))
                         if keep_staged.is_file() and keep_samples:
@@ -6382,10 +5112,6 @@ def run_peptide_design_backend(
                                 staged_path = str(keep_samples[0])
                                 break
                 if not (staged_path and os.path.isfile(staged_path)):
-                    # Checkpoint-resumed exports legitimately lose early-gen
-                    # structures to tmp cleanup. Ship the remaining ranked
-                    # rows and mark this one structureless — the UI shows it
-                    # as "no structure" instead of a detached pseudo-result.
                     print(
                         f"[d-peptide] WARNING: rank {rank} "
                         f"({str(next_row.get('sequence'))[:16]}) has no "
@@ -6407,23 +5133,16 @@ def run_peptide_design_backend(
             keep_file_name = str(next_row.pop("lpeptide_keep_file", "") or "")
             if peptide_chirality != 'd' \
                     and not (structure_source_for_rank and os.path.isfile(structure_source_for_rank)):
-                # L mirror of the dpeptide_keep fallback: recover the product
-                # persisted at finalize time (sequence-guarded).
                 structure_source_for_rank = _lpeptide_keep_structure(
                     parent_task_id, keep_file_name, next_row.get("sequence"))
             if structure_source_for_rank and os.path.isfile(structure_source_for_rank):
                 suffix = Path(structure_source_for_rank).suffix.lower()
                 ext = ".pdb" if suffix == ".pdb" else ".cif"
                 structure_arcname = f"structures/rank_{rank:02d}{ext}"
-                # Export gate: a dissociated product (e.g. a staged pre-docking
-                # frame that slipped past a fallback) must fail the export, not
-                # ship a floating peptide with a high score attached.
                 _assert_product_bound(
                     Path(structure_source_for_rank), binder_chain_id,
                     rank=rank, sequence=str(next_row.get("sequence") or ""))
                 if peptide_chirality == 'd':
-                    # Per-rank chirality telemetry (hard gate covers rank 1
-                    # only); recorded on the row, the <30% scoring policy stands.
                     violations = _count_dpeptide_chirality_violations(structure_source_for_rank)
                     if violations is not None:
                         next_row["peptide_chirality_violations"] = violations
@@ -6434,15 +5153,9 @@ def run_peptide_design_backend(
                                 "chirality artifacts",
                                 file=sys.stderr)
                 zipf.write(structure_source_for_rank, structure_arcname)
-                # rank_cif_source stays on the MIRROR-SPACE source: the
-                # product block flips it exactly once. Overwriting it with the
-                # already-flipped display file would double-flip.
                 if rank == 1 and not rank_cif_source:
                     rank_cif_source = structure_source_for_rank or source_path
             elif peptide_chirality != 'd':
-                # A hollow archive (JSON only) presented "no structure" cards
-                # to the user after a redelivered re-export — same policy as
-                # the D route: ship the row structureless, with a warning.
                 print(
                     f"[peptide] WARNING: rank {rank} "
                     f"({str(next_row.get('sequence'))[:16]}) structure file "
@@ -6454,11 +5167,6 @@ def run_peptide_design_backend(
             next_row["structure_file"] = structure_arcname
             next_row["structure_name"] = Path(structure_arcname).name if structure_arcname else ""
             next_row["structure_path"] = structure_arcname
-            # Mirror the pointer onto the original evaluated row: the zip's
-            # design_results.json serializes all_results, and the frontend 3D
-            # card view resolves each candidate's structure by structure_name
-            # — without this the cards ship nameless ("No structure is
-            # available for this peptide") even though rank_XX files exist.
             row["rank"] = rank
             row["structure_file"] = next_row["structure_file"]
             row["structure_name"] = next_row["structure_name"]
@@ -6468,9 +5176,6 @@ def run_peptide_design_backend(
 
         product_note: Dict[str, Any] = {}
         if peptide_chirality == 'd':
-            # The display rank-01 file already IS the product frame
-            # (L-target + D-peptide): it must pass the chirality gate before
-            # entering the archive as the product.
             if rank_cif_source and os.path.isfile(rank_cif_source):
                 _prod_path = Path(output_archive_path).parent / "PRODUCT_Ltarget_Dpeptide.pdb"
                 shutil.copyfile(rank_cif_source, _prod_path)
@@ -6492,9 +5197,6 @@ def run_peptide_design_backend(
                 )
                 integrity = _structure_integrity_report(_prod_path)
                 if not integrity.get("all_intact"):
-                    # telemetry, not rejection — the source-level fixes are the
-                    # staged strain relief + the sampler guards; the flag ships
-                    # with the report for visibility
                     print(
                         f"[d-peptide] product integrity flags: "
                         f"{integrity['broken_bonds'][:4]}",
@@ -6518,8 +5220,6 @@ def run_peptide_design_backend(
                     f"top-ranked candidate (rank_cif_source={rank_cif_source!r})."
                 )
         elif peptide_chirality == 'l' and pocket_sequence_contacts and top_results:
-            # L + user pocket: the shipped rank structures are the pocket-
-            # refined poses; record the gate evidence in the summary.
             top_row = top_results[0]
             product_note = {
                 "route": (
@@ -6541,8 +5241,6 @@ def run_peptide_design_backend(
                 ),
             }
         elif peptide_chirality == 'l' and not pocket_sequence_contacts and top_results:
-            # L-blind (no pocket): the shipped rank structures are the
-            # gate-checked fixed-receptor refines; record the route
             top_row = top_results[0]
             product_note = {
                 "route": "native_prediction_fixed_receptor_refine",
@@ -6623,13 +5321,8 @@ def run_peptide_design_backend(
     )
 
 
-# The two CCD artifacts are rewritten (merged) per overlay; every other entry in
-# the shared cache is static and must be linked, never duplicated. Keep the names
-# in one place: the skip set in the materialization loop is load-bearing — an
-# unlisted CCD artifact would be hardlinked over the freshly merged overlay copy.
 _PROTENIX_CCD_CIF = "components.cif"
 _PROTENIX_CCD_PKL = "components.cif.rdkit_mol.pkl"
 _PROTENIX_MERGED_CCD_FILES = (_PROTENIX_CCD_CIF, _PROTENIX_CCD_PKL)
-
 
 

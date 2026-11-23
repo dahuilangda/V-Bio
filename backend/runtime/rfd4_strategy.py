@@ -1,8 +1,3 @@
-"""RFD4 设计策略与双环执行策略（proposer 侧编排）。
-
-原 run_rfd4_backend / run_rfd4_design_strategy / run_bicyclic_strategy
-（run_single_prediction.py）整体迁入。
-"""
 from __future__ import annotations
 
 import json
@@ -46,9 +41,6 @@ from backend.runtime.backends.support import (
 from backend.worker.docker_cmd import ensure_image
 
 
-
-
-
 def run_rfd4_backend(
     temp_dir: str,
     yaml_content: str,
@@ -58,12 +50,6 @@ def run_rfd4_backend(
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
 ) -> None:
-    """RFD4-Proteina generation backend.
-
-    靶标坐标来自上传结构（template_inputs），yaml 第一个 protein 链用于
-    推导 contig 长度；RFD4_CONTIG 可整体覆盖 contig。产物按 task 隔离在
-    RFD4_DATA_DIR/runs/<task>，避免并发任务互覆。
-    """
     rfd4_image = str(RFD4_DOCKER_IMAGE or "").strip()
     ensure_image(rfd4_image)
     print("Using RFD4-Proteina backend", file=sys.stderr)
@@ -86,8 +72,6 @@ def run_rfd4_backend(
         raise ValueError("RFD4 生成任务需要在 yaml 中提供靶点蛋白链。")
     target_length = len(str(target_entry.get("sequence", "")))
     if rfd4_spec:
-        # 任务级 spec 透传（motif 条件化等）；spec 的 input 必须引用
-        # /workspace/input/target.cif（已落盘的上传靶标）
         spec_text = str(rfd4_spec)
     else:
         spec_text = rfd4_adapter.default_spec(target_length, RFD4_CONTIG)
@@ -109,9 +93,6 @@ def run_rfd4_backend(
         "-v", f"{RFD4_DATA_DIR}/hf_cache:/workspace/hf_cache",
         "-v", f"{RFD4_DATA_DIR}/runs:/workspace/runs",
         "-v", f"{input_dir}:/workspace/input:ro",
-        # CCD via the image's bundled biotite dictionary (covers NLE/AIB/HYP).
-        # Never set CCD_MIRROR_PATH: it becomes the exclusive CCD source and
-        # standard residues fail.
         "-w", "/workspace",
         "--entrypoint", "python3",
         image, "/app/rfd4_generate.py",
@@ -126,7 +107,6 @@ def run_rfd4_backend(
     if proc.returncode != 0:
         raise RuntimeError(f"rfd4-generate exited {proc.returncode}")
 
-    # 引擎产物经 RFD4_DATA_DIR/runs 挂载落在宿主侧同名目录，直接收集。
     archive_root = work_root / "archive"
     archive_root.mkdir(parents=True, exist_ok=True)
     engine_out_dir = Path(RFD4_DATA_DIR) / "runs" / run_token
@@ -164,20 +144,6 @@ def run_rfd4_design_strategy(
     template_inputs: Optional[List[Dict[str, Any]]] = None,
     options: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """RFD4 design strategy: one-shot generation, then verification dispatch.
-
-    Generation products (CIFs + summary.json) become the parent archive;
-    candidate binder sequences come from the summary (shortest polymer chain
-    per output, same convention as verify_designs.py). Verification tasks are
-    submitted to the selected scoring engine through the gateway into the
-    same project ("RFD4 verify <engine> <label>"); per-candidate failures are
-    recorded in verification_manifest.json without blocking the rest.
-
-    Bicyclic mode (peptideDesignMode=bicyclic) is fully automatic: seed,
-    NCAA, pocket and lengths drive in-runtime construction of the bicyclic
-    inputs and spec (rfd4_adapter), and verification carries the linker
-    ligand plus three SG bonds.
-    """
     options = options or {}
     design_mode = _normalize_peptide_design_mode(
         options.get("peptideDesignMode") or options.get("peptide_design_mode") or "linear")
@@ -239,7 +205,6 @@ def run_rfd4_design_strategy(
     headers = {"X-API-Token": platform_token}
     dispatched = 0
     for cand in candidates:
-        # cyclic 模式：验证侧补头尾 N(1)-C(L) bond（平台无引擎级 cyclic 标志）
         cyclic_bond = ""
         if design_mode == "cyclic":
             seq_len = len(cand["sequence"])
@@ -309,8 +274,6 @@ def run_rfd4_design_strategy(
 
 
 def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
-    """Cyclic/bicyclic ring closure requires a bond prior graded hard in the
-    capability matrix; soft priors (boltz) cannot guarantee ring bond lengths."""
     if design_mode not in ("cyclic", "bicyclic"):
         return
     from backend.core.engine_capabilities import engine_constraint_quality
@@ -326,8 +289,6 @@ def _assert_bond_capable_scorer(design_mode: str, score_backend: str) -> None:
 def _pair_arms_by_distance(anchors: Dict[int, Dict[str, np.ndarray]],
                            linker_atoms: List[Tuple[str, np.ndarray]],
                            linker_ccd: str) -> List[str]:
-    """Greedy one-to-one pairing of anchor SG atoms to linker arm atoms by
-    distance; returns arm names in anchor order for the verify bonds."""
     import numpy as _np
     linker = bicyclic_linkers.get_linker(linker_ccd)
     by_name = dict(linker_atoms)
@@ -366,16 +327,6 @@ def run_bicyclic_strategy(
     template_inputs: Optional[List[Dict[str, Any]]],
     options: Dict[str, Any],
 ) -> None:
-    """Bicyclic RFD4 strategy: build inputs in-runtime, generate, dispatch.
-
-    All inputs come from the form/upload (no user-prepared spec or combined
-    structure). Required: target structure (template_files), seed sequence
-    (peptideSequenceMask), pocket (peptidePocketResidues/Center), length
-    window (peptideLengthMin/Max, >= |seed|+7). Optional: NCAA list
-    (peptideNcaaCcds, one variant each), linker CCD (default SEZ). Each
-    (NCAA x length) pair generates independently; every candidate is verified
-    with the linker ligand, three Cys-SG bonds and NCAA modifications.
-    """
     from backend.runtime import rfd4_adapter
     from backend.runtime.rfd4_adapter import MIN_CLOSURE_RESIDUES
 
@@ -510,7 +461,6 @@ def run_bicyclic_strategy(
                 raise RuntimeError(f"{stem}: 生成未产出任何设计")
             for name in cifs:
                 archive_files[f"gen/{stem}/{Path(name).name}"] = archived[name]
-            # SG-臂几何配对：按骨架坐标贪心一对一，替代文档约定序
             arm_order = _pair_arms_by_distance(anchors, sez, linker_ccd)
             for name in cifs:
                 label = Path(name).parent.name

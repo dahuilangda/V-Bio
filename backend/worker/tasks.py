@@ -48,9 +48,6 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = BASE_DIR / "capabilities"
 
 
-
-
-
 def _ensure_repo_root_on_path() -> Path | None:
     """Ensure the repo root (containing capabilities/) is on sys.path."""
     if str(BASE_DIR) not in sys.path:
@@ -60,7 +57,6 @@ def _ensure_repo_root_on_path() -> Path | None:
     return BASE_DIR
 
 _ensure_repo_root_on_path()
-
 
 
 logger = logging.getLogger(__name__)
@@ -565,7 +561,6 @@ class TaskProgressTracker:
             logger.error(f"Failed to register process for task {self.task_id}: {e}")
 
 
-
 def _read_json_record(path: str) -> dict:
     if not path or not os.path.exists(path):
         return {}
@@ -879,10 +874,6 @@ def _stream_process_output(
     poll_interval: float = 5.0,
     on_poll=None,
 ) -> None:
-    """逐行消费 stdout；容器静默挂起时仍按 poll_interval 驱动超时与取消。
-
-    超时抛 SubprocessHardTimeout 时进程仍在运行，调用方负责杀进程组与容器。
-    """
     import queue as _queue
     import threading as _threading
     import time as _time
@@ -915,8 +906,6 @@ def _stream_process_output(
         if deadline is not None and _time.time() > deadline:
             raise SubprocessHardTimeout(
                 f"subprocess exceeded {timeout_seconds}s without completing.")
-
-
 
 
 def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
@@ -1083,7 +1072,6 @@ def upload_result_to_central_api(task_id: str, local_file_path: str, filename: s
             status_code = exc.response.status_code if exc.response is not None else 0
             if 400 <= status_code < 500 and status_code != 429:
                 # Client-side rejection (bad request/auth) — retrying cannot fix it.
-                # 429 是限流瞬态，与 5xx 同路退避重试。
                 raise ResultUploadError(
                     f"Upload rejected with HTTP {status_code} for task {task_id}: {exc}"
                 ) from exc
@@ -2064,7 +2052,6 @@ def boltz2score_task(self, score_args: dict):
         if tracker:
             tracker.stop_heartbeat()
             logger.info(f"Task {task_id}: Cleanup completed")
-
 
 
 # Register sibling task modules so Celery workers (whose include list is this

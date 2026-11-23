@@ -294,7 +294,6 @@ def register_task_routes(
         return snapshot
 
     def _read_archive_design_summary(archive_name: str) -> Dict[str, Any] | None:
-        """Read results_summary.json from a result archive (cached per stat)."""
         snapshot = _archive_snapshot(archive_name)
         if snapshot is None:
             return None
@@ -390,7 +389,6 @@ def register_task_routes(
         return info
 
     def _attach_compact_metrics(target: Dict[str, Any], task_id: str) -> None:
-        """附加 compact 指标（同对象双键）；目标已携带时不再拉取。"""
         compact = target.get('compact_metrics') or target.get('lead_opt_metrics')
         if not isinstance(compact, dict):
             compact = get_compact_prediction_metrics(task_id)
@@ -625,7 +623,6 @@ def register_task_routes(
                 ver = 'unknown'
             stub = {'task_id': task_id, 'ver': ver}
             _stub_snapshot_cache[task_id] = (stub, now + ttl_seconds)
-            # 会话级缓存随轮询任务集有界增长，超限整表过期（TTL 只有 2s，重建廉价）。
             if len(_stub_snapshot_cache) > 20000:
                 _stub_snapshot_cache.clear()
             stubs.append(stub)
@@ -842,8 +839,6 @@ def register_task_routes(
         temp_save_path = ""
         try:
             filename = secure_filename(file.filename)
-            # 归档名必须归属该任务：secure_filename 会把非 ASCII 名剥成扩展名，
-            # 空名或指向其他任务的归档一律拒绝，防止覆盖他任务产物。
             if not filename or not filename.startswith(f"{task_id}_"):
                 return jsonify({
                     'error': f'Archive filename must be "{task_id}_<suffix>" after sanitization; got "{filename}"'

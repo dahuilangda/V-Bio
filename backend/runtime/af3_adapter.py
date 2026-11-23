@@ -704,8 +704,6 @@ def load_unpaired_msa(
         for chain_id in chain_ids:
             path = chain_msa_paths.get(chain_id)
             if path and path.exists():
-                # a3m 首行保持搜索时的原查询；AF3 派生的 query_sequence 由
-                # 容器内 from_a3m patch 对齐（派生事实源在 AF3）。
                 msa_content = _replace_a3m_first_query_sequence(
                     _normalize_a3m_content(path.read_text()),
                     sequence,

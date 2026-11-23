@@ -1,16 +1,3 @@
-"""Complex multi-turn sessions against the deployed API.
-
-Each session mixes several goals with distractions, mind changes, ambiguous references and
-injected failure receipts. Checked every turn:
-  INV1 grounding: answers cite retrieved data; fabricated identifiers never ship (audits).
-  INV2 identity: entity choices state their dimensions; unstated dimensions are asked.
-  INV3 honesty: completion claims only with applied receipts; failures re-proposed corrected.
-  INV4 recovery: after a failed receipt the next turn proposes a corrective path, never
-       repeats the failed operation verbatim, never claims done.
-  INV5 relevance: after a distraction the assistant returns to the user's main request.
-
-Run:  python copilot_real_stack_chaos.py
-"""
 from __future__ import annotations
 
 import re
@@ -61,8 +48,6 @@ RENAME_FAILED = [{
 
 
 def session_interleaved_docking():
-    """Goal A (dock KLK+ibuprofen) interrupted by goal B (aspirin lookup), a chit-chat
-    distractor, an ambiguous reference, then back to A with a mind change."""
     s = RealStackSession("chaos-A", "task_list", TASK_LIST_AFFINITY)
     s.turn("我想对接klk和布洛芬", expect=[
         ("A1 asks identity determination", lambda r: has_choice_question(r) or obs_source("rcsb")(r)),
@@ -87,8 +72,6 @@ def session_interleaved_docking():
 
 
 def session_recovery_chain():
-    """Continuation → pocket fails → recover → pocket applied → submit proposed; a failed
-    rename on a stale row id mid-flow; a vague status question at the end."""
     s = RealStackSession("chaos-B", "task_detail", TASK_DETAIL_AFFINITY_DOCK_READY)
     s.turn("已应用刚才确认的操作（见回执），无需重复；请继续完成计划", receipts=RETRACT_CREATE, expect=[
         ("continuation proposes the blocker's resolution", has_action_skill("task_detail:set_docking_pocket_box")),
@@ -101,8 +84,6 @@ def session_recovery_chain():
     s.turn(
         "好了",
         receipts=POCKET_APPLIED,
-        # The context must evolve with the receipt (the real frontend clears the blocker
-        # once the pocket is set) — otherwise the model correctly re-proposes the pocket.
         payload_patch={"runtime": {"displayTaskState": "DRAFT", "runDisabled": False, "runBlockedReason": "", "activeTaskId": ""}},
         expect=[
             ("applied pocket advances the chain", lambda r: has_action_skill("task_detail:submit_current")(r) or bool(r.get("questions")) or r.get("state") == "complete"),
@@ -121,8 +102,6 @@ def session_recovery_chain():
 
 
 def session_prediction_with_distractions():
-    """Prediction flow with sequence fill, a template request, list-management distractions,
-    and a multi-thing turn (rename + lookup in one message)."""
     s = RealStackSession("chaos-C", "task_detail", TASK_DETAIL_PREDICTION)
     s.turn("帮我把目标蛋白设为人的溶菌酶，然后建个预测任务", expect=[
         ("sequence sourced from uniprot", lambda r: obs_source("uniprot")(r) or has_choice_question(r)),
@@ -140,8 +119,6 @@ def session_prediction_with_distractions():
 
 
 def session_vague_questions():
-    """Underspecified asks: anaphora, comparative without candidates, typo'd compound,
-    mixed-language entity."""
     s = RealStackSession("chaos-D", "task_list", TASK_LIST_WITH_ROWS)
     s.turn("这个项目现在怎么样？", expect=[
         ("context-anchored stats answer", lambda r: bool(str(r.get("content") or "").strip())),

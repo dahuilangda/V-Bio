@@ -30,21 +30,16 @@ def get_engine(backend: str) -> dict | None:
     return ENGINES.get(str(backend or "").strip().lower())
 
 
-
 def active_engine_ids() -> list[str]:
     return sorted(k for k, v in ENGINES.items() if v.get("status") == "active")
 
 
-
 def engine_constraints(backend: str) -> frozenset[str]:
-    """引擎声明的约束类型键集合；未知引擎返回空集。"""
     engine = get_engine(backend)
     return frozenset(engine.get("constraints") or []) if engine else frozenset()
 
 
 def engine_constraint_quality(backend: str, constraint: str) -> str | None:
-    """约束实现质量：hard（可保证环闭合/键长）、soft（先验性引导）、
-    native（引擎原生条件）。未声明返回 None。"""
     engine = get_engine(backend)
     if not engine:
         return None
@@ -52,7 +47,6 @@ def engine_constraint_quality(backend: str, constraint: str) -> str | None:
 
 
 def engine_chirality(backend: str) -> frozenset[str]:
-    """引擎声明的手性支持（l/d）；未知引擎返回空集。"""
     engine = get_engine(backend)
     return frozenset(engine.get("chirality") or []) if engine else frozenset()
 
@@ -62,7 +56,6 @@ def engine_supports_chirality(backend: str, chirality: str) -> bool:
 
 
 def engine_modification_support(backend: str) -> dict:
-    """引擎修饰能力：standard_ccd / custom_residue_upload；未知引擎全 False。"""
     engine = get_engine(backend)
     support = (engine or {}).get("modification_support") or {}
     return {

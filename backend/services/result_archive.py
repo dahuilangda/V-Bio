@@ -772,7 +772,6 @@ class ResultArchiveService:
             return str(cache_path)
 
         data = self._build_view_archive_bytes(source_zip_path, preferred_structure_name=preferred_structure_name)
-        # 并发构建共用 cache_key 时各写各的临时文件；os.replace 仍是原子发布。
         temp_path = cache_dir / f'{cache_key}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp'
         temp_path.write_bytes(data)
         os.replace(str(temp_path), str(cache_path))
@@ -1188,7 +1187,6 @@ class ResultArchiveService:
                 seed = seed[len('seed-'):]
             sample = str(row.get(sample_key) or '').strip()
             if sample:
-                # 无 seed 列时按样本号做键，查找侧回退到该形态
                 ranks[f"{sample}" if not has_seed else f"{seed}-{sample}"] = value
         return ranks
 
@@ -1221,15 +1219,12 @@ class ResultArchiveService:
 
     @classmethod
     def _best_sample(cls, samples: list, key=None):
-        """排名最高者胜，平局取最小索引；与 zip 成员顺序无关。"""
         rank = key or cls._sample_rank
         return samples[min(range(len(samples)),
                            key=lambda i: (-rank(samples[i]), i))]
 
     @staticmethod
     def _cif_asym_tokens(structure_text: str) -> Optional[list]:
-        """按 cif 文件序推导逐 token 链标签（聚合物残基 1 token，
-        非聚合物残基按原子数），供无 token 标注的归档使用。"""
         try:
             import gemmi
             structure = gemmi.make_structure_from_block(
@@ -1295,7 +1290,6 @@ class ResultArchiveService:
 
     @staticmethod
     def _extract_compact_pae_from_zip(src_zip) -> Optional[Dict[str, Any]]:
-        """任意后端的最优样本 PAE 压缩矩阵（≤134²）与链边界；numpy 下采样。"""
         import numpy as _np
         names = [n for n in src_zip.namelist() if not n.endswith('/')]
         samples = ResultArchiveService._prediction_samples(src_zip, names)
@@ -1338,10 +1332,8 @@ class ResultArchiveService:
         down = max(1, -(-n0 // 134))
         # Numpy downsample before materializing Python floats.
         matrix = arr[::down, ::down].round(2).tolist()
-        # 边界为全 token 空间坐标；前端自行缩放
         bounds = []
         if asym:
-            # 相邻同链 token 按原始标签合并；值优先取数字 ID，否则取序号
             prev = object()
             for idx, chain in enumerate(asym):
                 if chain == prev and bounds:
@@ -1509,7 +1501,6 @@ class ResultArchiveService:
             target_chain = max(cif_residues, key=cif_residues.get) if cif_residues else None
             binder_chains = [c for c in cif_residues if c != target_chain] + list(cif_atoms)
 
-            # 先建 cif 链名 -> token 字母映射，--group 使用 ipsae2 认识的链 ID
             full = best.get('full_data')
             if full is None and best.get('full_name'):
                 try:
@@ -1521,7 +1512,6 @@ class ResultArchiveService:
             used: set = set()
             cif_chain_names = set(cif_residues) | set(cif_atoms)
             if cif_chain_names and cif_chain_names <= set(asym_counts):
-                    # cif 链名与 token 标签一致时直接 1:1
                 id_to_letter = {name: name for name in cif_chain_names}
             else:
                 for chain, count in cif_residues.items():
@@ -1544,8 +1534,6 @@ class ResultArchiveService:
                        '--pae-cutoff', '10', '--output-file', str(out_path)]
             # IPSAE2 rejects a single-chain group (a group needs 2+ chains);
             # for one binder chain the pair rows already carry both directions.
-            # 映射失败的链不进 --group，避免整次运行被拒
-            # boltz 布局无 token 标签：cif 链名即 ipsae2 的链 ID，保留原名
             binder_letters = sorted({id_to_letter.get(c, c) for c in binder_chains
                                      if c in id_to_letter or not asym_counts})
             if len(binder_letters) >= 2:
@@ -1620,9 +1608,6 @@ class ResultArchiveService:
 
     @staticmethod
     def _extract_msa_stats_from_zip(src_zip) -> Optional[Dict[str, Any]]:
-        """归档内 a3m 的 MSA 统计：最深链为总深度，逐链深度与覆盖率
-        与 mol1 summary 块同构。小写插入列剥离，不匹配宽度的行跳过；
-        逐行累计空位，内存只随比对宽度增长。"""
         import numpy as _np
         per_chain: list = []
         for name in src_zip.namelist():
@@ -1696,7 +1681,6 @@ class ResultArchiveService:
                     )
                     if summary_name:
                         json_candidates = [summary_name]
-                # 顶层副本与逐样本目录并存时只保留后者，两段指标同源
                 if any('/seed-' in n for n in json_candidates):
                     json_candidates = [n for n in json_candidates if '/seed-' in n]
                 csv_ranks = self._zip_ranking_scores(src_zip, names)
@@ -1757,7 +1741,6 @@ class ResultArchiveService:
                         rank_value = self._to_finite_float(payload.get('ranking_score'))
                     if rank_value is None:
                         rank_value = self._to_finite_float(payload.get('confidence_score'))
-                    # 同分时取 token 级载体，避免由 zip 成员顺序决定
                     carrier = 0 if os.path.basename(name).lower().startswith('summary') else 1
                     score = (coverage, rank_value if rank_value is not None else 0.0, carrier)
                     metrics_block = {
@@ -1846,9 +1829,6 @@ class ResultArchiveService:
                 pair_block = self._extract_pair_ipsae(src_zip)
                 if pair_block:
                     merged.update(pair_block)
-                    # The legacy ligand-ipsae keys were distance-filtered
-                    # with the linker pooled into the protein side; the
-                    # official pure-PAE values above supersede them.
                     for legacy_key, pair_key in (
                         ('protein_to_ligand_ipsae', 'ipsae_protein_to_ligand'),
                         ('ligand_to_protein_ipsae', 'ipsae_ligand_to_protein'),
@@ -1856,7 +1836,6 @@ class ResultArchiveService:
                     ):
                         if pair_block.get(pair_key) is not None:
                             merged[legacy_key] = pair_block[pair_key]
-                # 各后端置信标点统一从最优样本规范化
                 try:
                     names = [n for n in src_zip.namelist() if not n.endswith('/')]
                     samples = self._prediction_samples(src_zip, names)
@@ -1872,7 +1851,6 @@ class ResultArchiveService:
                             merged.setdefault(key, value)
                 except Exception:  # noqa: BLE001 — scalar supplement is additive
                     pass
-                # 后端无 summary 级 msa 块时回退读 a3m
                 if 'msa' not in merged:
                     try:
                         msa_block = self._extract_msa_stats_from_zip(src_zip)
@@ -1886,7 +1864,6 @@ class ResultArchiveService:
                     root_summary = json.loads(src_zip.read(summary_name))
                     msa_stats = root_summary.get('msa')
                     if isinstance(msa_stats, dict) and msa_stats.get('depth'):
-                        # 仅含深度的摘要不得覆盖 a3m 推导的逐链明细
                         existing = merged.get('msa')
                         if (not msa_stats.get('chains')
                                 and isinstance(existing, dict)
@@ -1896,7 +1873,6 @@ class ResultArchiveService:
                             merged['msa'] = msa_stats
                 except Exception:  # noqa: BLE001 — zip 无 summary.json 时跳过
                     pass
-                # 磁盘 summary 由维护任务刷新，取更丰富的一方
                 archive_stem = Path(source_zip_path).stem.removesuffix('_results')
                 msa_path = Path(source_zip_path).parent / 'mol1' / archive_stem / 'output' / 'summary.json'
                 try:

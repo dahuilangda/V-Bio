@@ -1,8 +1,3 @@
-"""MSA 请求与缓存管线：ColabFold 服务器请求、ticket 管理、a3m 缓存。
-
-原 run_single_prediction.py 的 MSA 段整体迁入；由各后端与调度
-经 `from backend.runtime.msa_pipeline import ...` 使用。
-"""
 from __future__ import annotations
 
 import hashlib
@@ -29,8 +24,6 @@ from backend.services.common_utils import (
     is_msa_disabled,
 )
 
-# MSA 缓存配置（目录可通过 VBIO_MSA_CACHE_DIR 覆盖；默认指向 /data 挂载，
-# 避免缓存放大容器可写层导致宿主机根分区膨胀）
 MSA_CACHE_CONFIG = {
     'cache_dir': os.environ.get('VBIO_MSA_CACHE_DIR', '/data/boltz_msa_cache'),
     'enable_cache': True,
@@ -46,13 +39,9 @@ def _get_redis_client_optional():
 
 
 def get_sequence_hash(sequence: str) -> str:
-    """计算序列的MD5哈希值作为缓存键"""
     return hashlib.md5(sequence.encode('utf-8')).hexdigest()
 
 def sanitize_a3m_content(content: str, context: str = "") -> str:
-    """
-    移除 A3M 内容中的非法控制字符（例如 \\x00）。
-    """
     sanitized = content.replace("\x00", "")
     if sanitized != content:
         msg_context = f" ({context})" if context else ""
@@ -100,12 +89,7 @@ def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", heade
     return False
 
 
-
-
 def sanitize_a3m_file(path: str, context: str = "") -> None:
-    """
-    对 A3M 文件进行清理，移除非法控制字符。
-    """
     if not os.path.exists(path):
         return
 
@@ -125,13 +109,7 @@ def sanitize_a3m_file(path: str, context: str = "") -> None:
             print(f"[WARN] 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
 
 
-
-
 def _merge_a3m_texts(first: str, second: str) -> str:
-    """Concatenate two a3m texts, dropping duplicate aligned sequences.
-
-    The query (first entry of `first`) is kept exactly once; the second
-    file's query row and any sequence already present are skipped."""
     def _entries(text):
         header, block = None, []
         for line in text.splitlines():
@@ -154,9 +132,6 @@ def _merge_a3m_texts(first: str, second: str) -> str:
 
 
 def _cancel_msa_ticket(ticket_id: str) -> None:
-    """Best-effort DELETE of an MSA ticket: the patched colabfold server kills the
-    search's processes and frees its GPU slot. Never raises — a plain (unpatched)
-    server answers 405 and we simply keep the old abandon behaviour."""
     try:
         requests.delete(f"{MSA_SERVER_URL}/ticket/{ticket_id}", timeout=15)
     except requests.RequestException:
@@ -164,9 +139,6 @@ def _cancel_msa_ticket(ticket_id: str) -> None:
 
 
 def _msa_search_concurrency() -> int:
-    """Concurrent MSA searches against the shared colabfold server. Policy: one
-    search per GPU (each envdb search pins a full card); default 4, override
-    with VBIO_MSA_SEARCH_CONCURRENCY."""
     try:
         value = int(os.environ.get("VBIO_MSA_SEARCH_CONCURRENCY", "4"))
     except (TypeError, ValueError):
@@ -175,11 +147,6 @@ def _msa_search_concurrency() -> int:
 
 
 def _register_active_msa_ticket(ticket_id: str) -> None:
-    """把进行中的 MSA ticket 归档到任务名下,任务取消时由 terminate 链路撤销。
-
-    以 SET 存储(一个任务可能并发请求多条序列的 MSA);无 VBIO_TASK_ID 环境
-    (非 worker 子进程上下文)时跳过登记。
-    """
     task_id = str(os.environ.get("VBIO_TASK_ID") or "").strip()
     if not task_id or not str(ticket_id or "").strip():
         return
@@ -210,33 +177,14 @@ def _release_active_msa_ticket(ticket_id: str) -> None:
 def request_msa_from_server(
     sequence: str, timeout: Optional[int] = None, msa_mode: str = "auto",
 ) -> Optional[dict]:
-    """
-    从 ColabFold MSA 服务器请求多序列比对
-    
-    Args:
-        sequence: 蛋白质序列（FASTA 格式）
-        timeout: 请求超时时间（秒）
-    
-    Returns:
-        包含 MSA 结果的字典，如果失败则返回 None
-    """
     ticket_id = ""
     try:
         effective_timeout = timeout if timeout and timeout > 0 else MSA_SERVER_TIMEOUT_SECONDS
         print(f"正在从 MSA 服务器请求多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
         
-        # 准备请求数据
-        # 确保序列是 FASTA 格式
         if not sequence.startswith('>'):
             sequence = f">query\n{sequence}"
         
-        # ColabFold MSA 服务器使用 form data 格式。
-        # mode=env 启用宏基因组库搜索并在结果包里附带
-        # bfd.mgnify30.metaeuk30.smag30.a3m；只取第一个 a3m（uniref）会
-        # 丢掉整个宏基因组深度，下面下载时合并两份。
-        # 智能分层(auto): 长链(>=50aa, 蛋白)用 env — 良性成本;短链(肽)用
-        # uniref — env 的 CPU result2msa 阶段对短查询爆炸(实测 20aa 设计肽
-        # 30-60min vs 22aa 蛋白样序列 20s)。显式 env/uniref 可覆盖。
         if msa_mode == "auto":
             normalized = "".join(
                 aa if aa in "ACDEFGHIKLMNPQRSTVWY" else "A"
@@ -248,7 +196,6 @@ def request_msa_from_server(
         }
         print(f"MSA 请求参数: mode={msa_mode}", file=sys.stderr)
         
-        # 提交搜索任务
         submit_url = f"{MSA_SERVER_URL}/ticket/msa"
         print(f"提交 MSA 搜索任务到: {submit_url}", file=sys.stderr)
         
@@ -266,7 +213,6 @@ def request_msa_from_server(
         print(f"MSA 任务已提交，任务 ID: {ticket_id}", file=sys.stderr)
         _register_active_msa_ticket(ticket_id)
 
-        # 轮询结果
         result_url = f"{MSA_SERVER_URL}/ticket/{ticket_id}"
         start_time = time.time()
         
@@ -325,8 +271,6 @@ def request_msa_from_server(
 
                             print(f"成功提取 A3M 文件: {extracted_filename}", file=sys.stderr)
                             a3m_content = sanitize_a3m_content(a3m_content, context=extracted_filename)
-                            # merged rows with mismatched match-column counts
-                            # crash downstream featurizers — validate now
                             query_line = ""
                             for ln in a3m_content.splitlines():
                                 if ln and not ln.startswith(">"):
@@ -366,7 +310,6 @@ def request_msa_from_server(
             except requests.exceptions.RequestException as e:
                 print(f"[WARN] 检查状态时网络错误: {e}", file=sys.stderr)
             
-            # 等待一段时间再次检查
             time.sleep(10)
         
         _release_active_msa_ticket(ticket_id)
@@ -377,8 +320,6 @@ def request_msa_from_server(
     except Exception as e:
         print(f"[ERROR] MSA 服务器请求失败: {e}", file=sys.stderr)
         if ticket_id:
-            # 外层异常(如结果解压/清洗抛错):ticket 已终态则注销,仍在跑则撤销,
-            # 不留"已登记但无人管"的搜索。
             _cancel_msa_ticket(ticket_id)
             _release_active_msa_ticket(ticket_id)
         return None
@@ -391,19 +332,7 @@ def _write_a3m_atomic(output_path: str, content: str) -> None:
 
 
 def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
-    """
-    将 MSA 结果保存到文件
-    
-    Args:
-        msa_result: MSA 服务器返回的结果
-        output_path: 输出文件路径
-    
-    Returns:
-        是否成功保存
-    """
     try:
-        # 根据结果格式保存为 A3M 文件（tmp + os.replace 原子落盘，
-        # 避免并发读者读到半截缓存）
         if msa_result.get('a3m_content'):
             sanitized_content = sanitize_a3m_content(msa_result['a3m_content'], context=output_path)
             _write_a3m_atomic(output_path, sanitized_content)
@@ -429,9 +358,6 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
 
 
 def parse_a3m_content(a3m_content: str) -> list:
-    """
-    解析 A3M 文件内容为序列条目列表
-    """
     sanitized_content = sanitize_a3m_content(a3m_content)
     entries = []
     current_name = None
@@ -457,16 +383,6 @@ def parse_a3m_content(a3m_content: str) -> list:
 
     return entries
 def generate_msa_for_sequences(yaml_content: str, temp_dir: str, msa_mode: str = "auto") -> bool:
-    """
-    为 YAML 中的蛋白质序列生成 MSA
-
-    Args:
-        yaml_content: YAML 配置内容
-        temp_dir: 临时目录
-
-    Returns:
-        是否成功生成 MSA
-    """
     try:
         print(f"开始为蛋白质序列生成 MSA", file=sys.stderr)
 
@@ -500,7 +416,6 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str, msa_mode: str =
         print(f"找到 {len(protein_sequences)} 个蛋白质序列需要生成 MSA", file=sys.stderr)
         print(f"当前 MSA 超时配置: {msa_timeout} 秒", file=sys.stderr)
 
-        # 为每个蛋白质序列生成 MSA
         success_count = 0
         for protein_id, sequence in protein_sequences.items():
             print(f"正在为蛋白质 {protein_id} 生成 MSA...", file=sys.stderr)
@@ -518,7 +433,6 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str, msa_mode: str =
                     continue
                 print(f"[WARN] 临时目录中的 MSA 文件不可用，准备重新生成: {output_path}", file=sys.stderr)
 
-            # 缓存键与 af3 / boltz2score / protenix2dock 共用
             sequence_hash = get_sequence_hash(sequence)
             cache_dir = MSA_CACHE_CONFIG['cache_dir']
             cached_msa_path = os.path.join(cache_dir, f"msa_{sequence_hash}.a3m")
@@ -537,7 +451,6 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str, msa_mode: str =
                     continue
                 print(f"[WARN] 缓存中的 MSA 文件为空，准备重新生成: {cached_msa_path}", file=sys.stderr)
 
-            # 从服务器请求 MSA
             msa_result = request_msa_from_server(sequence, timeout=msa_timeout, msa_mode=msa_mode)
             if msa_result:
                 if save_msa_result_to_file(msa_result, output_path):
@@ -595,8 +508,6 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
     if not isinstance(sequences, list):
         return yaml_content, 0
 
-    # 按唯一序列分组：boltz 强制同序列蛋白共享同一条 MSA 路径，
-    # 逐实体注入会让同序列链指向不同文件而触发全局校验失败。
     groups: Dict[str, List[Tuple[dict, List[str]]]] = {}
     for entity in sequences:
         if not isinstance(entity, dict):
@@ -650,7 +561,6 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
 
 
 def cache_msa_files_from_temp_dir(temp_dir: str, yaml_content: str):
-    """Cache the declared external A3M output for each protein chain."""
     if not MSA_CACHE_CONFIG['enable_cache']:
         return
 
@@ -707,11 +617,6 @@ def _drop_malformed_rows_len(a3m_text: str, query_len: int) -> str:
 
 
 def _drop_malformed_rows(a3m_text: str, protein_sequence: str) -> str:
-    """Drop a3m rows whose match-state count differs from the query length.
-
-    Cross-source merges (uniref + metagenome) can carry rows aligned to a
-    different match column count; downstream featurizers (Protenix, AF3)
-    hard-fail on them. The query row defines the expected count."""
     query_len = len((protein_sequence or "").strip())
     if query_len == 0:
         return a3m_text
@@ -732,7 +637,6 @@ def _drop_malformed_rows(a3m_text: str, protein_sequence: str) -> str:
 
 
 def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: str, cache_dir: str) -> bool:
-    """Validate and cache one explicitly selected A3M file."""
     try:
         source_path = Path(msa_file)
         filename = source_path.name
@@ -766,7 +670,6 @@ def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: s
 
 
 def is_sequence_match(protein_sequence: str, query_sequence: str) -> bool:
-    """Compare normalized protein and A3M query sequences."""
     clean_protein = protein_sequence.replace('-', '').replace(' ', '').upper()
     clean_query = query_sequence.replace('-', '').replace(' ', '').upper()
     return clean_protein == clean_query

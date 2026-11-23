@@ -362,7 +362,6 @@ def list_known_queues() -> list[str]:
 
 
 def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
-    # 五次 broadcast 并发发出：串行时最坏 5×timeout 全打在请求路径上。
     from concurrent.futures import ThreadPoolExecutor
 
     inspector = celery_app.control.inspect(timeout=1.5)

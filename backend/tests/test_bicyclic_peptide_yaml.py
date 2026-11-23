@@ -62,10 +62,6 @@ class BicyclicCandidateYamlTests(unittest.TestCase):
             self._build("CWAGHIKXLMNAP")
 
     def test_amidated_modification_reanchors_to_shipped_c_term(self):
-        """The proposer lays an amidated residue at the proposal-time C-term;
-        a refined candidate can come back longer — the shipped yaml must
-        re-anchor it to the final sequence's last position (the terminal
-        validator rejects mid-chain amidated residues)."""
         yaml_text = _build_peptide_candidate_yaml(
             dict(self.BASE),
             binder_chain_id="B",

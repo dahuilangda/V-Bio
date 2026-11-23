@@ -1,8 +1,3 @@
-"""Boltz-2 后端：平台 yaml 原生透传（bond/contact/pocket）。
-
-原 run_boltz_backend（run_single_prediction.py）整体迁入：
-约束管线后处理、MSA 触发、CLI 组装、容器执行、ipSAE 后处理、归档。
-"""
 from __future__ import annotations
 
 import os
@@ -128,7 +123,6 @@ class BoltzBackend(StructureBackend):
         cli_args = dict(predict_args)
         requested_use_msa = coerce_bool(cli_args.pop("use_msa_server", None), False)
         cli_args.pop("msa_server_url", None)
-        # msa_mode 是 protenix2dock 的能力开关；Boltz CLI 无此选项
         cli_args.pop("msa_mode", None)
         cli_args.pop("notify_email", None)
         cli_args.pop("project_id", None)
@@ -139,7 +133,6 @@ class BoltzBackend(StructureBackend):
         if strict_ligand_confidence_contract:
             cli_args["strict_ligand_confidence_contract"] = True
         if low_vram:
-            # 大复合物的两个显存峰值开关：串行扩散样本 + bf16-mixed 精度
             cli_args["max_parallel_samples"] = 1
             if not cli_args.get("trainer_precision"):
                 cli_args["trainer_precision"] = "bf16-mixed"

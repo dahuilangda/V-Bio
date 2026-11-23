@@ -532,10 +532,6 @@ class QuestionDataFabricationTests(unittest.TestCase):
 
 
 class UnambiguousRefRebindTests(unittest.TestCase):
-    """Real-stack regression (check run 3): weaker planners invent a semantic id for the lookup
-    they declare in the same round and reference THAT name; three module lookups in a row were
-    rejected for it. The unambiguous rebind normalizes instead."""
-
     def _harness_with_read(self):
         from tests.helpers import NullLogger
 

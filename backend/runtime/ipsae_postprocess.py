@@ -1,9 +1,3 @@
-"""ipSAE 后处理：逐引擎（boltz/af3/protenix/standalone）ipsae 计算、
-置信载荷组装、配体注释与归档条目。
-
-由各后端子类在容器执行完成后调用；对 run_single_prediction 的
-编排符号（结构定位、亲和力管线）经模块引用访问。
-"""
 from __future__ import annotations
 
 import json
@@ -39,7 +33,6 @@ from backend.worker.docker_cmd import (
 
 
 def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
-    """标准化 properties 字段，支持 list / dict 等多种写法。"""
     if properties is None:
         return []
 
@@ -52,15 +45,11 @@ def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
     return []
 
 
-
-
 def _load_json_object(path: Path) -> Dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"JSON payload at {path} is not an object: {type(payload).__name__}")
     return payload
-
-
 
 
 def _run_boltz2score_ipsae_postprocess_in_docker(
@@ -147,13 +136,9 @@ def _run_boltz2score_ipsae_postprocess_in_docker(
         )
 
 
-
-
 def _to_finite_float(value: Any) -> Optional[float]:
     from backend.services.common_utils import to_finite_float
     return to_finite_float(value)
-
-
 
 
 def _choose_preferred_existing_path(paths: Iterable[Path]) -> Optional[Path]:
@@ -168,8 +153,6 @@ def _choose_preferred_existing_path(paths: Iterable[Path]) -> Optional[Path]:
         )
     )
     return candidates[0]
-
-
 
 
 def _collect_structure_chain_ids(structure_path: Path) -> List[str]:
@@ -192,15 +175,11 @@ def _collect_structure_chain_ids(structure_path: Path) -> List[str]:
     return chain_ids
 
 
-
-
 def _build_structure_chain_map(structure_path: Path) -> Dict[str, str]:
     return {
         str(index): chain_id
         for index, chain_id in enumerate(_collect_structure_chain_ids(structure_path))
     }
-
-
 
 
 def _cif_chain_has_nonpolymer_atom_site(structure_path: Path, chain_id: str) -> Optional[bool]:
@@ -267,8 +246,6 @@ def _cif_chain_has_nonpolymer_atom_site(structure_path: Path, chain_id: str) -> 
     return False if saw_chain else None
 
 
-
-
 def _structure_chain_has_nonpolymer_ligand(structure_path: Path, chain_id: str) -> bool:
     chain_id = str(chain_id or "").strip()
     if not chain_id:
@@ -306,15 +283,11 @@ def _structure_chain_has_nonpolymer_ligand(structure_path: Path, chain_id: str) 
     return False
 
 
-
-
 def _structure_chain_exists(structure_path: Path, chain_id: str) -> bool:
     chain_key = str(chain_id or "").strip()
     if not chain_key:
         return False
     return chain_key in set(_collect_structure_chain_ids(structure_path))
-
-
 
 
 def _extract_ligand_chain_ids_from_yaml_data(
@@ -368,8 +341,6 @@ def _extract_ligand_chain_ids_from_yaml_data(
     return resolved
 
 
-
-
 def _resolve_ligand_chain_annotations(
     requested_chain_ids: Iterable[str],
     structure_path: Path,
@@ -421,8 +392,6 @@ def _resolve_ligand_chain_annotations(
     }
 
 
-
-
 def _log_ipsae_ligand_annotation_skip(
     source: str,
     requested_chain_ids: Iterable[str],
@@ -438,8 +407,6 @@ def _log_ipsae_ligand_annotation_skip(
         "请在 yaml_file properties 中明确写入 target、ligand、binder。",
         file=sys.stderr,
     )
-
-
 
 
 def _convert_pair_iptm_matrix_to_map(matrix: Any, chain_map: Dict[str, str]) -> Dict[str, Dict[str, float]]:
@@ -462,8 +429,6 @@ def _convert_pair_iptm_matrix_to_map(matrix: Any, chain_map: Dict[str, str]) -> 
     return pair_map
 
 
-
-
 def _write_ipsae_json(path: Path, payload: Dict[str, Any]) -> None:
     def _normalize_json_value(value: Any) -> Any:
         if isinstance(value, float):
@@ -480,13 +445,9 @@ def _write_ipsae_json(path: Path, payload: Dict[str, Any]) -> None:
     )
 
 
-
-
 def _write_pae_matrix(path: Path, pae_matrix: Any) -> None:
     matrix = np.asarray(pae_matrix, dtype=float)
     np.savez_compressed(path, pae=matrix)
-
-
 
 
 def _copy_structure_with_ipsae_ligand_layout(
@@ -553,8 +514,6 @@ def _copy_structure_with_ipsae_ligand_layout(
     dest_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
 
 
-
-
 def _finalize_ipsae_archive_entries(record_dir: Path) -> List[Tuple[Path, str]]:
     best_confidence_path = record_dir / "best_confidence.json"
     best_structure_path = _find_first_existing(
@@ -588,8 +547,6 @@ def _finalize_ipsae_archive_entries(record_dir: Path) -> List[Tuple[Path, str]]:
         seen_arcnames.add(arcname)
         deduped.append((file_path, arcname))
     return deduped
-
-
 
 
 def _run_standalone_ipsae_postprocess(
@@ -652,8 +609,6 @@ def _run_standalone_ipsae_postprocess(
     return entries
 
 
-
-
 def _run_boltz_ipsae_postprocess(
     *,
     postprocess_base: Path,
@@ -662,8 +617,6 @@ def _run_boltz_ipsae_postprocess(
     explicit_ligand_chain: Optional[str] = None,
 ) -> List[Tuple[Path, str]]:
     requested_chain_ids = _extract_ligand_chain_ids_from_yaml_data(yaml_data)
-    # Same as the protenix side: peptide-design candidates declare their binder chain
-    # explicitly — without it the ligand-only YAML extraction skips interface scoring.
     explicit_chain = str(explicit_ligand_chain or "").strip()
     if explicit_chain and explicit_chain not in requested_chain_ids:
         requested_chain_ids.insert(0, explicit_chain)
@@ -718,8 +671,6 @@ def _run_boltz_ipsae_postprocess(
     )
 
 
-
-
 def _build_af3_ipsae_confidence_payload(
     *,
     summary_payload: Dict[str, Any],
@@ -765,8 +716,6 @@ def _build_af3_ipsae_confidence_payload(
             payload["ligand_atom_plddts_by_chain"] = {ligand_chain_id: ligand_values}
 
     return payload
-
-
 
 
 def _run_af3_ipsae_postprocess(
@@ -830,8 +779,6 @@ def _run_af3_ipsae_postprocess(
     )
 
 
-
-
 def _build_protenix_ipsae_confidence_payload(
     *,
     summary_payload: Dict[str, Any],
@@ -881,8 +828,6 @@ def _build_protenix_ipsae_confidence_payload(
             payload["ligand_atom_plddts_by_chain"] = {ligand_chain_id: ligand_values}
 
     return payload
-
-
 
 
 def _run_protenix_ipsae_postprocess(
@@ -935,11 +880,6 @@ def _run_protenix_ipsae_postprocess(
         yaml_data,
         alias_map=prep.chain_alias_map,
     )
-    # Peptide-design candidates carry no small-molecule ligand, so the YAML-based
-    # extraction finds nothing and interface scoring was silently skipped for every
-    # candidate (all rows shipped ligand_ipsae_max=None and the UI showed "IPSAE -").
-    # The design loop declares the binder chain explicitly; it resolves through the
-    # existing chain-exists branch (a polymer chain is a valid interface "ligand").
     explicit_chain = str(explicit_ligand_chain or "").strip()
     if explicit_chain and explicit_chain not in requested_chain_ids:
         requested_chain_ids.insert(0, explicit_chain)
@@ -971,10 +911,7 @@ def _run_protenix_ipsae_postprocess(
     )
 
 
-
-
 def _find_ligand_chain_and_resname_in_structure(path: Path) -> Optional[Tuple[str, str]]:
-    """Fallback ligand locator when binder chain ID does not match output chain naming."""
     polymer_like_names = set(AMINO_ACID_MAPPING.keys()) | {
         "A", "C", "G", "U", "I",
         "DA", "DC", "DG", "DT", "DI", "DU",
@@ -1018,8 +955,6 @@ def _find_ligand_chain_and_resname_in_structure(path: Path) -> Optional[Tuple[st
     return None
 
 
-
-
 def _tail_lines(path: Path, count: int = 80) -> str:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1028,16 +963,10 @@ def _tail_lines(path: Path, count: int = 80) -> str:
     return "\n".join(lines[-count:])
 
 
-
-
 def _find_first_existing(paths: List[Path]) -> Optional[Path]:
     for path in paths:
         if path.exists():
             return path
     return None
-
-
-
-
 
 

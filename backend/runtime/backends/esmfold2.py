@@ -1,4 +1,3 @@
-"""ESMFold2 后端：容器内折叠，支持 bond 约束（含首尾环化与双环链接键）。"""
 from __future__ import annotations
 
 import os

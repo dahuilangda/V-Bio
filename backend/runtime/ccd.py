@@ -1,4 +1,3 @@
-"""各引擎的标准 CCD 编码集合，以及自定义编码的改名与 yaml 回写。"""
 from __future__ import annotations
 
 import subprocess
@@ -43,8 +42,6 @@ def apply_custom_ccd_code_remap(yaml_content: str, remap: Mapping[str, str]) -> 
 
 
 class CcdCatalog(ABC):
-    """引擎自带的标准 CCD 编码集合。"""
-
     name: str = ""
 
     def __init__(self) -> None:
@@ -62,11 +59,9 @@ class CcdCatalog(ABC):
         raise NotImplementedError
 
     def missing(self, referenced: Iterable[str]) -> list[str]:
-        """引用的编码里引擎不认识的那些。"""
         return sorted(set(referenced) - self.codes())
 
     def rename_collisions(self, molecules: list[dict]) -> dict[str, str]:
-        """自定义编码与标准编码同名时改用空闲 Z###，返回 旧编码 → 新编码。"""
         standard = self.codes()
         taken = set(standard) | {str(m["ccd"]) for m in molecules}
         remap: dict[str, str] = {}
@@ -85,8 +80,6 @@ def _mmcif_component_ids(path: str, size: int, mtime_ns: int) -> frozenset:
 
 
 class MmcifCcdCatalog(CcdCatalog):
-    """读取 components.cif 的 data_ 块；同一文件只解析一次。"""
-
     def __init__(self, name: str, cif_path) -> None:
         super().__init__()
         self.name = name
@@ -109,12 +102,6 @@ print("\\n".join(codes))
 
 
 class ImageCcdCatalog(CcdCatalog):
-    """字典只在引擎镜像里能读到：在镜像内执行 reader 取编码。
-
-    reader 是把 codes 赋值为编码可迭代对象的 Python 片段；volumes、env
-    与启动该引擎时的挂载、环境变量一致。
-    """
-
     def __init__(self, name: str, image: str, python: str, reader: str,
                  volumes: Iterable[tuple[str, str]] = (),
                  env: Mapping[str, str] | None = None) -> None:

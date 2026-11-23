@@ -1,5 +1,3 @@
-"""平台 yaml 约束管线：链冲突归一、唯一性校验、链长清洗、
-模板对齐重映射与残基摘要。供各后端 post_validate 使用。"""
 from __future__ import annotations
 
 import sys
@@ -37,7 +35,6 @@ def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
     for item in yaml_data.get("sequences", []):
         if not isinstance(item, dict):
             continue
-        # Support both "protein" (Boltz format) and "proteinChain" (V-Bio format)
         protein = item.get("protein") or item.get("proteinChain")
         if protein is None or not isinstance(protein, dict):
             continue
@@ -63,9 +60,6 @@ def _normalize_chain_id_list(value: Any) -> List[str]:
     return [text] if text else []
 
 
-
-
-
 def validate_unique_sequence_chain_ids(yaml_content: str) -> None:
     try:
         yaml_data = yaml.safe_load(yaml_content) or {}
@@ -88,8 +82,6 @@ def _next_available_ligand_chain_id(occupied: set[str]) -> str:
         if token not in occupied:
             return token
         index += 1
-
-
 
 
 def normalize_ligand_chain_collisions(yaml_content: str) -> str:
@@ -185,8 +177,6 @@ def normalize_ligand_chain_collisions(yaml_content: str) -> str:
     return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
 
 
-
-
 def sanitize_constraints_for_chain_lengths(yaml_content: str) -> str:
     yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
@@ -256,8 +246,6 @@ def _load_template_chain_mappings(
     template_path: Path,
     preferred_chain: Optional[str] = None,
 ) -> List[Tuple[str, str, List[int]]]:
-    """All polymer chains of a template as (chain name, sequence, author
-    residue numbers); the preferred chain, if present, comes first."""
     structure = gemmi.read_structure(str(template_path))
     structure.setup_entities()
     if len(structure) == 0:
@@ -289,12 +277,6 @@ def _load_template_chain_mappings(
 
 
 def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[int, int]]:
-    """Author-to-sequence residue numbering per YAML chain.
-
-    Returns {query_chain_id: {author_resnum: 1-based_sequence_position}} built
-    by aligning each YAML chain sequence against the uploaded template chains.
-    Chains without a resolvable template are absent from the result.
-    """
     templates = yaml_data.get("templates")
     if not isinstance(templates, list) or not templates:
         return {}
@@ -325,10 +307,6 @@ def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[in
         if not template_chains:
             continue
 
-        # No chain meta (bare template_files upload): align every YAML chain
-        # against every template chain and keep the best match per query
-        # chain. Contacts then use template chain names/author numbers, so
-        # each template chain's map is stored under its own name as well.
         query_candidates = chain_ids or sorted(chain_seq_map)
         for query_chain in query_candidates:
             query_seq = str(chain_seq_map.get(query_chain) or "").strip()
@@ -355,8 +333,6 @@ def _build_template_residue_maps(yaml_data: Dict[str, Any]) -> Dict[str, Dict[in
                         mapping_by_chain[template_chain_name] = residue_map
 
     return mapping_by_chain
-
-
 
 
 def remap_constraints_by_template_alignment(yaml_content: str) -> str:
@@ -410,8 +386,6 @@ def remap_constraints_by_template_alignment(yaml_content: str) -> str:
         yaml_data["constraints"] = constraints
         return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
     return yaml_content
-
-
 
 
 def print_constraint_residue_summary(yaml_content: str) -> None:

@@ -1,8 +1,3 @@
-"""静态检查：runtime 模块内不得存在未定义的全局引用（潜在 NameError）。
-
-模块级 __getattr__ 只服务外部 `from module import name`，函数体内的裸引用
-（LOAD_GLOBAL）不会经过它——拆分迁移时丢失导入的回归曾以此方式漏网。
-"""
 import builtins
 import symtable
 from pathlib import Path
