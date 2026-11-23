@@ -62,12 +62,12 @@ def _compact_input_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
     return compact
 
 # Context budget for the rendered tool protocol (prose + tool catalog JSON). The protocol
-# rides EVERY planner round; unbounded skill descriptions would silently eclipse the
+# is sent on EVERY planner round; unbounded skill descriptions would silently exceed the
 # context-payload budget (MAX_CONTEXT_TOTAL_CHARS in copilot.py). Enforced in
-# render_protocol_prompt; a regression test pins the current size so growth must be a
-# conscious decision. Two-tier contract disclosure (one-line summaries + on-demand detail
-# skill) is the designed escape valve, but it changes what the model sees per turn and
-# requires the A/B harness (e2e_diag_copilot.py) before it may replace full rendering.
+# render_protocol_prompt; a regression test pins the current size, so growing it has to be
+# a deliberate decision. The alternative is two-tier disclosure (one-line summaries plus
+# detail on demand); it changes what the model sees each turn, so compare both with
+# diag_copilot.py before replacing full rendering.
 MAX_PROTOCOL_PROMPT_CHARS = 28000
 CONFIRMATION_EFFECTS = frozenset({"create", "update", "delete", "execute", "navigate"})
 KNOWN_EFFECTS = READ_EFFECTS | CONFIRMATION_EFFECTS
@@ -506,11 +506,10 @@ class CopilotSkillHarness:
         import json
 
         available = definitions if definitions is not None else self._read_definitions()
-        # Two-tier disclosure: "full" renders every
-        # read skill's complete description+schema (the A/B-protected default); "summary"
-        # renders each description's first sentence plus a compact name/type schema — the
-        # FULL contracts stay reachable via the on-demand skills.contract read skill the
-        # assistant registers in summary mode. Adoption is decided by the e2e A/B harness.
+        # Two-tier disclosure: "full" renders every read skill's complete
+        # description and schema (the default); "summary" renders the first sentence of each
+        # description plus a compact name/type schema. The full descriptions remain available
+        # through the on-demand skills.contract read skill registered in summary mode.
         summary_mode = str(read_disclosure).strip().lower() == "summary"
         # Tool catalog in the conventional {name, description, input_schema} shape that
         # tool-calling models are trained on. Split into read tools

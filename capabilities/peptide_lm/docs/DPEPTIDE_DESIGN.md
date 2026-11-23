@@ -14,7 +14,7 @@
 CA 手性体积严格反号（D-α 螺旋 φ≈+57/ψ≈+47；L-α 为 −57/−47）。
 
 **为什么必须镜像**：Boltz2/Protenix 的序列+MSA 输入手性盲，扩散生成先验
-只会输出 L 坐标——端到端预测永远是 L-L 复合物。手性空间转换必须显式
+只会输出 L 坐标，所以整体预测得到的永远是 L-L 复合物。手性空间转换必须显式
 做镜像，不能指望模型。
 
 **为什么"对接阶段只做 diffusion"不可行**（E1 矩阵证据）：完美初始
@@ -56,7 +56,7 @@ CA 手性体积严格反号（D-α 螺旋 φ≈+57/ψ≈+47；L-α 为 −57/−
 ```bash
 cd capabilities/peptide_lm
 python -m pytest tests/test_dpeptide.py -q -m "not slow"   # 单测（CPU）
-python -m pytest tests/test_dpeptide.py -q -m slow         # 端到端（GPU+docker）
+python -m pytest tests/test_dpeptide.py -q -m slow         # 完整流程（GPU+docker）
 ```
 
 单测覆盖：双镜像恒等、手性翻转（A/B 链）、镜像对 |φ+φ|=0、D/L-α 分类、

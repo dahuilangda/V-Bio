@@ -1,7 +1,7 @@
 """Tests for the compute/derivation skill category and the observation column-reference form.
 
 Covers: the aggregate handler (stats + non-numeric skipping + empty), the new ``$fromObservation``
-``all:true`` column extraction, and an end-to-end harness plan where ``compute.aggregate`` consumes
+``all:true`` column extraction, and a full plan where ``compute.aggregate`` consumes
 a numeric column from a prior observation.
 """
 

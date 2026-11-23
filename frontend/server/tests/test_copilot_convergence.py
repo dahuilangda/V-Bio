@@ -108,7 +108,7 @@ class NoConvergenceMessageUnitTests(unittest.TestCase):
 
 class ConvergenceTurnTests(unittest.TestCase):
     def test_repeated_fabricated_row_id_gets_boundary_feedback_and_honest_failure(self) -> None:
-        """End-to-end replay of the production failure: the model repeats the fabricated
+        """Replay of the production failure: the model repeats the fabricated
         task_001 operation until the loop breaks. The FEEDBACK must teach the boundary (no
         rows → create action), and the user-visible failure must explain the real blocker in
         Chinese instead of demanding a rephrase."""

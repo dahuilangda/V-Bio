@@ -495,8 +495,8 @@ class ComputeSkillUpgradeTests(unittest.TestCase):
             sequence_stats({"sequence": "12345678901"})
 
     def test_sequence_stats_consumes_observation_reference_in_loop(self):
-        # End-to-end: resolve a sequence, then feed it to compute.sequence_stats via
-        # $fromObservation — the grounded chain a "分子量多少" question should drive.
+        # Resolve a sequence, then feed it to compute.sequence_stats via $fromObservation:
+        # the chain a "分子量多少" question should drive.
         assistant, session = make_assistant([
             turn("解析序列。", operations=[rop("r1", "uniprot.resolve", {"q": "P00533"})]),
             turn(

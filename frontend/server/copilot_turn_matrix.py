@@ -1,15 +1,13 @@
-"""Large-scale end-to-end Copilot planner-turn matrix.
+"""Copilot turn matrix: realistic requests through the real CopilotAssistant.
 
-Drives the REAL CopilotAssistant (real LLM endpoint, real online sources through the configured
-proxy) with realistic user requests across every host page and workflow, mimicking what the
-frontend sends. Each scenario records the turn outcome (state / actions / questions /
-observations) and asserts the behaviors the product promises:
-
-- docking workflow: target-by-name -> rcsb.search + user choice (never silent pick)
-- ligand by common/CAS name -> pubchem.search
-- ligand given as SMILES -> applied directly, no lookup
-- sequence target (prediction) -> uniprot with valid field syntax
-- no "source unavailable" misreports for 4xx rejections
+Uses the real LLM endpoint and the online sources behind the configured proxy, with the
+requests the frontend sends, and records each turn's state, actions, questions and
+observations. Checked per scenario:
+- docking by target name: rcsb.search, then the user chooses (never a silent pick)
+- ligand by common or CAS name: pubchem.search
+- ligand given as SMILES: applied directly, no lookup
+- sequence target (prediction): uniprot with valid field syntax
+- 4xx rejections from a source are not reported as "source unavailable"
 """
 from __future__ import annotations
 
@@ -53,7 +51,7 @@ def build_assistant() -> CopilotAssistant:
         chat_model=ENV.get("VBIO_COPILOT_MODEL", ""),
         timeout_seconds=90.0,
         session=session,
-        logger=__import__("logging").getLogger("e2e"),
+        logger=__import__("logging").getLogger("copilot_turn_matrix"),
     )
     proxy = "http://172.16.34.31:2080"
     assistant.update_runtime_overrides(proxies={"http": proxy, "https": proxy})  # database proxy only; LLM calls stay direct
@@ -69,7 +67,7 @@ TASK_DETAIL_AFFINITY = {
         "runLabel": "Run Docking",
         "supportsSequenceInputs": False,
     },
-    "project": {"id": "e2e-1", "name": "E2E Docking", "task_type": "affinity", "workflow_key": "affinity"},
+    "project": {"id": "check-1", "name": "Docking check", "task_type": "affinity", "workflow_key": "affinity"},
     "draft": {
         "taskName": "New task",
         "taskSummary": "",
@@ -97,7 +95,7 @@ TASK_DETAIL_PREDICTION = {
         "runLabel": "Run Prediction",
         "supportsSequenceInputs": True,
     },
-    "project": {"id": "e2e-2", "name": "E2E Prediction", "task_type": "prediction", "workflow_key": "prediction"},
+    "project": {"id": "check-2", "name": "Prediction check", "task_type": "prediction", "workflow_key": "prediction"},
     "draft": {
         "taskName": "New task",
         "taskSummary": "",
@@ -164,8 +162,8 @@ def run_scenario(assistant, name, context_type, payload, content, checks):
         turn = assistant.plan_turn(
             context_type=context_type,
             context_payload=payload,
-            user_id="e2e-user",
-            username="e2e",
+            user_id="check-user",
+            username="check",
             content=content,
         )
     except Exception as exc:

@@ -1,21 +1,20 @@
-"""Real-stack Copilot E2E: drives the DEPLOYED management API over HTTP.
+"""Copilot checks against the deployed management API over HTTP.
 
-Unlike e2e_copilot_matrix (in-process assistant) this exercises exactly what the frontend
-exercises — the running server, its loaded settings (real LLM + real database proxy), and
-every audit/gate compiled into the deployed process. Sessions are multi-turn: the context
-payload evolves between turns (uploads appear, blockers change), confirmation receipts are
-injected the way the frontend persists them, and cross-turn memory rides along — mirroring
-buildCopilotConversationContext faithfully.
+Unlike copilot_turn_matrix (in-process assistant), this goes through the running server:
+its loaded settings (real LLM, real database proxy) and every audit and gate compiled into
+the deployed process. Sessions are multi-turn: the context payload changes between turns,
+confirmation receipts are injected the way the frontend persists them, and cross-turn memory
+rides along (see buildCopilotConversationContext).
 
-Scenario families:
-  S1  ambiguous entity (KLK, no isoform/organism) -> identity-stating choice -> user picks
-      -> create action proposed in proposal phrasing (never a completion claim)
-  S2  receipt-driven recovery: applied receipt -> continuation proposes the pocket box the
-      blocker names; FAILED receipt -> the next turn re-proposes corrected, never claims done
+Scenario groups:
+  S1  ambiguous entity (KLK, no isoform/organism): a choice that states identity; the user
+      picks; the create action is proposed in proposal wording, never as a completion claim
+  S2  recovery from receipts: an applied receipt lets the next turn propose the pocket box
+      the blocker names; a FAILED receipt is re-proposed corrected, never claimed done
   S3  module matrix: pubchem / rcsb / uniprot / alphafold / chembl+compute / host actions
-  S4  receipt-grounded status reporting (no fabricated machine state)
+  S4  status reporting grounded in receipts (no fabricated machine state)
 
-Run:  python e2e_real_stack.py [--base http://127.0.0.1:5055]
+Run:  python copilot_real_stack.py [--base http://127.0.0.1:5055]
 """
 from __future__ import annotations
 
@@ -37,14 +36,14 @@ RECENT_TURNS = 8
 
 TASK_LIST_AFFINITY = {
     "page": {"contextType": "task_list", "workflowKey": "affinity", "workflowTitle": "Docking"},
-    "project": {"id": "e2e-1", "name": "E2E Docking", "task_type": "affinity", "workflow_key": "affinity"},
+    "project": {"id": "check-1", "name": "Docking check", "task_type": "affinity", "workflow_key": "affinity"},
     "rows": [],
     "summary": {"total": 0, "all": 0},
 }
 
 TASK_LIST_WITH_ROWS = {
     "page": {"contextType": "task_list", "workflowKey": "prediction", "workflowTitle": "Prediction"},
-    "project": {"id": "e2e-2", "name": "E2E Prediction", "task_type": "prediction", "workflow_key": "prediction"},
+    "project": {"id": "check-2", "name": "Prediction check", "task_type": "prediction", "workflow_key": "prediction"},
     "rows": [
         {"id": "row-1", "name": "Lysozyme fold", "state": "SUCCESS", "backend": "boltz", "submitted": "2026-08-18 10:00"},
         {"id": "row-2", "name": "DHODH retry", "state": "FAILURE", "backend": "boltz", "submitted": "2026-08-18 11:00"},
@@ -55,7 +54,7 @@ TASK_LIST_WITH_ROWS = {
 
 TASK_DETAIL_AFFINITY_DOCK_READY = {
     "page": {"contextType": "task_detail", "workflowKey": "affinity", "workflowTitle": "Docking", "runLabel": "Run Docking"},
-    "project": {"id": "e2e-1", "name": "E2E Docking", "task_type": "affinity", "workflow_key": "affinity"},
+    "project": {"id": "check-1", "name": "Docking check", "task_type": "affinity", "workflow_key": "affinity"},
     "draft": {
         "taskName": "KLK-布洛芬对接", "taskSummary": "", "backend": "boltz",
         "options": {"affinityMode": "dock", "seed": 42},
@@ -73,7 +72,7 @@ TASK_DETAIL_AFFINITY_DOCK_READY = {
 
 TASK_DETAIL_PREDICTION = {
     "page": {"contextType": "task_detail", "workflowKey": "prediction", "workflowTitle": "Structure Prediction", "runLabel": "Run Prediction"},
-    "project": {"id": "e2e-2", "name": "E2E Prediction", "task_type": "prediction", "workflow_key": "prediction"},
+    "project": {"id": "check-2", "name": "Prediction check", "task_type": "prediction", "workflow_key": "prediction"},
     "draft": {
         "taskName": "New task", "taskSummary": "", "backend": "boltz",
         "options": {"seed": 42},
@@ -122,8 +121,8 @@ class RealStackSession:
                 json={
                     "context_type": self.context_type,
                     "context_payload": payload,
-                    "user_id": "e2e-user",
-                    "username": "e2e",
+                    "user_id": "check-user",
+                    "username": "check",
                     "content": user_text,
                 },
                 timeout=240,
@@ -217,21 +216,21 @@ def trace_has(event):
 
 
 APPLIED_CREATE_RECEIPT = [{
-    "plan_id": "plan-e2e-1", "operation_id": "create-1", "skill": "tasks:create_docking",
+    "plan_id": "plan-check-1", "operation_id": "create-1", "skill": "tasks:create_docking",
     "label": "New docking task (with target structure)", "status": "applied",
     "detail": "New docking task (with target structure) applied.",
     "arguments": {"create": True, "targetPdbId": "2BDG", "ligandSmiles": "CC(C)CC1=CC=C(C=C1)C(C)C(=O)O"},
 }]
 
 FAILED_POCKET_RECEIPT = [{
-    "plan_id": "plan-e2e-2", "operation_id": "pocket-1", "skill": "task_detail:set_docking_pocket_box",
+    "plan_id": "plan-check-2", "operation_id": "pocket-1", "skill": "task_detail:set_docking_pocket_box",
     "label": "Set docking pocket box", "status": "failed",
     "error": "The uploaded target file is not a .pdb, .cif structure.",
     "arguments": {"mode": "auto"},
 }]
 
 APPLIED_SUBMIT_RECEIPT = [{
-    "plan_id": "plan-e2e-3", "operation_id": "submit-1", "skill": "task_detail:submit_current",
+    "plan_id": "plan-check-3", "operation_id": "submit-1", "skill": "task_detail:submit_current",
     "label": "Start run", "status": "applied", "detail": "Task submitted. The task is now queued.",
     "arguments": {},
 }]
@@ -349,7 +348,7 @@ def main():
 
     passed = sum(1 for r in all_results if r.get("ok"))
     print("\n" + "=" * 70)
-    print(f"REAL-STACK E2E: {passed}/{len(all_results)} turns passed  ({time.time() - suite_start:.0f}s total)")
+    print(f"REAL-STACK CHECK: {passed}/{len(all_results)} turns passed  ({time.time() - suite_start:.0f}s total)")
     for r in all_results:
         mark = "PASS" if r.get("ok") else "FAIL"
         failures = "; ".join(r.get("failures") or []) or "-"

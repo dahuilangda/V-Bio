@@ -1,11 +1,9 @@
-"""Multi-turn, multi-task Copilot E2E tests against the real LLM + real databases.
+"""Multi-turn Copilot checks against the real LLM and the real databases.
 
-Simulates one Copilot panel session faithfully: every turn carries the conversation transcript,
-cross-turn copilot_memory (identity records projected from prior observations), simulated
-confirmation receipts (applied / failed), and a context_payload that EVOLVES between turns the
-way the real frontend's does (uploads become present, run blockers change). Scenarios interleave
-several distinct user goals in one session, switch topics mid-stream, and return to the main
-line afterwards — the way real users behave.
+One panel session per scenario. Every turn carries the transcript, the cross-turn
+copilot_memory, simulated confirmation receipts (applied / failed) and a context_payload
+that changes between turns the way the frontend's does (uploads appear, run blockers
+change). Scenarios mix several user goals in one session, switch topics and come back.
 """
 from __future__ import annotations
 
@@ -16,7 +14,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from e2e_copilot_matrix import build_assistant  # noqa: E402
+from copilot_turn_matrix import build_assistant  # noqa: E402
 from management_api.copilot import _compact_memory_records  # noqa: E402
 
 RECENT_TURNS = 8
@@ -69,8 +67,8 @@ class MultiturnSession:
             result = self.assistant.plan_turn(
                 context_type=self.context_type,
                 context_payload=payload,
-                user_id="e2e-user",
-                username="e2e",
+                user_id="check-user",
+                username="check",
                 content=user_text,
             )
         except Exception as exc:
@@ -151,7 +149,7 @@ def action_arg(result, skill, key):
 # --------------------------------------------------------------------------- #
 
 def scenario_a(assistant):
-    from e2e_copilot_matrix import TASK_DETAIL_AFFINITY
+    from copilot_turn_matrix import TASK_DETAIL_AFFINITY
 
     session = MultiturnSession(assistant, "task_detail", TASK_DETAIL_AFFINITY)
 
@@ -224,7 +222,7 @@ def scenario_a(assistant):
 # --------------------------------------------------------------------------- #
 
 def scenario_b(assistant):
-    from e2e_copilot_matrix import TASK_DETAIL_AFFINITY
+    from copilot_turn_matrix import TASK_DETAIL_AFFINITY
 
     session = MultiturnSession(assistant, "task_detail", TASK_DETAIL_AFFINITY)
 
@@ -278,7 +276,7 @@ def scenario_b(assistant):
 # --------------------------------------------------------------------------- #
 
 def scenario_c(assistant):
-    from e2e_copilot_matrix import TASK_DETAIL_PREDICTION
+    from copilot_turn_matrix import TASK_DETAIL_PREDICTION
 
     session = MultiturnSession(assistant, "task_detail", TASK_DETAIL_PREDICTION)
 

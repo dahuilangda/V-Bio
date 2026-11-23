@@ -98,7 +98,7 @@ class SystemPromptContractTests(unittest.TestCase):
 
 
 class KlkAmbiguityTurnTests(unittest.TestCase):
-    """End-to-end: 'KLK' without isoform/organism → search without an invented dimension,
+    """Full loop: 'KLK' without isoform/organism → search without an invented dimension,
     then a choice question whose options state identity dimensions. The loop must ACCEPT
     that question turn (regression guard for the prompt/contract change)."""
 

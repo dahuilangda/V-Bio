@@ -278,7 +278,7 @@ class _ScriptedSession:
 
 class StateGateTurnTests(unittest.TestCase):
     def test_fabricated_question_turn_is_rejected_and_replanned(self) -> None:
-        """The production failure end-to-end: the lying question turn is bounced once with
+        """The production failure in full: the lying question turn is bounced once with
         actionable feedback, and the honest re-emit reaches the user instead."""
         fabricated = json.dumps(
             {
@@ -532,9 +532,9 @@ class QuestionDataFabricationTests(unittest.TestCase):
 
 
 class UnambiguousRefRebindTests(unittest.TestCase):
-    """Real-stack regression (e2e run 3): weaker planners invent a semantic id for the lookup
-    they declare in the same round and reference THAT name — three module lookups died in
-    consecutive-identical rejections. The unambiguous rebind normalizes instead."""
+    """Real-stack regression (check run 3): weaker planners invent a semantic id for the lookup
+    they declare in the same round and reference THAT name; three module lookups in a row were
+    rejected for it. The unambiguous rebind normalizes instead."""
 
     def _harness_with_read(self):
         from tests.helpers import NullLogger
@@ -836,7 +836,7 @@ class MemorizedSequenceTests(unittest.TestCase):
         acronyms = "NMRPCRSDS PAGE WWWWWWWWWWWWWWWWWWWWWWWWWW TESTTESTTESTTESTTEST"
         self.assertEqual(CopilotSkillHarness.iter_fabricated_tokens(acronyms, ""), [])
 
-    def test_end_to_end_memory_sequence_answer_is_blocked(self):
+    def test_loop_memory_sequence_answer_is_blocked(self):
         lying = json.dumps(
             {"message": f"人的溶菌酶序列是：{self.SEQ}", "questions": [], "operations": []},
             ensure_ascii=False,
@@ -895,7 +895,7 @@ class FabricatedSuccessClaimTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertIn("RUNNING", issue)
 
-    def test_end_to_end_success_lie_is_corrected(self):
+    def test_loop_success_lie_is_corrected(self):
         lying = json.dumps(
             {"message": "任务 KLK2–布洛芬对接 已成功完成（状态 SUCCESS）。", "questions": [], "operations": []},
             ensure_ascii=False,

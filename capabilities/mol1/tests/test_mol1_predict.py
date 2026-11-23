@@ -1,7 +1,7 @@
 """mol1_predict 的单元测试：输入转换、键校验、MSA 缓存与汇总。
 
 不依赖 GPU 与 Mol-1 包（仅 yaml/json）；引擎的 Mol-1 调用路径由
-E2E 冒烟覆盖（README）。
+README 里的冒烟脚本覆盖。
 """
 from __future__ import annotations
 

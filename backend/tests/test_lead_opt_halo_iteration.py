@@ -1,9 +1,8 @@
-"""End-to-end iteration test for the HALO small-molecule design loop.
+"""Two-round run of the HALO small-molecule design loop, on a real GPU.
 
-Proves the product behavior: ONE submission runs an autonomous multi-round
-reinforcement loop (propose → filter → oracle scoring → surrogate → GRPO
-update on the pretrained model), streaming peptide-style per-round progress —
-no per-candidate user clicks anywhere.
+One submission runs the multi-round loop (propose, filter, oracle scoring,
+surrogate, GRPO update on the pretrained model) and reports per-round progress,
+with no per-candidate user action.
 """
 from __future__ import annotations
 
@@ -28,14 +27,14 @@ END
 """
 
 
-class HaloIterationE2ETests(unittest.TestCase):
+class HaloIterationLoopTests(unittest.TestCase):
     def test_two_round_rl_loop_with_progress_events(self):
         import tempfile
 
         from halo.vbio_runner import run_halo_optimization
 
         events: list[dict] = []
-        with tempfile.TemporaryDirectory(prefix="halo_e2e_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="halo_loop_") as tmp:
             root = Path(tmp)
             protein = root / "target.pdb"
             protein.write_text(_PROTEIN)

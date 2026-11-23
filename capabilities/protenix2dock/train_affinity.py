@@ -23,7 +23,7 @@ Smoke test (no external data):
   python train_affinity.py --smoke
   builds a tiny protein + CCD ligand record, trains a few steps, saves the
   head checkpoint, reloads it through PROTENIX_AFFINITY_CKPT and runs the
-  inference path end-to-end.
+  whole inference path.
 
 Runs inside the Protenix runtime image:
   PYTHONPATH=/workspace/vbio/vendor/protenix-source python train_affinity.py ...

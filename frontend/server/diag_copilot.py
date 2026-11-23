@@ -1,8 +1,7 @@
-"""Diagnostic: rerun the failing E2E scenarios with full per-round trace output.
+"""Rerun selected scenarios and print every trace round.
 
-Not a test — an investigation tool. Prints every trace round (model call, audit rejection,
-observations, terminal state) so a routing or capability failure can be attributed to its
-actual cause instead of guessed at.
+Not a test. Prints each round (model call, audit rejection, observations, terminal state)
+so a routing or capability failure can be traced to its cause.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from e2e_copilot_matrix import (
+from copilot_turn_matrix import (
     TASK_DETAIL_AFFINITY,
     TASK_DETAIL_PREDICTION,
     build_assistant,

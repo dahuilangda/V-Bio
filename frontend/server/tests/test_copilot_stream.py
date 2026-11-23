@@ -170,7 +170,7 @@ class SteeringLoopIntegrationTests(unittest.TestCase):
             {"role": "system", "content": "prompt"},
             {"role": "user", "content": "对接 KLK2"},
             {"role": "assistant", "content": "round1"},
-            {"role": "user", "content": "e2e (interjects): 用 4NFF 那个"},
+            {"role": "user", "content": "用户 (interjects): 用 4NFF 那个"},
         ]
         joined = _turn_user_text(planner_messages)
         self.assertIn("用 4NFF", joined)

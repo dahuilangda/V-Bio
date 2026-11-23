@@ -1,4 +1,4 @@
-"""Real-environment Copilot end-to-end tests.
+"""Copilot tests on context payloads taken from the real environment.
 
 These tests build context_payloads that mirror EXACTLY what the frontend sends in production
 (project_list with summary counts, task_list with project+options, task_detail with

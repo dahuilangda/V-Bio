@@ -2409,9 +2409,9 @@ class ProtocolPromptBudgetTests(unittest.TestCase):
             worst,
             MAX_PROTOCOL_PROMPT_CHARS,
             f"production tool catalog renders {worst} chars at {worst_label} "
-            f"(budget {MAX_PROTOCOL_PROMPT_CHARS}): the protocol now eclipses the context "
-            "payload budget. Shrink the new skill descriptions or introduce two-tier "
-            "contract disclosure (A/B-validated via e2e_diag_copilot.py first).",
+            f"(budget {MAX_PROTOCOL_PROMPT_CHARS}): the protocol now exceeds the context "
+            "payload budget. Shorten the new skill descriptions, or split them into "
+            "summaries plus detail on demand (compare both with diag_copilot.py first).",
         )
 
     def test_summary_mode_catalog_with_contract_skill_fits_budget(self):

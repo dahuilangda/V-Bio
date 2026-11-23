@@ -158,7 +158,7 @@ conflicts = [
 # Register the markers used across the suite so `-m` filters (and any future
 # `--strict-markers`) stay warning-free.
 markers = [
-    "gpu: end-to-end tests that require a GPU",
+    "gpu: full-run tests that require a GPU",
     "regression: GPU regression tests gated on a SOTA checkpoint",
     "cluster: cluster launcher / srun syntax checks",
     "slow: slower tests",

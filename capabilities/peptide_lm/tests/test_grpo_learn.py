@@ -1,6 +1,6 @@
 """GRPO learn 的 KL 锚、熵奖励、多 epoch 与零优势跳过。
 
-用最小桩 policy 端到端驱动 _learn: 梯度必须真实流过可训练参数, KL 项
+用最小的桩 policy 驱动 _learn 的完整流程: 梯度必须真实流过可训练参数, KL 项
 必须把训练后的 logprob 拉向禁用 adapter 的基线, 零优势行必须被丢弃。
 """
 from __future__ import annotations

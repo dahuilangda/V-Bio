@@ -1,6 +1,6 @@
 """rfd4_generate 封装的单元测试：链摘要、override 组装、产物校验。
 
-运行环境需 gemmi（引擎镜像内自带）；GPU 端到端由 scripts/run_smoke.sh 覆盖。
+运行环境需 gemmi（引擎镜像内自带）；GPU 上的整体流程由 scripts/run_smoke.sh 覆盖。
 """
 from __future__ import annotations
 

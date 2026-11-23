@@ -16,7 +16,7 @@ owns all its capabilities — there is no third-party extension mechanism to bui
 | Skills as data (SKILL.md frontmatter) | Host page actions are declarative data: `TASK_LIST_ACTION_SCHEMAS`, `PROJECT_LIST_ACTION_SCHEMAS` (`copilot_skills/`), workflow skills from the registered capability schemas (`copilot_capabilities.py`). Adding a V-Bio capability = declaring a skill, no loop changes. |
 | Progressive disclosure (read docs on demand) | Only the current page's action skills + the universal read catalog are exposed per turn (`build_cross_context_skill_definitions`); the frontend renders an action only on its own page (`payload.contextType`) and navigates on confirmation, so multi-page goals advance turn by turn. |
 | Event-emitting agent loop, full observability | `PlannerTrace` (OTel-GenAI-style event names) streams every round via SSE (`copilot_trace.py`, `copilot_stream.py`). |
-| Conformance tests | `tests/test_copilot_protocol.py` (harness contract), `management_api/copilot_eval.py` (scored gate), `server/e2e_copilot_matrix.py` + `e2e_copilot_multiturn.py` (real-model E2E; the matrix enforces "no turn may end `failed`"). |
+| Conformance tests | `tests/test_copilot_protocol.py` (harness contract), `management_api/copilot_eval.py` (scored gate), `server/copilot_turn_matrix.py` + `copilot_multiturn_check.py` (real model; the matrix enforces "no turn may end `failed`"). |
 
 ## Every V-Bio capability is a skill
 
@@ -44,7 +44,7 @@ user confirms (the read/write split below).
   (real model, 3 reps × 3 scenarios): the slim prompt scored 4/9 vs 9/9 for the explicit
   one on the deployed model. The explicit prompt is kept and guarded by
   `test_system_prompt_load_bearer_sections_are_present`; re-evaluate with the A/B
-  harness (`server/e2e_diag_copilot.py`) after a model upgrade.
+  harness (`server/diag_copilot.py`) after a model upgrade.
 - **Turn-scoped state.** pi persists JSONL sessions; V-Bio keeps server state per turn
   and carries cross-turn context via the frontend (`copilot_memory`,
   `recent_action_resolutions`), which already persists the conversation.
@@ -56,4 +56,4 @@ user confirms (the read/write split below).
    argument), `input_schema`, `effect`.
 2. The audit, protocol rendering, confirmation flow, and trace pick it up
    automatically — no loop edits.
-3. Add scenarios to the E2E matrix if it changes user-visible behavior.
+3. Add scenarios to the turn matrix if it changes user-visible behavior.

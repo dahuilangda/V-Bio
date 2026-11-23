@@ -1,21 +1,20 @@
-"""Module-coverage real-stack suite: every lookup skill family and every host-action family
-exercised end-to-end against the deployed API with the REAL LLM and REAL sources.
+"""Module coverage against the deployed API with the real LLM and the real sources.
 
-Coverage matrix (one turn each unless noted):
+One turn per family unless noted:
   lookup families   pubchem / rcsb / uniprot / alphafold / chembl(+compute) / pubmed /
                     clinicaltrials / translate
   host actions      tasks:update_view (+tasks:failure) / tasks:rename / tasks:open /
                     tasks:copy / tasks:create_with_sequence / tasks:create_virtual_screening /
                     task_detail:apply_parameter_patch / apply_metadata_patch
-  data-value honesty  every answer's PDB ids, accessions, SMILES and sequences trace to
-                    retrieval (the identifier audit enforces this; failures assert it)
+  data values       every answer's PDB ids, accessions, SMILES and sequences trace to
+                    retrieval (the identifier audit enforces this)
 """
 from __future__ import annotations
 
 import sys
 import time
 
-from e2e_real_stack import (
+from copilot_real_stack import (
     RealStackSession,
     TASK_LIST_AFFINITY,
     TASK_LIST_WITH_ROWS,
@@ -29,14 +28,14 @@ from e2e_real_stack import (
 
 TASK_LIST_VS = {
     "page": {"contextType": "task_list", "workflowKey": "virtual_screening", "workflowTitle": "Virtual Screening"},
-    "project": {"id": "e2e-vs", "name": "E2E VS", "task_type": "virtual_screening", "workflow_key": "virtual_screening"},
+    "project": {"id": "check-vs", "name": "Screening check", "task_type": "virtual_screening", "workflow_key": "virtual_screening"},
     "rows": [],
     "summary": {"total": 0, "all": 0},
 }
 
 TASK_DETAIL_PEPTIDE = {
     "page": {"contextType": "task_detail", "workflowKey": "peptide_design", "workflowTitle": "Peptide Design", "runLabel": "Run Design"},
-    "project": {"id": "e2e-pd", "name": "E2E Peptide", "task_type": "peptide_design", "workflow_key": "peptide_design"},
+    "project": {"id": "check-pd", "name": "Peptide design check", "task_type": "peptide_design", "workflow_key": "peptide_design"},
     "draft": {
         "taskName": "New design", "taskSummary": "", "backend": "boltz",
         "options": {"seed": 7, "peptideBinderLength": 12},
@@ -64,7 +63,7 @@ def run_all():
         [("pubchem", obs_source("pubchem")), ("cites retrieved identity", msg_contains(r"CID|aspirin|阿司匹林"))])
 
     one("mod-rcsb", ("task_detail", TASK_LIST_AFFINITY and {"page": {"contextType": "task_detail", "workflowKey": "affinity"},
-        "project": {"id": "e2e-1", "task_type": "affinity", "workflow_key": "affinity"},
+        "project": {"id": "check-1", "task_type": "affinity", "workflow_key": "affinity"},
         "draft": {"taskName": "T", "backend": "boltz", "options": {"affinityMode": "dock"}, "components": [], "constraints": []},
         "runtime": {"displayTaskState": "DRAFT", "runDisabled": True, "runBlockedReason": "Upload target structure first.", "activeTaskId": ""},
         "currentTask": None}),
@@ -110,7 +109,7 @@ def run_all():
 
     one("host-create-seq", ("task_list", {
         "page": {"contextType": "task_list", "workflowKey": "prediction", "workflowTitle": "Prediction"},
-        "project": {"id": "e2e-2", "task_type": "prediction", "workflow_key": "prediction"},
+        "project": {"id": "check-2", "task_type": "prediction", "workflow_key": "prediction"},
         "rows": [], "summary": {"total": 0, "all": 0}}),
         "帮我检索人源溶菌酶的序列并创建预测任务",
         [("uniprot first", lambda r: obs_source("uniprot")(r) or has_choice_question(r)),

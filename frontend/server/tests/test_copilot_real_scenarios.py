@@ -1,4 +1,4 @@
-"""Realistic end-to-end Copilot planner-loop tests — 50+ real user scenarios.
+"""Copilot planner-loop tests on 50+ real user scenarios.
 
 These tests drive the FULL planner loop (model call → audit → skill execution → replan) against
 REAL user questions (Chinese prompts the production Copilot receives) and the REAL host skills and

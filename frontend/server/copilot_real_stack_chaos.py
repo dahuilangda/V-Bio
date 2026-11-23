@@ -1,16 +1,15 @@
-"""Large-scale real-stack CHAOS suite: complex multi-turn sessions against the deployed API.
+"""Complex multi-turn sessions against the deployed API.
 
-Each session interleaves SEVERAL goals with distractions, mind changes, ambiguous references,
-and injected failure receipts — the way real users behave. The invariants asserted every turn:
-
-  INV1 grounding — answers cite retrieved data; fabricated identifiers never ship (audits).
-  INV2 identity — entity choices state their dimensions; unstated dimensions are asked.
-  INV3 honesty — completion claims only with applied receipts; failures re-proposed corrected.
-  INV4 recovery — after a failed receipt the next turn proposes a corrective path, never
+Each session mixes several goals with distractions, mind changes, ambiguous references and
+injected failure receipts. Checked every turn:
+  INV1 grounding: answers cite retrieved data; fabricated identifiers never ship (audits).
+  INV2 identity: entity choices state their dimensions; unstated dimensions are asked.
+  INV3 honesty: completion claims only with applied receipts; failures re-proposed corrected.
+  INV4 recovery: after a failed receipt the next turn proposes a corrective path, never
        repeats the failed operation verbatim, never claims done.
-  INV5 relevance — after a distraction the assistant returns to the user's main line.
+  INV5 relevance: after a distraction the assistant returns to the user's main request.
 
-Run:  python e2e_real_stack_chaos.py
+Run:  python copilot_real_stack_chaos.py
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ import re
 import sys
 import time
 
-from e2e_real_stack import (
+from copilot_real_stack import (
     RealStackSession,
     TASK_LIST_AFFINITY,
     TASK_LIST_WITH_ROWS,
