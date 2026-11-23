@@ -177,6 +177,24 @@ def locals_read_before_assignment(source: str) -> dict[str, int]:
     return found
 
 
+def mismatched_call_keywords(source: str) -> set[tuple[str, str]]:
+    tree = ast.parse(source)
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    mismatched: set[tuple[str, str]] = set()
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+            continue
+        function = functions.get(call.func.id)
+        if function is None:
+            continue
+        accepted = {arg.arg for arg in (
+            *function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs)}
+        for keyword in call.keywords:
+            if keyword.arg is not None and function.args.kwarg is None and keyword.arg not in accepted:
+                mismatched.add((call.func.id, keyword.arg))
+    return mismatched
+
+
 @pytest.mark.parametrize(
     "source", [str(path) for path in platform_sources()],
     ids=lambda path: str(Path(path).relative_to(REPO)),
@@ -186,6 +204,7 @@ def test_every_referenced_name_is_defined(source: str) -> None:
     assert not undefined_global_refs(text), f"未定义的全局名: {sorted(undefined_global_refs(text))}"
     assert not locals_read_before_assignment(text), (
         f"先读取后赋值的局部变量: {locals_read_before_assignment(text)}")
+    assert not mismatched_call_keywords(text), f"调用传入了函数不接受的参数: {sorted(mismatched_call_keywords(text))}"
 
 
 def test_checker_catches_a_local_read_before_assignment():
@@ -211,3 +230,14 @@ def test_checker_accepts_closure_variables_and_loops():
     )
     assert not undefined_global_refs(source)
     assert not locals_read_before_assignment(source)
+
+
+def test_checker_catches_a_keyword_the_function_does_not_accept():
+    source = (
+        "def build(count, seed):\n"
+        "    return count + seed\n"
+        "def run():\n"
+        "    return build(count=1, seed=2, options={})\n"
+    )
+    assert mismatched_call_keywords(source) == {("build", "options")}
+    assert not mismatched_call_keywords("def f(a):\n    return a\ndef g(**kw):\n    return f(**kw)\n")

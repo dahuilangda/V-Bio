@@ -3916,7 +3916,6 @@ def run_peptide_design_backend(
     else:
         strategy = _build_esm3_strategy(
             temp_dir=temp_dir,
-            options=options,
             predict_args=predict_args,
             base_yaml_data=base_yaml_data,
             resolved_target_chain_id=resolved_target_chain_id,
