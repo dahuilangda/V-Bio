@@ -11,6 +11,7 @@ import psutil
 
 from backend.core import config
 from backend.core.celery_app import celery_app
+from backend.runtime import candidate_pool
 from gpu_manager import get_gpu_status, get_redis_client, release_gpu
 
 TASK_CANCELLED_KEY_PREFIX = 'task_cancelled:'
@@ -238,11 +239,10 @@ class TaskMonitor:
             'failed': [],
             'msa_tickets_cancelled': [],
         }
-        key = f"{config.PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{str(parent_task_id or '').strip()}"
         if not parent_task_id:
             return result
         try:
-            task_ids = self.redis_client.smembers(key) or set()
+            task_ids = candidate_pool.registered_subtasks(self.redis_client, parent_task_id)
         except Exception as exc:
             result['failed'].append(f"read_registry_failed:{exc}")
             return result

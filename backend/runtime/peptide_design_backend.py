@@ -109,7 +109,6 @@ from backend.core.config import (
     PROTENIX_CONTAINER_CHECKPOINT_PATH,
     PROTENIX_COMMON_CACHE_DIR,
     PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
-    PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
     RESULTS_BASE_DIR,
     VBIO_API_TOKEN,
     VBIO_GATEWAY_URL,
@@ -130,6 +129,7 @@ from backend.runtime.linker_measurement import (
     _pdb_link_line,
     _rebuild_single_atom_linker_anchor,
 )
+from backend.runtime import candidate_pool
 from backend.runtime.backends import is_structure_backend, structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
@@ -1483,237 +1483,58 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
 
 
 
-def _peptide_subtask_registry_key(parent_task_id: str) -> str:
-    token = str(parent_task_id or "").strip()
-    if not token:
-        token = "unknown"
-    return f"{PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{token}"
-
-
-
-
-def _get_redis_client_optional():
-    try:
-        from gpu_manager import get_redis_client as get_redis_client_fn
-        return get_redis_client_fn()
-    except Exception:
-        return None
-
-
-
-
-def _register_peptide_subtask(parent_task_id: str, subtask_id: str) -> None:
-    parent_token = str(parent_task_id or "").strip()
-    subtask_token = str(subtask_id or "").strip()
-    if not parent_token or not subtask_token:
-        return
-    client = _get_redis_client_optional()
-    if client is None:
-        return
-    key = _peptide_subtask_registry_key(parent_token)
-    try:
-        pipe = client.pipeline()
-        pipe.sadd(key, subtask_token)
-        # The registry is the cancel path's map to in-flight candidate tasks.
-        # Design parents legitimately run for DAYS; a 24h TTL let the map
-        # expire mid-run, so a late cancel/terminate could no longer revoke
-        # dispatched candidates and they kept burning GPU as orphans (the
-        # late-cancel orphaned dispatched candidates). 14d matches the cancel-marker TTL.
-        pipe.expire(key, 14 * 24 * 3600)
-        pipe.execute()
-    except Exception as exc:
-        # A registry miss makes the candidate invisible to cancel/terminate —
-        # silent swallowing here is how orphans happen. At minimum log it.
-        print(f"[peptide-design] WARNING: subtask registry write failed "
-              f"({exc}); cancel/terminate will not see {subtask_token}",
-              file=sys.stderr)
-
-
-
-
-def _candidate_dispatch_window() -> int:
-    """Per-parent in-flight cap for the candidate dispatch loops.
-
-    A generation used to be enqueued in one burst; with several design
-    parents active, the broker FIFO let early parents' whole batches run
-    while late parents' candidates sat uncomputed for hours. A per-parent
-    window keeps every active parent circulating: dispatch W, refill
-    one-for-one as results land. Default W = GPU count — a single parent
-    still saturates the pool (candidates already wave across all GPUs),
-    multi-parent runs interleave fairly. Override with
-    PEPTIDE_CANDIDATE_DISPATCH_WINDOW.
-    """
-    raw = str(os.environ.get("PEPTIDE_CANDIDATE_DISPATCH_WINDOW", "") or "").strip()
-    if raw.isdigit() and int(raw) > 0:
-        return int(raw)
-    try:
-        from gpu_manager import get_gpu_status
-        return max(1, int(get_gpu_status().get("valid_count") or 1))
-    except Exception:
-        return 4
-
-
-
-
-def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, parent_task_id: str):
-    from backend.core.celery_app import celery_app
-
-    payload = {
-        "generation": int(job.get("generation") or 0),
-        "candidate_index": int(job.get("candidate_index") or 0),
-        "sequence": str(job.get("sequence") or ""),
-        "candidate_yaml": str(job.get("candidate_yaml") or ""),
-        "candidate_dir": str(job.get("candidate_dir") or ""),
-        "archive_path": str(job.get("archive_path") or ""),
-        "predict_args": job.get("predict_args", {}),
-        "model_name": job.get("model_name"),
-        "backend": str(job.get("backend") or "boltz"),
-        "worker_args_path": str(job.get("worker_args_path") or ""),
-        # The cancel-marker check on the candidate side keys on the PARENT's
-        # task id (the marker is written per cancelled parent); without this
-        # field a queued candidate cannot know it belongs to a dead plan.
-        "parent_task_id": str(parent_task_id or ""),
-    }
-    async_result = celery_app.send_task(
-        "tasks.peptide_candidate_worker_task",
-        args=[payload],
-        queue=queue_name,
-    )
-    _register_peptide_subtask(parent_task_id=parent_task_id, subtask_id=str(getattr(async_result, "id", "") or ""))
-    return async_result
-
-
-
-
 def _execute_peptide_generation_jobs(
     jobs: List[Dict[str, Any]],
     queue_name: str,
     parent_task_id: str,
     progress_callback: Optional[Callable[[Dict[str, int]], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """Dispatch every candidate job at once and drain their results.
-
-    No orchestrator-side concurrency window: the shared GPU pool plus the
-    worker's own concurrency are the only bounds, so freed GPUs are picked up
-    immediately no matter how pool occupancy shifted since dispatch.
-    """
     if not jobs:
         return []
-    pending = list(jobs)
-    running: List[Tuple[Any, Dict[str, Any]]] = []
-    completed_jobs: List[Dict[str, Any]] = []
-    first_error: Optional[Exception] = None
-    last_progress_signature: Optional[Tuple[int, int, int, int, int]] = None
 
-    window = _candidate_dispatch_window()
+    def _submit(job: Dict[str, Any]):
+        from backend.core.celery_app import celery_app
 
-    def _fill_running() -> None:
-        while pending and first_error is None and len(running) < window:
-            next_job = pending.pop(0)
-            async_result = _submit_peptide_candidate_worker_job(
-                next_job,
-                queue_name=queue_name,
-                parent_task_id=parent_task_id,
-            )
-            running.append((async_result, next_job))
-
-    _fill_running()
-    while pending or running:
-        if not running:
-            break
-
-        next_running: List[Tuple[Any, Dict[str, Any]]] = []
-        state_counts = {
-            "queued": 0,
-            "running": 0,
-            "success": 0,
-            "failure": 0,
+        payload = {
+            "generation": int(job.get("generation") or 0),
+            "candidate_index": int(job.get("candidate_index") or 0),
+            "sequence": str(job.get("sequence") or ""),
+            "candidate_yaml": str(job.get("candidate_yaml") or ""),
+            "candidate_dir": str(job.get("candidate_dir") or ""),
+            "archive_path": str(job.get("archive_path") or ""),
+            "predict_args": job.get("predict_args", {}),
+            "model_name": job.get("model_name"),
+            "backend": str(job.get("backend") or "boltz"),
+            "worker_args_path": str(job.get("worker_args_path") or ""),
+            "parent_task_id": str(parent_task_id or ""),
         }
-        for async_result, submitted_job in running:
-            state = str(getattr(async_result, "state", "") or "").upper()
-            if state in {"SUCCESS", "FAILURE", "REVOKED"}:
-                if state == "SUCCESS":
-                    completed_job = dict(submitted_job)
-                    worker_result = getattr(async_result, "result", None)
-                    if isinstance(worker_result, dict):
-                        archive_from_worker = str(worker_result.get("archive_path") or "").strip()
-                        if archive_from_worker:
-                            completed_job["archive_path"] = archive_from_worker
-                        candidate_dir_from_worker = str(worker_result.get("candidate_dir") or "").strip()
-                        if candidate_dir_from_worker:
-                            completed_job["candidate_dir"] = candidate_dir_from_worker
-                    completed_jobs.append(completed_job)
-                    state_counts["success"] += 1
-                    continue
-                failure_info = getattr(async_result, "result", None)
-                if first_error is None:
-                    first_error = RuntimeError(
-                        "Peptide candidate worker celery task failed "
-                        f"(generation={submitted_job.get('generation')}, candidate={submitted_job.get('candidate_index')}, "
-                        f"celery_task_id={getattr(async_result, 'id', '')}, state={state}): {failure_info}"
-                    )
-                state_counts["failure"] += 1
-                continue
-            if state in {"PENDING", "RECEIVED", "RETRY"}:
-                state_counts["queued"] += 1
-            else:
-                state_counts["running"] += 1
-            next_running.append((async_result, submitted_job))
-        running = next_running
-        _fill_running()
+        return celery_app.send_task(
+            "tasks.peptide_candidate_worker_task", args=[payload], queue=queue_name)
 
-        if callable(progress_callback):
-            try:
-                progress_payload = {
-                    "total": len(jobs),
-                    "completed": len(completed_jobs),
-                    "queued": int(state_counts.get("queued", 0)),
-                    "running": int(state_counts.get("running", 0)),
-                    "failed": int(state_counts.get("failure", 0)),
-                }
-                progress_signature = (
-                    int(progress_payload["total"]),
-                    int(progress_payload["completed"]),
-                    int(progress_payload["queued"]),
-                    int(progress_payload["running"]),
-                    int(progress_payload["failed"]),
-                )
-                if progress_signature != last_progress_signature:
-                    progress_callback(progress_payload)
-                    last_progress_signature = progress_signature
-            except Exception:
-                pass
+    def _collect(job: Dict[str, Any], worker_result, _state: str) -> None:
+        if not isinstance(worker_result, dict):
+            return
+        archive_from_worker = str(worker_result.get("archive_path") or "").strip()
+        if archive_from_worker:
+            job["archive_path"] = archive_from_worker
+        candidate_dir_from_worker = str(worker_result.get("candidate_dir") or "").strip()
+        if candidate_dir_from_worker:
+            job["candidate_dir"] = candidate_dir_from_worker
+        completed.append(job)
 
-        if first_error is not None:
-            break
-        time.sleep(0.8)
-
-    if first_error is not None:
-        for async_result, _ in running:
-            try:
-                async_result.revoke(terminate=True, signal="SIGTERM")
-            except Exception:
-                pass
-        raise first_error
-
-    if running:
-        # Stuck-in-flight escape: a broker restart or worker crash orphans
-        # dispatched candidates as PENDING forever (no worker will ever ack
-        # them), and the parent would spin here for eternity. Treat any
-        # candidate still unfinished after the window as failed and let the
-        # generation complete with what landed.
-        stuck = [submitted for async_result, submitted in running
-                 if str(getattr(async_result, "state", "") or "").upper()
-                 in {"PENDING", "RECEIVED", "RETRY"}]
+    completed: List[Dict[str, Any]] = []
+    try:
+        candidate_pool.drain(
+            jobs, _submit, parent_task_id, _collect, candidate_pool.SCORE_CANDIDATES,
+            on_progress=progress_callback)
+    except candidate_pool.SubtaskFailed as failure:
+        job = failure.item
         raise RuntimeError(
-            "Peptide candidate dispatch drained with unfinished jobs "
-            f"(parent_task_id={parent_task_id}, stuck={len(stuck)}/"
-            f"{len(running)}): probable broker/worker restart mid-flight."
-        )
-
-    return completed_jobs
-
-
+            "Peptide candidate worker celery task failed "
+            f"(generation={job.get('generation')}, candidate={job.get('candidate_index')}, "
+            f"celery_task_id={getattr(failure.async_result, 'id', '')}, "
+            f"state={failure.celery_state}): {failure.detail}") from None
+    return completed
 
 
 def _run_dpeptide_refine_stage(
@@ -1722,67 +1543,26 @@ def _run_dpeptide_refine_stage(
     finalize_context: Callable[[Dict[str, Any]], None],
     poll_interval: float = 2.0,
 ) -> None:
-    """Run the per-candidate GPU refine stage with all refines in flight.
-
-    Each context carries a ``dispatch`` callable (staging/placement already
-    done — dispatching only sends the celery task) or ``dispatch=None`` for
-    candidates that need no GPU refine. The refine previously ran inline in
-    the collection loop — one ~4-5 min protenix2dock task at a time while
-    every other GPU in the pool sat idle for the whole generation (design
-    wall time ≈ candidates × refine). Every refine is now dispatched
-    immediately; the shared GPU pool plus worker concurrency schedule them,
-    and each candidate finalizes as soon as its own refine lands, so
-    per-candidate progress keeps updating.
-
-    A per-candidate refine failure rejects only that candidate (the task
-    still fails when NO candidate survives, enforced by the collection tail).
-    """
     for ctx in stage_contexts:
         if ctx.get("dispatch") is None:
             finalize_context(ctx)
 
-    pending = [ctx for ctx in stage_contexts if ctx.get("dispatch") is not None]
-    running: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
-    window = _candidate_dispatch_window()
+    def _submit(ctx: Dict[str, Any]):
+        ctx["async_result"] = ctx["dispatch"]()
+        return ctx["async_result"]
 
-    def _fill_refines() -> None:
-        while pending and len(running) < window:
-            ctx = pending.pop(0)
-            try:
-                async_result = ctx["dispatch"]()
-            except Exception as exc:  # noqa: BLE001 — reject this candidate only
-                ctx["refine_error"] = exc
-                finalize_context(ctx)
-                continue
-            _register_peptide_subtask(
-                parent_task_id=parent_task_id,
-                subtask_id=str(getattr(async_result, "id", "") or ""),
-            )
-            ctx["async_result"] = async_result
-            running[str(getattr(async_result, "id", "") or "")] = (async_result, ctx)
+    def _collected(ctx: Dict[str, Any], result, state: str) -> None:
+        if state == "SUBMIT_FAILED":
+            ctx["refine_error"] = result
+        elif state != "SUCCESS":
+            ctx["refine_error"] = RuntimeError(
+                f"D-space refine task {getattr(ctx.get('async_result'), 'id', '')} failed.")
+        finalize_context(ctx)
 
-    _fill_refines()
-    while pending or running:
-        if not running:
-            break
-
-        finished: List[str] = []
-        for task_key, (async_result, ctx) in running.items():
-            state = str(getattr(async_result, "state", "") or "").upper()
-            if state in {"FAILURE", "REVOKED"}:
-                ctx["refine_error"] = RuntimeError(
-                    f"D-space refine task {getattr(async_result, 'id', '')} failed."
-                )
-                finished.append(task_key)
-            elif state == "SUCCESS":
-                finished.append(task_key)
-        if not finished:
-            time.sleep(max(0.2, poll_interval))
-            continue
-        for task_key in finished:
-            _async_result, ctx = running.pop(task_key)
-            finalize_context(ctx)
-        _fill_refines()
+    candidate_pool.drain(
+        [ctx for ctx in stage_contexts if ctx.get("dispatch") is not None],
+        _submit, parent_task_id, _collected, candidate_pool.REFINE_CANDIDATES,
+        poll_interval=poll_interval)
 
 
 

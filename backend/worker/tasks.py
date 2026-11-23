@@ -27,6 +27,7 @@ from backend.monitoring.event_transport import publish_task_heartbeat, publish_t
 from backend.services.common_utils import coerce_bool
 from backend.scheduling.capability_router import parse_capability_queue
 from backend.core.errors import DomainError, TransientError
+from backend.runtime import candidate_pool
 from backend.runtime.backends import resolve_ccd_before_gpu
 from backend.runtime.docker_exec import remove_container
 from backend.worker.docker_cmd import (
@@ -163,9 +164,8 @@ def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool 
         result["failed"].append(f"redis_unavailable:{exc}")
         return result
 
-    key = f"{config.PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{task_token}"
     try:
-        raw_members = redis_client.smembers(key) or set()
+        raw_members = candidate_pool.registered_subtasks(redis_client, task_token)
     except Exception as exc:
         result["failed"].append(f"registry_read_failed:{exc}")
         return result

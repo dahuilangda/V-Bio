@@ -115,7 +115,6 @@ from backend.runtime.constraints_pipeline import _normalize_chain_id_list
 from backend.runtime.peptide_design_backend import (
     _normalize_peptide_backend,
     _normalize_peptide_design_mode,
-    _peptide_subtask_registry_key,
     run_peptide_design_backend,
 )
 from backend.runtime.rfd4_strategy import (
@@ -123,6 +122,7 @@ from backend.runtime.rfd4_strategy import (
     run_rfd4_backend,
     run_rfd4_design_strategy,
 )
+from backend.runtime import candidate_pool
 from backend.runtime.backends import resolve_ccd_before_gpu, structure_backend
 from backend.runtime.backends.base import BackendRunContext
 from backend.runtime.backends.request import PredictionRequest
@@ -1944,16 +1944,7 @@ def _validate_amidated_terminal_constraints(yaml_text: str, custom_molecules: Li
 
 
 def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
-    parent_token = str(parent_task_id or "").strip()
-    if not parent_token:
-        return
-    client = _get_redis_client_optional()
-    if client is None:
-        return
-    try:
-        client.delete(_peptide_subtask_registry_key(parent_token))
-    except Exception:
-        pass
+    candidate_pool.forget_subtasks(parent_task_id)
 
 
 def _binder_msa_assignment(binder_sequence: str) -> str:
