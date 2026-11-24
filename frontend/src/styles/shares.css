@@ -259,11 +259,13 @@
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 1100px) {
   .shares-toolbar .project-toolbar-filters {
     flex-wrap: wrap;
   }
+}
 
+@media (max-width: 720px) {
   .shares-search-field {
     min-width: 0;
     width: 100%;
