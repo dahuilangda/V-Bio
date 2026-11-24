@@ -1,17 +1,15 @@
 @media (max-width: 1460px) {
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
-    min-width: 1120px;
-  }
-
   .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-duration,
   .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-duration {
     display: none;
   }
 }
 
-@media (max-width: 1300px) {
+@media (max-width: 1360px) {
   .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
-    min-width: 1000px;
+    --task-ligand-thumb-w: 248px;
+    --task-ligand-col-w: 260px;
+    min-width: calc(var(--task-table-min-w) - var(--task-seed-col-w));
   }
 
   .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-seed,

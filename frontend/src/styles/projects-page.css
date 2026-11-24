@@ -102,19 +102,23 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: #fff;
+  overflow: visible;
 }
 .project-table {
   min-width: 1240px;
   table-layout: fixed;
   width: 100%;
 }
+.project-table:not(.task-table) {
+  min-width: 0;
+}
 /* 固定列规划：Project 吃余量，其余列定宽，避免自动布局把空间全灌进名称列 */
-.project-table:not(.task-table) thead th:nth-child(2) { width: 9%; }
-.project-table:not(.task-table) thead th:nth-child(3) { width: 7%; }
-.project-table:not(.task-table) thead th:nth-child(4) { width: 21%; }
-.project-table:not(.task-table) thead th:nth-child(5) { width: 12%; }
-.project-table:not(.task-table) thead th:nth-child(6) { width: 12%; }
-.project-table:not(.task-table) thead th:nth-child(7) { width: 9%; text-align: right; }
+.project-table:not(.task-table) thead th:nth-child(2) { width: 120px; }
+.project-table:not(.task-table) thead th:nth-child(3) { width: 84px; }
+.project-table:not(.task-table) thead th:nth-child(4) { width: 272px; }
+.project-table:not(.task-table) thead th:nth-child(5),
+.project-table:not(.task-table) thead th:nth-child(6) { width: 172px; }
+.project-table:not(.task-table) thead th:nth-child(7) { width: 168px; text-align: right; }
 .project-table thead th {
   position: sticky;
   top: 0;
@@ -545,6 +549,20 @@
   .project-toolbar-meta-rich {
     width: 100%;
     justify-content: space-between;
+  }
+}
+
+@media (max-width: 1300px) {
+  .project-table:not(.task-table) th:nth-child(5),
+  .project-table:not(.task-table) td:nth-child(5) {
+    display: none;
+  }
+}
+
+@media (max-width: 1100px) {
+  .project-table:not(.task-table) th:nth-child(2),
+  .project-table:not(.task-table) td:nth-child(2) {
+    display: none;
   }
 }
 

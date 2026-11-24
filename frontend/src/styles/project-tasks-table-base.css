@@ -1,10 +1,9 @@
 .task-table {
-  min-width: 1300px;
   --task-row-pad-y: 7px;
   --task-ligand-inner-h: 120px;
   --task-ligand-thumb-h: 120px;
-  --task-ligand-thumb-w: 312px;
-  --task-ligand-col-w: 324px;
+  --task-ligand-thumb-w: 272px;
+  --task-ligand-col-w: 284px;
   --task-ligand-svg-max-h: 104px;
 }
 
@@ -24,6 +23,7 @@
 
 .task-table-wrap {
   border-color: #d3e0d8;
+  overflow-x: auto;
 }
 
 .task-table thead th {
@@ -31,28 +31,38 @@
   top: auto;
 }
 
-/* 列规划：默认预测任务表（指标列数量动态，均分余量） */
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
+  --task-metric-col-w: 84px;
+  --task-submitted-col-w: 188px;
+  --task-backend-col-w: 104px;
+  --task-seed-col-w: 74px;
+  --task-mode-col-w: 80px;
+  --task-actions-col-w: 184px;
+  --task-table-min-w: calc(
+    var(--task-ligand-col-w) + 4 * var(--task-metric-col-w) + var(--task-submitted-col-w) +
+    var(--task-backend-col-w) + var(--task-seed-col-w) + var(--task-mode-col-w) + var(--task-actions-col-w)
+  );
   table-layout: fixed;
   width: 100%;
+  min-width: var(--task-table-min-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) thead th:first-child {
-  width: 300px;
+  width: var(--task-ligand-col-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-metric {
-  width: 92px;
+  width: var(--task-metric-col-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-submitted {
-  width: 176px;
+  width: var(--task-submitted-col-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-backend {
-  width: 116px;
+  width: var(--task-backend-col-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-seed {
-  width: 84px;
+  width: var(--task-seed-col-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-mode {
-  width: 92px;
+  width: var(--task-mode-col-w);
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-sort {
   white-space: nowrap;
@@ -62,7 +72,7 @@
   text-align: center;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) thead th:last-child {
-  width: 184px;
+  width: var(--task-actions-col-w);
   text-align: right;
 }
 .task-table:not(.task-table--leadopt):not(.task-table--peptide) tbody td:last-child {

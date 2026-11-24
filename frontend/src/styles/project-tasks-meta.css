@@ -1,12 +1,10 @@
 .task-col-submitted {
-  min-width: 248px;
   white-space: normal;
 }
 
-.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-submitted,
-.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-submitted {
-  width: 280px;
-  max-width: 280px;
+.task-table--leadopt .task-col-submitted,
+.task-table--peptide .task-col-submitted {
+  min-width: 248px;
 }
 
 .task-table.task-table--leadopt .task-col-submitted {
