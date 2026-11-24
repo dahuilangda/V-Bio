@@ -301,6 +301,14 @@
   display: inline-grid;
 }
 
+@media (pointer: coarse) {
+  .copilot-attach-btn,
+  .copilot-send-btn {
+    width: 40px;
+    height: 40px;
+  }
+}
+
 @media (max-width: 767px) {
   .copilot-chat-window .copilot-composer {
     display: block;

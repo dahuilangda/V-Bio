@@ -2717,3 +2717,47 @@ button.mask-cell:not(:disabled):hover {
   color: #6b7a72;
   margin: 0;
 }
+
+@media (max-width: 1100px) {
+  .inputs-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .inputs-workspace.components-resizable {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .basics-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .basics-panel .field:nth-of-type(2) {
+    grid-column: auto;
+  }
+
+  .component-runtime-settings-row {
+    grid-template-columns: 1fr;
+  }
+
+  .affinity-basics-controls {
+    gap: 12px;
+  }
+
+  .affinity-basics-upload-row,
+  .affinity-basics-settings-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px), (pointer: coarse) {
+  .affinity-inline-toggle > input[type='checkbox'] {
+    width: 20px;
+    height: 20px;
+  }
+
+  .peptide-residue-help {
+    width: 26px;
+    height: 26px;
+  }
+}

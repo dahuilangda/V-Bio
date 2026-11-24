@@ -985,3 +985,10 @@
     align-self: flex-end;
   }
 }
+
+@media (max-width: 860px), (pointer: coarse) {
+  .checkbox-inline input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+  }
+}

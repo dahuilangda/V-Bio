@@ -296,6 +296,20 @@
   border-bottom: 0;
 }
 
-.table-wrap {
-  overflow: auto;
+@media (max-width: 1100px) {
+  .confidence-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .confidence-kv-row:nth-child(2n + 1) {
+    border-right: 0;
+  }
+
+  .confidence-kv-row:nth-last-child(-n + 2) {
+    border-bottom: 1px solid #eef3f0;
+  }
+
+  .confidence-kv-row:last-child {
+    border-bottom: 0;
+  }
 }

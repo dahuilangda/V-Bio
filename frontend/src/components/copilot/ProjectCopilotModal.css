@@ -824,3 +824,11 @@
 .copilot-chat-window .copilot-plan-step.is-current .copilot-plan-step-mark {
   color: #1f7a4d;
 }
+
+@media (pointer: coarse) {
+  .copilot-history-new,
+  .copilot-history-delete {
+    width: 40px;
+    height: 40px;
+  }
+}

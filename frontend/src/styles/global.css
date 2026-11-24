@@ -1031,271 +1031,13 @@ select:focus {
 
 
 @media (max-width: 1100px) {
-  /* Phones/narrow tablets: the sticky stepper's negative margin renders it
-     fully off-screen; convert it to the centered horizontal row. */
-  .workspace-shell {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-
-  .workspace-stepper {
-    position: static;
-    width: auto;
-    margin-left: 0;
-    padding: 0;
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .workspace-stepper-track {
-    display: none;
-  }
-
-  .workspace-step {
-    width: 44px;
-    min-height: 44px;
-    padding: 0;
-  }
-
-  .workspace-step-dot {
-    width: 38px;
-    height: 38px;
-  }
-
-  .workspace-step::after {
-    left: 50%;
-    top: -6px;
-    transform: translate(-50%, -100%);
-  }
-
-  .two-columns {
-    grid-template-columns: 1fr;
-  }
-
-  .results-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .results-resizer {
-    display: none;
-  }
-
-  .panel-resizer {
-    display: none;
-  }
-
-  .info-panel {
-    min-width: 0;
-  }
-
-  .info-list-compact {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .confidence-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .confidence-kv-row:nth-child(2n + 1) {
-    border-right: 0;
-  }
-
-  .confidence-kv-row:nth-last-child(-n + 2) {
-    border-bottom: 1px solid #eef3f0;
-  }
-
-  .confidence-kv-row:last-child {
-    border-bottom: 0;
-  }
-
-  .ligand-prop-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-
-  .users-create {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .component-meta {
-    grid-template-columns: 1fr 1fr;
-  }
-
-
-
-
-
-
-
-
   .advanced-filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .affinity-sidebar-list {
-    grid-template-columns: 1fr;
-  }
-
-  .component-content-split.has-side {
-    grid-template-columns: 1fr;
-  }
-
-  .component-card-ligand .component-content-split-ligand.has-side {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-panel-head {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-  }
-
-  .settings-panel-head p {
-    white-space: normal;
-  }
-
-  .inputs-workspace {
-    grid-template-columns: 1fr;
-  }
-
-  .inputs-workspace.components-resizable {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-
-  .basics-panel {
-    grid-template-columns: 1fr;
-  }
-
-  .basics-panel .field:nth-of-type(2) {
-    grid-column: auto;
-  }
-
-  .component-runtime-settings-row {
-    grid-template-columns: 1fr;
-  }
-
-  .affinity-basics-controls {
-    gap: 12px;
-  }
-
-  .affinity-basics-upload-row,
-  .affinity-basics-settings-row {
-    grid-template-columns: 1fr;
-  }
-
-  .affinity-toggles-hint {
-    text-align: left;
-    margin-top: 0;
-  }
-
-  .component-sidebar {
-    position: static;
-  }
-
-  .component-sidebar-head {
-    align-items: flex-start;
-  }
-
-  .component-sidebar-head-meta {
-    justify-content: flex-start;
-  }
-
-  .constraint-workspace {
-    grid-template-columns: 1fr;
-  }
-
-  .constraint-workspace.resizable {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-
-  .constraint-viewer-panel {
-    position: static;
-  }
-
-  .constraint-template-switch {
-    min-width: 0;
-  }
-
-  .constraint-nav-controls {
-    grid-template-columns: 1fr;
-    align-items: stretch;
-  }
-
-  .constraint-nav-actions {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-  }
-}
-
-@media (min-width: 1101px) and (max-width: 1540px) {
-  .workspace-shell {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .workspace-stepper {
-    position: static;
-    width: auto;
-    margin-left: 0;
-    padding: 0;
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: center;
-    margin-top: 0;
-    margin-bottom: 0;
-    gap: 8px;
-  }
-
-  .workspace-stepper-track {
-    display: none;
-  }
-
-  .workspace-step {
-    width: 40px;
-    min-height: 40px;
-    padding: 0;
-  }
-
-  .workspace-step-dot {
-    width: 34px;
-    height: 34px;
-  }
-
-  .workspace-step::after {
-    left: 50%;
-    top: -8px;
-    transform: translate(-50%, -100%);
-  }
-
-  .workspace-step:hover::after,
-  .workspace-step:focus-visible::after {
-    transform: translate(-50%, calc(-100% - 2px));
-  }
 }
 
 @media (max-width: 860px) {
-
-  .workspace-step-dot {
-    width: 32px;
-    height: 32px;
-  }
-
-  .workspace-step-dot > svg {
-    width: 15px;
-    height: 15px;
-  }
-
   .top-nav {
     height: 56px;
     padding: 0 var(--gutter);
@@ -1353,40 +1095,12 @@ select:focus {
     width: auto;
     padding: 0;
   }
-
-  .detail-tabs-inline {
-    margin-right: 0;
-  }
-
   .grid-2 {
     grid-template-columns: 1fr;
   }
-
-  .confidence-pair-line {
-    grid-template-columns: 1fr;
-    gap: 6px;
-  }
-
-  .users-create {
-    grid-template-columns: 1fr;
-  }
-
-  .component-add-quick {
-    justify-content: flex-start;
-  }
-
-  .inputs-subtabs {
-    width: 100%;
-  }
-
   .advanced-filter-grid {
     grid-template-columns: 1fr;
   }
-
-  .overview-component-pair {
-    grid-template-columns: 1fr;
-  }
-
   .main-content {
     padding: 0 10px 16px;
   }
@@ -1413,53 +1127,9 @@ select:focus {
     border-radius: var(--radius-sm);
   }
 
-  /* Workspace stepper: collapse to a compact horizontal row at the top */
-  .workspace-stepper {
-    position: static;
-    width: 100%;
-    margin-left: 0;
-    grid-auto-flow: column;
-    grid-auto-columns: max-content;
-    overflow-x: auto;
-    padding: 6px 0;
-  }
-
-  .workspace-stepper-track {
-    display: none;
-  }
-
   /* Form fields stack vertically */
   .form-grid {
     grid-template-columns: 1fr;
-  }
-
-  /* Detail page tabs scroll horizontally */
-  .detail-tabs {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .detail-tab {
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  /* Component editor: single column */
-  .component-editor-grid,
-  .prediction-components-grid {
-    grid-template-columns: 1fr;
-  }
-
-  /* Results summary: stack cards */
-  .results-summary-grid {
-    grid-template-columns: 1fr;
-  }
-
-  /* Run controls wrap */
-  .run-controls {
-    flex-wrap: wrap;
-    gap: 6px;
   }
 
   /* Buttons shrink padding on mobile */
@@ -1495,33 +1165,12 @@ select:focus {
   textarea {
     font-size: 16px;
   }
-
-  .affinity-inline-toggle > input[type='checkbox'],
-  .affinity-enable-toggle input[type='checkbox'],
-  .checkbox-inline input[type='checkbox'] {
-    width: 20px;
-    height: 20px;
-  }
-
-  .detail-tab {
-    padding: 10px 12px;
-  }
-
-  .peptide-residue-help {
-    width: 26px;
-    height: 26px;
-  }
 }
 
 
 /* Touch enlargements: interactive icon buttons stay >=40px on coarse pointers. */
 @media (pointer: coarse) {
-  .task-row-action-btn,
-  .icon-btn,
-  .copilot-attach-btn,
-  .copilot-send-btn,
-  .copilot-history-new,
-  .copilot-history-delete {
+  .icon-btn {
     width: 40px;
     height: 40px;
   }
@@ -1698,6 +1347,10 @@ button.peptide-residue-config-head .peptide-residue-selection-summary {
   padding: 8px;
   text-align: left;
   font-size: var(--text-sm);
+}
+
+.table-wrap {
+  overflow: auto;
 }
 
 /* 跨页共享：登录/注册页基座（LoginPage 等无页面样式表的路由） */

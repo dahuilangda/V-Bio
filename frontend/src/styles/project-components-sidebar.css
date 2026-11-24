@@ -274,3 +274,28 @@
     animation: none;
   }
 }
+
+@media (max-width: 1100px) {
+  .component-sidebar {
+    position: static;
+  }
+
+  .component-sidebar-head {
+    align-items: flex-start;
+  }
+
+  .component-sidebar-head-meta {
+    justify-content: flex-start;
+  }
+
+  .affinity-sidebar-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px), (pointer: coarse) {
+  .affinity-enable-toggle input[type='checkbox'] {
+    width: 20px;
+    height: 20px;
+  }
+}

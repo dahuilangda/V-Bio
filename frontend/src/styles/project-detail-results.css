@@ -214,6 +214,22 @@
    on phones (grid collapses at 1100px). These rules tune the stacked layout:
    comfortable viewer height, readable signal rows, and a JSME/2D ligand
    block that fits a ~390px viewport without inner scrolling. */
+
+@media (max-width: 1100px) {
+  .results-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .results-resizer,
+  .panel-resizer {
+    display: none;
+  }
+
+  .info-panel {
+    min-width: 0;
+  }
+}
+
 @media (max-width: 767px) {
   .structure-panel .molstar-host {
     height: clamp(260px, 48vh, 380px) !important;
@@ -234,14 +250,6 @@
 
   .ligand-preview-svg svg {
     max-height: 180px;
-  }
-
-  /* Signal rows: label column was fixed 132-160px, squeezing the detail
-     text into near-invisibility on narrow screens. */
-  .overview-signal-row {
-    grid-template-columns: 1fr;
-    gap: 2px;
-    padding: 8px 2px;
   }
 
   .overview-signal-value {
@@ -643,6 +651,14 @@
   line-height: 1.25;
 }
 
+@media (max-width: 767px) {
+  .overview-signal-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+    padding: 8px 2px;
+  }
+}
+
 @media (max-width: 1024px) {
   
   .peptide-result-table-wrap {
@@ -777,4 +793,11 @@
   width: 100%;
   height: 30px;
   border-radius: 4px;
+}
+
+@media (pointer: coarse) {
+  .task-row-action-btn {
+    width: 40px;
+    height: 40px;
+  }
 }
