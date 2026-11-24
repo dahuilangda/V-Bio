@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
-import { InfoTip } from './InfoTip';
+import { InfoTip, tooltipHorizontalShift } from './InfoTip';
+
+describe('tooltipHorizontalShift', () => {
+  it('leaves a bubble that fits the viewport where it is', () => {
+    expect(tooltipHorizontalShift(120, 300, 390)).toBe(0);
+  });
+
+  it('pulls a bubble back from the right edge', () => {
+    expect(tooltipHorizontalShift(121, 421, 390)).toBe(-39);
+  });
+
+  it('pushes a bubble away from the left edge', () => {
+    expect(tooltipHorizontalShift(-12, 180, 390)).toBe(20);
+  });
+});
 
 describe('InfoTip', () => {
   it('renders the info trigger with an accessible tooltip bubble', () => {
