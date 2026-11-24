@@ -138,6 +138,37 @@ def _sync_project_task_terminal_state(task_id: str, zip_path: str, logger_,
         )
 
 
+def _sync_project_task_worker_lost(task_id: str, message: str, logger_) -> None:
+    database_url = os.environ.get("VBIO_MONITOR_DATABASE_URL", "").strip()
+    if not database_url:
+        return
+    try:
+        import psycopg2
+
+        with psycopg2.connect(database_url, connect_timeout=5,
+                              application_name="vbio-worker-lost") as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET ROLE anon")
+                cur.execute(
+                    "UPDATE project_tasks SET "
+                    "task_state = 'FAILURE', "
+                    "status_text = 'Task failed', "
+                    "error_text = %s, "
+                    "completed_at = NOW(), "
+                    "updated_at = NOW() "
+                    "WHERE task_id = %s AND task_id <> '' "
+                    "AND task_state NOT IN ('SUCCESS', 'FAILURE', 'REVOKED')",
+                    (message, task_id),
+                )
+                updated = cur.rowcount
+        if updated:
+            logger_.info("Synced project_tasks worker-lost state for task %s.", task_id)
+    except Exception as exc:
+        logger_.warning(
+            "project_tasks worker-lost sync skipped for task %s: %s", task_id, exc,
+        )
+
+
 def _sync_project_task_design_candidates(task_id: str, zip_path: str, logger_) -> None:
     """Store peptide-design candidates into project_tasks.confidence so the
     results workspace renders them without a browser session. Mirrors the
@@ -220,6 +251,7 @@ def register_task_routes(
     resolve_result_archive_path: Callable[[str], tuple[str, str]],
     build_or_get_view_archive: Callable[..., str],
     get_tracker_status: Callable[[str], tuple[Dict[str, Any] | None, str | None]],
+    fail_task_if_worker_lost: Callable[[str, str], Optional[str]],
     get_compact_prediction_metrics: Callable[[str], Dict[str, Any] | None],
     list_known_queues: Callable[[], list[str]],
     get_worker_capability_snapshot: Callable[[], Dict[str, Any]],
@@ -525,6 +557,12 @@ def register_task_routes(
                 response['info']['status'] = 'Task completed successfully.'
                 logger.debug("Task %s marked SUCCESS via result archive '%s' from state %s.", task_id, archive_name, task_result.state)
             else:
+                worker_lost_message = fail_task_if_worker_lost(task_id, task_result.state)
+                if worker_lost_message:
+                    response['state'] = 'FAILURE'
+                    response['info'] = {'status': worker_lost_message, 'message': worker_lost_message}
+                    _sync_project_task_worker_lost(task_id, worker_lost_message, logger)
+                    return response
                 tracker_status, heartbeat = get_tracker_status(task_id)
                 tracker_message = ''
                 if isinstance(tracker_status, dict):

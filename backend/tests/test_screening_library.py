@@ -297,6 +297,7 @@ class ScreeningResultsRouteTests(unittest.TestCase):
             resolve_result_archive_path=lambda _task_id: ("results.zip", archive_path),
             build_or_get_view_archive=lambda *_a, **_k: archive_path,
             get_tracker_status=lambda _task_id: (None, None),
+            fail_task_if_worker_lost=lambda _task_id, _state: None,
             get_compact_prediction_metrics=lambda _task_id: {},
             list_known_queues=lambda: [],
             get_worker_capability_snapshot=lambda: {},

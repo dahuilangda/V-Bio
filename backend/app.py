@@ -245,6 +245,7 @@ register_task_routes(
     resolve_result_archive_path=result_archive_service.resolve_result_archive_path,
     build_or_get_view_archive=result_archive_service.build_or_get_view_archive,
     get_tracker_status=result_archive_service.get_tracker_status,
+    fail_task_if_worker_lost=result_archive_service.fail_task_if_worker_lost,
     get_compact_prediction_metrics=result_archive_service.get_compact_prediction_metrics,
     list_known_queues=_list_known_queues,
     get_worker_capability_snapshot=_get_worker_capability_snapshot,

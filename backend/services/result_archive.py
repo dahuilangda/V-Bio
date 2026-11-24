@@ -34,6 +34,8 @@ _BOLTZ_ION_RESNAMES = {
 }
 _PROTENIX_SUMMARY_SAMPLE_RE = re.compile(r'_summary_confidence_sample_(\d+)\.json$', re.IGNORECASE)
 _PEPTIDE_DESIGN_RANK_RE = re.compile(r'(?:^|/)rank_(\d+)(?:_|\.|$)', re.IGNORECASE)
+WORKER_LOST_GRACE_SECONDS = 300
+WORKER_LOST_MESSAGE = 'Worker exited before the task finished.'
 
 
 def _normalize_json_value_for_output(value: Any) -> Any:
@@ -787,6 +789,32 @@ class ResultArchiveService:
         except Exception as exc:
             self.logger.warning('Failed to fetch tracker status for task %s: %s', task_id, exc)
             return None, None
+
+    def fail_task_if_worker_lost(self, task_id: str, state: str) -> Optional[str]:
+        if state not in {'STARTED', 'PROGRESS'}:
+            return None
+        try:
+            redis_client = self.get_redis_client()
+            seen_key = f'task_no_heartbeat_since:{task_id}'
+            if redis_client.exists(f'task_heartbeat:{task_id}'):
+                redis_client.delete(seen_key)
+                return None
+            now = time.time()
+            first_seen_raw = redis_client.get(seen_key)
+            if first_seen_raw is None:
+                redis_client.set(seen_key, json.dumps(now), ex=WORKER_LOST_GRACE_SECONDS * 4)
+                return None
+            first_seen = float(json.loads(first_seen_raw))
+            if now - first_seen < WORKER_LOST_GRACE_SECONDS:
+                return None
+            redis_client.delete(seen_key)
+            self.celery_app.backend.mark_as_failure(task_id, RuntimeError(WORKER_LOST_MESSAGE), call_errbacks=False)
+            self.logger.warning(
+                'Task %s in state %s has had no heartbeat since %.0f; marked FAILURE.', task_id, state, first_seen)
+            return WORKER_LOST_MESSAGE
+        except Exception as exc:
+            self.logger.warning('Failed to check worker liveness for task %s: %s', task_id, exc)
+            return None
 
     # 历史别名：与 _normalize_plddt_value 同实现，保留调用点不动
     _normalize_01_or_100 = _normalize_plddt_value
