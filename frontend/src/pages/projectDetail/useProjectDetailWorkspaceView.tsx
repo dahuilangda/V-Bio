@@ -375,7 +375,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           `Parameters loaded from "${row.name?.trim() || 'task'}" — review and press Run.`
         );
       } finally {
-        if (!cancelled) navigate(`/projects/${runtimeProjectId}`, { replace: true });
+        if (!cancelled) navigate(`/projects/${runtimeProjectId}?tab=basics`, { replace: true });
       }
     })();
     return () => { cancelled = true; };

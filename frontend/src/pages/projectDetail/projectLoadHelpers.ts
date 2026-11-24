@@ -7,6 +7,16 @@ interface SavedUiStateLike {
   taskAffinityUploads?: Record<string, unknown>;
 }
 
+export function workspaceLoadSearchKey(locationSearch: string): string {
+  const query = new URLSearchParams(locationSearch);
+  for (const key of ['tab', 'task_row_id', 'task_list_page', 'clone_task_row_id']) query.delete(key);
+  Array.from(query.keys())
+    .filter((key) => key.startsWith('copilot_'))
+    .forEach((key) => query.delete(key));
+  const next = query.toString();
+  return next ? `?${next}` : '';
+}
+
 export async function resolveTaskSnapshotContext(params: {
   taskRowsBase: ProjectTask[];
   activeTaskId: string;

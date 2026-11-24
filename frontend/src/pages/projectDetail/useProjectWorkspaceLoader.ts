@@ -9,6 +9,7 @@ import type {
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { ConstraintResiduePick } from '../../components/project/ConstraintEditor';
 import { loadProjectIntoWorkspace } from './projectLoadController';
+import { workspaceLoadSearchKey } from './projectLoadHelpers';
 import type { ProjectWorkspaceDraft, WorkspaceTab } from './workspaceTypes';
 
 interface UseProjectWorkspaceLoaderOptions<TDraft extends ProjectWorkspaceDraft> {
@@ -75,26 +76,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
     latestLocationSearchRef.current = locationSearch;
   }, [locationSearch]);
 
-  const loadContextSearchKey = useMemo(() => {
-    // Only server-routing intent should trigger a full workspace refetch. Client-side view-state
-    // params (task_row_id, tab, task_list_page, copilot_* prefill) are applied in place by their
-    // own handlers — patching them in here would recreate `loadProject`, re-run the mount effect,
-    // and cause the whole task list to be cleared and refetched on every submit/view switch.
-    // The params that remain (new_task, source_task_row_id) are the ones that genuinely change
-    // what the server must return (a fresh draft vs. an existing task's draft).
-    const query = new URLSearchParams(locationSearch);
-    query.delete('tab');
-    query.delete('task_row_id');
-    query.delete('task_list_page');
-    // EVERY copilot_* prefill param is consumed in-place by the prefill effect (which also
-    // navigate(replace)s them out of the URL). Any one left here would key a full reload that
-    // wipes the just-applied prefill with the server's default draft.
-    Array.from(query.keys())
-      .filter((key) => key.startsWith('copilot_'))
-      .forEach((key) => query.delete(key));
-    const next = query.toString();
-    return next ? `?${next}` : '';
-  }, [locationSearch]);
+  const loadContextSearchKey = useMemo(() => workspaceLoadSearchKey(locationSearch), [locationSearch]);
 
   const loadProject = useCallback(async () => {
     await loadProjectIntoWorkspace({
