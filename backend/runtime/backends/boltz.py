@@ -333,6 +333,9 @@ class BoltzBackend(StructureBackend):
             print(f"[WARN] 运行 Boltz IPSAE 后处理失败: {err}", file=sys.stderr)
 
         _append_custom_residues_ccd_from_molecules(extra_archive_files, custom_molecules, ctx.temp_dir, "boltz")
+        input_record_path = work_root / "input.yaml"
+        input_record_path.write_text(normalized_yaml)
+        extra_archive_files.append((input_record_path, "boltz/input.yaml"))
 
         create_archive_with_a3m(
             ctx.output_archive_path,
