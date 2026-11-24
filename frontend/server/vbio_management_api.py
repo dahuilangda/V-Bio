@@ -201,6 +201,7 @@ postgrest_client = PostgrestClient(
     session=postgrest_http,
 )
 auth_service = AuthService(postgrest_client)
+auth_service.require_token_table_access()
 copilot_goal_store = CopilotGoalStore(postgrest_client)
 usage_tracker = UsageTracker(postgrest_client, logger)
 task_store = ProjectTaskStore(postgrest_client)

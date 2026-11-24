@@ -145,6 +145,15 @@ class AuthService:
         if not rows:
             raise PermissionError("Unknown project_id; create project in V-Bio web first")
 
+    def require_token_table_access(self) -> None:
+        try:
+            self.postgrest.request("GET", "api_tokens", query={"select": "id", "limit": "1"})
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"PostgREST refused to read api_tokens ({exc}); check PGRST_JWT_SECRET or "
+                "VBIO_POSTGREST_APIKEY in the management API environment."
+            ) from exc
+
     def authorize_submit(self, project_id: str, token_plain: str) -> TokenContext:
         token = self.validate_token(token_plain)
         if token.is_platform:

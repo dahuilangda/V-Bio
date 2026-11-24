@@ -52,7 +52,8 @@ unit_pid() {
 
 unit_env_args() {
   local args=() name
-  for name in PATH HOME LANG $(compgen -e | /usr/bin/grep -E '^(VBIO_|VITE_|SMTP_|MSA_|RESULTS_|TENANT_|LEAD_|P2D_|PROTENIX_|REDIS_URL$|CENTRAL_API_URL$|FRONTEND_URL$)'); do
+  local systemd_owned='^(INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|LISTEN_FDS|LISTEN_PID|NOTIFY_SOCKET|WATCHDOG_PID|WATCHDOG_USEC)$'
+  for name in $(compgen -e | /usr/bin/grep -Ev "${systemd_owned}"); do
     args+=(--setenv="${name}=${!name}")
   done
   printf '%s\0' "${args[@]}"
@@ -261,8 +262,31 @@ start_management_api() {
       --timeout "${VBIO_MGMT_TIMEOUT}" \
       --keep-alive 75 \
       "vbio_management_api:app"
+  wait_for_management_api
   rm -f "${MGMT_PID_FILE}"
   echo "[management-api] started (pid: $(unit_pid "${MGMT_UNIT}"))."
+}
+
+wait_for_management_api() {
+  local host="${VBIO_MGMT_HOST}"
+  if [[ "${host}" == "0.0.0.0" || "${host}" == "::" ]]; then
+    host="127.0.0.1"
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[management-api] curl is required to wait for the service to become ready." >&2
+    return 1
+  fi
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    if curl -fsS -m 2 -o /dev/null "http://${host}:${VBIO_MGMT_PORT}/vbio-api/healthz" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  systemctl --user stop "${MGMT_UNIT}.service" >/dev/null 2>&1 || true
+  echo "[management-api] did not become ready within 30s; last log lines:" >&2
+  tail -n 15 "${MGMT_LOG}" >&2
+  return 1
 }
 
 start_frontend_prod() {
