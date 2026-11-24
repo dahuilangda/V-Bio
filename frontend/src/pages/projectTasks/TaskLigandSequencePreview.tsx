@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { ProteinModification } from '../../types/models';
+import { SequenceLineTrack } from '../../components/common/SequenceLineTrack';
 import { toneForPlddt } from './taskPresentation';
 
 interface TaskLigandSequencePreviewProps {
@@ -85,28 +86,7 @@ export function TaskLigandSequencePreview({ sequence, residuePlddts, modificatio
             <span className="task-ligand-sequence-line-index left" aria-hidden="true">
               {line[0]?.index + 1}
             </span>
-            <span className="task-ligand-sequence-line-track">
-              {line.map((item, colIndex) => {
-                const confidenceText = item.confidence === null ? '-' : item.confidence.toFixed(1);
-                const linkTone = colIndex > 0 ? line[colIndex - 1].tone : item.tone;
-                const position = item.index + 1;
-                const isModified = Boolean(item.modifiedLabel);
-                const title = isModified
-                  ? `#${position} ${item.residue} -> ${item.modifiedLabel} | pLDDT ${confidenceText}`
-                  : `#${position} ${item.residue} | pLDDT ${confidenceText}`;
-                return (
-                  <span className="task-ligand-sequence-node" key={`ligand-seq-residue-${item.index}`}>
-                    {colIndex > 0 && <span className={`task-ligand-sequence-link tone-${linkTone}`} aria-hidden="true" />}
-                    <span
-                      className={`task-ligand-sequence-residue tone-${item.tone}${isModified ? ' is-modified' : ''}`}
-                      title={title}
-                    >
-                      {item.displayResidue}
-                    </span>
-                  </span>
-                );
-              })}
-            </span>
+            <SequenceLineTrack nodes={line} classPrefix="task-ligand-sequence" />
             <span className="task-ligand-sequence-line-index right" aria-hidden="true">
               {line[line.length - 1]?.index + 1}
             </span>
