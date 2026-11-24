@@ -172,6 +172,13 @@
   font-size: var(--text-xs);
 }
 
+@media (max-width: 860px), (pointer: coarse) {
+  .api-project-filter-field select,
+  .api-project-sort-field select {
+    font-size: 16px;
+  }
+}
+
 .api-project-table-wrap {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);

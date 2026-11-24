@@ -1480,6 +1480,14 @@ button.peptide-residue-config-head .peptide-residue-selection-summary {
   font-size: var(--text-sm);
   color: #2a4739;
 }
+
+@media (max-width: 860px), (pointer: coarse) {
+  .project-filter-select,
+  .project-page-size select {
+    font-size: 16px;
+  }
+}
+
 .project-filter-select:focus {
   outline: 2px solid var(--primary, #1f4f3f);
   outline-offset: 1px;

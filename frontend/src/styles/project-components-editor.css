@@ -206,6 +206,12 @@
   font-size: var(--text-sm);
 }
 
+@media (max-width: 860px), (pointer: coarse) {
+  .component-card select {
+    font-size: 16px;
+  }
+}
+
 /* Keep unified file input vertically centered inside component cards. */
 .component-card input.file-input-unified {
   box-sizing: border-box;
