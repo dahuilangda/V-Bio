@@ -226,6 +226,10 @@
   font-weight: 600;
 }
 
+.confidence-pair-line-grouped .confidence-pair-label {
+  color: #2a4137;
+}
+
 .confidence-pair-value {
   font-size: var(--text-sm);
   line-height: 1.1;

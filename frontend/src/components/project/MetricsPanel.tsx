@@ -411,6 +411,7 @@ interface PairRow {
   chainB: string;
   value: number;
   directional?: boolean;
+  grouped?: boolean;
 }
 
 function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: string[]): PairRow[] {
@@ -427,10 +428,11 @@ function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: st
       const aToB = toNumber(entry.a_to_b);
       const bToA = toNumber(entry.b_to_a);
       if (!a || !b || chainTokenEquals(a, b)) continue;
+      const grouped = entry.grouped === true;
       const aToBValue = aToB !== null ? normalizeProbability(aToB) : null;
       const bToAValue = bToA !== null ? normalizeProbability(bToA) : null;
-      if (aToBValue !== null) rows.push({ chainA: a, chainB: b, value: aToBValue, directional: true });
-      if (bToAValue !== null) rows.push({ chainA: b, chainB: a, value: bToAValue, directional: true });
+      if (aToBValue !== null) rows.push({ chainA: a, chainB: b, value: aToBValue, directional: true, grouped });
+      if (bToAValue !== null) rows.push({ chainA: b, chainB: a, value: bToAValue, directional: true, grouped });
     }
     if (rows.length > 0) return rows.sort((x, y) => y.value - x.value);
   }
@@ -746,7 +748,7 @@ function ConfidencePanel({
             {renderHelp(
               Array.isArray(data.pair_ipsae) ? 'Pair ipSAE' : 'Pair ipTM',
               Array.isArray(data.pair_ipsae)
-                ? 'Directional ipSAE per chain pair (aligned chain -> scored chain, Dunbrack Eq. 14-16, pure PAE). Values are asymmetric by construction. >0.8 confident, <0.6 likely failed.'
+                ? 'Directional ipSAE per chain pair (aligned chain -> scored chain, Dunbrack Eq. 14-16, pure PAE). Values are asymmetric by construction. >0.8 confident, <0.6 likely failed. A + joins chains into one virtual molecule (IPSAE2 --group): the binder is scored against every receptor chain from the raw PAE of all member tokens.'
                 : 'Interface confidence (ipTM) per chain pair; directional arrows mark conditioned direction. >0.8 confident, 0.6-0.8 gray zone, <0.6 likely failed.'
             )}
             <span className="muted small">{pairRows.length} rows</span>
@@ -756,7 +758,10 @@ function ConfidencePanel({
               const toneForPair = toneForScale(row.value, 'iptm');
               const pct = Math.max(0, Math.min(100, (row.value <= 1 ? row.value : row.value / 100) * 100));
               return (
-                <div key={`${row.chainA}-${row.chainB}`} className={`confidence-pair-line tone-${toneForPair}`}>
+                <div
+                  key={`${row.chainA}-${row.chainB}`}
+                  className={`confidence-pair-line tone-${toneForPair}${row.grouped ? ' confidence-pair-line-grouped' : ''}`}
+                >
                   <span className="confidence-pair-label">{`${row.chainA} ${row.directional ? '→' : '↔'} ${row.chainB}`}</span>
                   <div className="confidence-pair-meter">
                     <span style={{ width: `${pct.toFixed(1)}%` }} />
