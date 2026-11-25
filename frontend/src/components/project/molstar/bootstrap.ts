@@ -1,5 +1,4 @@
-import { ENV } from '../../../utils/env';
-import { loadScript, loadStylesheet } from '../../../utils/script';
+import { loadMolstar } from '../../../bundles/vendor';
 
 const MOLSTAR_OVERRIDE_STYLE_ID = 'vbio-molstar-theme-overrides';
 
@@ -78,16 +77,6 @@ export function ensureMolstarThemeOverrides() {
 }
 `;
   document.head.appendChild(style);
-}
-
-export async function waitForMolstarReady(timeoutMs = 12000, intervalMs = 120) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const creator = (window as any).molstar?.Viewer?.create;
-    if (creator) return creator;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error('Mol* failed to initialize.');
 }
 
 // Overlay bookkeeping lives ON the viewer instance, not in module state: structure loads are
@@ -246,11 +235,9 @@ export async function bootstrapViewerHost(
   host: HTMLElement,
   showSequence: boolean
 ): Promise<any> {
-  loadStylesheet(ENV.molstarCssUrl);
-  await loadScript(ENV.molstarScriptUrl);
+  const { createViewer } = await loadMolstar();
   ensureMolstarThemeOverrides();
-  const creator = await waitForMolstarReady();
-  return await creator(host, {
+  return createViewer(host, {
     layoutIsExpanded: false,
     layoutShowControls: true,
     layoutShowSequence: showSequence,

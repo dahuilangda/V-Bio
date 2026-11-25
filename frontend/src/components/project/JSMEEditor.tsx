@@ -1,17 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ENV } from '../../utils/env';
-import { loadScript } from '../../utils/script';
+import { loadJsme } from '../../bundles/vendor';
 
 interface JSMEEditorProps {
   smiles: string;
   onSmilesChange: (smiles: string) => void;
   height?: number;
-}
-
-declare global {
-  interface Window {
-    jsmeOnLoad?: () => void;
-  }
 }
 
 interface JsmeThemeOptions {
@@ -32,20 +25,6 @@ function getJsmeThemeOptions(): JsmeThemeOptions {
     guiAtomColor: readThemeColor('--primary', '#1f4f3f'),
     markerIconColor: readThemeColor('--primary', '#1f4f3f')
   };
-}
-
-async function waitForJSMEReady(timeoutMs = 12000, intervalMs = 120): Promise<any> {
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    const JSApplet = (window as any).JSApplet;
-    if (JSApplet?.JSME) {
-      return JSApplet;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  throw new Error('JSME initialization timed out.');
 }
 
 export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorProps) {
@@ -72,36 +51,12 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
       mount.style.width = '100%';
       mount.style.height = '100%';
 
-      const applet = appletRef.current;
-      if (applet && typeof applet.setSize === 'function') {
-        try {
-          applet.setSize(widthPx, heightPx);
-        } catch {
-          try {
-            applet.setSize(`${widthPx}`, `${heightPx}`);
-          } catch {
-            try {
-              applet.setSize('100%', '100%');
-            } catch {
-              // Ignore unsupported signatures.
-            }
-          }
-        }
-      }
+      if (appletRef.current) appletRef.current.setSize(widthPx, heightPx);
     };
 
     applySize();
 
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', applySize);
-      return () => {
-        window.removeEventListener('resize', applySize);
-      };
-    }
-
-    const observer = new ResizeObserver(() => {
-      applySize();
-    });
+    const observer = new ResizeObserver(applySize);
     if (hostRef.current) {
       observer.observe(hostRef.current);
     }
@@ -116,22 +71,13 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
     const boot = async () => {
       try {
         setError(null);
-        // Silence JSME runtime warning when callback is absent.
-        if (typeof window !== 'undefined' && typeof window.jsmeOnLoad !== 'function') {
-          window.jsmeOnLoad = () => {};
-        }
-        await loadScript(ENV.jsmeScriptUrl);
-
-        if (cancelled || !mountRef.current) return;
-
-        // JSME script may still bootstrap after script onload (GWT nocache flow).
-        const JSApplet = await waitForJSMEReady();
+        const { JSME } = await loadJsme();
         if (cancelled || !mountRef.current) return;
 
         mountRef.current.innerHTML = '';
         mountRef.current.id = editorId;
         const themeOptions = getJsmeThemeOptions();
-        const applet = new JSApplet.JSME(editorId, '100%', '100%', {
+        const applet = new JSME(editorId, '100%', '100%', {
           options: 'star',
           ...themeOptions
         });
