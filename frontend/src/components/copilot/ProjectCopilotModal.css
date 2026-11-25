@@ -749,10 +749,6 @@
   cursor: not-allowed;
 }
 
-.copilot-settings-btn .spin {
-  animation: copilot-spin 0.8s linear infinite;
-}
-
 /* Steering interjections (pi alignment): queued mid-turn user texts, shown above the live
  * trace until the turn ends. */
 .copilot-chat-window .copilot-steered-list {
