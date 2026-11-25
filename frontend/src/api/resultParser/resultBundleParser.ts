@@ -294,6 +294,13 @@ function chooseBestAf3StructureFile(names: string[]): string | null {
 }
 
 const PROTENIX_SUMMARY_SAMPLE_RE = /_summary_confidence_sample_(\d+)\.json$/i;
+const ESMFOLD2_OUTPUT_ROOT = 'esmfold2/output/';
+const PROTENIX_OUTPUT_ROOTS = ['protenix/output/', 'mol1/output/', ESMFOLD2_OUTPUT_ROOT];
+
+function isUnderProtenixOutputRoot(name: string): boolean {
+  const lower = name.toLowerCase();
+  return PROTENIX_OUTPUT_ROOTS.some((root) => lower.startsWith(root));
+}
 
 async function chooseBestProtenixStructureAndConfidence(
   zip: JSZip,
@@ -310,12 +317,11 @@ async function chooseBestProtenixStructureAndConfidence(
     return { structureFile: canonicalStructure, confidenceFile: canonicalConfidence };
   }
 
-  const summaryCandidates = names.filter((name) => {
-    const lower = name.toLowerCase();
-    if (!lower.startsWith('protenix/output/') && !lower.startsWith('mol1/output/')) return false;
-    if (!lower.endsWith('.json')) return false;
-    return PROTENIX_SUMMARY_SAMPLE_RE.test(getBaseName(name));
-  });
+  const summaryCandidates = names.filter((name) => (
+    isUnderProtenixOutputRoot(name)
+    && name.toLowerCase().endsWith('.json')
+    && PROTENIX_SUMMARY_SAMPLE_RE.test(getBaseName(name))
+  ));
   if (summaryCandidates.length === 0) {
     return { structureFile: null, confidenceFile: null };
   }
@@ -1841,13 +1847,10 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
   // mol1/esmfold2 与 protenix2dock 的置信度载荷同形，按 protenix 契约解析
-  const isEsMfold2 = names.some((name) => name.toLowerCase().includes('esmfold2/output/'));
-  const isProtenix = names.some(
-    (name) =>
-      name.toLowerCase().includes('protenix/output/') ||
-      name.toLowerCase().includes('mol1/output/') ||
-      isEsMfold2
-  );
+  const isEsMfold2 = names.some((name) => name.toLowerCase().includes(ESMFOLD2_OUTPUT_ROOT));
+  const isProtenix = names.some((name) => (
+    PROTENIX_OUTPUT_ROOTS.some((root) => name.toLowerCase().includes(root))
+  ));
   const isNesso = names.some((name) => name.toLowerCase() === 'nesso/manifest.json');
   // HALO lead-optimization bundles are structureless run artifacts keyed on a
   // top-level halo_results.json (engine marker inside). The name deliberately
