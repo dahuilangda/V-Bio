@@ -390,11 +390,6 @@
   border-color: #eccfce;
 }
 
-.badge-muted {
-  background: #f1f3f2;
-  color: #61736a;
-  border-color: #e1e7e4;
-}
 
 .api-usage-panel {
   display: grid;

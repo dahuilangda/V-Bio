@@ -39,6 +39,7 @@ import {
   builderTerminalForPosition,
   clampBuilderModPosition
 } from './apiAccessHelpers';
+import '../styles/project-constraints-editor.css';
 import './ApiYamlBuilderModal.css';
 
 export interface ApiYamlBuilderChromeProps {

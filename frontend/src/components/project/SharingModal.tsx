@@ -14,6 +14,7 @@ import { searchUsers as searchUsersServer, toAppUser } from '../../api/authServe
 import type { AppUser, ProjectShareRecord, ProjectTaskShareRecord, ShareAccessLevel } from '../../types/models';
 import { InfoTip } from '../../components/common/InfoTip';
 import { useModalDialog } from '../ui/useModalDialog';
+import '../../styles/shares-page.css';
 
 interface SharingModalProps {
   open: boolean;

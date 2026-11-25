@@ -34,6 +34,7 @@ import { canEditProject, canManageProjectShares } from '../utils/accessControl';
 import { getWorkflowDefinition } from '../utils/workflows';
 import type { CopilotPlanAction, ProjectTask } from '../types/models';
 import '../styles/project-tasks.css';
+import '../styles/project-metrics.css';
 import { readCopilotText, readCopilotNumber, isOneOf } from '../utils/copilotPayload';
 
 const TASK_STATE_FILTER_OPTIONS = ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE', 'REVOKED'] as const;
