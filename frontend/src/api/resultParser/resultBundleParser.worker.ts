@@ -1,35 +1,16 @@
-// Worker 侧解析入口：整份结果包（JSZip 解压 + CIF/JSON 解析）移出主线程。
+import type { Envelope } from '../../bundles/rpc';
 import { parseResultBundle } from './resultBundleParser';
+import type { ParseResultBundleOptions } from './resultBundleContract';
 
-interface WorkerParseRequest {
-  id: number;
-  blob: Blob;
-  options?: {
-    preservePeptideCandidateStructureText?: boolean;
-    preferredStructureName?: string;
-  };
-}
+const scope = self as unknown as {
+  postMessage: (message: Envelope) => void;
+  onmessage: ((event: MessageEvent<{ id: number; payload: { blob: Blob; options?: ParseResultBundleOptions } }>) => void) | null;
+};
 
-interface WorkerParseResponse {
-  id: number;
-  ok: boolean;
-  parsed?: unknown;
-  error?: string;
-}
-
-self.addEventListener('message', (event: MessageEvent<WorkerParseRequest>) => {
-  const { id, blob, options } = event.data;
-  parseResultBundle(blob, options)
-    .then((parsed) => {
-      const response: WorkerParseResponse = { id, ok: true, parsed };
-      (self as unknown as Worker).postMessage(response);
-    })
-    .catch((exc: unknown) => {
-      const response: WorkerParseResponse = {
-        id,
-        ok: false,
-        error: exc instanceof Error ? exc.message : String(exc)
-      };
-      (self as unknown as Worker).postMessage(response);
-    });
-});
+scope.onmessage = (event) => {
+  const { id, payload } = event.data;
+  void parseResultBundle(payload.blob, payload.options).then(
+    (parsed) => scope.postMessage({ id, ok: true, result: parsed }),
+    (error: unknown) => scope.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) })
+  );
+};
