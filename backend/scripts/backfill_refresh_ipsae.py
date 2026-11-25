@@ -41,12 +41,14 @@ def db():
 
 conn = psycopg2.connect(DB_URL, application_name='vbio-ipsae-refresh-plan')
 cur = conn.cursor()
+only = sys.argv[1:]
 cur.execute("SET ROLE anon")
 cur.execute(
     "SELECT task_id, confidence, properties, constraints FROM project_tasks "
     "WHERE backend IN ('boltz', 'alphafold3', 'protenix', 'mol1', 'esmfold2') "
     "AND task_state='SUCCESS' AND confidence ? 'pair_ipsae' "
-    "ORDER BY created_at")
+    "AND (%s::text[] IS NULL OR task_id = ANY(%s::text[])) "
+    "ORDER BY created_at", (only or None, only or None))
 rows = cur.fetchall()
 cur.close()
 conn.close()
