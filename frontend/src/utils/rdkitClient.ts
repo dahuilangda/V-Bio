@@ -63,14 +63,6 @@ export function validateBackboneSlots(
   return invoke('validateBackboneSlots', smiles, slots, amidated);
 }
 
-export function customResidueAtomNamesFromSmiles(
-  smiles: string,
-  backboneOverride?: CustomResidueBackbone,
-  amidated = false
-): Promise<string[] | null> {
-  return invoke('customResidueAtomNamesFromSmiles', smiles, backboneOverride, amidated);
-}
-
 export function resolveComponentAtomOptions(components: InputComponent[]): Promise<StructureAtomOptionsByChain> {
   return invoke('buildComponentAtomOptionsByChain', components);
 }

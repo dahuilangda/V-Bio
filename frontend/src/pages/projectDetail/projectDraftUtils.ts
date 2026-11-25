@@ -80,7 +80,6 @@ const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'po
 import { ENGINES } from '../../config/engineCapabilities';
 import { normalizePredictionBackend } from '../apiAccessHelpers';
 
-export type { PredictionBackend } from '../apiAccessHelpers';
 export { normalizePredictionBackend };
 
 // 约束能力读共享能力矩阵（configs/engine_capabilities.json），与后端同源

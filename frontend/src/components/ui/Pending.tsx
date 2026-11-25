@@ -30,10 +30,6 @@ export function LoadingLine({ children, className = '' }: { children: React.Reac
   );
 }
 
-export function FadeIn({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <div className={`fade-in ${className}`}>{children}</div>;
-}
-
 export function SkeletonRows({ rows = 5 }: { rows?: number }) {
   return (
     <div className="skeleton-rows" role="status" aria-label="Loading">

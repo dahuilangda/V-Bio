@@ -55,14 +55,6 @@
   border-radius: 6px;
 }
 
-.fade-in {
-  display: contents;
-}
-
-.fade-in > * {
-  animation: fade-in 0.22s var(--ease);
-}
-
 @keyframes fade-in {
   from {
     opacity: 0;
