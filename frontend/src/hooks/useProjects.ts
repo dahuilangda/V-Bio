@@ -523,7 +523,7 @@ function overlayProjectCountsWithRuntimeSnapshot(params: {
 
 export function useProjects(session: Session | null) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(session !== null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const loadSeqRef = useRef(0);
@@ -734,6 +734,7 @@ export function useProjects(session: Session | null) {
 
   const load = useCallback(async (options?: LoadProjectsOptions) => {
     if (!session) {
+      setLoading(false);
       setProjects([]);
       projectsRef.current = [];
       projectCountsRef.current = new Map();

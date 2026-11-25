@@ -523,12 +523,10 @@ export function useProjectTasksDataLoader({
       const showRefreshing = silent && options?.showRefreshing !== false;
       const preferBackendStatus = options?.preferBackendStatus !== false;
       const forceRefetch = Boolean(options?.forceRefetch);
-      if (!forceRefetch) {
-        hydrateRuntimeCache();
-      }
+      const hydrated = !forceRefetch && hydrateRuntimeCache();
       if (showRefreshing) {
         setRefreshing(true);
-      } else if (!silent) {
+      } else if (!silent && !hydrated) {
         setLoading(true);
       }
       if (!silent) {
