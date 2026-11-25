@@ -100,3 +100,13 @@ with ThreadPoolExecutor(max_workers=8) as pool:
             done[0] += 1
             if done[0] % 100 == 0 or done[0] == len(rows):
                 print(f'{done[0]}/{len(rows)} {counts}', flush=True)
+
+snapshot_keys = list(PAIR_KEYS + SC_KEYS + tuple(LEGACY_KEYS))
+with db().cursor() as cur:
+    cur.execute("SET ROLE anon")
+    cur.execute(
+        "UPDATE projects p SET confidence = (COALESCE(p.confidence, '{}'::jsonb) - %s::text[]) || COALESCE(("
+        "SELECT jsonb_object_agg(key, value) FROM jsonb_each(t.confidence) WHERE key = ANY(%s::text[])), '{}'::jsonb) "
+        "FROM project_tasks t WHERE t.task_id = p.task_id AND t.confidence ? 'pair_ipsae'",
+        (list(PAIR_KEYS + SC_KEYS), snapshot_keys))
+    print(f'project snapshots synced: {cur.rowcount}', flush=True)
