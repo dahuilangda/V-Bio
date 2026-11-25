@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 
+from management_api.task_store import terminal_outcome
+
 LOGGER_NAME = "vbio-task-janitor"
 
 
@@ -101,9 +103,9 @@ class TaskStatusJanitor:
             terminal, lost_rows = self._ask_runtime(project_rows)
             # 防御：只有真终态才进对账（PENDING/RUNNING 不是终态）
             terminal = {
-                task_id: state
-                for task_id, state in terminal.items()
-                if state in ("SUCCESS", "FAILURE", "REVOKED")
+                task_id: outcome
+                for task_id, outcome in terminal.items()
+                if outcome["state"] in ("SUCCESS", "FAILURE", "REVOKED")
             }
             if terminal:
                 reconciled += self.task_store.reconcile_terminal_rows(project_id, terminal)
@@ -122,7 +124,9 @@ class TaskStatusJanitor:
         )
         return self.postgrest.request("GET", query) or []
 
-    def _ask_runtime(self, project_rows: List[Dict[str, Any]]) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+    def _ask_runtime(
+        self, project_rows: List[Dict[str, Any]]
+    ) -> Tuple[Dict[str, Dict[str, str]], List[Dict[str, Any]]]:
         task_ids = [str(row.get("task_id") or "").strip() for row in project_rows]
         task_ids = [task_id for task_id in task_ids if task_id]
         if not task_ids:
@@ -136,7 +140,7 @@ class TaskStatusJanitor:
         response.raise_for_status()
         statuses = (response.json() or {}).get("statuses") or []
         by_id = {str(s.get("task_id") or ""): s for s in statuses if isinstance(s, dict)}
-        terminal: Dict[str, str] = {}
+        terminal: Dict[str, Dict[str, str]] = {}
         lost_rows: List[Dict[str, Any]] = []
         for row in project_rows:
             task_id = str(row.get("task_id") or "").strip()
@@ -148,7 +152,7 @@ class TaskStatusJanitor:
             except ValueError:
                 continue
             if state in ("SUCCESS", "FAILURE", "REVOKED"):
-                terminal[task_id] = state
+                terminal[task_id] = terminal_outcome(status)
             elif state in ("", "PENDING", "UNKNOWN"):
                 created_ts = _parse_ts(created)
                 age = time.time() - created_ts if created_ts else None

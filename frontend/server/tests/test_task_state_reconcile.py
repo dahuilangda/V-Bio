@@ -9,6 +9,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+def outcome(state, status_text="", error_text=""):
+    return {"state": state, "status_text": status_text, "error_text": error_text}
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
@@ -49,7 +52,7 @@ def test_reconcile_patches_non_terminal_row():
     rows = {"tid-1": {"task_id": "tid-1", "task_state": "QUEUED"}}
     store, pg = _make_store(rows)
 
-    patched = store.reconcile_terminal_rows("proj-1", {"tid-1": "SUCCESS"})
+    patched = store.reconcile_terminal_rows("proj-1", {"tid-1": outcome("SUCCESS")})
 
     assert patched == 1
     assert len(pg.patches) == 1
@@ -68,7 +71,7 @@ def test_reconcile_skips_already_terminal_rows():
     store, pg = _make_store(rows)
 
     patched = store.reconcile_terminal_rows(
-        "proj-1", {"tid-a": "SUCCESS", "tid-b": "FAILURE", "tid-c": "REVOKED"})
+        "proj-1", {"tid-a": outcome("SUCCESS"), "tid-b": outcome("FAILURE"), "tid-c": outcome("REVOKED")})
 
     assert patched == 0
     assert pg.patches == []
@@ -78,7 +81,7 @@ def test_reconcile_maps_revoked_to_row_state():
     rows = {"tid-2": {"task_id": "tid-2", "task_state": "RUNNING"}}
     store, pg = _make_store(rows)
 
-    store.reconcile_terminal_rows("proj-1", {"tid-2": "REVOKED"})
+    store.reconcile_terminal_rows("proj-1", {"tid-2": outcome("REVOKED")})
 
     assert pg.patches[0][1]["task_state"] == "REVOKED"
 
@@ -86,5 +89,5 @@ def test_reconcile_maps_revoked_to_row_state():
 def test_reconcile_ignores_unknown_task_ids():
     store, pg = _make_store({})
 
-    assert store.reconcile_terminal_rows("proj-1", {"ghost": "SUCCESS"}) == 0
+    assert store.reconcile_terminal_rows("proj-1", {"ghost": outcome("SUCCESS")}) == 0
     assert pg.patches == []

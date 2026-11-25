@@ -6,6 +6,8 @@ from unittest import mock
 
 from management_api.task_status_janitor import TaskStatusJanitor
 
+def outcome(state, status_text="", error_text=""):
+    return {"state": state, "status_text": status_text, "error_text": error_text}
 
 class FakePostgrest:
     def __init__(self, rows):
@@ -77,11 +79,11 @@ class SweepTests(unittest.TestCase):
         janitor, postgrest, store = make_janitor(rows)
         with mock.patch.object(
             TaskStatusJanitor, "_ask_runtime",
-            return_value=({"cel-1": "SUCCESS", "cel-2": "RUNNING"}, []),
+            return_value=({"cel-1": outcome("SUCCESS"), "cel-2": outcome("RUNNING")}, []),
         ):
             janitor._sweep_once()
         # RUNNING 不是终态：只推进 cel-1
-        self.assertEqual(store.reconciled, [("p-1", {"cel-1": "SUCCESS"})])
+        self.assertEqual(store.reconciled, [("p-1", {"cel-1": outcome("SUCCESS")})])
         self.assertEqual(postgrest.patches, [])
 
     def test_lost_row_marked_failure_after_threshold(self):
@@ -89,7 +91,7 @@ class SweepTests(unittest.TestCase):
         janitor, postgrest, store = make_janitor(rows)
         with mock.patch.object(
             TaskStatusJanitor, "_ask_runtime",
-            return_value=({"cel-2": "PENDING"}, [{"row_id": "r2", "task_id": "cel-2"}]),
+            return_value=({"cel-2": outcome("PENDING")}, [{"row_id": "r2", "task_id": "cel-2"}]),
         ):
             janitor._sweep_once()
         self.assertEqual(len(store.failed), 1)
@@ -101,7 +103,7 @@ class SweepTests(unittest.TestCase):
         janitor, postgrest, store = make_janitor(rows)
         with mock.patch.object(
             TaskStatusJanitor, "_ask_runtime",
-            return_value=({"cel-3": "RUNNING"}, []),
+            return_value=({"cel-3": outcome("RUNNING")}, []),
         ):
             janitor._sweep_once()
         self.assertEqual(store.reconciled, [])
@@ -125,6 +127,36 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(len(projects_queried), 2)
         for projects in projects_queried:
             self.assertEqual(len(projects), 1)
+
+
+class RuntimeOutcomeTests(unittest.TestCase):
+    def _runtime_response(self, statuses):
+        response = mock.Mock()
+        response.json.return_value = {"statuses": statuses}
+        return response
+
+    def test_failure_reason_is_carried_from_runtime(self):
+        rows = [task_row("r1", "p-1", "cel-1", "RUNNING", 2)]
+        janitor, _postgrest, store = make_janitor(rows)
+        with mock.patch("management_api.task_status_janitor.requests.post",
+                        return_value=self._runtime_response([{
+                            "task_id": "cel-1",
+                            "state": "FAILURE",
+                            "info": {"status": "Task failed.", "exc_message": "Subprocess exited with code 1."},
+                        }])):
+            janitor._sweep_once()
+        self.assertEqual(store.reconciled, [("p-1", {"cel-1": outcome("FAILURE", "Task failed.", "Subprocess exited with code 1.")})])
+
+    def test_only_terminal_states_are_reconciled(self):
+        rows = [task_row("r1", "p-1", "cel-1", "RUNNING", 2), task_row("r2", "p-1", "cel-2", "RUNNING", 2)]
+        janitor, _postgrest, store = make_janitor(rows)
+        with mock.patch("management_api.task_status_janitor.requests.post",
+                        return_value=self._runtime_response([
+                            {"task_id": "cel-1", "state": "PROGRESS", "info": {}},
+                            {"task_id": "cel-2", "state": "REVOKED", "info": {"status": "Task was revoked."}},
+                        ])):
+            janitor._sweep_once()
+        self.assertEqual(store.reconciled, [("p-1", {"cel-2": outcome("REVOKED", "Task was revoked.")})])
 
 
 if __name__ == "__main__":

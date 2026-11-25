@@ -9,6 +9,7 @@ from flask import Response, jsonify, request, stream_with_context
 from management_api.runtime_proxy import RuntimeProxyBusyError
 from management_api.rfd4_consistency import maybe_enrich_view
 from management_api.task_status_stream import task_status_sse_frames
+from management_api.task_store import terminal_outcomes
 
 
 def forward_task_read(
@@ -233,12 +234,7 @@ def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
             # 服务端对账: 运行时已终态而行未推进的(页面没开着/经 API 直提),
             # 在任意一次状态轮询时自愈。仅处理明确终态, 失败不影响读取。
             try:
-                terminal = {
-                    str(entry.get("task_id") or ""): str(entry.get("state") or "")
-                    for entry in (upstream.json() or {}).get("statuses", [])
-                    if entry.get("state") in ("SUCCESS", "FAILURE", "REVOKED")
-                    and entry.get("task_id")
-                }
+                terminal = terminal_outcomes((upstream.json() or {}).get("statuses", []))
                 if terminal:
                     gateway.task_store.reconcile_terminal_rows(project_id, terminal)
                     hub = getattr(gateway, "task_status_hub", None)

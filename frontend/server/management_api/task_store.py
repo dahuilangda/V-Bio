@@ -22,6 +22,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def terminal_outcome(status: Dict[str, Any]) -> Dict[str, str]:
+    info = status.get("info") if isinstance(status.get("info"), dict) else {}
+    state = str(status.get("state") or "").strip().upper()
+    reason = str(info.get("exc_message") or info.get("message") or "").strip() if state == "FAILURE" else ""
+    return {
+        "state": state,
+        "status_text": str(info.get("status") or "").strip(),
+        "error_text": reason,
+    }
+
+
+def terminal_outcomes(statuses: List[Any]) -> Dict[str, Dict[str, str]]:
+    terminal: Dict[str, Dict[str, str]] = {}
+    for status in statuses:
+        if not isinstance(status, dict):
+            continue
+        outcome = terminal_outcome(status)
+        task_id = str(status.get("task_id") or "").strip()
+        if task_id and outcome["state"] in ("SUCCESS", "FAILURE", "REVOKED"):
+            terminal[task_id] = outcome
+    return terminal
+
+
 class ProjectTaskStore:
     def __init__(self, postgrest: PostgrestClient) -> None:
         self.postgrest = postgrest
@@ -256,7 +279,7 @@ class ProjectTaskStore:
             logging.getLogger(__name__).warning("Failed to mark %d lost task rows", failed)
         return patched
 
-    def reconcile_terminal_rows(self, project_id: str, terminal_by_task_id: Dict[str, str]) -> int:
+    def reconcile_terminal_rows(self, project_id: str, terminal_by_task_id: Dict[str, Dict[str, str]]) -> int:
         """把已有运行时终态的任务行同步到终态, 返回更新的行数。
 
         行状态的 QUEUED→SUCCESS 平台上是前端轮询回写的; 页面没开着(或任务
@@ -271,13 +294,20 @@ class ProjectTaskStore:
         except Exception:
             return 0
         patched = 0
-        for task_id, row_state in terminal_by_task_id.items():
+        for task_id, outcome in terminal_by_task_id.items():
             row = rows.get(task_id)
             if not row:
                 continue
+            row_state = str(outcome.get("state") or "").strip().upper()
             current = str(row.get("task_state") or "").strip().upper()
             if current == row_state or current in ("SUCCESS", "FAILURE", "REVOKED"):
                 continue
+            status_text = outcome.get("status_text") or {
+                "SUCCESS": "Task completed successfully",
+                "FAILURE": "Task failed",
+                "REVOKED": "Task revoked",
+            }.get(row_state, "Task finished")
+            error_text = outcome.get("error_text") or ""
             try:
                 self.postgrest.request(
                     "PATCH",
@@ -288,19 +318,16 @@ class ProjectTaskStore:
                     },
                     payload={
                         "task_state": row_state,
-                        "status_text": "Task completed successfully"
-                        if row_state == "SUCCESS"
-                        else "Task failed"
-                        if row_state == "FAILURE"
-                        else "Task revoked",
+                        "status_text": status_text,
+                        "error_text": error_text,
                         "completed_at": _now_iso(),
                     },
                     headers={"Prefer": "return=minimal"},
                     expect_json=False,
                 )
                 patched += 1
-            except Exception:
-                continue
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to reconcile task %s: %s", task_id, exc)
         return patched
 
     def mark_task_cancelled(self, task_row_id: str) -> None:
