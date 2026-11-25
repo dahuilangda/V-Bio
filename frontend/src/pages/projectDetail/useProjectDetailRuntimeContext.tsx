@@ -744,6 +744,7 @@ export function useProjectDetailRuntimeContext() {
   // options live under properties.__vbio_input_options_v1. List rows are
   // lightweight, so fetch the detail through the cache on a snapshot miss.
   const peptideTaskSwitchRef = useRef<string>('');
+  const peptideTaskHydrationRef = useRef<Record<string, string>>({});
   useEffect(() => {
     if (!isPeptideDesignWorkflow) return;
 
@@ -820,6 +821,9 @@ export function useProjectDetailRuntimeContext() {
       return;
     }
 
+    const hydrationMarker = `${focusedRowId}|${String(focusedRow?.updated_at || '').trim()}`;
+    if (peptideTaskHydrationRef.current[focusedRowId] === hydrationMarker) return;
+
     void (async () => {
       try {
         const detailRow = await getProjectTaskDetailCached(focusedRowId, {
@@ -833,6 +837,7 @@ export function useProjectDetailRuntimeContext() {
           includeProteinSequence: true
         });
         if (cancelled || !detailRow) return;
+        peptideTaskHydrationRef.current[focusedRowId] = hydrationMarker;
         setProjectTasks((prev) =>
           prev.map((row) =>
             String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
@@ -864,6 +869,7 @@ export function useProjectDetailRuntimeContext() {
   // refetch) for the component-editor workflows; peptide/lead-opt have their
   // own effects above. The marker ref dedupes against projectTasks refreshes.
   const componentTaskSwitchRef = useRef<string>('');
+  const componentTaskHydrationRef = useRef<Record<string, string>>({});
   useEffect(() => {
     if (!isPredictionWorkflow && !isAffinityWorkflow && !isVirtualScreeningWorkflow) return;
 
@@ -911,6 +917,9 @@ export function useProjectDetailRuntimeContext() {
       return;
     }
 
+    const hydrationMarker = `${focusedRowId}|${String(focusedRow?.updated_at || '').trim()}`;
+    if (componentTaskHydrationRef.current[focusedRowId] === hydrationMarker) return;
+
     void (async () => {
       try {
         const detailRow = await getProjectTaskDetailCached(focusedRowId, {
@@ -924,6 +933,7 @@ export function useProjectDetailRuntimeContext() {
           includeProteinSequence: true
         });
         if (cancelled || !detailRow) return;
+        componentTaskHydrationRef.current[focusedRowId] = hydrationMarker;
         setProjectTasks((prev) =>
           prev.map((row) =>
             String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
