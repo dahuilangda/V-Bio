@@ -287,6 +287,44 @@ def parse_ligand_smiles_map_from_form(request_obj: Any) -> Dict[str, str]:
     return output
 
 
+def _parse_protein_modifications(
+    entry_value: Dict[str, Any], sequence: str, component_id: str
+) -> List[Dict[str, Any]]:
+    raw_modifications = entry_value.get("modifications")
+    if not isinstance(raw_modifications, list):
+        return []
+    length = len(sequence)
+    modifications: List[Dict[str, Any]] = []
+    for raw in raw_modifications:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            position = int(raw.get("position"))
+        except (TypeError, ValueError):
+            continue
+        ccd = str(raw.get("ccd") or "").strip().upper()
+        if position < 1 or (length and position > length) or not ccd:
+            continue
+        residue_at_position = sequence[position - 1].upper() if position <= length else ""
+        base_residue = (
+            str(raw.get("baseResidue") or raw.get("base_residue") or "").strip().upper()[:1]
+            or residue_at_position
+        )
+        modifications.append({
+            "id": f"{component_id}-mod-{position}",
+            "position": position,
+            "terminal": (
+                "n_term" if position == 1
+                else "c_term" if length and position == length
+                else "internal"
+            ),
+            "baseResidue": base_residue,
+            "ccd": ccd,
+            "inputMethod": "ccd",
+        })
+    return modifications
+
+
 def build_prediction_task_snapshot_from_yaml(request_obj: Any, logger: Any) -> Dict[str, Any]:
     yaml_upload = request_obj.files.get("yaml_file")
     yaml_text = read_upload_text(yaml_upload)
@@ -385,6 +423,9 @@ def build_prediction_task_snapshot_from_yaml(request_obj: Any, logger: Any) -> D
             component["cyclic"] = bool(entry_value.get("cyclic", False))
             msa_value = entry_value.get("msa")
             component["useMsa"] = not (isinstance(msa_value, str) and msa_value.strip().lower() == "empty")
+            modifications = _parse_protein_modifications(entry_value, sequence, component_id)
+            if modifications:
+                component["modifications"] = modifications
             if sequence and not first_protein_sequence:
                 first_protein_sequence = sequence
         components.append(component)
