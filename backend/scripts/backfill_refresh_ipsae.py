@@ -80,7 +80,8 @@ def refresh(row):
             drop += list(SC_KEYS)
         if not drop:
             return 'empty'
-        if all(stored.get(key) == payload.get(key) for key in drop):
+        if (all(stored.get(key) == value for key, value in payload.items())
+                and all(key not in stored for key in drop if key not in payload)):
             return 'same'
         conn = db()
         with conn.cursor() as cur:
