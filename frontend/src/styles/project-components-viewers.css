@@ -514,6 +514,15 @@
   min-height: 150px;
 }
 
+.ligand-preview-svg.is-ready {
+  animation: fade-in 0.22s var(--ease);
+}
+
+.ligand-preview-svg-skeleton {
+  display: block;
+  width: 100%;
+}
+
 .ligand-preview-svg svg {
   width: 100%;
   height: auto;

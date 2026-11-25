@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { LoadingLine } from '../components/ui/Pending';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { terminateTask as terminateBackendTask } from '../api/backendApi';
@@ -703,7 +704,7 @@ export function ProjectTasksPage() {
   }, [project, supportsApiAccess, workspaceView, setWorkspaceViewWithUrl]);
 
   if (loading && !project) {
-    return <div className="centered-page">Loading tasks...</div>;
+    return <div className="centered-page"><LoadingLine>Loading tasks…</LoadingLine></div>;
   }
 
   if (!project) {

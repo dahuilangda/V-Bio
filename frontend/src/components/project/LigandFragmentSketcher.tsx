@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { renderMolSvg } from '../../utils/rdkitClient';
+import { LoadingLine } from '../ui/Pending';
 import { MemoLigand2DPreview } from './Ligand2DPreview';
 
 export interface LigandFragmentItem {
@@ -255,7 +256,7 @@ export function LigandFragmentSketcher({
           }}
         />
       ) : (
-        <div className="ligand-preview-empty">Rendering ligand fragments...</div>
+        <LoadingLine>Rendering ligand fragments…</LoadingLine>
       )}
       <div className="lead-opt-fragment-legend">
         {fragments.slice(0, 10).map((fragment) => {

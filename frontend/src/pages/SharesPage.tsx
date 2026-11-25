@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { LoadingLine } from '../components/ui/Pending';
 import { ChevronDown, ExternalLink, Eye, Filter, PencilLine, Search, Share2, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
@@ -652,7 +653,7 @@ export function SharesPage() {
       <section className="panel shares-list-panel">
         {error ? <div className="alert error" role="alert">{error}</div> : null}
         {loading ? (
-          <div className="muted">Loading shares...</div>
+          <LoadingLine>Loading shares…</LoadingLine>
         ) : groupedProjects.length === 0 ? (
           <div className="empty-state">No share records match the current filters.</div>
         ) : (

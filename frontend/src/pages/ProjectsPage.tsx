@@ -1,4 +1,5 @@
 import { FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { SkeletonRows } from '../components/ui/Pending';
 import { Link, useNavigate } from 'react-router-dom';
 import { useOverlayHost } from '../components/ui/OverlayContext';
 import { useModalDialog } from '../components/ui/useModalDialog';
@@ -838,7 +839,7 @@ export function ProjectsPage() {
         )}
 
         {loading && projects.length === 0 ? (
-          <div className="muted">Loading projects...</div>
+          <SkeletonRows rows={6} />
         ) : filteredProjects.length === 0 ? (
           <div className="empty-state">
             <FolderPlus size={20} aria-hidden="true" />

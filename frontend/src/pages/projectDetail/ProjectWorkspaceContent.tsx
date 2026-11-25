@@ -1,4 +1,5 @@
 import { memo, Suspense, lazy, type FormEvent, type ReactNode } from 'react';
+import { LoadingLine } from '../../components/ui/Pending';
 import { ProjectBasicsMetadataForm } from '../../components/project/ProjectBasicsMetadataForm';
 import type { ProjectResultsSectionProps } from '../../components/project/ProjectResultsSection';
 import type { AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
@@ -19,7 +20,7 @@ const VirtualScreeningWorkflowSection = memo(lazy(() => import('./VirtualScreeni
 const WorkflowRuntimeSettingsSection = memo(lazy(() => import('./WorkflowRuntimeSettingsSection').then((m) => ({ default: m.WorkflowRuntimeSettingsSection }))));
 
 function SectionSuspense({ children }: { children: ReactNode }) {
-  return <Suspense fallback={<div className="workflow-note" role="status" aria-live="polite">Loading workspace...</div>}>{children}</Suspense>;
+  return <Suspense fallback={<LoadingLine>Loading workspace…</LoadingLine>}>{children}</Suspense>;
 }
 
 export interface ProjectWorkspaceContentProps {

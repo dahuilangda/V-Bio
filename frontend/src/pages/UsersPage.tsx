@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { LoadingLine } from '../components/ui/Pending';
 import { RefreshCcw, ShieldCheck, ShieldX, Trash2, LoaderCircle} from 'lucide-react';
 import type { AppUser } from '../types/models';
 import { formatDateTime } from '../utils/date';
@@ -162,7 +163,7 @@ export function UsersPage() {
         <h2>User List</h2>
         {error && <div className="alert error" role="alert">{error}</div>}
         {loading ? (
-          <div className="muted">Loading users...</div>
+          <LoadingLine>Loading users…</LoadingLine>
         ) : (
           <div className="table-wrap">
             <table className="table">

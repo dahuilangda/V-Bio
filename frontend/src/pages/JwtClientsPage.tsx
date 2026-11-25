@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { LoadingLine } from '../components/ui/Pending';
 import { Clipboard, KeyRound, LoaderCircle, Power, PowerOff, Trash2 } from 'lucide-react';
 import {
   createJwtClient,
@@ -161,7 +162,7 @@ export function JwtClientsPage() {
       {!loading && !canManage ? (
         <div className="alert error" role="alert">Administrator management session is unavailable.</div>
       ) : null}
-      {loading ? <div className="muted">Loading integrations...</div> : null}
+      {loading ? <LoadingLine>Loading integrations…</LoadingLine> : null}
 
       <section className="panel">
         <div className="settings-panel-head">

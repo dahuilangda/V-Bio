@@ -14,6 +14,7 @@ import { searchUsers as searchUsersServer, toAppUser } from '../../api/authServe
 import type { AppUser, ProjectShareRecord, ProjectTaskShareRecord, ShareAccessLevel } from '../../types/models';
 import { InfoTip } from '../../components/common/InfoTip';
 import { useModalDialog } from '../ui/useModalDialog';
+import { LoadingLine } from '../ui/Pending';
 import '../../styles/shares-page.css';
 
 interface SharingModalProps {
@@ -399,7 +400,7 @@ export function SharingModal({
               </div>
             </div>
             {loading ? (
-              <div className="muted share-modal-empty">Loading shares...</div>
+              <LoadingLine className="share-modal-empty">Loading shares…</LoadingLine>
             ) : items.length === 0 ? (
               <div className="muted share-modal-empty">No shared users yet.</div>
             ) : filteredItems.length === 0 ? (

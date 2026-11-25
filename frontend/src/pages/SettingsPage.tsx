@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { LoadingLine } from '../components/ui/Pending';
 import { KeyRound, UserRound } from 'lucide-react';
 import type { AppUser } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
@@ -135,7 +136,7 @@ export function SettingsPage() {
             <h2><UserRound size={16} /> Profile</h2>
           </div>
           {loading ? (
-            <div className="muted">Loading profile...</div>
+            <LoadingLine>Loading profile…</LoadingLine>
           ) : (
             <form className="form-grid" onSubmit={saveProfile}>
               <Field label="Display Name">

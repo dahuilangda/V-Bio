@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { renderLigand2DSvg } from '../../utils/rdkitClient';
+import { Skeleton } from '../ui/Pending';
 
 interface Ligand2DPreviewProps {
   smiles: string;
@@ -211,14 +212,18 @@ export function Ligand2DPreview({
   }
 
   if (!svg) {
-    return <div className="ligand-preview-empty">Rendering ligand 2D...</div>;
+    return (
+      <div className="ligand-preview-svg-wrap">
+        <Skeleton className="ligand-preview-svg ligand-preview-svg-skeleton" />
+      </div>
+    );
   }
 
   return (
     <div className="ligand-preview-svg-wrap">
       <div
         ref={hostRef}
-        className="ligand-preview-svg"
+        className="ligand-preview-svg is-ready"
         dangerouslySetInnerHTML={{ __html: svg }}
         onClick={
           onAtomClick || onBackgroundClick

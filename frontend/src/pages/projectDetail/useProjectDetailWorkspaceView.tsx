@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { LoadingLine } from '../../components/ui/Pending';
 import { Link } from 'react-router-dom';
 import type {
   InputComponent,
@@ -106,13 +107,13 @@ export function useProjectDetailWorkspaceView() {
     const query = new URLSearchParams(locationSearch);
     const requestedTaskRowId =
       String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
-    const loadingLabel =
-      !entryRoutingResolved
-        ? 'Loading project...'
-        : requestedTaskRowId || query.get('tab') === 'results'
-          ? 'Loading current task...'
-          : 'Loading project...';
-    return <div className="centered-page">{loadingLabel}</div>;
+    return (
+      <div className="centered-page">
+        <LoadingLine>
+          {!entryRoutingResolved ? 'Loading project…' : requestedTaskRowId || query.get('tab') === 'results' ? 'Loading current task…' : 'Loading project…'}
+        </LoadingLine>
+      </div>
+    );
   }
 
   if (error && !project) {
