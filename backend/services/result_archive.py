@@ -179,6 +179,9 @@ class ResultArchiveService:
             ) from exc
 
         if not task_ready:
+            tracker_status, heartbeat = self.get_tracker_status(task_id)
+            if task_state == 'PENDING' and not tracker_status and not heartbeat:
+                raise FileNotFoundError(f'Result archive for task {task_id} is not on disk and the task is not running.')
             raise FileNotFoundError(f'Task has not completed yet. State: {task_state}')
 
         result_info: Dict[str, Any]

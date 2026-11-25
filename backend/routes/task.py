@@ -735,6 +735,10 @@ def register_task_routes(
         body.headers['ETag'] = etag
         return body
 
+    def results_not_found(task_id: str, exc: FileNotFoundError):
+        logger.info('Results for task %s are unavailable: %s', task_id, exc)
+        return jsonify({'error': str(exc), 'state': str(AsyncResult(task_id, app=celery_app).state)}), 404
+
     @app.route('/results/<task_id>', methods=['GET'])
     @require_api_token
     def download_results(task_id):
@@ -742,9 +746,7 @@ def register_task_routes(
         try:
             filename, filepath = resolve_result_archive_path(task_id)
         except FileNotFoundError as exc:
-            task_result = AsyncResult(task_id, app=celery_app)
-            logger.warning('Failed to resolve results for task %s: %s', task_id, exc)
-            return jsonify({'error': str(exc), 'state': task_result.state}), 404
+            return results_not_found(task_id, exc)
         except PermissionError as exc:
             logger.error('Invalid result path for task %s: %s', task_id, exc)
             return jsonify({'error': 'Invalid file path detected.'}), 400
@@ -770,9 +772,7 @@ def register_task_routes(
         try:
             _, filepath = resolve_result_archive_path(task_id)
         except FileNotFoundError as exc:
-            task_result = AsyncResult(task_id, app=celery_app)
-            logger.warning('Failed to resolve view results for task %s: %s', task_id, exc)
-            return jsonify({'error': str(exc), 'state': task_result.state}), 404
+            return results_not_found(task_id, exc)
         except PermissionError as exc:
             logger.error('Invalid view result path for task %s: %s', task_id, exc)
             return jsonify({'error': 'Invalid file path detected.'}), 400
@@ -811,9 +811,7 @@ def register_task_routes(
         try:
             _, filepath = resolve_result_archive_path(task_id)
         except FileNotFoundError as exc:
-            task_result = AsyncResult(task_id, app=celery_app)
-            logger.warning('Failed to resolve results for task %s: %s', task_id, exc)
-            return jsonify({'error': str(exc), 'state': task_result.state}), 404
+            return results_not_found(task_id, exc)
         except PermissionError as exc:
             logger.error('Invalid result path for task %s: %s', task_id, exc)
             return jsonify({'error': 'Invalid file path detected.'}), 400
