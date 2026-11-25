@@ -9,8 +9,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-def outcome(state, status_text="", error_text=""):
-    return {"state": state, "status_text": status_text, "error_text": error_text}
+def outcome(state, status_text="", error_text="", completed_at=""):
+    return {"state": state, "status_text": status_text, "error_text": error_text, "completed_at": completed_at}
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -59,7 +59,18 @@ def test_reconcile_patches_non_terminal_row():
     tid, payload = pg.patches[0]
     assert tid == "eq.tid-1"
     assert payload["task_state"] == "SUCCESS"
-    assert payload["completed_at"]
+    assert "completed_at" not in payload
+
+
+def test_reconcile_writes_runtime_completion_time():
+    rows = {"tid-1": {"task_id": "tid-1", "task_state": "RUNNING"}}
+    store, pg = _make_store(rows)
+
+    store.reconcile_terminal_rows("proj-1", {"tid-1": outcome("FAILURE", "Task failed.", "boom", "2026-11-25T01:03:04+00:00")})
+
+    payload = pg.patches[0][1]
+    assert payload["completed_at"] == "2026-11-25T01:03:04+00:00"
+    assert payload["error_text"] == "boom"
 
 
 def test_reconcile_skips_already_terminal_rows():

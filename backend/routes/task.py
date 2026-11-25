@@ -9,6 +9,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 # /status/batch 专用常驻线程池：每请求新建池会反复抖动线程
 _STATUS_BATCH_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="status-batch")
@@ -428,7 +429,42 @@ def register_task_routes(
             target['compact_metrics'] = compact
             target['lead_opt_metrics'] = compact
 
+    def _archive_completed_at(task_id: str) -> Optional[str]:
+        archive_name = find_result_archive(task_id)
+        if not archive_name:
+            return None
+        try:
+            stat = os.stat(os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(archive_name)))
+        except OSError:
+            return None
+        return datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+
+    def _tracker_completed_at(task_id: str) -> Optional[str]:
+        tracker_status, _heartbeat = get_tracker_status(task_id)
+        raw = str(_as_record(tracker_status).get('timestamp') or '').strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+
     def build_task_status_response(task_id: str) -> Dict[str, Any]:
+        response = _build_task_status_response(task_id)
+        if response['state'] in ('SUCCESS', 'FAILURE', 'REVOKED'):
+            completed_at = (
+                _archive_completed_at(task_id)
+                if response['state'] == 'SUCCESS'
+                else _tracker_completed_at(task_id)
+            )
+            if completed_at:
+                response['info']['completed_at'] = completed_at
+        return response
+
+    def _build_task_status_response(task_id: str) -> Dict[str, Any]:
         # Finished tasks are served from the on-disk archive (source of truth);
         # Celery is consulted only for tasks without one.
         archive_name = find_result_archive(task_id)

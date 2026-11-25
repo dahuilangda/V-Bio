@@ -6,8 +6,8 @@ from unittest import mock
 
 from management_api.task_status_janitor import TaskStatusJanitor
 
-def outcome(state, status_text="", error_text=""):
-    return {"state": state, "status_text": status_text, "error_text": error_text}
+def outcome(state, status_text="", error_text="", completed_at=""):
+    return {"state": state, "status_text": status_text, "error_text": error_text, "completed_at": completed_at}
 
 class FakePostgrest:
     def __init__(self, rows):
@@ -146,6 +146,32 @@ class RuntimeOutcomeTests(unittest.TestCase):
                         }])):
             janitor._sweep_once()
         self.assertEqual(store.reconciled, [("p-1", {"cel-1": outcome("FAILURE", "Task failed.", "Subprocess exited with code 1.")})])
+
+    def test_completion_time_is_carried_from_runtime(self):
+        rows = [task_row("r1", "p-1", "cel-1", "RUNNING", 2), task_row("r2", "p-1", "cel-2", "RUNNING", 2)]
+        janitor, _postgrest, store = make_janitor(rows)
+        with mock.patch("management_api.task_status_janitor.requests.post",
+                        return_value=self._runtime_response([
+                            {"task_id": "cel-1", "state": "SUCCESS",
+                             "info": {"status": "Task completed successfully.", "completed_at": "2026-11-25T01:02:03+00:00"}},
+                            {"task_id": "cel-2", "state": "FAILURE",
+                             "info": {"status": "Task failed.", "exc_message": "boom", "completed_at": "2026-11-25T01:03:04+00:00"}},
+                        ])):
+            janitor._sweep_once()
+        self.assertEqual(store.reconciled[0][1], {
+            "cel-1": outcome("SUCCESS", "Task completed successfully.", "", "2026-11-25T01:02:03+00:00"),
+            "cel-2": outcome("FAILURE", "Task failed.", "boom", "2026-11-25T01:03:04+00:00"),
+        })
+
+    def test_missing_completion_time_is_not_invented(self):
+        rows = [task_row("r1", "p-1", "cel-1", "RUNNING", 2)]
+        janitor, _postgrest, store = make_janitor(rows)
+        with mock.patch("management_api.task_status_janitor.requests.post",
+                        return_value=self._runtime_response([
+                            {"task_id": "cel-1", "state": "FAILURE", "info": {"exc_message": "boom"}},
+                        ])):
+            janitor._sweep_once()
+        self.assertEqual(store.reconciled[0][1]["cel-1"]["completed_at"], "")
 
     def test_only_terminal_states_are_reconciled(self):
         rows = [task_row("r1", "p-1", "cel-1", "RUNNING", 2), task_row("r2", "p-1", "cel-2", "RUNNING", 2)]

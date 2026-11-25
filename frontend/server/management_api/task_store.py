@@ -30,6 +30,7 @@ def terminal_outcome(status: Dict[str, Any]) -> Dict[str, str]:
         "state": state,
         "status_text": str(info.get("status") or "").strip(),
         "error_text": reason,
+        "completed_at": str(info.get("completed_at") or "").strip(),
     }
 
 
@@ -308,6 +309,13 @@ class ProjectTaskStore:
                 "REVOKED": "Task revoked",
             }.get(row_state, "Task finished")
             error_text = outcome.get("error_text") or ""
+            payload = {
+                "task_state": row_state,
+                "status_text": status_text,
+                "error_text": error_text,
+            }
+            if outcome.get("completed_at"):
+                payload["completed_at"] = outcome["completed_at"]
             try:
                 self.postgrest.request(
                     "PATCH",
@@ -316,12 +324,7 @@ class ProjectTaskStore:
                         "task_id": f"eq.{task_id}",
                         "project_id": f"eq.{project_id}",
                     },
-                    payload={
-                        "task_state": row_state,
-                        "status_text": status_text,
-                        "error_text": error_text,
-                        "completed_at": _now_iso(),
-                    },
+                    payload=payload,
                     headers={"Prefer": "return=minimal"},
                     expect_json=False,
                 )
