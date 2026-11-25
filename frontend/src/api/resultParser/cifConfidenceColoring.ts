@@ -1,48 +1,9 @@
 import { stripCifTokenQuotes } from '../../utils/structureParser';
-import { tokenizeCifRow } from './resultBundleHelpers';
-
-const POLYMER_COMP_IDS = new Set([
-  'ACE',
-  'NME',
-  'NMA',
-  'NH2',
-  'ALA',
-  'ARG',
-  'ASN',
-  'ASP',
-  'CYS',
-  'GLN',
-  'GLU',
-  'GLY',
-  'HIS',
-  'ILE',
-  'LEU',
-  'LYS',
-  'MET',
-  'PHE',
-  'PRO',
-  'SER',
-  'THR',
-  'TRP',
-  'TYR',
-  'VAL',
-  'SEC',
-  'PYL',
-  'ASX',
-  'GLX',
-  'UNK',
-  'A',
-  'C',
-  'G',
-  'U',
-  'I',
-  'DA',
-  'DC',
-  'DG',
-  'DT',
-  'DI',
-  'DU'
-]);
+import {
+  cifResidueKey,
+  collectCifPolymerResidueKeys,
+  tokenizeCifRow
+} from './resultBundleHelpers';
 
 function parseMaQaLocalMetricIdFromCif(structureText: string): string | null {
   const lines = structureText.split(/\r?\n/);
@@ -128,6 +89,7 @@ function buildResidueConfidenceRowsFromCif(structureText: string): CifResidueCon
     if (chainCol < 0 || seqCol < 0 || compCol < 0 || bFactorCol < 0) {
       return [];
     }
+    const polymerKeys = collectCifPolymerResidueKeys(structureText);
 
     const residueMap = new Map<string, { chainId: string; seqId: number; compId: string; sum: number; count: number }>();
     let rowIndex = headerIndex;
@@ -152,12 +114,7 @@ function buildResidueConfidenceRowsFromCif(structureText: string): CifResidueCon
           rowIndex += 1;
           continue;
         }
-        if (groupPdb) {
-          if (groupPdb !== 'ATOM') {
-            rowIndex += 1;
-            continue;
-          }
-        } else if (!POLYMER_COMP_IDS.has(compId)) {
+        if (!polymerKeys.has(cifResidueKey(chainId, seqToken, compId)) && groupPdb !== 'ATOM') {
           rowIndex += 1;
           continue;
         }
@@ -239,6 +196,7 @@ export function ensureCifHasMaQaMetricLocal(structureText: string): string {
 function pruneCifMaQaMetricLocalToPolymer(structureText: string): string {
   if (!structureText) return structureText;
   if (!structureText.includes('_ma_qa_metric_local.label_comp_id')) return structureText;
+  const polymerKeys = collectCifPolymerResidueKeys(structureText);
   const lines = structureText.split(/\r?\n/);
   const output: string[] = [];
   let changed = false;
@@ -262,7 +220,9 @@ function pruneCifMaQaMetricLocalToPolymer(structureText: string): string {
 
     const isQaLocalLoop = headers.some((header) => header.toLowerCase().startsWith('_ma_qa_metric_local.'));
     const compCol = headers.findIndex((header) => header.toLowerCase() === '_ma_qa_metric_local.label_comp_id');
-    if (!isQaLocalLoop || compCol < 0) {
+    const chainCol = headers.findIndex((header) => header.toLowerCase() === '_ma_qa_metric_local.label_asym_id');
+    const seqCol = headers.findIndex((header) => header.toLowerCase() === '_ma_qa_metric_local.label_seq_id');
+    if (!isQaLocalLoop || compCol < 0 || chainCol < 0 || seqCol < 0) {
       let rowIndex = headerIndex;
       while (rowIndex < lines.length) {
         const row = lines[rowIndex].trim();
@@ -287,8 +247,12 @@ function pruneCifMaQaMetricLocalToPolymer(structureText: string): string {
       }
       const tokens = tokenizeCifRow(rawRow);
       if (tokens.length >= headers.length) {
-        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
-        if (POLYMER_COMP_IDS.has(compId)) {
+        const residueKey = cifResidueKey(
+          stripCifTokenQuotes(tokens[chainCol]),
+          stripCifTokenQuotes(tokens[seqCol]),
+          stripCifTokenQuotes(tokens[compCol])
+        );
+        if (polymerKeys.has(residueKey)) {
           output.push(tokens.join(' '));
         } else {
           changed = true;

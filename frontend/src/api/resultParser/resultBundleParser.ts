@@ -4,9 +4,10 @@ import { ensureCifHasMaQaMetricLocal, ensureStructureConfidenceColoringData } fr
 import {
   POLYMER_COMP_IDS,
   WATER_COMP_IDS,
+  cifResidueKey,
+  collectCifPolymerResidueKeys,
   hasNonEmptyResiduePlddtByChain,
   isHydrogenLikeElement,
-  isLikelyLigandAtomRow,
   normalizeChainToken,
   parseJsonObject,
   selectByChainHints,
@@ -801,6 +802,7 @@ function buildLigandAtomPlddtsByChainFromNameMaps(
 
 function inferSingleLigandChainIdFromCif(structureText: string): string | null {
   if (!structureText) return null;
+  const polymerKeys = collectCifPolymerResidueKeys(structureText);
   const lines = structureText.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].trim() !== 'loop_') continue;
@@ -819,8 +821,8 @@ function inferSingleLigandChainIdFromCif(structureText: string): string | null {
       continue;
     }
 
-    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
     const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+    const seqCol = findHeaderIndex(headers, ['_atom_site.label_seq_id', '_atom_site.auth_seq_id']);
     const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
     const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
     const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
@@ -843,14 +845,9 @@ function inferSingleLigandChainIdFromCif(structureText: string): string | null {
       const tokens = tokenizeCifRow(rawRow);
       if (tokens.length >= headers.length) {
         const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
-        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
         const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
         const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
         if (!compId || WATER_COMP_IDS.has(compId)) {
-          rowIndex += 1;
-          continue;
-        }
-        if (!isLikelyLigandAtomRow(groupPdb, compId)) {
           rowIndex += 1;
           continue;
         }
@@ -858,10 +855,10 @@ function inferSingleLigandChainIdFromCif(structureText: string): string | null {
           rowIndex += 1;
           continue;
         }
-
         const chainIdRaw = stripCifTokenQuotes(tokens[chainCol]).trim();
         const chainId = chainIdRaw.toUpperCase();
-        if (chainId) {
+        const seqId = seqCol >= 0 ? stripCifTokenQuotes(tokens[seqCol]).trim() : '';
+        if (chainId && !polymerKeys.has(cifResidueKey(chainIdRaw, seqId, compId))) {
           chainSet.add(chainId);
         }
       }
@@ -909,6 +906,16 @@ function inferSingleLigandChainIdFromStructure(
     : inferSingleLigandChainIdFromCif(structureText);
 }
 
+function readDeclaredLigandChainId(confidence: Record<string, unknown>): string | null {
+  for (const key of ['requested_ligand_chain_id', 'ligand_chain_id', 'model_ligand_chain_id']) {
+    const value = confidence[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim().toUpperCase();
+    }
+  }
+  return null;
+}
+
 function normalizeResiduePlddtsByChain(value: unknown): Record<string, number[]> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const byChain: Record<string, number[]> = {};
@@ -940,6 +947,7 @@ function findHeaderIndex(headers: string[], names: string[]): number {
 
 function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<string, number[]> {
   if (!structureText) return {};
+  const polymerKeys = collectCifPolymerResidueKeys(structureText);
   const lines = structureText.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].trim() !== 'loop_') continue;
@@ -958,7 +966,6 @@ function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<st
       continue;
     }
 
-    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
     const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
     const seqCol = findHeaderIndex(headers, ['_atom_site.label_seq_id', '_atom_site.auth_seq_id']);
     const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
@@ -987,15 +994,10 @@ function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<st
       const tokens = tokenizeCifRow(rawRow);
       if (tokens.length >= headers.length) {
         const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
-        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
         const bFactor = Number(stripCifTokenQuotes(tokens[bFactorCol]));
         const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
         const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
-        if (!compId || !Number.isFinite(bFactor)) {
-          rowIndex += 1;
-          continue;
-        }
-        if (!isLikelyLigandAtomRow(groupPdb, compId)) {
+        if (!compId || !Number.isFinite(bFactor) || WATER_COMP_IDS.has(compId)) {
           rowIndex += 1;
           continue;
         }
@@ -1003,7 +1005,6 @@ function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<st
           rowIndex += 1;
           continue;
         }
-
         const chainIdRaw = chainCol >= 0 ? stripCifTokenQuotes(tokens[chainCol]).trim() : '';
         const chainId = chainIdRaw.toUpperCase();
         if (!chainId) {
@@ -1011,6 +1012,10 @@ function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<st
           continue;
         }
         const seqId = seqCol >= 0 ? stripCifTokenQuotes(tokens[seqCol]).trim() : '';
+        if (polymerKeys.has(cifResidueKey(chainIdRaw, seqId, compId))) {
+          rowIndex += 1;
+          continue;
+        }
         const residueKey = `${chainId}|${seqId}|${compId}`;
         if (!firstResidueKeyByChain.has(chainId)) {
           firstResidueKeyByChain.set(chainId, residueKey);
@@ -1245,6 +1250,7 @@ function extractResiduePlddtsByChainFromCif(structureText: string): Record<strin
       continue;
     }
 
+    const polymerKeys = collectCifPolymerResidueKeys(structureText);
     const residueStats = new Map<string, { chainId: string; sum: number; count: number }>();
     const residueOrderByChain = new Map<string, string[]>();
     let rowIndex = headerIndex;
@@ -1261,7 +1267,8 @@ function extractResiduePlddtsByChainFromCif(structureText: string): Record<strin
       if (tokens.length >= headers.length) {
         const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
         const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
-        const chainId = stripCifTokenQuotes(tokens[chainCol]).trim().toUpperCase();
+        const chainToken = stripCifTokenQuotes(tokens[chainCol]).trim();
+        const chainId = chainToken.toUpperCase();
         const seqId = stripCifTokenQuotes(tokens[seqCol]).trim();
         const bFactor = Number(stripCifTokenQuotes(tokens[bFactorCol]));
         const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
@@ -1278,12 +1285,7 @@ function extractResiduePlddtsByChainFromCif(structureText: string): Record<strin
           rowIndex += 1;
           continue;
         }
-        if (groupPdb) {
-          if (groupPdb !== 'ATOM' && !POLYMER_COMP_IDS.has(compId)) {
-            rowIndex += 1;
-            continue;
-          }
-        } else if (!POLYMER_COMP_IDS.has(compId)) {
+        if (!polymerKeys.has(cifResidueKey(chainToken, seqId, compId)) && groupPdb !== 'ATOM') {
           rowIndex += 1;
           continue;
         }
@@ -2144,10 +2146,12 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
 
   let ligandAtomPlddtsByChainForRender = existingLigandAtomPlddtsByChain;
   if (Object.keys(ligandAtomPlddtsByChainForRender).length === 0 && existingLigandAtomPlddts.length > 0) {
-    const singleLigandChainId = inferSingleLigandChainIdFromStructure(structureText, structureFormat);
-    if (singleLigandChainId) {
+    const flatLigandChainId =
+      readDeclaredLigandChainId(confidenceRecord)
+      || inferSingleLigandChainIdFromStructure(structureText, structureFormat);
+    if (flatLigandChainId) {
       ligandAtomPlddtsByChainForRender = {
-        [singleLigandChainId]: existingLigandAtomPlddts
+        [flatLigandChainId]: existingLigandAtomPlddts
       };
     }
   }

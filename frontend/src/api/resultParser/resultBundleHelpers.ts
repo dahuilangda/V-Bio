@@ -6,11 +6,14 @@
  *
  * Groups:
  * 1. JSON normalization: parseJsonObject, normalizeNonFiniteJsonLiterals, isJsonLiteralBoundary
- * 2. Small pure predicates: isLikelyLigandCompId, isLikelyLigandAtomRow, isHydrogenLikeElement,
- *    isPlainRecord, hasStorageValue, hasNonEmptyResiduePlddtByChain
+ * 2. Small pure predicates: isHydrogenLikeElement, isPlainRecord, hasStorageValue,
+ *    hasNonEmptyResiduePlddtByChain
+ * 2b. mmCIF residue classification: cifResidueKey, collectCifPolymerResidueKeys
  * 3. Chain-hint selection: selectByChainHints<T> (unified from three near-identical functions),
  *    plus chainIdMatches, normalizeChainToken, collectLigandCoverageChainIds
  */
+
+import { stripCifTokenQuotes } from '../../utils/structureParser';
 
 // ---------------------------------------------------------------------------
 // Shared constants
@@ -149,21 +152,88 @@ function normalizeNonFiniteJsonLiterals(text: string): string {
 // Small pure predicates
 // ---------------------------------------------------------------------------
 
-export function isLikelyLigandCompId(compId: string): boolean {
-  const normalized = compId.trim().toUpperCase();
-  if (!normalized) return false;
-  if (WATER_COMP_IDS.has(normalized)) return false;
-  return !POLYMER_COMP_IDS.has(normalized);
+export function cifResidueKey(chainId: string, seqId: string, compId: string): string {
+  return `${chainId.trim()}|${seqId.trim()}|${compId.trim().toUpperCase()}`;
 }
 
-export function isLikelyLigandAtomRow(groupPdb: string, compId: string): boolean {
-  const normalizedGroup = groupPdb.trim().toUpperCase();
-  if (!isLikelyLigandCompId(compId)) return false;
-  if (!normalizedGroup) return true;
-  // Some runtimes may emit ligand atoms as ATOM instead of HETATM.
-  if (normalizedGroup === 'HETATM') return true;
-  if (normalizedGroup === 'ATOM') return true;
-  return false;
+function cifHeaderColumn(headers: string[], names: string[]): number {
+  for (const name of names) {
+    const index = headers.indexOf(name);
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
+export function collectCifPolymerResidueKeys(structureText: string): Set<string> {
+  const polymerKeys = new Set<string>();
+  if (!structureText.trim()) return polymerKeys;
+  const lines = structureText.split(/\r?\n/);
+  const entityTypes = new Map<string, string>();
+  let atomSite: { headers: string[]; firstRow: number; endRow: number } | null = null;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length && lines[headerIndex].trim().startsWith('_')) {
+      headers.push(lines[headerIndex].trim().toLowerCase());
+      headerIndex += 1;
+    }
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const row = lines[rowIndex].trim();
+      if (row === 'loop_' || row.startsWith('_') || row.startsWith('data_')) break;
+      rowIndex += 1;
+    }
+    const entityIdCol = headers.indexOf('_entity.id');
+    const entityTypeCol = headers.indexOf('_entity.type');
+    if (entityIdCol >= 0 && entityTypeCol >= 0) {
+      for (let index = headerIndex; index < rowIndex; index += 1) {
+        const tokens = tokenizeCifRow(lines[index]);
+        if (tokens.length < headers.length) continue;
+        entityTypes.set(
+          stripCifTokenQuotes(tokens[entityIdCol]).trim(),
+          stripCifTokenQuotes(tokens[entityTypeCol]).trim().toLowerCase()
+        );
+      }
+    } else if (
+      !atomSite
+      && cifHeaderColumn(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']) >= 0
+    ) {
+      atomSite = { headers, firstRow: headerIndex, endRow: rowIndex };
+    }
+    i = rowIndex - 1;
+  }
+  if (!atomSite) return polymerKeys;
+
+  const { headers, firstRow, endRow } = atomSite;
+  const chainCol = cifHeaderColumn(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+  const seqCol = cifHeaderColumn(headers, ['_atom_site.label_seq_id', '_atom_site.auth_seq_id']);
+  const compCol = cifHeaderColumn(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
+  const entityCol = headers.indexOf('_atom_site.label_entity_id');
+  const groupCol = headers.indexOf('_atom_site.group_pdb');
+  if (chainCol < 0 || compCol < 0) return polymerKeys;
+  for (let index = firstRow; index < endRow; index += 1) {
+    const tokens = tokenizeCifRow(lines[index]);
+    if (tokens.length < headers.length) continue;
+    const chainId = stripCifTokenQuotes(tokens[chainCol]).trim();
+    const seqId = seqCol >= 0 ? stripCifTokenQuotes(tokens[seqCol]).trim() : '';
+    const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
+    if (!chainId || !compId) continue;
+    const entityType = entityCol >= 0
+      ? entityTypes.get(stripCifTokenQuotes(tokens[entityCol]).trim())
+      : undefined;
+    const group = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
+    const polymer = entityType !== undefined
+      ? entityType === 'polymer'
+      : group
+        ? group === 'ATOM'
+        : POLYMER_COMP_IDS.has(compId);
+    if (polymer) {
+      polymerKeys.add(cifResidueKey(chainId, seqId, compId));
+    }
+  }
+  return polymerKeys;
 }
 
 // 以 H/D/T 开头的真实双字母元素符号——不得按氢处理（否则 Hg/Hf/Dy/Tb 等
