@@ -74,6 +74,27 @@ _SC_LIGAND_RADII = {
 }
 
 
+def _binding_record(properties: Any, constraints: Any) -> Dict[str, Any]:
+    if isinstance(properties, dict):
+        properties = [properties]
+    bonds = []
+    for constraint in constraints if isinstance(constraints, list) else []:
+        if not isinstance(constraint, dict):
+            continue
+        bond = constraint.get('bond')
+        if isinstance(bond, dict):
+            ends = (bond.get('atom1'), bond.get('atom2'))
+            if all(isinstance(end, (list, tuple)) and end for end in ends):
+                bonds.append((ends[0][0], ends[1][0]))
+        elif constraint.get('type') == 'bond':
+            bonds.append((constraint.get('atom1_chain'), constraint.get('atom2_chain')))
+    return {
+        'properties': [entry for entry in properties if isinstance(entry, dict)]
+        if isinstance(properties, list) else [],
+        'bonds': bonds,
+    }
+
+
 class ResultArchiveService:
     def __init__(self, *, app, celery_app, logger, get_redis_client_fn: Callable[[], Any]):
         self.app = app
@@ -1376,15 +1397,125 @@ class ResultArchiveService:
         return {'pae_matrix': matrix, 'pae_chain_bounds': bounds}
 
     @staticmethod
-    def _extract_interface_sc(src_zip) -> Optional[Dict[str, Any]]:
-        """Lawrence-Colman shape complementarity of the best-ranked sample.
+    def _cif_chain_atoms(cif_text: str) -> Dict[str, list]:
+        import gemmi
+        block = gemmi.cif.read_string(cif_text).sole_block()
+        table = block.find('_atom_site.', ['group_PDB', 'label_atom_id', 'label_comp_id', 'label_asym_id',
+                                           'Cartn_x', 'Cartn_y', 'Cartn_z'])
+        if not len(table):
+            return {}
+        size = len(table)
 
-        Sides follow the classical definition: target is the largest amino-
-        acid chain, the binder surface is every other chain's heavy atoms
-        (binder polymers, covalently bound linkers, ligands and cofactors;
-        waters excluded). Covers protein-protein, protein-peptide and
-        protein-small-molecule interfaces.
-        """
+        def column(name: str) -> list:
+            values = block.find_values(f'_atom_site.{name}')
+            if not values or len(values) != size:
+                return [''] * size
+            return [gemmi.cif.as_string(value) for value in values]
+
+        auth_asym = column('auth_asym_id')
+        alt_ids = column('label_alt_id')
+        seq_ids = column('label_seq_id')
+        if not any(seq_ids):
+            seq_ids = column('auth_seq_id')
+        symbols = column('type_symbol')
+        chains: Dict[str, list] = {}
+        for index, row in enumerate(table):
+            record, atom, comp, chain, x, y, z = (gemmi.cif.as_string(str(value)) for value in row)
+            if comp in _BOLTZ_WATER_RESNAMES or alt_ids[index] not in ('', 'A', '1'):
+                continue
+            symbol = symbols[index].upper()
+            if not symbol and atom.upper().lstrip('0123456789').startswith(('H', 'D')):
+                symbol = 'H'
+            if symbol in ('H', 'D'):
+                continue
+            chains.setdefault(chain or auth_asym[index], []).append(
+                (record == 'HETATM', seq_ids[index] or '1', comp, atom, symbol, (float(x), float(y), float(z))))
+        return chains
+
+    @staticmethod
+    def _chain_tokens(chain_atoms: Dict[str, list]) -> Dict[str, Dict[str, int]]:
+        import gemmi
+        tokens: Dict[str, Dict[str, int]] = {}
+        for chain, atoms in chain_atoms.items():
+            residues = set()
+            het_atoms = 0
+            for het, seq, comp, _atom, _symbol, _xyz in atoms:
+                info = gemmi.find_tabulated_residue(comp)
+                if info is not None and (info.is_amino_acid() or info.is_nucleic_acid()) and not het:
+                    residues.add((seq, comp))
+                else:
+                    het_atoms += 1
+            tokens[chain] = {'residues': len(residues), 'atoms': het_atoms}
+        return tokens
+
+    @staticmethod
+    def _input_binding(src_zip) -> Optional[Dict[str, Any]]:
+        import yaml
+        records = sorted(name for name in src_zip.namelist()
+                         if name.count('/') == 1 and name.endswith('/input.yaml'))
+        if not records:
+            return None
+        record = yaml.safe_load(src_zip.read(records[0]))
+        if not isinstance(record, dict):
+            return None
+        return _binding_record(record.get('properties'), record.get('constraints'))
+
+    @staticmethod
+    def _chain_label_map(src_zip) -> Dict[str, str]:
+        names = sorted(name for name in src_zip.namelist()
+                       if name.count('/') == 1 and name.endswith('/metadata.json'))
+        if not names:
+            return {}
+        mapping = json.loads(src_zip.read(names[0])).get('chain_id_label_map')
+        if not isinstance(mapping, dict):
+            return {}
+        return {str(key): str(value) for key, value in mapping.items()}
+
+    @staticmethod
+    def _binding_sides(src_zip, chain_atoms: Dict[str, list],
+                       binding: Optional[Dict[str, Any]]) -> Optional[tuple]:
+        if not binding:
+            return None
+        label_map = ResultArchiveService._chain_label_map(src_zip)
+        properties = binding.get('properties') or []
+
+        def resolve(identifier) -> Optional[str]:
+            if not isinstance(identifier, str):
+                return None
+            chain = label_map.get(identifier, identifier)
+            return chain if chain in chain_atoms else None
+
+        binders = []
+        for key in ('binder', 'ligand'):
+            binders = [chain for chain in dict.fromkeys(
+                resolve(entry.get(key)) for entry in properties) if chain]
+            if binders:
+                break
+        if not binders:
+            return None
+        targets = {chain for chain in (resolve(entry.get('target')) for entry in properties) if chain}
+
+        neighbors: Dict[str, set] = {}
+        for first, second in binding.get('bonds') or []:
+            left, right = resolve(first), resolve(second)
+            if left and right:
+                neighbors.setdefault(left, set()).add(right)
+                neighbors.setdefault(right, set()).add(left)
+        binder_side = set(binders)
+        frontier = list(binders)
+        while frontier:
+            for neighbor in neighbors.get(frontier.pop(), ()):
+                if neighbor not in binder_side and neighbor not in targets:
+                    binder_side.add(neighbor)
+                    frontier.append(neighbor)
+        receptor = [chain for chain in chain_atoms if chain not in binder_side]
+        binder_chains = [chain for chain in chain_atoms if chain in binder_side]
+        if not receptor or not binder_chains:
+            return None
+        return receptor, binder_chains
+
+    @staticmethod
+    def _extract_interface_sc(src_zip, binding: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         import gemmi
         import numpy as np
         from shape_complementarity import compute_sc
@@ -1395,72 +1526,60 @@ class ResultArchiveService:
         if not candidates:
             return None
         best = ResultArchiveService._best_sample(candidates)
-        cif_name = best['cif']
         try:
-            structure_text = src_zip.read(cif_name).decode('utf-8', errors='replace')
-            structure = gemmi.make_structure_from_block(
-                gemmi.cif.read_string(structure_text).sole_block())
-            structure.setup_entities()
+            chain_atoms = ResultArchiveService._cif_chain_atoms(
+                src_zip.read(best['cif']).decode('utf-8', errors='replace'))
         except Exception:  # noqa: BLE001 — malformed sample structure: no Sc
             return None
-        model = structure[0] if len(structure) else None
-        if model is None:
+        if not chain_atoms:
             return None
 
-        water = _BOLTZ_WATER_RESNAMES
+        def is_amino(het: bool, comp: str) -> bool:
+            info = gemmi.find_tabulated_residue(comp)
+            return not het and info is not None and info.is_amino_acid()
 
-        def amino_count(chain):
-            return sum(1 for res in chain
-                       if res.het_flag != 'H'
-                       and gemmi.find_tabulated_residue(res.name) is not None
-                       and gemmi.find_tabulated_residue(res.name).is_amino_acid())
+        amino_counts = {chain: len({(seq, comp) for het, seq, comp, *_ in atoms if is_amino(het, comp)})
+                        for chain, atoms in chain_atoms.items()}
+
+        sides = ResultArchiveService._binding_sides(
+            src_zip, chain_atoms,
+            binding if binding is not None else ResultArchiveService._input_binding(src_zip))
+        if sides:
+            receptor_chains, binder_chains = sides
+        else:
+            polymers = [chain for chain, count in amino_counts.items() if count]
+            if not polymers:
+                return None
+            target_chain = max(polymers, key=amino_counts.get)
+            receptor_chains, binder_chains = [target_chain], [c for c in chain_atoms if c != target_chain]
+        if not binder_chains:
+            return None
 
         def side(chains):
             coords, atoms, residues = [], [], []
             for chain in chains:
-                for res in chain:
-                    if res.name.strip() in water:
-                        continue
-                    info = gemmi.find_tabulated_residue(res.name)
-                    is_amino = info is not None and info.is_amino_acid()
-                    for atom in res:
-                        if atom.element == 'H':
-                            continue
-                        coords.append((atom.pos.x, atom.pos.y, atom.pos.z))
-                        if is_amino:
-                            # Polymer atoms key directly into the sc-rs radius
-                            # table.
-                            atoms.append(atom.name)
-                            residues.append(res.name.strip())
-                        else:
-                            # Ligand/cofactor atoms: translate to a standard
-                            # residue key with the same vdW radius (Br/P ->
-                            # MET SD 1.85, SE -> MET SE 2.0, C -> ALA CB 1.88,
-                            # N -> ALA N 1.65, O/CL/F -> ALA O 1.46).
-                            element = atom.element.name.upper()
-                            res_key, atom_key = _SC_LIGAND_RADII.get(
-                                element, ('ALA', 'CB'))
-                            atoms.append(atom_key)
-                            residues.append(res_key)
+                for _het, _seq, comp, atom, symbol, xyz in chain_atoms[chain]:
+                    coords.append(xyz)
+                    info = gemmi.find_tabulated_residue(comp)
+                    if info is not None and info.is_amino_acid():
+                        atoms.append(atom)
+                        residues.append(comp)
+                    else:
+                        res_key, atom_key = _SC_LIGAND_RADII.get(symbol, ('ALA', 'CB'))
+                        atoms.append(atom_key)
+                        residues.append(res_key)
             return coords, atoms, residues
 
-        polymer_chains = [ch for ch in model if amino_count(ch) > 0]
-        if not polymer_chains:
+        receptor_side, binder_side = side(receptor_chains), side(binder_chains)
+        if not receptor_side[0] or not binder_side[0]:
             return None
-        target_chain = max(polymer_chains, key=amino_count)
-        binder_chains = [ch for ch in model if ch is not target_chain]
-        if not binder_chains:
-            return None
-        target_side, binder_side = side([target_chain]), side(binder_chains)
-        if not target_side[0] or not binder_side[0]:
-            return None
-        target_coords = np.asarray(target_side[0])
+        receptor_coords = np.asarray(receptor_side[0])
         binder_coords = np.asarray(binder_side[0])
         contacts = (np.linalg.norm(
-            target_coords[:, None, :] - binder_coords[None, :, :], axis=-1) <= 8.0).any()
+            receptor_coords[:, None, :] - binder_coords[None, :, :], axis=-1) <= 8.0).any()
         if not contacts:
             return None
-        result = compute_sc(target_side[0], target_side[1], target_side[2],
+        result = compute_sc(receptor_side[0], receptor_side[1], receptor_side[2],
                             binder_side[0], binder_side[1], binder_side[2])
         sc_value = float(result.sc)
         if not math.isfinite(sc_value):
@@ -1471,15 +1590,7 @@ class ResultArchiveService:
         }
 
     @staticmethod
-    def _extract_pair_ipsae(src_zip) -> Optional[Dict[str, Any]]:
-        """Directional per-chain-pair ipSAE via the official IPSAE2 CLI.
-
-        The best-ranked sample (cif + PAE carrier) is staged and handed to
-        `python -m ipsae`; the official reader natively understands every
-        backend's carrier (mol1/esmfold2 and protenix token-level json,
-        AF3 confidences json, Boltz pae npz). All scoring math lives in the
-        official package, so values match the reference by construction.
-        """
+    def _extract_pair_ipsae(src_zip, binding: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         import subprocess
 
         names = [n for n in src_zip.namelist() if not n.endswith('/')]
@@ -1489,45 +1600,33 @@ class ResultArchiveService:
             return None
 
         best = ResultArchiveService._best_sample(candidates)
+        try:
+            chain_atoms = ResultArchiveService._cif_chain_atoms(
+                src_zip.read(best['cif']).decode('utf-8', errors='replace'))
+        except Exception:  # noqa: BLE001 — malformed cif: no chains, no letters
+            chain_atoms = {}
+        if not chain_atoms:
+            return None
+        chain_tokens = ResultArchiveService._chain_tokens(chain_atoms)
+
+        sides = ResultArchiveService._binding_sides(
+            src_zip, chain_atoms,
+            binding if binding is not None else ResultArchiveService._input_binding(src_zip))
+        if sides:
+            receptor, binder_chains = sides
+        else:
+            polymers = [chain for chain, tokens in chain_tokens.items() if tokens['residues']]
+            target_chain = (max(polymers, key=lambda chain: chain_tokens[chain]['residues'])
+                            if polymers else None)
+            receptor = [target_chain] if target_chain else []
+            binder_chains = [chain for chain in chain_atoms if chain != target_chain]
+
         workdir = Path(tempfile.mkdtemp(prefix='vbio-ipsae-'))
         try:
             cif_path = workdir / 'sample.cif'
             pae_path = workdir / f'pae.{best["pae_kind"]}'
             cif_path.write_bytes(src_zip.read(best['cif']))
             pae_path.write_bytes(src_zip.read(best['pae_name']))
-
-            # Binder group = every chain except the largest (target); the
-            # official --group scores the union straight from the full PAE
-            # matrix (IPSAE2 virtual-molecule mode).
-            import gemmi
-
-            cif_residues: Counter = Counter()
-            cif_atoms: Counter = Counter()
-            try:
-                structure_text = src_zip.read(best['cif']).decode('utf-8', errors='replace')
-                structure = gemmi.make_structure_from_block(
-                    gemmi.cif.read_string(structure_text).sole_block())
-                structure.setup_entities()
-            except Exception:  # noqa: BLE001 — malformed cif: no group, no letters
-                structure = None
-            if structure is not None:
-                for ch in structure[0]:
-                    for res in ch:
-                        if res.name.strip() in _BOLTZ_WATER_RESNAMES:
-                            continue
-                        info = gemmi.find_tabulated_residue(res.name)
-                        polymer = (info is not None
-                                   and (info.is_amino_acid() or info.is_nucleic_acid())
-                                   and res.het_flag != 'H')
-                        if polymer:
-                            cif_residues[ch.name] += 1  # PAE: 1 token per polymer residue
-                        else:
-                            cif_atoms[ch.name] += len(res)  # atom-token per het residue
-            if not cif_residues and not cif_atoms:
-                return None
-
-            target_chain = max(cif_residues, key=cif_residues.get) if cif_residues else None
-            binder_chains = [c for c in cif_residues if c != target_chain] + list(cif_atoms)
 
             full = best.get('full_data')
             if full is None and best.get('full_name'):
@@ -1538,34 +1637,26 @@ class ResultArchiveService:
             asym_counts = Counter(str(a) for a in ((full or {}).get('token_asym_id') or []))
             id_to_letter: dict = {}
             used: set = set()
-            cif_chain_names = set(cif_residues) | set(cif_atoms)
-            if cif_chain_names and cif_chain_names <= set(asym_counts):
-                id_to_letter = {name: name for name in cif_chain_names}
+            if chain_atoms.keys() <= set(asym_counts):
+                id_to_letter = {name: name for name in chain_atoms}
             else:
-                for chain, count in cif_residues.items():
-                    for asym, acount in asym_counts.items():
-                        if acount == count and asym not in used:
-                            id_to_letter[chain] = ResultArchiveService._chain_letter(
-                                int(asym)) if asym.isdigit() else asym
-                            used.add(asym)
-                            break
-                for chain, count in cif_atoms.items():
-                    for asym, acount in asym_counts.items():
-                        if acount == count and asym not in used:
-                            id_to_letter[chain] = ResultArchiveService._chain_letter(
-                                int(asym)) if asym.isdigit() else asym
-                            used.add(asym)
+                for chain, tokens in chain_tokens.items():
+                    for count in (tokens['residues'], tokens['atoms']):
+                        for asym, asym_count in asym_counts.items():
+                            if count and asym_count == count and asym not in used:
+                                id_to_letter[chain] = ResultArchiveService._chain_letter(
+                                    int(asym)) if asym.isdigit() else asym
+                                used.add(asym)
+                                break
+                        if chain in id_to_letter:
                             break
 
             out_path = workdir / 'ipsae.tsv'
             command = [sys.executable, '-m', 'ipsae', str(cif_path), str(pae_path),
                        '--pae-cutoff', '10', '--output-file', str(out_path)]
-            # IPSAE2 rejects a single-chain group (a group needs 2+ chains);
-            # for one binder chain the pair rows already carry both directions.
-            binder_letters = sorted({id_to_letter.get(c, c) for c in binder_chains
-                                     if c in id_to_letter or not asym_counts})
-            if len(binder_letters) >= 2:
-                command += ['--group', '+'.join(binder_letters)]
+            for side_chains in (receptor, binder_chains):
+                if len(side_chains) >= 2:
+                    command += ['--group', '+'.join(side_chains)]
             result = subprocess.run(
                 command, capture_output=True, text=True, timeout=300)
             if result.returncode != 0 or not out_path.exists():
@@ -1574,16 +1665,14 @@ class ResultArchiveService:
                     (result.stderr or '')[-200:])
                 return None
 
-            def to_letter(chain_name: str) -> str:
-                # group rows join chains with '+' ('B+L'); map each part.
-                return '+'.join(id_to_letter.get(part, part)
-                                for part in chain_name.split('+'))
+            def to_letter(chain: str) -> str:
+                return '+'.join(id_to_letter.get(part, part) for part in chain.split('+'))
 
             with open(out_path, newline='') as handle:
                 rows_out = list(csv.DictReader(handle, delimiter='\t'))
 
             pair_rows = []
-            group_values: dict = {}
+            entity_values: dict = {}
             for row in rows_out:
                 chn1, chn2 = row.get('chn1', ''), row.get('chn2', '')
                 try:
@@ -1591,42 +1680,37 @@ class ResultArchiveService:
                     ipsae21 = float(row['ipsae21'])
                 except (KeyError, ValueError):
                     continue
-                if '+' in chn1 or '+' in chn2:
-                    group_values[(chn1, chn2)] = (ipsae12, ipsae21)
-                    continue
-                pair_rows.append({
-                    'a': to_letter(chn1), 'b': to_letter(chn2),
-                    'a_to_b': ipsae12, 'b_to_a': ipsae21,
-                })
+                entity_values[(chn1, chn2)] = (ipsae12, ipsae21)
+                if '+' not in chn1 and '+' not in chn2:
+                    pair_rows.append({
+                        'a': to_letter(chn1), 'b': to_letter(chn2),
+                        'a_to_b': ipsae12, 'b_to_a': ipsae21,
+                    })
             if not pair_rows:
                 return None
 
             out: Dict[str, Any] = {'pair_ipsae': pair_rows}
-            # Binder aggregate: prefer the official group row; for a single
-            # binder chain (no group emitted) derive it from the target pair.
-            target_letter = id_to_letter.get(target_chain)
-            binder_group = next(((c1, c2) for (c1, c2) in group_values
-                                 if target_chain and (target_chain in c2.split('+'))), None)
-            if binder_group:
-                i12, i21 = group_values[binder_group]
-                # ipsae12: aligned on the binder group, scoring the target.
-                out['ipsae_protein_to_ligand'] = i21
-                out['ipsae_ligand_to_protein'] = i12
-                out['ipsae_official_max'] = max(i21, i12)
-            elif target_chain:
-                target_letter = id_to_letter.get(target_chain, target_chain)
-                p2l = [r['a_to_b'] for r in pair_rows
-                       if r['a'] == target_letter and r['b'] != target_letter]
-                l2p = [r['b_to_a'] for r in pair_rows
-                       if r['a'] == target_letter and r['b'] != target_letter]
-                if p2l:
-                    out['ipsae_protein_to_ligand'] = max(p2l)
-                if l2p:
-                    out['ipsae_ligand_to_protein'] = max(l2p)
-                if out.get('ipsae_protein_to_ligand') is not None or out.get('ipsae_ligand_to_protein') is not None:
-                    out['ipsae_official_max'] = max(
-                        out.get('ipsae_protein_to_ligand', 0.0),
-                        out.get('ipsae_ligand_to_protein', 0.0))
+            receptor_set, binder_set = frozenset(receptor), frozenset(binder_chains)
+            for (chn1, chn2), (i12, i21) in entity_values.items():
+                first, second = frozenset(chn1.split('+')), frozenset(chn2.split('+'))
+                if first == receptor_set and second == binder_set:
+                    protein_to_ligand, ligand_to_protein = i12, i21
+                    break
+                if first == binder_set and second == receptor_set:
+                    protein_to_ligand, ligand_to_protein = i21, i12
+                    break
+            else:
+                return out
+            out['ipsae_protein_to_ligand'] = protein_to_ligand
+            out['ipsae_ligand_to_protein'] = ligand_to_protein
+            out['ipsae_official_max'] = max(protein_to_ligand, ligand_to_protein)
+            if len(receptor) >= 2 or len(binder_chains) >= 2:
+                pair_rows.append({
+                    'a': '+'.join(to_letter(c) for c in receptor),
+                    'b': '+'.join(to_letter(c) for c in binder_chains),
+                    'a_to_b': protein_to_ligand, 'b_to_a': ligand_to_protein,
+                    'grouped': True,
+                })
             return out
         except Exception:  # noqa: BLE001 — malformed inputs: no pair ipsae
             logging.getLogger(__name__).exception('pair ipsae extraction failed')
