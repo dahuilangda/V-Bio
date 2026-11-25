@@ -89,6 +89,11 @@ function isMissingTaskRuntimeStatusText(statusText: string): boolean {
   );
 }
 
+export function readTaskRuntimeCompletedAt(status: Pick<TaskStatusResponse, 'state' | 'info'>): string | null {
+  const value = asRecord(status.info).completed_at;
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
 export function buildTaskRuntimeFailureMessage(
   status: Pick<TaskStatusResponse, 'state' | 'info'>,
   fallback = 'Task failed.'

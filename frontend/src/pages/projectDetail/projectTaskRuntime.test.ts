@@ -11,6 +11,7 @@ vi.mock('../../api/backendApi', () => ({
 import { getTaskStatus } from '../../api/backendApi';
 
 const getTaskStatusMock = vi.mocked(getTaskStatus);
+const DONE_AT = '2026-11-24T23:15:31.658158+00:00';
 
 function makeProject(taskState: string, taskId = 'tid-1'): Project {
   return {
@@ -106,7 +107,7 @@ describe('refreshTaskStatus DB write policy', () => {
     getTaskStatusMock.mockResolvedValue({
       task_id: 'tid-1',
       state: 'SUCCESS',
-      info: { progress: { status_message: 'done' } }
+      info: { progress: { status_message: 'done' }, completed_at: DONE_AT }
     } as never);
     const params = makeParams(makeProject('RUNNING'), [makeTaskRow('RUNNING')]);
 
@@ -116,9 +117,38 @@ describe('refreshTaskStatus DB write policy', () => {
     expect(params.patchTask).toHaveBeenCalledTimes(1);
     const taskPatch = params.patchTask.mock.calls[0][1] as Partial<ProjectTask>;
     expect(taskPatch.task_state).toBe('SUCCESS');
-    expect(taskPatch.completed_at).toBeTruthy();
+    expect(taskPatch.completed_at).toBe(DONE_AT);
     expect(taskPatch.confidence).toBeUndefined();
     expect(params.pullResultForViewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the completion time from the runtime on a RUNNING→FAILURE transition', async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: 'tid-1',
+      state: 'FAILURE',
+      info: { exc_message: 'Engine failed', completed_at: DONE_AT }
+    } as never);
+    const params = makeParams(makeProject('RUNNING'), [makeTaskRow('RUNNING')]);
+
+    await refreshTaskStatus(params as never);
+
+    const taskPatch = params.patchTask.mock.calls[0][1] as Partial<ProjectTask>;
+    expect(taskPatch.task_state).toBe('FAILURE');
+    expect(taskPatch.completed_at).toBe(DONE_AT);
+  });
+
+  it('does not PATCH a terminal row when no completion time was recorded', async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: 'tid-1',
+      state: 'FAILURE',
+      info: { exc_message: 'Engine failed' }
+    } as never);
+    const params = makeParams(makeProject('FAILURE'), [makeTaskRow('FAILURE')]);
+
+    await refreshTaskStatus(params as never);
+
+    expect(params.patch).not.toHaveBeenCalled();
+    expect(params.patchTask).not.toHaveBeenCalled();
   });
 
   it('strips bulk structure text from runtime peptide candidate rows', async () => {

@@ -24,6 +24,7 @@ import { removeProjectInputConfig, removeProjectUiState } from '../utils/project
 import {
   buildTaskRuntimeFailureMessage,
   inferTaskStateFromStatusPayload,
+  readTaskRuntimeCompletedAt,
   readTaskRuntimeStatusText,
   taskStatePriority
 } from '../utils/taskRuntime';
@@ -217,10 +218,10 @@ async function persistTerminalRuntimeTaskStatuses(
 
       const statusText = readTaskRuntimeStatusText(statusPayload);
       const errorText = taskState === 'FAILURE' ? buildTaskRuntimeFailureMessage(statusPayload) : '';
-      const completedAt = row.completed_at || new Date().toISOString();
+      const completedAt = row.completed_at || readTaskRuntimeCompletedAt(statusPayload);
       const submittedAt = row.submitted_at;
       const durationSeconds =
-        submittedAt
+        submittedAt && completedAt
           ? (() => {
               const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
               // 时钟倒挂/非法值时保留已落库时长，而不是清成 null 覆盖合法值。

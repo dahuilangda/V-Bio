@@ -13,7 +13,7 @@ import { canEditProject, canEditTask } from '../../utils/accessControl';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import { normalizeLeadOptPredictionBackend } from '../../utils/leadOptimization';
 import { derivePersistedResultConfidences } from '../../utils/resultConfidenceStorage';
-import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
+import { buildTaskRuntimeFailureMessage, readTaskRuntimeCompletedAt } from '../../utils/taskRuntime';
 import { hasStoredTaskInputOptions, mergeTaskPropertiesPreservingInputOptions } from '../projectDetail/projectTaskSnapshot';
 import {
   readLeadOptTaskSummary,
@@ -1363,12 +1363,16 @@ export async function syncRuntimeTaskRows(
         : rawStatusText;
     const errorText = taskState === 'FAILURE' ? statusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-    const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
+    const completedAt = !terminal
+      ? null
+      : stalePendingRepair
+        ? new Date().toISOString()
+        : runtimeTask.completed_at || readTaskRuntimeCompletedAt(statusPayload!);
     const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
     const durationSeconds =
-      terminal && submittedAt
+      terminal && submittedAt && completedAt
         ? (() => {
-            const duration = (new Date(completedAt || Date.now()).getTime() - new Date(submittedAt).getTime()) / 1000;
+            const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
             return Number.isFinite(duration) && duration >= 0 ? duration : null;
           })()
         : null;
@@ -1583,12 +1587,16 @@ export async function syncInitialRuntimeTaskRows(
         : statusText;
     const errorText = taskState === 'FAILURE' ? normalizedStatusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-    const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
+    const completedAt = !terminal
+      ? null
+      : stalePendingRepair
+        ? new Date().toISOString()
+        : runtimeTask.completed_at || readTaskRuntimeCompletedAt(statusPayload!);
     const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
     const durationSeconds =
-      terminal && submittedAt
+      terminal && submittedAt && completedAt
         ? (() => {
-            const duration = (new Date(completedAt || Date.now()).getTime() - new Date(submittedAt).getTime()) / 1000;
+            const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
             return Number.isFinite(duration) && duration >= 0 ? duration : null;
           })()
         : null;

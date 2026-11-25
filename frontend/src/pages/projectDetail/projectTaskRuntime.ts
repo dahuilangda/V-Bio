@@ -17,6 +17,7 @@ import { normalizeWorkflowKey } from '../../utils/workflows';
 import {
   inferTaskStateFromStatusPayload,
   isTransientRuntimeStatusText,
+  readTaskRuntimeCompletedAt,
   readTaskRuntimeStatusText as readStatusText
 } from '../../utils/taskRuntime';
 import { asRecord, asRecordArray } from '../projectTasks/recordReaders';
@@ -777,7 +778,7 @@ export async function refreshTaskStatus(params: {
     const isProjectActiveTask = String(project?.task_id || '').trim() === activeTaskId;
     const nextErrorText = taskState === 'FAILURE' ? statusText : '';
     const completedAt = isTerminalTaskState(taskState)
-      ? (runtimeTask?.completed_at || project.completed_at || new Date().toISOString())
+      ? (runtimeTask?.completed_at || project.completed_at || readTaskRuntimeCompletedAt(status))
       : null;
     const submittedAt = runtimeTask?.submitted_at || project.submitted_at;
     const durationSeconds =
@@ -878,9 +879,9 @@ export async function refreshTaskStatus(params: {
     const persistedProjectState = String(project.task_state || '').trim().toUpperCase();
     const persistedTaskState = String(runtimeTask?.task_state || '').trim().toUpperCase();
     const projectNeedsTerminalBackfill =
-      isTerminalTaskState(taskState) && (!project.completed_at || project.duration_seconds === null);
+      isTerminalTaskState(taskState) && completedAt !== null && (!project.completed_at || project.duration_seconds === null);
     const taskNeedsTerminalBackfill =
-      isTerminalTaskState(taskState) && (!runtimeTask?.completed_at || runtimeTask.duration_seconds === null);
+      isTerminalTaskState(taskState) && completedAt !== null && (!runtimeTask?.completed_at || runtimeTask.duration_seconds === null);
     const shouldPersistProject =
       isProjectActiveTask && (persistedProjectState !== taskState || projectNeedsTerminalBackfill);
     const shouldPersistTask = Boolean(runtimeTask) && (persistedTaskState !== taskState || taskNeedsTerminalBackfill);

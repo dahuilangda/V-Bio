@@ -429,39 +429,33 @@ def register_task_routes(
             target['compact_metrics'] = compact
             target['lead_opt_metrics'] = compact
 
-    def _archive_completed_at(task_id: str) -> Optional[str]:
-        archive_name = find_result_archive(task_id)
-        if not archive_name:
-            return None
+    def _archive_completed_at(archive_name: str) -> Optional[str]:
         try:
-            stat = os.stat(os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(archive_name)))
+            mtime = os.stat(os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(archive_name))).st_mtime
         except OSError:
             return None
-        return datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
-    def _tracker_completed_at(task_id: str) -> Optional[str]:
-        tracker_status, _heartbeat = get_tracker_status(task_id)
+    def _tracker_completed_at(tracker_status: Any) -> Optional[str]:
         raw = str(_as_record(tracker_status).get('timestamp') or '').strip()
         if not raw:
             return None
-        try:
-            parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).isoformat()
+        return datetime.fromisoformat(raw).replace(tzinfo=timezone.utc).isoformat()
 
     def build_task_status_response(task_id: str) -> Dict[str, Any]:
         response = _build_task_status_response(task_id)
-        if response['state'] in ('SUCCESS', 'FAILURE', 'REVOKED'):
-            completed_at = (
-                _archive_completed_at(task_id)
-                if response['state'] == 'SUCCESS'
-                else _tracker_completed_at(task_id)
-            )
-            if completed_at:
-                response['info']['completed_at'] = completed_at
+        state = response['state']
+        if state not in ('SUCCESS', 'FAILURE', 'REVOKED'):
+            return response
+        info = response['info']
+        if state == 'SUCCESS' and info.get('result_file'):
+            completed_at = _archive_completed_at(info['result_file'])
+        elif (meta := celery_app.backend.get_task_meta(task_id, cache=False)).get('status') == state:
+            completed_at = meta['date_done'].isoformat()
+        else:
+            completed_at = _tracker_completed_at(info.get('tracker'))
+        if completed_at:
+            info['completed_at'] = completed_at
         return response
 
     def _build_task_status_response(task_id: str) -> Dict[str, Any]:
