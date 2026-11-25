@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { loadRDKitModule } from '../../utils/rdkit';
+import { renderMolSvg } from '../../utils/rdkitClient';
 import { MemoLigand2DPreview } from './Ligand2DPreview';
 
 export interface LigandFragmentItem {
@@ -186,57 +186,35 @@ export function LigandFragmentSketcher({
       }
       try {
         setRenderError('');
-        const rdkit = await loadRDKitModule();
-        if (cancelled) return;
-        const mol = rdkit.get_mol(value);
-        if (!mol) {
-          throw new Error('Invalid ligand SMILES.');
-        }
-        try {
-          mol.set_new_coords?.();
-          mol.normalize_depiction?.();
-          let rendered = '';
-          if (typeof mol.get_svg_with_highlights === 'function') {
-            const details: Record<string, unknown> = {
-              width: renderWidth,
-              height,
-              minFontSize: 9,
-              fixedFontSize: 12,
-              maxFontSize: 32,
-              fillHighlights: true,
-              atomHighlightsAreCircles: true
-            };
-            const highlightAtoms: number[] = [];
-            const highlightAtomColors: Record<number, [number, number, number]> = {};
-            const highlightAtomRadii: Record<number, number> = {};
-            atomDisplayMap.forEach((entry, atomIndex) => {
-              highlightAtoms.push(atomIndex);
-              highlightAtomColors[atomIndex] = entry.color;
-              highlightAtomRadii[atomIndex] = entry.radius;
-            });
+        const details: Record<string, unknown> = {
+          width: renderWidth,
+          height,
+          minFontSize: 9,
+          fixedFontSize: 12,
+          maxFontSize: 32,
+          fillHighlights: true,
+          atomHighlightsAreCircles: true
+        };
+        const highlightAtoms: number[] = [];
+        const highlightAtomColors: Record<number, [number, number, number]> = {};
+        const highlightAtomRadii: Record<number, number> = {};
+        atomDisplayMap.forEach((entry, atomIndex) => {
+          highlightAtoms.push(atomIndex);
+          highlightAtomColors[atomIndex] = entry.color;
+          highlightAtomRadii[atomIndex] = entry.radius;
+        });
 
-            if (highlightAtoms.length > 0) {
-              details.atoms = highlightAtoms;
-              details.highlightAtoms = highlightAtoms;
-              details.highlightAtomColors = highlightAtomColors;
-              details.highlightAtomRadii = highlightAtomRadii;
-              details.highlightRadii = highlightAtomRadii;
-              details.highlightBonds = [];
-            }
-            rendered = mol.get_svg_with_highlights(JSON.stringify(details)) || '';
-          }
-          if (!rendered) {
-            rendered = mol.get_svg(renderWidth, height);
-          }
-          if (!rendered) {
-            throw new Error('RDKit returned empty SVG.');
-          }
-          if (!cancelled) {
-            setSvg(injectSvgStyle(rendered));
-          }
-        } finally {
-          mol.delete();
+        if (highlightAtoms.length > 0) {
+          details.atoms = highlightAtoms;
+          details.highlightAtoms = highlightAtoms;
+          details.highlightAtomColors = highlightAtomColors;
+          details.highlightAtomRadii = highlightAtomRadii;
+          details.highlightRadii = highlightAtomRadii;
+          details.highlightBonds = [];
         }
+        const rendered = await renderMolSvg(value, { width: renderWidth, height, details });
+        if (cancelled) return;
+        setSvg(injectSvgStyle(rendered));
       } catch (e) {
         if (cancelled) return;
         setSvg('');

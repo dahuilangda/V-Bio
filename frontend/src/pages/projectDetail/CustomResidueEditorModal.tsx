@@ -7,7 +7,7 @@ import { JSMEEditor } from '../../components/project/JSMEEditor';
 import { CUSTOM_RESIDUE_SCAFFOLD_SMILES } from './peptideCustomResidues';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
 import { firstBackboneSlotError, generateCustomResidueCode } from '../../utils/constraintAtomOptions';
-import { toggleTerminalAmide } from '../../utils/smilesTransform';
+import { toggleTerminalAmide } from '../../utils/rdkitClient';
 
 const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 

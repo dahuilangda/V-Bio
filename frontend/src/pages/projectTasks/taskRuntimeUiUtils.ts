@@ -85,24 +85,6 @@ function normalizeSmilesForSearch(value: string): string {
   return value.trim().replace(/\s+/g, '');
 }
 
-function hasSubstructureMatchPayload(value: unknown): boolean {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed || trimmed === '[]' || trimmed === '{}' || trimmed === 'null') return false;
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      if (Array.isArray(parsed)) return parsed.length > 0;
-      if (parsed && typeof parsed === 'object') return Object.keys(parsed as Record<string, unknown>).length > 0;
-      return Boolean(parsed);
-    } catch {
-      return trimmed !== '-1';
-    }
-  }
-  if (Array.isArray(value)) return value.length > 0;
-  if (value && typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
-  return Boolean(value);
-}
-
 interface LoadTaskDataOptions {
   silent?: boolean;
   showRefreshing?: boolean;
@@ -121,8 +103,7 @@ export {
   parseNumberOrNull,
   normalizePlddtThreshold,
   normalizeIptmThreshold,
-  normalizeSmilesForSearch,
-  hasSubstructureMatchPayload
+  normalizeSmilesForSearch
 };
 
 export type { LoadTaskDataOptions };

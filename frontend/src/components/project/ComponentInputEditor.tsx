@@ -6,11 +6,16 @@ import { componentTypeLabel, createInputComponent, normalizeComponentSequence, r
 import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
 import { JSMEEditor } from './JSMEEditor';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
-import { loadRDKitModule } from '../../utils/rdkit';
 import { Ligand2DPreview } from './Ligand2DPreview';
-import { rdkitMolHasAminoAcidBackbone, PROTEIN_REGEX } from '../../utils/inputValidation';
-import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
-import { toggleTerminalAmide } from '../../utils/smilesTransform';
+import { PROTEIN_REGEX } from '../../utils/inputValidation';
+import { firstBackboneSlotError, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
+import {
+  detectCustomResidueBackbone,
+  molHasAminoAcidBackbone,
+  toggleTerminalAmide,
+  validateBackboneSlots,
+  validateCustomResidueBackbone
+} from '../../utils/rdkitClient';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
 import { Field } from '../common/Field';
 
@@ -266,9 +271,8 @@ function CustomResiduePreview({
           return;
         }
         try {
-          const rdkit = await loadRDKitModule();
+          const hasBackbone = await molHasAminoAcidBackbone(text, true);
           if (cancelled) return;
-          const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
           setValid(hasBackbone);
           onValidityChange(hasBackbone);
 
@@ -276,7 +280,8 @@ function CustomResiduePreview({
           if (amidatedChanged) {
             skipNextDetectRef.current = false;
             const anchors = manualOverrideRef.current ? slots : {};
-            const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, anchors, isAmidated) ?? undefined : undefined;
+            const detected = hasBackbone ? (await detectCustomResidueBackbone(text, anchors, isAmidated)) ?? undefined : undefined;
+            if (cancelled) return;
             setSlots(detected ?? {});
             onBackboneChange(detected);
             setAutoStatus('idle');
@@ -285,7 +290,8 @@ function CustomResiduePreview({
 
           // Manual picks are never auto-detected over; validate them against the new structure.
           if (manualOverrideRef.current) {
-            const kept = validateBackboneSlots(rdkit, text, slots, Boolean(isAmidated));
+            const kept = await validateBackboneSlots(text, slots, Boolean(isAmidated));
+            if (cancelled) return;
             if (slotsDiffer(kept, slots)) {
               setSlots(kept);
               onBackboneChange(allSet(kept) ? (kept as CustomResidueBackbone) : undefined);
@@ -298,7 +304,8 @@ function CustomResiduePreview({
             return;
           }
           // No manual intervention yet — offer a fresh auto-detection as the starting suggestion.
-          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, {}, isAmidated) ?? undefined : undefined;
+          const detected = hasBackbone ? (await detectCustomResidueBackbone(text, {}, isAmidated)) ?? undefined : undefined;
+          if (cancelled) return;
           setSlots(detected ?? {});
           onBackboneChange(detected);
           setAutoStatus('idle');
@@ -331,9 +338,8 @@ function CustomResiduePreview({
         return;
       }
       try {
-        const rdkit = await loadRDKitModule();
+        const errors = await validateCustomResidueBackbone(smiles.trim(), slots as CustomResidueBackbone, Boolean(isAmidated));
         if (cancelled) return;
-        const errors = validateCustomResidueBackbone(rdkit, smiles.trim(), slots as CustomResidueBackbone, Boolean(isAmidated));
         if (!cancelled) {
           setSlotErrors(errors);
           onSlotErrorsChange?.(errors);
@@ -353,10 +359,9 @@ function CustomResiduePreview({
   const runAutoDetect = async () => {
     manualOverrideRef.current = false;
     const text = smiles.trim();
-    const rdkit = await loadRDKitModule();
     // Re-detect with the current picks as anchors; only empty slots are filled.
-    const detected = text && rdkitMolHasAminoAcidBackbone(rdkit, text, true)
-      ? detectCustomResidueBackbone(rdkit, text, slots, isAmidated) ?? undefined
+    const detected = text && (await molHasAminoAcidBackbone(text, true))
+      ? (await detectCustomResidueBackbone(text, slots, isAmidated)) ?? undefined
       : undefined;
     skipNextDetectRef.current = false;
     if (detected) {

@@ -1,5 +1,4 @@
 import { ENV } from './env';
-import { loadScript } from './script';
 
 export interface RDKitMol {
   get_svg: (width: number, height: number) => string;
@@ -20,37 +19,19 @@ export interface RDKitModule {
   get_qmol?: (smarts: string) => RDKitMol | null;
 }
 
-declare global {
-  interface Window {
-    initRDKitModule?: (params?: { locateFile?: (path: string) => string }) => Promise<RDKitModule>;
-    __rdkitModulePromise?: Promise<RDKitModule>;
-  }
-}
+type RDKitModuleFactory = (params?: { locateFile?: (path: string) => string }) => Promise<RDKitModule>;
 
-export async function loadRDKitModule(): Promise<RDKitModule> {
-  if (window.__rdkitModulePromise) {
-    return window.__rdkitModulePromise;
-  }
+let modulePromise: Promise<RDKitModule> | null = null;
 
-  const promise = (async () => {
-    await loadScript(ENV.rdkitScriptUrl);
-
-    if (typeof window.initRDKitModule !== 'function') {
-      throw new Error('RDKit module init function is unavailable.');
-    }
-
-    return await window.initRDKitModule({
-      locateFile: (path: string) => {
-        if (path.endsWith('.wasm')) return ENV.rdkitWasmUrl;
-        return path;
-      }
+export function loadRDKitModule(): Promise<RDKitModule> {
+  if (modulePromise) return modulePromise;
+  modulePromise = import(/* @vite-ignore */ ENV.rdkitModuleUrl)
+    .then((module) => (module as { default: RDKitModuleFactory }).default({
+      locateFile: (path: string) => (path.endsWith('.wasm') ? ENV.rdkitWasmUrl : path)
+    }))
+    .catch((error) => {
+      modulePromise = null;
+      throw error;
     });
-  })();
-
-  window.__rdkitModulePromise = promise.catch((error) => {
-    window.__rdkitModulePromise = undefined;
-    throw error;
-  });
-
-  return window.__rdkitModulePromise;
+  return modulePromise;
 }

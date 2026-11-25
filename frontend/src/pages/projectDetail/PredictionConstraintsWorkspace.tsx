@@ -9,7 +9,7 @@ import { buildChainInfos } from '../../utils/chainAssignments';
 import { BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES } from '../../components/project/residueCatalog';
 import { buildComponentAtomOptionsByChain } from '../../utils/constraintAtomOptions';
 import { extractStructureResidueAtomOptions, type StructureAtomOptionsByChain } from '../../utils/structureParser';
-import { loadRDKitModule, type RDKitModule } from '../../utils/rdkit';
+import { resolveComponentAtomOptions } from '../../utils/rdkitClient';
 
 export interface ConstraintTemplateOption {
   componentId: string;
@@ -487,23 +487,29 @@ export function PredictionConstraintsWorkspace({
   onPropertiesChange,
   disabled
 }: PredictionConstraintsWorkspaceProps) {
-  // RDKit resolves custom-residue atom names from the drawn SMILES; the module load is
-  // already cached by Ligand2DPreview in this view
-  const [rdkit, setRdkit] = useState<RDKitModule | null>(null);
+  const [customResidueAtomOptions, setCustomResidueAtomOptions] = useState<{
+    components: InputComponent[];
+    options: StructureAtomOptionsByChain;
+  } | null>(null);
   useEffect(() => {
     let alive = true;
-    loadRDKitModule()
-      .then((module) => {
-        if (alive) setRdkit(module);
+    resolveComponentAtomOptions(components)
+      .then((options) => {
+        if (alive) setCustomResidueAtomOptions({ components, options });
       })
-      .catch(() => {
-        /* RDKit unavailable: custom residues expose no atom names until it loads */
+      .catch((error) => {
+        console.error('Custom residue atom names unavailable.', error);
       });
     return () => {
       alive = false;
     };
-  }, []);
-  const sequenceAtomOptionsByChain = useMemo(() => buildComponentAtomOptionsByChain(components, rdkit), [components, rdkit]);
+  }, [components]);
+  const sequenceAtomOptionsByChain = useMemo(
+    () => (customResidueAtomOptions?.components === components
+      ? customResidueAtomOptions.options
+      : buildComponentAtomOptionsByChain(components)),
+    [components, customResidueAtomOptions]
+  );
   const structureAtomOptionsByChain = useMemo(() => {
     if (!hasConstraintStructure || !constraintStructureText.trim()) return sequenceAtomOptionsByChain;
     return extractStructureResidueAtomOptions(constraintStructureText, constraintStructureFormat);

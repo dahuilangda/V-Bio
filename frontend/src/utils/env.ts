@@ -79,12 +79,12 @@ export const ENV = {
   molstarCssUrl:
     import.meta.env.VITE_MOLSTAR_CSS_URL?.trim() ||
     '/vendor/molstar/molstar.css',
-  rdkitScriptUrl:
-    import.meta.env.VITE_RDKIT_SCRIPT_URL?.trim() ||
-    'https://cdn.jsdelivr.net/npm/@rdkit/rdkit/dist/RDKit_minimal.js',
+  rdkitModuleUrl:
+    import.meta.env.VITE_RDKIT_MODULE_URL?.trim() ||
+    '/vendor/rdkit/RDKit_minimal.mjs',
   rdkitWasmUrl:
     import.meta.env.VITE_RDKIT_WASM_URL?.trim() ||
-    'https://cdn.jsdelivr.net/npm/@rdkit/rdkit/dist/RDKit_minimal.wasm'
+    '/vendor/rdkit/RDKit_minimal.wasm'
 } as const;
 
 export const apiUrl = (path: string) => {

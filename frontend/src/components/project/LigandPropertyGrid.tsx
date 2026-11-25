@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { loadRDKitModule } from '../../utils/rdkit';
+import { molDescriptors } from '../../utils/rdkitClient';
 
 interface LigandPropertyGridProps {
   smiles: string;
@@ -154,35 +154,20 @@ export function LigandPropertyGrid({ smiles, variant = 'grid' }: LigandPropertyG
     const run = async () => {
       setLoading(true);
       try {
-        const rdkit = await loadRDKitModule();
+        const parsed = await molDescriptors(text);
         if (cancelled) return;
-        const mol = rdkit.get_mol(text);
-        if (!mol) {
+        if (!parsed) {
           setProps(EMPTY_PROPS);
           return;
         }
-        try {
-          const raw = mol.get_descriptors?.();
-          const parsed =
-            typeof raw === 'string'
-              ? (JSON.parse(raw) as Record<string, unknown>)
-              : raw && typeof raw === 'object'
-                ? (raw as Record<string, unknown>)
-                : {};
-
-          setProps({
-            mw: pickNumber(parsed, ['amw', 'MolWt', 'molwt', 'mw']),
-            logP: pickNumber(parsed, ['CrippenClogP', 'MolLogP', 'logp', 'LogP']),
-            tpsa: pickNumber(parsed, ['tpsa', 'TPSA']),
-            hba: pickNumber(parsed, ['NumHBA', 'hba', 'HBA']),
-            hbd: pickNumber(parsed, ['NumHBD', 'hbd', 'HBD']),
-            rotB: pickNumber(parsed, ['NumRotatableBonds', 'nRotB', 'rotB', 'rotatable_bonds'])
-          });
-        } catch {
-          setProps(EMPTY_PROPS);
-        } finally {
-          mol.delete();
-        }
+        setProps({
+          mw: pickNumber(parsed, ['amw', 'MolWt', 'molwt', 'mw']),
+          logP: pickNumber(parsed, ['CrippenClogP', 'MolLogP', 'logp', 'LogP']),
+          tpsa: pickNumber(parsed, ['tpsa', 'TPSA']),
+          hba: pickNumber(parsed, ['NumHBA', 'hba', 'HBA']),
+          hbd: pickNumber(parsed, ['NumHBD', 'hbd', 'HBD']),
+          rotB: pickNumber(parsed, ['NumRotatableBonds', 'nRotB', 'rotB', 'rotatable_bonds'])
+        });
       } catch {
         if (!cancelled) {
           setProps(EMPTY_PROPS);

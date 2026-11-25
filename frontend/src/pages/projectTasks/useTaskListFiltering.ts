@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { ProjectTask } from '../../types/models';
-import { loadRDKitModule } from '../../utils/rdkit';
+import { substructureFilter } from '../../utils/rdkitClient';
 import type {
   SeedFilterOption,
   SortDirection,
@@ -26,8 +26,7 @@ import {
   parseNumberOrNull,
   normalizePlddtThreshold,
   normalizeIptmThreshold,
-  normalizeSmilesForSearch,
-  hasSubstructureMatchPayload,
+  normalizeSmilesForSearch
 } from './taskDataUtils';
 import { backendLabel } from './taskPresentation';
 
@@ -458,42 +457,13 @@ export function useTaskListFiltering(
           return;
         }
 
-        const rdkit = await loadRDKitModule();
+        const flags = await substructureFilter(query, taskRows.map((row) => (row.ligandIsSmiles ? row.ligandSmiles.trim() : '')));
         if (cancelled) return;
 
-        const queryMol = (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(query) : null) || rdkit.get_mol(query);
-        if (!queryMol) {
-          throw new Error('Invalid SMARTS/SMILES query.');
-        }
-
         const nextMatches: Record<string, boolean> = {};
-        try {
-          for (const row of taskRows) {
-            if (!row.ligandIsSmiles || !row.ligandSmiles.trim()) {
-              nextMatches[row.task.id] = false;
-              continue;
-            }
-            const mol = rdkit.get_mol(row.ligandSmiles);
-            if (!mol) {
-              nextMatches[row.task.id] = false;
-              continue;
-            }
-            try {
-              let matched = false;
-              if (typeof mol.get_substruct_match === 'function') {
-                matched = hasSubstructureMatchPayload(mol.get_substruct_match(queryMol));
-              }
-              if (!matched && typeof mol.get_substruct_matches === 'function') {
-                matched = hasSubstructureMatchPayload(mol.get_substruct_matches(queryMol));
-              }
-              nextMatches[row.task.id] = matched;
-            } finally {
-              mol.delete();
-            }
-          }
-        } finally {
-          queryMol.delete();
-        }
+        taskRows.forEach((row, index) => {
+          nextMatches[row.task.id] = flags[index];
+        });
 
         if (!cancelled) {
           setStructureSearchMatches(nextMatches);

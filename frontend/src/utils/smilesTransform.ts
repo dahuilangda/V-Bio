@@ -1,4 +1,3 @@
-import { loadRDKitModule } from './rdkit';
 import type { RDKitModule, RDKitMol } from './rdkit';
 import { detectCustomResidueBackbone } from './constraintAtomOptions';
 import type { CustomResidueBackbone } from '../types/models';
@@ -14,12 +13,12 @@ const ATOM_SYMBOL_START = 31;
 //
 // The minimal RDKit WASM has no atom-editing API or reactions, so the symbol is rewritten in the
 // molblock and re-parsed.
-export async function toggleTerminalAmide(
+export function toggleTerminalAmide(
+  rdkit: RDKitModule,
   smiles: string,
   backbone: Partial<CustomResidueBackbone> | undefined,
   toAmide: boolean
-): Promise<string | null> {
-  const rdkit = await loadRDKitModule();
+): string | null {
   const terminal = detectCustomResidueBackbone(rdkit, smiles, backbone, !toAmide)?.oxt;
   if (terminal === undefined || terminal < 0) return null;
   return replaceAtomElement(rdkit, smiles, terminal, toAmide ? 'N' : 'O');

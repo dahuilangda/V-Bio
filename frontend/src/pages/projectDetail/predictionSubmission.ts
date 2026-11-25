@@ -7,10 +7,10 @@ import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, Proj
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 import { selectedCustomResidueDefinitions } from './peptideCustomResidues';
 import { pocketOptionsWithRestoredTemplate } from '../../utils/peptidePocket';
-import { loadRDKitModule } from '../../utils/rdkit';
 import { parseVirtualScreeningInput, validateVirtualScreeningSmiles } from '../../utils/virtualScreening';
 import { normalizeTaskSummary } from '../../utils/taskMetadata';
-import { firstBackboneSlotError, validateCustomResidueBackbone } from '../../utils/constraintAtomOptions';
+import { firstBackboneSlotError } from '../../utils/constraintAtomOptions';
+import { validateCustomResidueBackbone } from '../../utils/rdkitClient';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 
@@ -230,7 +230,6 @@ async function validateAllCustomResidueBackbones(
   options: ProjectInputConfig['options'],
   isPeptideDesignWorkflow: boolean
 ): Promise<string | null> {
-  const rdkit = await loadRDKitModule();
   for (const comp of components) {
     if (comp.type !== 'protein') continue;
     const modifications = (comp as { modifications?: ProteinModification[] }).modifications || [];
@@ -238,7 +237,7 @@ async function validateAllCustomResidueBackbones(
       if (mod.inputMethod !== 'jsme' || !mod.backbone) continue;
       const smiles = String(mod.smiles || '').trim();
       if (!smiles) continue;
-      const first = firstBackboneSlotError(validateCustomResidueBackbone(rdkit, smiles, mod.backbone, Boolean(mod.cTerminalAmidated)));
+      const first = firstBackboneSlotError(await validateCustomResidueBackbone(smiles, mod.backbone, Boolean(mod.cTerminalAmidated)));
       if (first) return `Custom residue ${mod.ccd || '(unnamed)'} (position ${mod.position}): ${first}`;
     }
   }
@@ -247,7 +246,7 @@ async function validateAllCustomResidueBackbones(
       if (!def.backbone) continue;
       const smiles = String(def.smiles || '').trim();
       if (!smiles) continue;
-      const first = firstBackboneSlotError(validateCustomResidueBackbone(rdkit, smiles, def.backbone, Boolean(def.cTerminalAmidated)));
+      const first = firstBackboneSlotError(await validateCustomResidueBackbone(smiles, def.backbone, Boolean(def.cTerminalAmidated)));
       if (first) return `Custom residue ${def.ccd}: ${first}`;
     }
   }

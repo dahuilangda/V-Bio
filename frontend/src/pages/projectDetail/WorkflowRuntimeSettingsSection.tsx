@@ -3,12 +3,17 @@ import { CustomResidueEditorModal } from './CustomResidueEditorModal';
 import { CommitNumberInput } from '../../components/common/CommitNumberInput';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
 import { buildCustomResidueCatalog, BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES, type ResidueCatalogEntry } from '../../components/project/residueCatalog';
-import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
-import { loadRDKitModule } from '../../utils/rdkit';
+import { AMINO_ACID_BACKBONE_SMARTS } from '../../utils/inputValidation';
+import {
+  detectCustomResidueBackbone,
+  molHasAminoAcidBackbone,
+  validateBackboneSlots,
+  validateCustomResidueBackbone
+} from '../../utils/rdkitClient';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
 import { engineOptionsFor, peptideEngineOptionsFor, engineSupportsChirality, engineSupportsDesignMode, engineSupportsPeptideRole, type DesignMode } from '../../config/engineCapabilities';
-import { detectCustomResidueBackbone, firstBackboneSlotError, generateCustomResidueCode, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
+import { firstBackboneSlotError, generateCustomResidueCode, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { useAuth } from '../../hooks/useAuth';
 import { InfoTip } from '../../components/common/InfoTip';
 import { CUSTOM_RESIDUE_SCAFFOLD_SMILES } from './peptideCustomResidues';
@@ -416,20 +421,21 @@ export function WorkflowRuntimeSettingsSection({
           return;
         }
         try {
-          const rdkit = await loadRDKitModule();
+          const valid = await molHasAminoAcidBackbone(smiles, true);
           if (cancelled) return;
-          const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
           setCustomDraftValid(valid);
           // amidation flips the terminal element; re-detect keeping the user's picks
           const latestBackbone = customDraftBackboneRef.current;
           if (amidatedChanged) {
             skipBackboneAutoDetectRef.current = false;
             const anchors = manualOverrideBackboneRef.current ? latestBackbone : {};
-            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, anchors, customDraftAmidated) ?? {});
+            setCustomDraftBackbone((await detectCustomResidueBackbone(smiles, anchors, customDraftAmidated)) ?? {});
+            if (cancelled) return;
             setCustomDraftAutoStatus('idle');
           } else if (manualOverrideBackboneRef.current) {
             // user picked atoms: validate them, never auto-detect over them
-            const kept = validateBackboneSlots(rdkit, smiles, latestBackbone, customDraftAmidated);
+            const kept = await validateBackboneSlots(smiles, latestBackbone, customDraftAmidated);
+            if (cancelled) return;
             if (CUSTOM_BACKBONE_SLOTS.some((slot) => kept[slot] !== latestBackbone[slot])) {
               setCustomDraftBackbone(kept);
             }
@@ -437,7 +443,8 @@ export function WorkflowRuntimeSettingsSection({
             skipBackboneAutoDetectRef.current = false;
           } else if (valid) {
             // fresh auto-detection as a starting suggestion
-            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, {}, customDraftAmidated) ?? {});
+            setCustomDraftBackbone((await detectCustomResidueBackbone(smiles, {}, customDraftAmidated)) ?? {});
+            if (cancelled) return;
             setCustomDraftAutoStatus('idle');
           } else {
             setCustomDraftBackbone({});
@@ -470,9 +477,8 @@ export function WorkflowRuntimeSettingsSection({
         return;
       }
       try {
-        const rdkit = await loadRDKitModule();
+        const errors = await validateCustomResidueBackbone(customDraftSmiles.trim(), customDraftBackbone as CustomResidueBackbone, customDraftAmidated);
         if (cancelled) return;
-        const errors = validateCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone as CustomResidueBackbone, customDraftAmidated);
         if (!cancelled) setCustomDraftSlotErrors(errors);
       } catch {
         // RDKit not warmed yet; keep the previous verdict
@@ -534,9 +540,8 @@ export function WorkflowRuntimeSettingsSection({
 
   const resetBackboneToAuto = async () => {
     manualOverrideBackboneRef.current = false;
-    const rdkit = await loadRDKitModule();
     // re-detect with the current picks as anchors; only empty slots are filled
-    const detected = detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone, customDraftAmidated);
+    const detected = await detectCustomResidueBackbone(customDraftSmiles.trim(), customDraftBackbone, customDraftAmidated);
     if (detected) {
       setCustomDraftBackbone(detected);
       setCustomDraftAutoStatus('idle');

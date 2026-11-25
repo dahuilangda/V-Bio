@@ -54,8 +54,8 @@ import { buildVirtualScreeningYaml, VIRTUAL_SCREENING_EXAMPLE } from '../utils/v
 import { getWorkflowDefinition } from '../utils/workflows';
 import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
-import { loadRDKitModule } from '../utils/rdkit';
-import { rdkitMolHasAminoAcidBackbone, looksLikeAminoAcidBackboneSmiles } from '../utils/inputValidation';
+import { looksLikeAminoAcidBackboneSmiles } from '../utils/inputValidation';
+import { molHasAminoAcidBackbone } from '../utils/rdkitClient';
 import { ApiYamlBuilderModal } from './ApiYamlBuilderModal';
 import { ApiProjectTokenModal } from './ApiProjectTokenModal';
 import '../styles/api-access.css';
@@ -1585,15 +1585,9 @@ ${submitTaskIdCapture}`;
       setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: false }));
       return;
     }
-    setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: looksLikeAminoAcidBackboneSmiles(text) }));
-    void loadRDKitModule()
-      .then((rdkit) => {
-        const valid = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
-        setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: valid }));
-      })
-      .catch(() => {
-        setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: looksLikeAminoAcidBackboneSmiles(text) }));
-      });
+    void molHasAminoAcidBackbone(text, true).then((valid) => {
+      setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: valid }));
+    });
   }, []);
 
   const patchYamlBuilderModification = (componentId: string, modificationId: string, patch: Partial<ProteinModification>) => {

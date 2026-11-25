@@ -1,6 +1,6 @@
 import type { InputComponent } from '../types/models';
 import { normalizeComponentSequence } from './projectInputs';
-import type { RDKitModule } from './rdkit';
+import type { RDKitMol, RDKitModule } from './rdkit';
 
 
 // α-nitrogen accepts any valence (incl. protonated [NH3+] from JSME zwitterions) — mirrors the
@@ -9,7 +9,7 @@ import type { RDKitModule } from './rdkit';
 export const AMINO_ACID_BACKBONE_SMARTS = '[N;!$(NC=O)]-[C;X4]-C(=O)[O,N]';
 export const AMINO_ACID_TERMINAL_BACKBONE_SMARTS = '[N]-[C;X4]-C(=O)[O,N]';
 
-function hasSubstructureMatchPayload(value: unknown): boolean {
+export function hasSubstructureMatchPayload(value: unknown): boolean {
   if (typeof value === 'string') {
     const text = value.trim();
     if (!text || text === '-1' || text === '[]' || text === 'null' || text === '{}') return false;
@@ -28,6 +28,13 @@ function hasSubstructureMatchPayload(value: unknown): boolean {
   return false;
 }
 
+export function molMatchesQuery(mol: RDKitMol, query: RDKitMol): boolean {
+  if (typeof mol.get_substruct_match === 'function' && hasSubstructureMatchPayload(mol.get_substruct_match(query))) {
+    return true;
+  }
+  return typeof mol.get_substruct_matches === 'function' && hasSubstructureMatchPayload(mol.get_substruct_matches(query));
+}
+
 export function rdkitMolHasAminoAcidBackbone(rdkit: RDKitModule, smiles: string, allowTerminal = true): boolean {
   const text = String(smiles || '').trim();
   if (!text || !rdkit) return false;
@@ -39,11 +46,7 @@ export function rdkitMolHasAminoAcidBackbone(rdkit: RDKitModule, smiles: string,
       const query = (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(pattern) : null) || rdkit.get_mol(pattern);
       if (!query) continue;
       try {
-        const hasMatch = Boolean(
-          (typeof mol.get_substruct_match === 'function' && hasSubstructureMatchPayload(mol.get_substruct_match(query))) ||
-            (typeof mol.get_substruct_matches === 'function' && hasSubstructureMatchPayload(mol.get_substruct_matches(query)))
-        );
-        if (hasMatch) return true;
+        if (molMatchesQuery(mol, query)) return true;
       } finally {
         query.delete();
       }

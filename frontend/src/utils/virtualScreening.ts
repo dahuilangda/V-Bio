@@ -1,7 +1,7 @@
 import yaml from 'js-yaml';
 import type { InputComponent } from '../types/models';
 import { assignChainIdsForComponents } from './chainAssignments';
-import { loadRDKitModule } from './rdkit';
+import { canonicalSmilesList } from './rdkitClient';
 
 export interface VirtualScreeningCompound {
   id: string;
@@ -237,37 +237,24 @@ export function parseVirtualScreeningInput(rawInput: string): VirtualScreeningPa
 export async function validateVirtualScreeningSmiles(
   compounds: VirtualScreeningCompound[]
 ): Promise<VirtualScreeningValidationResult> {
-  const rdkit = await loadRDKitModule();
+  const canonical = await canonicalSmilesList(compounds.map((compound) => compound.smiles));
   const invalid: Array<{ index: number; message: string }> = [];
   const warnings: string[] = [];
   const canonicalOwners = new Map<string, string>();
-  const next = compounds.map((compound) => ({ ...compound }));
-  for (let index = 0; index < next.length; index += 1) {
-    const compound = next[index];
-    let mol: ReturnType<typeof rdkit.get_mol> = null;
-    try {
-      mol = rdkit.get_mol(compound.smiles);
-    } catch {
-      mol = null;
-    }
-    if (!mol) {
+  const next = compounds.map((compound, index) => {
+    if (canonical[index] === null) {
       invalid.push({ index, message: 'Invalid SMILES: ' + compound.smiles });
-      continue;
+      return { ...compound };
     }
-    try {
-      const canonical = String(mol.get_smiles?.() || compound.smiles).trim();
-      const canonicalSmiles = canonical || compound.smiles;
-      next[index].canonicalSmiles = canonicalSmiles;
-      const owner = canonicalOwners.get(canonicalSmiles);
-      if (owner) {
-        warnings.push(compound.name + ' duplicates ' + owner + '; duplicate molecules will be skipped.');
-      } else {
-        canonicalOwners.set(canonicalSmiles, compound.name);
-      }
-    } finally {
-      mol.delete();
+    const canonicalSmiles = canonical[index].trim() || compound.smiles;
+    const owner = canonicalOwners.get(canonicalSmiles);
+    if (owner) {
+      warnings.push(compound.name + ' duplicates ' + owner + '; duplicate molecules will be skipped.');
+    } else {
+      canonicalOwners.set(canonicalSmiles, compound.name);
     }
-  }
+    return { ...compound, canonicalSmiles };
+  });
   return { compounds: next, invalid, warnings };
 }
 

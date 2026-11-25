@@ -1,6 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { renderLigand2DSvg } from '../../utils/ligand2d';
-import { loadRDKitModule } from '../../utils/rdkit';
+import { renderLigand2DSvg } from '../../utils/rdkitClient';
 
 interface Ligand2DPreviewProps {
   smiles: string;
@@ -164,10 +163,7 @@ export function Ligand2DPreview({
 
       try {
         setError('');
-        const rdkit = await loadRDKitModule();
-        if (cancelled) return;
-
-        const rendered = renderLigand2DSvg(rdkit, {
+        const rendered = await renderLigand2DSvg({
           smiles: value,
           width,
           height,

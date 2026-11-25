@@ -876,7 +876,6 @@ export {
   normalizePlddtThreshold,
   normalizeIptmThreshold,
   normalizeSmilesForSearch,
-  hasSubstructureMatchPayload,
   waitForRuntimeTaskToStop
 } from './taskRuntimeUiUtils';
 
