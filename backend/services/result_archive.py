@@ -784,7 +784,7 @@ class ResultArchiveService:
 
     def build_or_get_view_archive(self, source_zip_path: str, preferred_structure_name: str | None = None) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v18-binder-sides'
+        cache_schema_version = 'view-v19-residue-plddt'
         preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}|{preferred_structure_token}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
@@ -1418,6 +1418,15 @@ class ResultArchiveService:
         if not any(seq_ids):
             seq_ids = column('auth_seq_id')
         symbols = column('type_symbol')
+        b_factors = column('B_iso_or_equiv')
+        entity_refs = column('label_entity_id')
+        entity_ids = block.find_values('_entity.id')
+        entity_types = block.find_values('_entity.type')
+        has_entity_table = bool(entity_ids and entity_types and len(entity_ids) == len(entity_types))
+        polymer_entities = (
+            {str(entity_id) for entity_id, entity_type in zip(entity_ids, entity_types)
+             if str(entity_type).lower() == 'polymer'}
+            if has_entity_table else set())
         chains: Dict[str, list] = {}
         for index, row in enumerate(table):
             record, atom, comp, chain, x, y, z = (gemmi.cif.as_string(str(value)) for value in row)
@@ -1428,8 +1437,15 @@ class ResultArchiveService:
                 symbol = 'H'
             if symbol in ('H', 'D'):
                 continue
+            try:
+                b_factor: Optional[float] = float(b_factors[index])
+            except ValueError:
+                b_factor = None
+            entity = entity_refs[index]
+            polymer = entity in polymer_entities if has_entity_table and entity else record == 'ATOM'
             chains.setdefault(chain or auth_asym[index], []).append(
-                (record == 'HETATM', seq_ids[index] or '1', comp, atom, symbol, (float(x), float(y), float(z))))
+                (record == 'HETATM', seq_ids[index] or '1', comp, atom, symbol, (float(x), float(y), float(z)),
+                 b_factor, polymer))
         return chains
 
     @staticmethod
@@ -1439,7 +1455,7 @@ class ResultArchiveService:
         for chain, atoms in chain_atoms.items():
             residues = set()
             het_atoms = 0
-            for het, seq, comp, _atom, _symbol, _xyz in atoms:
+            for het, seq, comp, *_ in atoms:
                 info = gemmi.find_tabulated_residue(comp)
                 if info is not None and (info.is_amino_acid() or info.is_nucleic_acid()) and not het:
                     residues.add((seq, comp))
@@ -1558,7 +1574,7 @@ class ResultArchiveService:
         def side(chains):
             coords, atoms, residues = [], [], []
             for chain in chains:
-                for _het, _seq, comp, atom, symbol, xyz in chain_atoms[chain]:
+                for _het, _seq, comp, atom, symbol, xyz, *_ in chain_atoms[chain]:
                     coords.append(xyz)
                     info = gemmi.find_tabulated_residue(comp)
                     if info is not None and info.is_amino_acid():
@@ -1588,6 +1604,44 @@ class ResultArchiveService:
             'interface_sc': sc_value,
             'interface_sc_median': float(result.median_distance),
         }
+
+    @staticmethod
+    def _extract_residue_plddt_from_zip(src_zip) -> Optional[Dict[str, Any]]:
+        names = [n for n in src_zip.namelist() if not n.endswith('/')]
+        samples = ResultArchiveService._prediction_samples(src_zip, names)
+        candidates = [s for s in samples if s.get('cif')]
+        if not candidates:
+            return None
+        best = ResultArchiveService._best_sample(candidates)
+        try:
+            chain_atoms = ResultArchiveService._cif_chain_atoms(
+                src_zip.read(best['cif']).decode('utf-8', errors='replace'))
+        except Exception:  # noqa: BLE001 — malformed cif: no residue plddt
+            return None
+        residues_by_chain: Dict[str, Dict[tuple, list]] = {}
+        values_by_chain: Dict[str, list] = {}
+        for chain, atoms in chain_atoms.items():
+            residues = residues_by_chain.setdefault(chain, {})
+            chain_values = values_by_chain.setdefault(chain, [])
+            for het, seq, comp, _atom, _symbol, _xyz, b_factor, polymer in atoms:
+                if b_factor is None:
+                    continue
+                chain_values.append(b_factor)
+                if polymer or not het:
+                    residues.setdefault((seq, comp), []).append(b_factor)
+        out: Dict[str, Any] = {}
+        residue_series = {
+            chain: [round(sum(values) / len(values), 2) for values in residues.values()]
+            for chain, residues in residues_by_chain.items() if residues
+        }
+        chain_means = {
+            chain: round(sum(values) / len(values), 2) for chain, values in values_by_chain.items() if values
+        }
+        if residue_series:
+            out['residue_plddt_by_chain'] = residue_series
+        if chain_means:
+            out['chain_mean_plddt'] = chain_means
+        return out or None
 
     @staticmethod
     def _extract_pair_ipsae(src_zip, binding: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -1938,6 +1992,12 @@ class ResultArchiveService:
                         merged.update(sc_block)
                 except Exception as exc:  # noqa: BLE001 — sc is additive
                     self.logger.warning('interface sc extraction skipped: %s', exc)
+                try:
+                    plddt_block = self._extract_residue_plddt_from_zip(src_zip)
+                    for key, value in (plddt_block or {}).items():
+                        merged.setdefault(key, value)
+                except Exception as exc:  # noqa: BLE001 — residue plddt is additive
+                    self.logger.warning('residue plddt extraction skipped: %s', exc)
                 pair_block = self._extract_pair_ipsae(src_zip)
                 if pair_block:
                     merged.update(pair_block)
