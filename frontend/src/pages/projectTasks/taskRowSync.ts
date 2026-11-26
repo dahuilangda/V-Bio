@@ -293,34 +293,6 @@ function shouldRepairStalePendingRuntimeTask(
   return Date.now() - newestActivityMs >= STALE_PENDING_RUNTIME_REPAIR_AGE_MS;
 }
 
-async function fetchTaskStatusesWithFallback(
-  taskIds: string[]
-): Promise<Record<string, RuntimeTaskStatusPayload>> {
-  const normalizedTaskIds = Array.from(new Set(taskIds.map((taskId) => String(taskId || '').trim()).filter(Boolean)));
-  if (normalizedTaskIds.length === 0) return {};
-  try {
-    return await getTaskStatuses(normalizedTaskIds);
-  } catch (error) {
-    console.warn('[taskRowSync] Batch status lookup failed; retrying per task.', {
-      taskCount: normalizedTaskIds.length,
-      error: readErrorMessage(error)
-    });
-  }
-
-  const recovered: Record<string, RuntimeTaskStatusPayload> = {};
-  const fallbackConcurrency = 8;
-  for (let index = 0; index < normalizedTaskIds.length; index += fallbackConcurrency) {
-    const chunk = normalizedTaskIds.slice(index, index + fallbackConcurrency);
-    const settled = await Promise.allSettled(chunk.map(async (taskId) => [taskId, await getTaskStatus(taskId)] as const));
-    for (const item of settled) {
-      if (item.status !== 'fulfilled') continue;
-      const [taskId, status] = item.value;
-      recovered[taskId] = status;
-    }
-  }
-  return recovered;
-}
-
 function canPersistProjectChanges(project: Project | null | undefined): boolean {
   return canEditProject(project);
 }
@@ -1311,7 +1283,7 @@ export async function syncRuntimeTaskRows(
   if (taskIdsForPoll.length > 0) {
     for (let i = 0; i < taskIdsForPoll.length; i += RUNTIME_STATUS_BATCH_CHUNK_SIZE) {
       const chunk = taskIdsForPoll.slice(i, i + RUNTIME_STATUS_BATCH_CHUNK_SIZE);
-      Object.assign(statusByTaskId, await fetchTaskStatusesWithFallback(chunk));
+      Object.assign(statusByTaskId, await getTaskStatuses(chunk));
     }
   }
 
@@ -1536,7 +1508,7 @@ export async function syncInitialRuntimeTaskRows(
 
   const statusByTaskId =
     taskIdsForStatus.length > 0
-      ? await fetchTaskStatusesWithFallback(taskIdsForStatus)
+      ? await getTaskStatuses(taskIdsForStatus)
       : {};
 
   for (const runtimeTask of runtimeRows) {
