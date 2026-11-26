@@ -129,9 +129,8 @@ from backend.runtime.design_strategy import (
     rfd4_generation_queue,
     strategy_class,
 )
-from backend.runtime.backends import is_structure_backend, structure_backend
+from backend.runtime.backends import is_structure_backend, resolve_ccd_before_gpu
 from backend.runtime.backends.base import BackendRunContext
-from backend.runtime.backends.request import PredictionRequest
 from backend.runtime.msa_pipeline import (
     get_sequence_hash,
     request_msa_from_server,
@@ -1052,6 +1051,41 @@ def _normalize_initial_sequence(
     else:
         cleaned = cleaned[:binder_length]
     return _apply_sequence_mask(cleaned, sequence_mask)
+
+
+def _candidate_ccd_probe_yaml(
+    base_yaml_data: Dict[str, Any],
+    binder_chain_id: str,
+    binder_length: int,
+    fixed_modifications: List[Dict[str, Any]],
+    unnatural_pool: List[Dict[str, str]],
+    amidated_ccds: set,
+) -> str:
+    binder_modifications: List[Dict[str, Any]] = []
+    for mod in fixed_modifications:
+        position = binder_length if mod["ccd"] in amidated_ccds else int(mod["position"])
+        if position <= binder_length:
+            binder_modifications.append({"position": position, "ccd": mod["ccd"]})
+    probe_length = binder_length
+    for entry in unnatural_pool:
+        placement = entry.get("placement")
+        if placement == "n_term":
+            position = 1
+        elif placement == "c_term" or entry["ccd"] in amidated_ccds:
+            position = binder_length
+        else:
+            probe_length += 1
+            position = probe_length
+        binder_modifications.append({"position": position, "ccd": entry["ccd"]})
+    data = copy.deepcopy(base_yaml_data)
+    data["sequences"] = list(data.get("sequences") or []) + [{
+        "protein": {
+            "id": binder_chain_id,
+            "sequence": "A" * probe_length,
+            "modifications": binder_modifications,
+        }
+    }]
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 def _build_peptide_candidate_yaml(
@@ -3669,11 +3703,6 @@ def run_peptide_design_backend(
             if isinstance(pos, (int, float)) and int(pos) >= 1 and ccd:
                 fixed_modifications.append({"position": int(pos), "ccd": ccd})
 
-    if is_structure_backend(backend):
-        scorer = structure_backend(backend)
-        scorer.check_ccd_codes(m["ccd"] for m in fixed_modifications)
-        scorer.validate_ccd_input(PredictionRequest.from_yaml(yaml_content), custom_ccd_molecules)
-
     used_chain_ids = _extract_chain_ids_from_yaml(base_yaml_data)
     chain_order = list(used_chain_ids)
     binder_chain_id = _next_available_chain_id(used_chain_ids, "B")
@@ -3787,6 +3816,14 @@ def run_peptide_design_backend(
     if design_mode in ("cyclic", "bicyclic") and any(row.get("placement") == "c_term" for row in unnatural_pool):
         raise ValueError("C-terminal amidated residues cannot be used in cyclic/bicyclic peptide design (no free C-terminus). Remove them or switch to linear mode.")
     custom_molecules = _merge_selected_peptide_preset_molecules(custom_molecules, unnatural_pool)
+    amidated_ccds = {str(m["ccd"]) for m in custom_molecules if m.get("cTerminalAmidated")}
+    if is_structure_backend(backend):
+        resolve_ccd_before_gpu(
+            backend,
+            _candidate_ccd_probe_yaml(
+                base_yaml_data, binder_chain_id, binder_length,
+                fixed_modifications, unnatural_pool, amidated_ccds),
+            custom_molecules)
     _peptide_allowed_residues(natural_pool, design_mode)
     nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
     nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", 0, min_value=0, max_value=binder_length)
@@ -4217,11 +4254,6 @@ def run_peptide_design_backend(
                     f"({_msa_seed_exc}); engine-side server fetch remains "
                     "the fallback", file=sys.stderr)
 
-        amidated_ccds = {
-            str(m.get("ccd") or "").strip().upper()
-            for m in custom_molecules or []
-            if isinstance(m, dict) and m.get("cTerminalAmidated")
-        }
         generation_jobs: List[Dict[str, Any]] = []
         generation_completed_base = completed_tasks
         for idx, candidate in enumerate(generation_candidates, start=1):
