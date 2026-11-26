@@ -451,7 +451,7 @@ def register_task_routes(
         if state == 'SUCCESS' and info.get('result_file'):
             completed_at = _archive_completed_at(info['result_file'])
         elif (meta := celery_app.backend.get_task_meta(task_id, cache=False)).get('status') == state:
-            completed_at = meta['date_done'].isoformat()
+            completed_at = meta['date_done']
         else:
             completed_at = _tracker_completed_at(info.get('tracker'))
         if completed_at:
