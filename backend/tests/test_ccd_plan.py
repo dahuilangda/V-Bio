@@ -181,6 +181,13 @@ class PlanTests(unittest.TestCase):
         request = request_with((4, "NLE"), ligand="SEZ")
         engine.resolve_ccd_codes(request, engine.validate_ccd_input(request, []))
 
+    def test_engine_dictionary_is_read_once_per_backend(self):
+        catalog = StubCatalog({"ACE"})
+        engine = Engine(catalog)
+        for request in (request_with((1, "ACE")), request_with((5, "ACE")), request_with((1, "ACE"), ligand="SEZ")):
+            engine.resolve_ccd_codes(request, engine.validate_ccd_input(request, []))
+        self.assertEqual(catalog.reads, 1)
+
     def test_resolve_skips_the_catalog_without_ccd_references(self):
         catalog = StubCatalog({"ACE"})
         engine = Engine(catalog)
@@ -239,6 +246,8 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(is_structure_backend("boltz2dock"))
         self.assertFalse(is_structure_backend("nesso"))
         self.assertIsNone(resolve_ccd_before_gpu("nesso", "sequences: []", []))
+        engine = structure_backend("protenix2dock")
+        self.addCleanup(setattr, engine, "_catalog", None)
         with mock.patch.object(ProtenixBackend, "ccd_catalog", return_value=StubCatalog({"FME"})):
             with self.assertRaisesRegex(UserInputError, "ZAC"):
                 resolve_ccd_before_gpu("protenix2dock", request_with((3, "ZAC")).source_yaml, [])

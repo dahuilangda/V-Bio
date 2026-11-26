@@ -47,6 +47,7 @@ class StructureBackend(ABC):
     serializes_ccd_blocks: ClassVar[bool] = True
     injects_referenced_presets: ClassVar[bool] = False
     validates_ccd_mmcif: ClassVar[bool] = False
+    _catalog: CcdCatalog | None = None
 
     @classmethod
     def supported_constraints(cls) -> frozenset[str]:
@@ -108,11 +109,12 @@ class StructureBackend(ABC):
         referenced = _referenced_ccd_codes(request)
         if not resolution.molecules and not referenced:
             return resolution
-        catalog = self.ccd_catalog()
+        if self._catalog is None:
+            self._catalog = self.ccd_catalog()
         molecules = [dict(molecule) for molecule in resolution.molecules]
-        remap = catalog.rename_collisions(molecules)
+        remap = self._catalog.rename_collisions(molecules)
         defined = {str(m["ccd"]) for m in molecules} | set(remap) | _platform_ccd_codes()
-        missing = catalog.missing(referenced - defined)
+        missing = self._catalog.missing(referenced - defined)
         if missing:
             raise UserInputError(
                 f"{self.name} 无法解析 CCD 编码: {', '.join(missing)}。"
