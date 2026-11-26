@@ -4,7 +4,6 @@ import {
   getTaskRuntimeIndex,
   getTaskStatus,
   getTaskStatuses,
-  type TaskRuntimeIndexResponse,
   parseResultBundle
 } from '../../api/backendApi';
 import { updateProject, updateProjectTask } from '../../api/supabaseLite';
@@ -125,7 +124,6 @@ const RUNNING_RUNTIME_STATUS_POLL_MAX_TASKS = 256;
 const PRIORITY_RUNTIME_STATUS_POLL_MAX_TASKS = 48;
 const BACKGROUND_RUNTIME_STATUS_POLL_MAX_TASKS = 256;
 const LEADOPT_STATUS_LIGHT_POLL_MAX_ROWS = 3;
-const STALE_PENDING_RUNTIME_REPAIR_AGE_MS = 2 * 60 * 60 * 1000;
 const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
 
 interface SyncRuntimeTaskRowsOptions {
@@ -253,44 +251,27 @@ function readErrorMessage(error: unknown): string {
   return String(error || 'unknown error');
 }
 
-function readTimestampMs(value: unknown): number {
-  const text = String(value || '').trim();
-  if (!text) return Number.NaN;
-  const parsed = Date.parse(text);
-  return Number.isFinite(parsed) ? parsed : Number.NaN;
-}
-
-function readNewestTaskActivityMs(task: ProjectTask): number {
-  const candidates = [task.updated_at, task.submitted_at, task.created_at].map(readTimestampMs).filter(Number.isFinite);
-  if (candidates.length === 0) return Number.NaN;
-  return Math.max(...candidates);
-}
-
-function isGenericPendingQueueStatus(
-  status: RuntimeTaskStatusPayload | null | undefined
-): boolean {
-  if (!status) return false;
-  if (String(status.state || '').trim().toUpperCase() !== 'PENDING') return false;
-  const info = asRecord(status.info);
-  if (String(info.result_file || '').trim()) return false;
-  if (Object.keys(asRecord(info.tracker)).length > 0) return false;
-  const statusText = readStatusText(status).trim().toLowerCase();
-  return statusText === 'task is waiting in the queue.';
-}
-
-function shouldRepairStalePendingRuntimeTask(
-  task: ProjectTask,
-  status: RuntimeTaskStatusPayload | null | undefined,
-  runtimeTaskIndex: TaskRuntimeIndexResponse | null,
-  activeTaskIdSet: Set<string>,
-  queuedTaskIdSet: Set<string>
-): boolean {
-  if (!runtimeTaskIndex) return false;
-  if (activeTaskIdSet.size > 0 || queuedTaskIdSet.size > 0) return false;
-  if (!isGenericPendingQueueStatus(status)) return false;
-  const newestActivityMs = readNewestTaskActivityMs(task);
-  if (!Number.isFinite(newestActivityMs)) return false;
-  return Date.now() - newestActivityMs >= STALE_PENDING_RUNTIME_REPAIR_AGE_MS;
+function resolveRuntimePollOutcome(
+  status: RuntimeTaskStatusPayload | undefined,
+  queuePresence: ProjectTask['task_state'] | null,
+  row: ProjectTask,
+  activeTaskIdSet: Set<string>
+): { taskState: ProjectTask['task_state']; statusText: string } {
+  if (!status) {
+    const taskState = queuePresence!;
+    const rowText =
+      String(row.task_state || '').trim().toUpperCase() === taskState ? String(row.status_text || '').trim() : '';
+    return {
+      taskState,
+      statusText: rowText || (taskState === 'RUNNING' ? 'Task is running.' : 'Task is waiting in the queue.')
+    };
+  }
+  const inferred = inferTaskStateFromStatusPayload(status, row.task_state);
+  const taskState =
+    inferred === 'QUEUED' && activeTaskIdSet.has(String(row.task_id || '').trim())
+      ? ('RUNNING' as ProjectTask['task_state'])
+      : inferred;
+  return { taskState, statusText: readStatusText(status) };
 }
 
 function canPersistProjectChanges(project: Project | null | undefined): boolean {
@@ -1291,41 +1272,10 @@ export async function syncRuntimeTaskRows(
     const runtimeTaskId = String(runtimeTask.task_id || '').trim();
     if (!runtimeTaskId) continue;
     const statusPayload = statusByTaskId[runtimeTaskId];
-    const currentTaskState = String(runtimeTask.task_state || '').trim().toUpperCase();
     const queuePresenceState: ProjectTask['task_state'] | null =
       activeTaskIdSet.has(runtimeTaskId) ? 'RUNNING' : queuedTaskIdSet.has(runtimeTaskId) ? 'QUEUED' : null;
     if (!statusPayload && !queuePresenceState) continue;
-    const stalePendingRepair = shouldRepairStalePendingRuntimeTask(
-      runtimeTask,
-      statusPayload,
-      runtimeTaskIndex,
-      activeTaskIdSet,
-      queuedTaskIdSet
-    );
-
-    const taskState =
-      stalePendingRepair
-        ? 'FAILURE'
-        : !statusPayload
-        ? queuePresenceState!
-        : (() => {
-            const inferred = inferTaskStateFromStatusPayload(statusPayload, runtimeTask.task_state);
-            if (inferred === 'QUEUED' && activeTaskIdSet.has(runtimeTaskId)) {
-              return 'RUNNING' as ProjectTask['task_state'];
-            }
-            return inferred;
-          })();
-    const rawStatusText = stalePendingRepair
-      ? 'Task not found in runtime backend; stale queued row repaired.'
-      : statusPayload
-        ? readStatusText(statusPayload)
-        : taskState === 'RUNNING'
-          ? currentTaskState === 'RUNNING' && String(runtimeTask.status_text || '').trim()
-            ? String(runtimeTask.status_text || '').trim()
-            : 'Task is running.'
-          : currentTaskState === 'QUEUED' && String(runtimeTask.status_text || '').trim()
-            ? String(runtimeTask.status_text || '').trim()
-            : 'Task is waiting in the queue.';
+    const { taskState, statusText: rawStatusText } = resolveRuntimePollOutcome(statusPayload, queuePresenceState, runtimeTask, activeTaskIdSet);
     const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
     const statusText =
       runtimeWorkflow === 'lead_optimization' &&
@@ -1335,11 +1285,7 @@ export async function syncRuntimeTaskRows(
         : rawStatusText;
     const errorText = taskState === 'FAILURE' ? statusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-    const completedAt = !terminal
-      ? null
-      : stalePendingRepair
-        ? new Date().toISOString()
-        : runtimeTask.completed_at || readTaskRuntimeCompletedAt(statusPayload!);
+    const completedAt = terminal ? runtimeTask.completed_at || readTaskRuntimeCompletedAt(statusPayload!) : null;
     const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
     const durationSeconds =
       terminal && submittedAt && completedAt
@@ -1515,41 +1461,10 @@ export async function syncInitialRuntimeTaskRows(
     const runtimeTaskId = String(runtimeTask.task_id || '').trim();
     if (!runtimeTaskId) continue;
     const statusPayload = statusByTaskId[runtimeTaskId];
-    const currentTaskState = String(runtimeTask.task_state || '').trim().toUpperCase();
     const queuePresenceState: ProjectTask['task_state'] | null =
       activeTaskIdSet.has(runtimeTaskId) ? 'RUNNING' : queuedTaskIdSet.has(runtimeTaskId) ? 'QUEUED' : null;
     if (!statusPayload && !queuePresenceState) continue;
-    const stalePendingRepair = shouldRepairStalePendingRuntimeTask(
-      runtimeTask,
-      statusPayload,
-      runtimeTaskIndex,
-      activeTaskIdSet,
-      queuedTaskIdSet
-    );
-
-    const taskState =
-      stalePendingRepair
-        ? 'FAILURE'
-        : !statusPayload
-        ? queuePresenceState!
-        : (() => {
-            const inferred = inferTaskStateFromStatusPayload(statusPayload, runtimeTask.task_state);
-            if (inferred === 'QUEUED' && activeTaskIdSet.has(runtimeTaskId)) {
-              return 'RUNNING' as ProjectTask['task_state'];
-            }
-            return inferred;
-          })();
-    const statusText = stalePendingRepair
-      ? 'Task not found in runtime backend; stale queued row repaired.'
-      : statusPayload
-        ? readStatusText(statusPayload)
-        : taskState === 'RUNNING'
-          ? currentTaskState === 'RUNNING' && String(runtimeTask.status_text || '').trim()
-            ? String(runtimeTask.status_text || '').trim()
-            : 'Task is running.'
-          : currentTaskState === 'QUEUED' && String(runtimeTask.status_text || '').trim()
-            ? String(runtimeTask.status_text || '').trim()
-            : 'Task is waiting in the queue.';
+    const { taskState, statusText } = resolveRuntimePollOutcome(statusPayload, queuePresenceState, runtimeTask, activeTaskIdSet);
     const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
     const normalizedStatusText =
       runtimeWorkflow === 'lead_optimization' &&
@@ -1559,11 +1474,7 @@ export async function syncInitialRuntimeTaskRows(
         : statusText;
     const errorText = taskState === 'FAILURE' ? normalizedStatusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-    const completedAt = !terminal
-      ? null
-      : stalePendingRepair
-        ? new Date().toISOString()
-        : runtimeTask.completed_at || readTaskRuntimeCompletedAt(statusPayload!);
+    const completedAt = terminal ? runtimeTask.completed_at || readTaskRuntimeCompletedAt(statusPayload!) : null;
     const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
     const durationSeconds =
       terminal && submittedAt && completedAt
