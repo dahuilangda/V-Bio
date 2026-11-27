@@ -24,3 +24,12 @@ The default destination is `vbio-results/vbio-<task_id>.zip` in the current work
 - After a new submission, default to monitoring and downloading unless the user gives different instructions.
 
 Report a task ID and a known task-list link in the submission receipt. For a single status check, give the state and any available stage, estimate, or failure reason. If the archive is still publishing, report computation success and archive availability separately. For multiple tasks, use a table with one row per task. Offer the next action only when there is a decision or blocker.
+
+## Interpret prediction results
+
+For a result summary, inspect the full ZIP for structures and engine outputs. Use `metrics <task_id>` to read the compact metrics from the V-Bio result view when available. That view can expose server-computed values absent from the raw model JSON. A missing metrics block means the view did not provide it. When the route is unavailable, use the downloaded artifacts and the V-Bio result page.
+
+- Lead with the top-ranked structure and a link or archive member path. Rank samples using the engine's ranking metric and match each structure to the metrics for the same seed and sample. Count actual structure files and distinguish them from confidence and auxiliary files.
+- Report confidence relevant to the task. For a monomer, use available local and global confidence measures. SC, ipSAE, and interchain ipTM are not applicable when the input has no interface. Do not interpret placeholder zeros as failed confidence.
+- For applicable complexes, look for `interface_sc` (shape complementarity) and `pair_ipsae` or the related directional ipSAE fields. Report the evaluated interface and direction when available. Use the server-computed values for the selected result and avoid attaching them to every sample. Distinguish a missing value from zero and from a metric that does not apply.
+- Summarize only the fields that help the user interpret the outcome. Use a Markdown table when comparing samples. Present confidence and interface geometry as computational measures. Similar confidence values alone do not establish structural agreement or experimental accuracy.

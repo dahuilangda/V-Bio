@@ -34,7 +34,11 @@ class Gateway(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.requests.append((self.path, self.headers["X-API-Token"]))
-        if "/status/" in self.path:
+        if "/project?" in self.path:
+            self.respond(200, b'{"project_id":"project+A","workflow":"prediction","can_submit":true}')
+        elif "/view?" in self.path:
+            self.respond(200, self.server.archive)
+        elif "/status/" in self.path:
             task_id = self.path.split("/status/")[1].split("?")[0]
             queue = getattr(self.server, "status_queue", [])
             state, info = queue.pop(0) if queue else ("SUCCESS", {})
@@ -182,6 +186,27 @@ class ClientTest(unittest.TestCase):
         self.env["VBIO_PROJECT_ID"] = "project+A"
         self.cli("submit", "a.json", "--approved-preview", approved)
         self.assertIn(("yaml_file", original), self.gateway.requests[0][2])
+
+    def test_project_check_is_read_only(self):
+        project = json.loads(self.cli("project").stdout)
+        self.assertEqual(project["workflow"], "prediction")
+        self.assertTrue(project["can_submit"])
+        self.assertEqual(self.gateway.requests, [
+            ("/vbio-api/project?project_id=project%2BA", TOKEN)
+        ])
+
+    def test_metrics_reads_compact_view_without_saving_an_archive(self):
+        self.assertEqual(json.loads(self.cli("metrics", "job-1").stdout), {"metrics": None})
+        archive = io.BytesIO()
+        metrics = {"interface_sc": 0.6, "pair_ipsae": [{"a_to_b": 0.7, "b_to_a": 0.5}]}
+        with zipfile.ZipFile(archive, "w") as result:
+            result.writestr("compact_metrics.json", json.dumps(metrics))
+        self.gateway.archive = archive.getvalue()
+        self.assertEqual(json.loads(self.cli("metrics", "job-1").stdout), {"metrics": metrics})
+        self.assertEqual(self.gateway.requests[-1], (
+            "/vbio-api/results/job-1/view?project_id=project%2BA", TOKEN
+        ))
+        self.assertFalse((self.root / "vbio-results").exists())
 
     def test_task_reads_and_zip(self):
         self.assertEqual(json.loads(self.cli("status", "job-1").stdout)["state"], "SUCCESS")

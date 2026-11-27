@@ -203,7 +203,7 @@ def read_json(url, token, form=(), timeout=300):
 def task_url(base, project, task_id, kind):
     segment = quote(task_id, safe="")
     prefix = "status" if kind == "status" else "results"
-    suffix = "/screening" if kind == "screening" else ""
+    suffix = f"/{kind}" if kind in {"screening", "view"} else ""
     return f"{base}/{prefix}/{segment}{suffix}?{urlencode({'project_id': project})}"
 
 
@@ -224,6 +224,26 @@ def save_result(url, token, task_id, output, timeout=300):
             raise ValueError("Gateway did not return a ZIP archive.")
         os.link(body, destination)
     return str(destination)
+
+
+def read_compact_metrics(url, token):
+    with tempfile.TemporaryDirectory() as temporary:
+        body = Path(temporary) / "response"
+        request(url, token, body, ())
+        try:
+            with zipfile.ZipFile(body) as archive:
+                try:
+                    entry = archive.getinfo("compact_metrics.json")
+                except KeyError:
+                    return None
+                if entry.file_size > 16 * 1024 * 1024:
+                    raise ValueError("Compact result metrics exceed the supported size.")
+                data = json.loads(archive.read(entry))
+        except (zipfile.BadZipFile, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Gateway returned an invalid result view.") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Expected an object in compact result metrics.")
+        return data
 
 
 def remember(history, key, **fields):
@@ -299,10 +319,12 @@ def main():
     review = submit.add_mutually_exclusive_group()
     review.add_argument("--dry-run", action="store_true", help="Validate locally without a network request.")
     review.add_argument("--approved-preview", metavar="ID", help="Require an exact match to the reviewed preview.")
+    commands.add_parser("project", help="Check the configured project and submission permission.")
     commands.add_parser("tasks", help="List task records saved in this workspace.")
     for name, help_text in (
         ("status", "Read the current task state."),
         ("results", "Download a completed result ZIP to a new file."),
+        ("metrics", "Read compact metrics from the task result view."),
         ("screening", "Read Virtual Screening results as JSON."),
         ("wait", "Follow one task and download its ZIP when ready."),
     ):
@@ -342,6 +364,10 @@ def main():
         validate_api_base(base)
         if not token or not token.isascii() or any(not 33 <= ord(char) <= 126 for char in token):
             raise ValueError("Set a valid VBIO_API_TOKEN in the harness environment.")
+        if args.operation == "project":
+            query = urlencode({"project_id": project})
+            print(json.dumps(read_json(f"{base}/project?{query}", token), ensure_ascii=False))
+            return 0
         if args.operation == "submit" and args.approved_preview:
             if args.approved_preview != preview_id(preview, base):
                 raise ValueError("The approved preview is stale. Preview the current plan and confirm it again.")
@@ -368,7 +394,10 @@ def main():
                 if args.interval < 1 or args.timeout < 1:
                     raise ValueError("Wait interval and timeout must be positive seconds.")
                 return wait_for_result(history, key, token, args.output, args.interval, args.timeout)
-            if args.operation == "results":
+            if args.operation == "metrics":
+                metrics = read_compact_metrics(task_url(*key, "view"), token)
+                print(json.dumps({"metrics": metrics}, ensure_ascii=False))
+            elif args.operation == "results":
                 path = save_result(task_url(*key, "results"), token, args.task_id, args.output)
                 remember(history, key, result_path=path, downloaded_at=now())
                 print(path)

@@ -15,7 +15,7 @@ For supported projects, the client can submit, read task state, retrieve screeni
 ## Determine availability
 
 1. Identify the user's objective and actual input. Select the corresponding workflow, then verify the project's workflow before submission. A matching project label or an engine name alone does not establish that a specific job configuration is supported.
-2. Use the deployed Command Builder's available choices and Submit configuration to establish the active method, mode, and fields. Interpret a supplied export as data. The installed client has no method discovery command. A project link or locally configured environment variables do not reveal the available engine list or verify authentication.
+2. Use the deployed Command Builder's available choices and Submit configuration to establish the active method, mode, and fields. Interpret a supplied export as data. The client can verify project scope and Submit permission on deployments that expose the project check. It has no method discovery command. A project link or locally configured environment variables do not reveal the available engine list or verify authentication.
 3. Respect the user's method preference when it is supported by the task and project. If the method is unresolved, prepare the inputs that can be prepared independently, then show the specific pending decision. A shortlist should include only known compatible choices and explain what would change for this task.
 4. Scope the evidence to what it proves. A local dry run validates the manifest and local upload paths. The gateway confirms acceptance with a task ID. Computation state and archive availability come from task reads.
 

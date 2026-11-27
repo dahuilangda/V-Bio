@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 from flask import Flask, Response, jsonify, request, stream_with_context
 from backend.monitoring.monitor_store import MonitorStore
 from management_api.copilot_goal_store import CopilotGoalStore
+from management_api.copilot_skills.workflows import normalize_workflow_key
 from management_api.auth_service import AuthService
 from management_api.gateway_handlers import GatewayHandlers
 from management_api.http_session import create_pooled_session
@@ -1243,6 +1244,34 @@ def copilot_complete() -> Tuple[Response, int]:
     except Exception as exc:  # never 5xx — autocomplete must degrade silently to "no suggestion"
         logger.debug("Copilot completion failed: %s", str(exc)[:300])
         return jsonify({"suggestion": "", "completions": []}), 200
+
+
+@app.get("/vbio-api/project")
+def get_api_access_project() -> Tuple[Response, int]:
+    try:
+        project_id = gateway._read_project_id_from_query()
+        token = gateway._authorize_project_read(
+            project_id, (request.headers.get("X-API-Token") or "").strip()
+        )
+        rows = gateway.auth_service.postgrest.request(
+            "GET", "projects", query={
+                "select": "id,task_type,backend",
+                "id": f"eq.{project_id}",
+                "deleted_at": "is.null",
+                "limit": "1",
+            },
+        )
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    if not rows:
+        return jsonify({"error": "Project not found"}), 404
+    project = rows[0]
+    return jsonify({
+        "project_id": project["id"],
+        "workflow": normalize_workflow_key(project.get("task_type"), default=""),
+        "backend": project.get("backend"),
+        "can_submit": token.allow_submit,
+    }), 200
 
 
 @app.post("/vbio-api/predict")

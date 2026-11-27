@@ -33,7 +33,8 @@ def workflow_backend_values(workflow_key: str) -> List[str]:
 
 def normalize_workflow_key(value: Any, *, default: str = "prediction") -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if token in {"prediction", "boltz_2_prediction", "boltz_prediction"}:
+    if token in {"prediction", "structure_prediction", "structureprediction", "boltz_2_prediction",
+                 "boltz2_prediction", "boltz_prediction"}:
         return "prediction"
     if token in {"virtual_screening", "virtualscreening", "screening", "vs"}:
         return "virtual_screening"
