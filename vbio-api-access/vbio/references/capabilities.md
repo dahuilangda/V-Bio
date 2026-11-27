@@ -10,7 +10,7 @@ Use this reference for capability questions, workflow selection, or requests out
 | Peptide Designer | Direct the user to the V-Bio web workflow and explain its separate design and scoring roles when relevant. | The skill does not submit peptide design jobs; design submissions belong to the web app. |
 | Lead Optimization | Direct the user to the relevant V-Bio web workflow if enabled in their deployment. | The skill does not submit optimization jobs. |
 
-For supported projects, the client can submit, read task state, retrieve screening data, and download available result archives. Its task list contains records from the current workspace. Use the V-Bio project Tasks page for the full project history. Project creation, token administration, task cancellation or deletion, and other platform services are outside this client's operation set.
+For supported projects, the client can submit, read task state, retrieve screening data, and download available result archives. Its task list contains records from the current workspace, and `stats` summarizes those records in a terminal report. Use the V-Bio project Tasks page for the full project history. Project creation, token administration, task cancellation or deletion, and other platform services are outside this client's operation set.
 
 ## Determine availability
 

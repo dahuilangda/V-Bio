@@ -2,6 +2,7 @@ import io
 import json
 import os
 import runpy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -299,6 +300,38 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(failed["status_message"], "Invalid input [redacted]")
         self.assertTrue(all(path.startswith("/vbio-api/status/") for path, *_ in self.gateway.requests))
         self.assertFalse((self.root / "vbio-results").exists())
+
+
+    def test_stats_reads_local_records_offline(self):
+        self.manifest()
+        self.cli("submit", "job.json")
+        completed = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self.gateway.status_queue = [("SUCCESS", {"completed_at": completed})]
+        self.cli("status", "job-1")
+        for key in ("VBIO_API_BASE", "VBIO_PROJECT_ID", "VBIO_API_TOKEN"):
+            self.env.pop(key)
+        before = len(self.gateway.requests)
+        report = self.cli("stats").stdout
+        self.assertEqual(len(self.gateway.requests), before)
+        self.assertIn("V-Bio workspace statistics", report)
+        self.assertIn("SUCCESS", report)
+        self.assertIn("prediction", report)
+        self.assertIn("boltz", report)
+        self.assertIn("median", report)
+        self.assertIn("VBIO_API_TOKEN", self.cli("stats", "--refresh", code=1).stderr)
+
+    def test_stats_refresh_updates_active_tasks(self):
+        self.manifest()
+        self.cli("submit", "job.json")
+        report = self.cli("stats", "--refresh").stdout
+        self.assertIn("SUCCESS", report)
+        self.assertTrue(any(path.startswith("/vbio-api/status/") for path, *_ in self.gateway.requests))
+        self.assertNotIn(TOKEN, report)
+
+    def test_stats_on_empty_workspace_needs_no_credentials(self):
+        for key in ("VBIO_API_BASE", "VBIO_PROJECT_ID", "VBIO_API_TOKEN"):
+            self.env.pop(key)
+        self.assertIn("No V-Bio tasks", self.cli("stats").stdout)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,12 @@ After showing the user the submission receipt, run `wait <task_id> [output.zip]`
 
 The default destination is `vbio-results/vbio-<task_id>.zip` in the current workspace. Use the user's destination if provided. Report success and download as separate facts. Give one saved file link per task, and preserve any existing file. For a remote session, offer a downloadable artifact link when the harness supports it. Keep drafts under `.vbio/drafts/` and leave original inputs intact. In a later session, use `tasks` to recover the IDs and paths, then obtain the original connection if a fresh read is needed.
 
+## Workspace statistics
+
+`stats` summarizes every task recorded in this workspace as a terminal report: state counts, per-workflow and per-backend success rates, durations of successful jobs, submission activity over the recent days, and the most frequent failure reasons. It reads the local records and performs no network request; `--refresh` re-reads the non-terminal tasks from the gateway first and needs the configured connection.
+
+Use it when the user asks for an overview, a success rate, a trend, or recurring problems rather than about one task. Report the numbers as this workspace's records, not as the project's full history; the project Tasks page stays the source for every task. A stale record can be refreshed with `status <task_id>` before the next report. The report never resubmits or cancels anything.
+
 ## Match the requested action
 
 - For a status check, use `status <task_id>` and report the current state.

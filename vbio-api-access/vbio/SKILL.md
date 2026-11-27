@@ -15,6 +15,7 @@ Run [the bundled client](scripts/vbio.py) from the user's current workspace, on 
 | Prepare, edit, or compare | Read [draft interaction](references/conversation.md). Read [input mapping](references/command-builder.md) when building or changing scientific inputs or method settings. |
 | Confirm a draft | Recover the selected draft and its shown preview. Use [plan review](references/plan-review.md) for approvals, changed inputs, or ambiguous submissions. |
 | Find a task, check progress, or download | Read [task follow-up](references/task-follow-up.md). Start with the task ID or run `tasks` in this workspace. |
+| Summarize activity, success rates, or failures | Read [task follow-up](references/task-follow-up.md). Run `stats` in this workspace. |
 
 Open [connection setup](references/connection.md) for first-time setup, missing credentials, or project changes. Open [peptide compatibility](references/peptide-compatibility.md) for peptide workflow selection, design and scoring role questions, or existing inputs with modified residues, cyclization, or stereochemistry. For unsupported workflows or unclear availability, use the [capability guide](references/capabilities.md).
 

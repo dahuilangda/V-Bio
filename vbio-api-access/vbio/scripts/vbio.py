@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode, urlsplit
 import zipfile
 
@@ -246,6 +248,134 @@ def read_compact_metrics(url, token):
         return data
 
 
+SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+BAR_WIDTH = 26
+STATE_COLORS = {"SUCCESS": "2", "FAILURE": "31", "REVOKED": "33"}
+
+
+def colorize(text, code):
+    if not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def read_timestamp(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def human_span(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, _ = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h{minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours}h"
+
+
+def bar(count, total, color):
+    filled = max(1, round(BAR_WIDTH * count / total))
+    return colorize("█" * filled, color) + "░" * (BAR_WIDTH - filled)
+
+
+def sparkline(counts):
+    top = max(counts, default=0)
+    if not top:
+        return "·" * len(counts)
+    return "".join(SPARK_BLOCKS[min(7, 7 * count // top)] if count else "·" for count in counts)
+
+
+def group_line(records, key):
+    names = sorted({str(r.get(key) or "unknown").strip().lower() or "unknown" for r in records})
+    parts = []
+    for name in names:
+        subset = [r for r in records
+                  if (str(r.get(key) or "unknown").strip().lower() or "unknown") == name]
+        finished = [r for r in subset if str(r.get("state") or "").upper() in TERMINAL_STATES]
+        if finished:
+            success = sum(1 for r in finished if str(r.get("state")).upper() == "SUCCESS")
+            parts.append(f"{name} {len(subset)} ({round(100 * success / len(finished))}% ok)")
+        else:
+            parts.append(f"{name} {len(subset)}")
+    return f"{key:<9} " + " · ".join(parts)
+
+
+def render_stats(records):
+    total = len(records)
+    if not total:
+        return "No V-Bio tasks recorded in this workspace yet."
+    state_of = lambda r: str(r.get("state") or "?").upper()
+    states = Counter(state_of(r) for r in records)
+    finished = sum(count for state, count in states.items() if state in TERMINAL_STATES)
+    success = states.get("SUCCESS", 0)
+    rate = f"{round(100 * success / finished)}%" if finished else "n/a"
+    active = total - finished
+    lines = [colorize(
+        f"V-Bio workspace statistics — {total} task(s), {active} active, success {success}/{finished} ({rate})", "1")]
+    for state, count in states.most_common():
+        lines.append(f"  {state:<10} {bar(count, total, STATE_COLORS.get(state, '36'))} {count}")
+    lines.append(group_line(records, "workflow"))
+    lines.append(group_line(records, "backend"))
+    durations = []
+    for record in records:
+        submitted, completed = read_timestamp(record.get("submitted_at")), read_timestamp(record.get("completed_at"))
+        if submitted and completed:
+            seconds = (completed - submitted).total_seconds()
+            if 0 <= seconds < 30 * 86400:
+                durations.append(seconds)
+    if durations:
+        ordered = sorted(durations)
+        p90 = ordered[min(len(ordered) - 1, round(0.9 * len(ordered) - 0.5))]
+        lines.append(
+            f"duration  {len(ordered)} finished: median {human_span(ordered[len(ordered) // 2])}"
+            f", p90 {human_span(p90)}, range {human_span(ordered[0])}–{human_span(ordered[-1])}")
+    today = datetime.now().date()
+    counts = [
+        sum(1 for r in records
+            if (ts := read_timestamp(r.get("submitted_at"))) and ts.date() == today - timedelta(days=offset))
+        for offset in range(13, -1, -1)
+    ]
+    lines.append(f"activity  last 14 days {sparkline(counts)}  ({sum(counts)} submitted)")
+    failures = Counter()
+    for record in records:
+        if state_of(record) != "FAILURE":
+            continue
+        reason = " ".join(str(record.get("status_message") or "unknown reason").split())
+        failures[reason[:80]] += 1
+    if failures:
+        top = " · ".join(f"{count}× {reason}" for reason, count in failures.most_common(3))
+        lines.append(colorize(f"failures  {top}", "31"))
+    return "\n".join(lines)
+
+
+def refresh_workspace(history, token):
+    active = [r for r in history.list() if str(r.get("state") or "").upper() not in TERMINAL_STATES]
+    if not active:
+        return
+    checked = 0
+    for record in active:
+        key = (str(record.get("api_base") or ""), str(record.get("project_id") or ""),
+               str(record.get("task_id") or ""))
+        if not all(key):
+            continue
+        try:
+            status_for(history, key, token, timeout=60)
+            checked += 1
+        except (GatewayError, NetworkError, ValueError):
+            continue
+    print(f"Refreshed {checked}/{len(active)} active task(s).", file=sys.stderr)
+
+
 def remember(history, key, **fields):
     try:
         return history.save(*key, **fields)
@@ -321,6 +451,9 @@ def main():
     review.add_argument("--approved-preview", metavar="ID", help="Require an exact match to the reviewed preview.")
     commands.add_parser("project", help="Check the configured project and submission permission.")
     commands.add_parser("tasks", help="List task records saved in this workspace.")
+    stats = commands.add_parser("stats", help="Summarize every task recorded in this workspace.")
+    stats.add_argument("--refresh", action="store_true",
+                       help="Re-read the non-terminal tasks from the gateway before summarizing.")
     for name, help_text in (
         ("status", "Read the current task state."),
         ("results", "Download a completed result ZIP to a new file."),
@@ -342,6 +475,9 @@ def main():
         history = TaskHistory(Path.cwd())
         if args.operation == "tasks":
             print(json.dumps(history.list(), ensure_ascii=False))
+            return 0
+        if args.operation == "stats" and not args.refresh:
+            print(render_stats(history.list()))
             return 0
         settings = read_connection(args.connection_stdin)
         token = settings["VBIO_API_TOKEN"]
@@ -367,6 +503,10 @@ def main():
         if args.operation == "project":
             query = urlencode({"project_id": project})
             print(json.dumps(read_json(f"{base}/project?{query}", token), ensure_ascii=False))
+            return 0
+        if args.operation == "stats":
+            refresh_workspace(history, token)
+            print(render_stats(history.list()))
             return 0
         if args.operation == "submit" and args.approved_preview:
             if args.approved_preview != preview_id(preview, base):
