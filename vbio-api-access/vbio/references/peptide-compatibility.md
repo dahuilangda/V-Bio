@@ -1,6 +1,6 @@
 # Peptide compatibility
 
-First determine whether the user wants to predict an existing peptide, evaluate an existing pose, or generate new candidates. Use the matching project workflow. The installed client can prepare supported existing inputs for Prediction or Affinity. Direct new design requests to Peptide Designer in the web app. Some Command Builder settings exposed in a Prediction context emit the Peptide Design workflow. Use the actual workflow shown under Submit.
+First determine whether the user wants to predict an existing peptide, evaluate an existing pose, or generate new candidates. Use the matching project workflow. The installed client can prepare supported existing inputs for Prediction or Affinity. Direct new design requests to Peptide Designer in the web app. The Command Builder submits exactly the project's own workflow: a Prediction project shows no design selectors, and a Peptide Designer project always submits the design workflow.
 
 ## Design Strategy and Predict & Score
 

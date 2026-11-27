@@ -7,7 +7,7 @@ Use this reference for capability questions, workflow selection, or requests out
 | Structure Prediction | Prepare and submit a supported molecular input for structure prediction. | The selected engine must support the input types, assembly, and requested features. |
 | Virtual Screening | Submit a compound library against a configured target and retrieve screening results. | A screening project, target configuration, and one library source are required. |
 | Docking, called Affinity in API Access | Dock a ligand into a defined pocket or evaluate an existing input pose using a supported mode. | Docking needs a protein structure, ligand SMILES, and one pocket definition. Existing-pose modes use the supplied protein and ligand files. |
-| Peptide Designer | Direct the user to the V-Bio web workflow and explain its separate design and scoring roles when relevant. | The skill does not submit peptide design jobs, including when the Builder exposes a design command in a Prediction context. |
+| Peptide Designer | Direct the user to the V-Bio web workflow and explain its separate design and scoring roles when relevant. | The skill does not submit peptide design jobs; design submissions belong to the web app. |
 | Lead Optimization | Direct the user to the relevant V-Bio web workflow if enabled in their deployment. | The skill does not submit optimization jobs. |
 
 For supported projects, the client can submit, read task state, retrieve screening data, and download available result archives. Its task list contains records from the current workspace. Use the V-Bio project Tasks page for the full project history. Project creation, token administration, task cancellation or deletion, and other platform services are outside this client's operation set.
