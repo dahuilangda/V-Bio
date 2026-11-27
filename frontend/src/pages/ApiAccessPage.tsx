@@ -1427,7 +1427,7 @@ fi
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}"${vsCompoundsFileFlag} \\
   -F "backend=${effectiveSubmitBackend}" \\
-  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : isPredictionWorkflow && builderDesignStrategy === 'esm3' ? 'peptide_design' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}" \
+  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : isPeptideDesignWorkflow ? 'peptide_design' : 'prediction'}" \
   ${msaSubmitFlags}
   -F "priority=${builderPriority}"${peptideDesignCurlFlags}${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
@@ -1848,7 +1848,7 @@ ${submitTaskIdCapture}`;
 
             {(isPredictionWorkflow || isVirtualScreeningWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
               <>
-                {(isPredictionWorkflow || isPeptideDesignWorkflow) && (
+                {isPeptideDesignWorkflow && (
                   <Field label="Design Engine" hint="rfd4: motif 条件化生成（种子+靶点合并结构，走 rfd4 队列）；esm3: ESM3+RL 进化循环（peptide_design 流程）">
                     <select
                       value={builderDesignStrategy}
@@ -1942,7 +1942,7 @@ ${submitTaskIdCapture}`;
                     </Field>
                   </>
                 )}
-              <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : builderDesignStrategy === 'rfd4' ? 'Generation Backend' : 'Prediction Backend'}>
+              <Field label={isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : isPeptideDesignWorkflow && builderDesignStrategy === 'rfd4' ? 'Generation Backend' : 'Prediction Backend'}>
                 <select
                   value={effectivePredictionBackend}
                   onChange={(e) => setBuilderPredictionBackend(normalizePredictionBackend(e.target.value))}
