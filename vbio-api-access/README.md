@@ -22,52 +22,9 @@ In V-Bio, open **API → Command Builder → Environment** to obtain the gateway
 
 Provide the research input and desired workflow. The assistant prepares a local draft, summarizes the choices, and explains what you can change or what is needed to submit. Local previews can run offline. Submitted jobs return a task ID. Use the same workspace to recover task records and download paths across sessions. [Draft interaction](vbio/references/conversation.md) · [Task follow-up](vbio/references/task-follow-up.md)
 
-## Worked examples
+## Review workspace statistics
 
-Invoke the `vbio` skill before sending these requests. Each starts with a draft or a capability check.
-
-### Predict ubiquitin from a sequence
-
-> Predict the structure of this ubiquitin sequence: `MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG`.
-
-**Draft A · Ubiquitin structure prediction**
-
-| Item | Details |
-| --- | --- |
-| Input | Human ubiquitin, one chain, 76 amino acids |
-| Prediction method | Pending confirmation of the project's available methods |
-| V-Bio project | Connection pending |
-| Job status | Input prepared, awaiting submission |
-
-**Next step**　[Connect a V-Bio project](#install-and-connect) to run the prediction. To choose a method first, ask which methods in the project are suitable for this sequence.
-
-[RCSB PDB 1UBQ](https://www.rcsb.org/structure/1UBQ)
-
-### Predict an existing head-to-tail cyclic peptide
-
-> Predict the structure of the experimentally characterized cyclic hexapeptide cyclo-(Gly–L-Pro–Gly)₂. Use `GPGGPG` for chain A and preserve the head-to-tail peptide bond between Gly6 and Gly1. Check whether my Prediction project supports that closure before submitting.
-
-The draft should identify chain A and the head-to-tail closure. It should say whether the selected backend can represent that topology or what still needs verification. [Published crystal structure](https://pubs.acs.org/doi/10.1021/ja00513a057)
-
-### Preserve a built-in CCD residue
-
-Download and attach the coordinate file for the selenomethionine-containing lysozyme structure. [1CX6 coordinate file](https://files.rcsb.org/download/1CX6.cif)
-
-> Predict the structure of chain A from the attached `1CX6.cif`, preserving its selenomethionine residues as `MSE`.
-
-The assistant should map the structure labels to sequence positions and check whether the selected backend accepts the built-in `MSE` component.
-
-### Supply a custom residue as SMILES
-
-> I have a linear peptide with sequence `AGKG`. In chain A, position 3 is L-ornithine. Preserve it in the structure prediction. If the Builder has no matching built-in entry, use this residue definition: `N[C@@H](CCCN)C(=O)O`.
-
-The draft should show chain A, position 3, L-ornithine, and the selected representation. If the exact built-in entry is unavailable and the backend accepts custom residue uploads, the assistant can prepare a matching Custom CCD for the job. If support is unknown, it should say what needs checking. [Peptide compatibility](vbio/references/peptide-compatibility.md)
-
-### Understand a Peptide Designer configuration
-
-> In my Peptide Designer project, I selected D chirality and bicyclic topology. The options in Design Strategy and Predict & Score changed. Explain what each field controls and where I can see which options my project allows.
-
-The assistant should explain that the two fields select the candidate generator and evaluator, respectively. Each selector filters by its role and the selected chemistry. If the deployed choices are unknown, the assistant can ask for the visible option names or a screenshot with credentials omitted. The project’s Peptide Designer page is where users review settings and submit design jobs. [Capability boundaries](vbio/references/capabilities.md)
+The bundled client summarizes every task recorded in the current workspace as a terminal report: state counts, workflow and method success rates, durations of successful jobs, submission activity, and recurring failure reasons. Run `stats` from the workspace; add `--refresh` to re-read non-terminal tasks first. [Task follow-up](vbio/references/task-follow-up.md)
 
 ## Validate the client
 
